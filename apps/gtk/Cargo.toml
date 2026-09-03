@@ -1,0 +1,19 @@
+[package]
+name = "accent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "accent"
+path = "src/main.rs"
+
+[dependencies]
+accent-core.workspace = true
+accent-api.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
+sourceview5 = { version = "0.11", features = ["v5_12"] }
