@@ -194,7 +194,10 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
     // Deterministic winner: shallowest path, then lexicographic. `build_parallel` yields in an
     // arbitrary order, so "first path wins" only means anything after a sort.
     files.sort_unstable_by(|a, b| {
-        let (da, db) = (a.rel_path.matches('/').count(), b.rel_path.matches('/').count());
+        let (da, db) = (
+            a.rel_path.matches('/').count(),
+            b.rel_path.matches('/').count(),
+        );
         da.cmp(&db).then_with(|| a.rel_path.cmp(&b.rel_path))
     });
     let mut seen: HashMap<(u64, u64), String> = HashMap::with_capacity(files.len());
@@ -347,7 +350,11 @@ fn walk_pass(
                 }
             };
 
-            let kind = if is_dir { FileKind::Dir } else { classify(&name) };
+            let kind = if is_dir {
+                FileKind::Dir
+            } else {
+                classify(&name)
+            };
             let _ = tx.send(Msg::File(FileMeta {
                 rel_path,
                 canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
@@ -476,7 +483,13 @@ mod tests {
 
         let r = scan(vault.path(), &ScanOptions::default());
         // Exactly one of the two links is followed; the other is reported, not walked.
-        assert_eq!(r.files.iter().filter(|f| f.rel_path.ends_with("ext.md")).count(), 1);
+        assert_eq!(
+            r.files
+                .iter()
+                .filter(|f| f.rel_path.ends_with("ext.md"))
+                .count(),
+            1
+        );
         assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
         assert_eq!(r.skipped[0].reason, SkipReason::TargetOverlapsSymlink);
     }
@@ -499,7 +512,11 @@ mod tests {
         let vault = tempfile::tempdir().unwrap();
         fs::create_dir(vault.path().join("d")).unwrap();
         fs::write(vault.path().join("d/note.md"), "hello").unwrap();
-        symlink(vault.path().join("d/note.md"), vault.path().join("alias.md")).unwrap();
+        symlink(
+            vault.path().join("d/note.md"),
+            vault.path().join("alias.md"),
+        )
+        .unwrap();
 
         let r = scan(vault.path(), &ScanOptions::default());
         // Shallowest path wins the FileMeta; the deeper one becomes the alias.
@@ -529,7 +546,13 @@ mod tests {
         fs::write(vault.path().join("n.md"), "n").unwrap();
         fs::write(vault.path().join(".syncthing.n.md.tmp"), "t").unwrap();
         fs::write(vault.path().join("~syncthing~n.md.tmp"), "t").unwrap();
-        fs::write(vault.path().join("n.sync-conflict-20240101-120000-ABCDEFG.md"), "c").unwrap();
+        fs::write(
+            vault
+                .path()
+                .join("n.sync-conflict-20240101-120000-ABCDEFG.md"),
+            "c",
+        )
+        .unwrap();
 
         let r = scan(vault.path(), &ScanOptions::default());
         assert_eq!(
@@ -556,7 +579,10 @@ mod tests {
         let r = scan(vault.path(), &ScanOptions::default());
         let paths = rels(&r);
         assert!(!paths.iter().any(|p| p.starts_with(".git/")), "{paths:?}");
-        assert!(!paths.iter().any(|p| p.starts_with("node_modules/")), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.starts_with("node_modules/")),
+            "{paths:?}"
+        );
         assert!(!paths.iter().any(|p| p.starts_with("secret")), "{paths:?}");
         assert!(paths.contains(&".obsidian/app.json"), "{paths:?}");
     }

@@ -37,7 +37,9 @@ pub enum Style {
     Tag,
     Quote,
     ListMarker,
-    TaskMarker { checked: bool },
+    TaskMarker {
+        checked: bool,
+    },
     Math,
     Html,
     Frontmatter,
@@ -259,7 +261,14 @@ fn sp(range: Range<usize>, style: Style) -> Span {
 }
 
 /// Style the content, dim the delimiters (`**bold**` -> Strong on `bold`, Marker on each `**`).
-fn delimited(out: &mut Vec<Span>, text: &str, r: Range<usize>, style: Style, chars: &[u8], n: usize) {
+fn delimited(
+    out: &mut Vec<Span>,
+    text: &str,
+    r: Range<usize>,
+    style: Style,
+    chars: &[u8],
+    n: usize,
+) {
     let b = text.as_bytes();
     let fits = r.len() > n * 2
         && b[r.start..r.start + n].iter().all(|c| chars.contains(c))
@@ -382,7 +391,11 @@ fn pending(range: Range<usize>, dest: &str, link_type: LinkType, image: bool) ->
             let (target, anchor) = split_anchor(dest);
             Pending {
                 range,
-                kind: if image { LinkKind::Embed } else { LinkKind::Wiki },
+                kind: if image {
+                    LinkKind::Embed
+                } else {
+                    LinkKind::Wiki
+                },
                 target: target.to_string(),
                 anchor: anchor.map(str::to_string),
                 aliased: has_pothole,
@@ -523,7 +536,11 @@ fn scan_tags(text: &str, r: &Range<usize>, tags: &mut Vec<Tag>, spans: &mut Vec<
 fn frontmatter(text: &str, r: &Range<usize>, a: &mut Analysis) -> Option<String> {
     let block = &text[r.clone()];
     let start = block.find('\n').map(|i| r.start + i + 1)?;
-    let end = block.rfind('\n').map(|i| r.start + i).unwrap_or(r.end).max(start);
+    let end = block
+        .rfind('\n')
+        .map(|i| r.start + i)
+        .unwrap_or(r.end)
+        .max(start);
     a.frontmatter = Some(text[start..end].to_string());
 
     let mut title = None;
@@ -645,11 +662,7 @@ pub fn to_html(text: &str) -> String {
             }) => {
                 let (t, anchor) = split_anchor(dest_url);
                 evts.push(Event::Html(
-                    format!(
-                        "<a href=\"{}\" class=\"wikilink\">",
-                        open_href(t, anchor)
-                    )
-                    .into(),
+                    format!("<a href=\"{}\" class=\"wikilink\">", open_href(t, anchor)).into(),
                 ));
                 link_wiki.push(true);
             }
@@ -763,7 +776,10 @@ mod tests {
             a.links[1].anchor.as_deref(),
             Some("page=3&selection=4,0,4,11")
         );
-        assert_eq!(&t[a.links[1].range.clone()], "![[paper.pdf#page=3&selection=4,0,4,11]]");
+        assert_eq!(
+            &t[a.links[1].range.clone()],
+            "![[paper.pdf#page=3&selection=4,0,4,11]]"
+        );
     }
 
     #[test]
@@ -802,7 +818,10 @@ mod tests {
             ["tag", "nested/tag", "tag_with-dash", "paren"]
         );
         assert!(names("#123").is_empty(), "purely numeric is not a tag");
-        assert!(names("# Heading\n").is_empty(), "heading marker is not a tag");
+        assert!(
+            names("# Heading\n").is_empty(),
+            "heading marker is not a tag"
+        );
         assert!(names("`#incode`").is_empty(), "code span is not a tag");
         assert!(
             names("```\n#inblock\n```\n").is_empty(),
@@ -812,7 +831,10 @@ mod tests {
             names("https://x.com/#frag").is_empty(),
             "URL fragment is not a tag"
         );
-        assert!(names("[#notatag](x.md)").is_empty(), "link text is scanned as a link");
+        assert!(
+            names("[#notatag](x.md)").is_empty(),
+            "link text is scanned as a link"
+        );
     }
 
     #[test]
@@ -873,15 +895,27 @@ mod tests {
         let t = "# Head\n\nSome **bold** and *em* and `code` and ~~out~~.\n";
         let a = analyze(t);
 
-        let heading = a.spans.iter().find(|s| s.style == Style::Heading(1)).unwrap();
+        let heading = a
+            .spans
+            .iter()
+            .find(|s| s.style == Style::Heading(1))
+            .unwrap();
         assert_eq!(at(t, heading), "# Head");
         let strong = a.spans.iter().find(|s| s.style == Style::Strong).unwrap();
         assert_eq!(at(t, strong), "bold");
         let em = a.spans.iter().find(|s| s.style == Style::Emphasis).unwrap();
         assert_eq!(at(t, em), "em");
-        let code = a.spans.iter().find(|s| s.style == Style::CodeInline).unwrap();
+        let code = a
+            .spans
+            .iter()
+            .find(|s| s.style == Style::CodeInline)
+            .unwrap();
         assert_eq!(at(t, code), "`code`");
-        let strike = a.spans.iter().find(|s| s.style == Style::Strikethrough).unwrap();
+        let strike = a
+            .spans
+            .iter()
+            .find(|s| s.style == Style::Strikethrough)
+            .unwrap();
         assert_eq!(at(t, strike), "out");
 
         let markers: Vec<&str> = a
@@ -904,12 +938,19 @@ mod tests {
             .map(|s| at(t, s))
             .collect();
         assert_eq!(markers, ["__", "__", "_", "_"]);
-        assert_eq!(at(t, a.spans.iter().find(|s| s.style == Style::Strong).unwrap()), "strong");
+        assert_eq!(
+            at(
+                t,
+                a.spans.iter().find(|s| s.style == Style::Strong).unwrap()
+            ),
+            "strong"
+        );
     }
 
     #[test]
     fn block_spans() {
-        let t = "> quoted\n\n- one\n- [x] done\n\n```rust\nfn x() {}\n```\n\n$$e$$\n\n<div>h</div>\n";
+        let t =
+            "> quoted\n\n- one\n- [x] done\n\n```rust\nfn x() {}\n```\n\n$$e$$\n\n<div>h</div>\n";
         let a = analyze(t);
         assert_eq!(&t[spans_of(&a, Style::Quote)[0].clone()], "> quoted");
         let list: Vec<&str> = spans_of(&a, Style::ListMarker)
@@ -926,7 +967,10 @@ mod tests {
         let html = spans_of(&a, Style::Html);
         assert_eq!(&t[html[0].clone()], "<div>h</div>");
         // the `>` and both fences are dimmed
-        let markers: Vec<&str> = spans_of(&a, Style::Marker).iter().map(|r| &t[r.clone()]).collect();
+        let markers: Vec<&str> = spans_of(&a, Style::Marker)
+            .iter()
+            .map(|r| &t[r.clone()])
+            .collect();
         assert!(markers.contains(&">"), "{markers:?}");
         assert!(markers.contains(&"```"), "{markers:?}");
     }
@@ -937,7 +981,10 @@ mod tests {
         let a = analyze(t);
         let fm = spans_of(&a, Style::Frontmatter);
         assert_eq!(&t[fm[0].clone()], "---\ntags: [a]\n---");
-        let markers: Vec<&str> = spans_of(&a, Style::Marker).iter().map(|r| &t[r.clone()]).collect();
+        let markers: Vec<&str> = spans_of(&a, Style::Marker)
+            .iter()
+            .map(|r| &t[r.clone()])
+            .collect();
         assert!(markers.contains(&"---"), "{markers:?}");
         assert!(markers.contains(&"[["), "{markers:?}");
         assert!(markers.contains(&"]]"), "{markers:?}");
@@ -989,10 +1036,10 @@ mod tests {
     #[test]
     fn malformed_input_never_panics_and_ranges_stay_on_char_boundaries() {
         let cases = [
-            "---\ntags: a\n",              // unterminated frontmatter
-            "---\n---\n",                  // empty frontmatter
-            "```",                         // lone fence
-            "```rust\nunclosed\n",         // unterminated block
+            "---\ntags: a\n",      // unterminated frontmatter
+            "---\n---\n",          // empty frontmatter
+            "```",                 // lone fence
+            "```rust\nunclosed\n", // unterminated block
             "[[",
             "]]",
             "[[]]",
@@ -1026,7 +1073,11 @@ mod tests {
                 assert!(t.is_char_boundary(l.range.start) && t.is_char_boundary(l.range.end));
             }
             for g in &a.tags {
-                assert_eq!(t[g.range.clone()].trim_start_matches('#'), g.name, "in {t:?}");
+                assert_eq!(
+                    t[g.range.clone()].trim_start_matches('#'),
+                    g.name,
+                    "in {t:?}"
+                );
             }
             let _ = to_html(t);
         }
@@ -1046,6 +1097,10 @@ mod tests {
         let a = analyze(&doc);
         let took = started.elapsed();
         assert!(!a.spans.is_empty() && !a.links.is_empty());
-        assert!(took.as_millis() < 200, "analyze({} bytes) took {took:?}", doc.len());
+        assert!(
+            took.as_millis() < 200,
+            "analyze({} bytes) took {took:?}",
+            doc.len()
+        );
     }
 }

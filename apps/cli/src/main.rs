@@ -11,7 +11,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "accent-cli", version, about = "accent vault index and query CLI")]
+#[command(
+    name = "accent-cli",
+    version,
+    about = "accent vault index and query CLI"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -130,11 +134,12 @@ fn main() -> Result<()> {
         Cmd::Index { common, progress } => {
             let mut ix = common.open()?;
             let t = Instant::now();
-            let stats = ix.reconcile_with(&common.vault, &common.scan_options(), |p: Progress| {
-                if progress && p.phase == Phase::Index {
-                    eprintln!("  indexing {}/{}", p.done, p.total);
-                }
-            })?;
+            let stats =
+                ix.reconcile_with(&common.vault, &common.scan_options(), |p: Progress| {
+                    if progress && p.phase == Phase::Index {
+                        eprintln!("  indexing {}/{}", p.done, p.total);
+                    }
+                })?;
             let total_ms = t.elapsed().as_millis();
             let db = common.db_path();
             println!("db            {}", db.display());
@@ -142,14 +147,20 @@ fn main() -> Result<()> {
             println!("unchanged     {}", stats.unchanged);
             println!("added         {}", stats.added);
             println!("updated       {}", stats.updated);
-            println!("touched       {}  (stat changed, content hash equal)", stats.touched);
+            println!(
+                "touched       {}  (stat changed, content hash equal)",
+                stats.touched
+            );
             println!("removed       {}", stats.removed);
             println!("aliases       {}", stats.aliases);
             println!("conflicts     {}", stats.conflicts);
             println!("skipped links {}", stats.skipped_symlinks);
             println!("bytes read    {}", stats.bytes_read);
             println!("scan          {} ms", stats.scan_ms);
-            println!("reconcile     {} ms  (of which scan {} ms)", total_ms, stats.scan_ms);
+            println!(
+                "reconcile     {} ms  (of which scan {} ms)",
+                total_ms, stats.scan_ms
+            );
             if let Ok(m) = std::fs::metadata(&db) {
                 println!("db size       {} KiB", m.len() / 1024);
             }

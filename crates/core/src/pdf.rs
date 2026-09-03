@@ -93,7 +93,12 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const ZERO: Rect = Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+    pub const ZERO: Rect = Rect {
+        left: 0.0,
+        top: 0.0,
+        right: 0.0,
+        bottom: 0.0,
+    };
 
     fn from_pdf(r: PdfRect, page_height: f32) -> Self {
         Rect {
@@ -209,7 +214,11 @@ const DARK_HI: f32 = 0.922; // 0xeb
 // space. Upgrade path when someone complains is Oklab — convert, negate L, convert back — at
 // roughly 3x the cost, at which point this wants SIMD or the GPU.
 pub fn dark_pixel(px: [u8; 4]) -> [u8; 4] {
-    let (r, g, b) = (px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0);
+    let (r, g, b) = (
+        px[0] as f32 / 255.0,
+        px[1] as f32 / 255.0,
+        px[2] as f32 / 255.0,
+    );
     let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
     let l2 = DARK_LO + (1.0 - l) * (DARK_HI - DARK_LO);
     let map = |c: f32| ((l2 + (c - l)) * 255.0).clamp(0.0, 255.0) as u8;
@@ -278,7 +287,11 @@ impl PdfDoc {
             let bitmap = p
                 .render_with_config(&config)
                 .map_err(|e| anyhow!("render page {page}: {e:?}"))?;
-            (bitmap.width() as u32, bitmap.height() as u32, bitmap.as_rgba_bytes())
+            (
+                bitmap.width() as u32,
+                bitmap.height() as u32,
+                bitmap.as_rgba_bytes(),
+            )
         };
         // Outside the lock on purpose: the theme pass costs about as much as the render itself
         // and touches nothing but our own buffer, so it must not block other pdfium callers.
@@ -288,7 +301,11 @@ impl PdfDoc {
                 px.copy_from_slice(&out);
             }
         }
-        Ok(RgbaImage { width, height, data })
+        Ok(RgbaImage {
+            width,
+            height,
+            data,
+        })
     }
 
     /// Every character on the page with its box, in pdfium's character order (reading order for
@@ -326,9 +343,13 @@ impl PdfDoc {
     /// Text inside a rectangle, empty if the page or region has none.
     pub fn text_in_rect(&self, page: usize, rect: Rect) -> String {
         let _guard = lock();
-        let Ok(p) = self.page(page) else { return String::new() };
+        let Ok(p) = self.page(page) else {
+            return String::new();
+        };
         let page_height = p.height().value;
-        let Ok(text) = p.text() else { return String::new() };
+        let Ok(text) = p.text() else {
+            return String::new();
+        };
         text.inside_rect(rect.to_pdf(page_height))
     }
 
@@ -519,7 +540,10 @@ mod tests {
             out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
         }
         let xref = out.len();
-        out.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1));
+        out.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objs.len() + 1
+        ));
         for off in &offsets {
             out.push_str(&format!("{off:010} 00000 n \n"));
         }
@@ -551,7 +575,10 @@ mod tests {
         let Some((_d, doc)) = open_tiny() else { return };
         assert_eq!(doc.page_count(), 1);
         let (w, h) = doc.page_size(0).unwrap();
-        assert!((w - 200.0).abs() < 0.5 && (h - 100.0).abs() < 0.5, "{w}x{h}");
+        assert!(
+            (w - 200.0).abs() < 0.5 && (h - 100.0).abs() < 0.5,
+            "{w}x{h}"
+        );
     }
 
     #[test]
@@ -572,14 +599,23 @@ mod tests {
     #[test]
     fn text_in_rect_reads_the_line() {
         let Some((_d, doc)) = open_tiny() else { return };
-        let whole = Rect { left: 0.0, top: 0.0, right: 200.0, bottom: 100.0 };
+        let whole = Rect {
+            left: 0.0,
+            top: 0.0,
+            right: 200.0,
+            bottom: 100.0,
+        };
         assert!(doc.text_in_rect(0, whole).contains("Hello"));
     }
 
     #[test]
     fn selection_link_has_the_obsidian_shape() {
         let Some((_d, doc)) = open_tiny() else { return };
-        let sel = Selection { page: 0, start: 0, end: 40 };
+        let sel = Selection {
+            page: 0,
+            start: 0,
+            end: 40,
+        };
         let out = doc.selection_link("notes/paper.pdf", &sel).unwrap();
         // Stand-in for ^\[\[.+\.pdf#page=\d+&selection=\d+,\d+,\d+,\d+\]\]$ without a regex dep.
         let body = out
@@ -593,7 +629,10 @@ mod tests {
         assert!(page.parse::<u32>().is_ok(), "page {page:?}");
         let nums: Vec<_> = sel_part.split(',').collect();
         assert_eq!(nums.len(), 4, "{sel_part:?}");
-        assert!(nums.iter().all(|n| n.parse::<usize>().is_ok()), "{sel_part:?}");
+        assert!(
+            nums.iter().all(|n| n.parse::<usize>().is_ok()),
+            "{sel_part:?}"
+        );
 
         assert!(out.text.starts_with("Hello"), "{:?}", out.text);
         assert!(!out.quads.is_empty());
@@ -601,7 +640,9 @@ mod tests {
 
     #[test]
     fn reads_existing_highlight_annotations() {
-        let Some((_d, doc)) = open_tiny_with(true) else { return };
+        let Some((_d, doc)) = open_tiny_with(true) else {
+            return;
+        };
         let hls = doc.highlights().unwrap();
         assert_eq!(hls.len(), 1, "{hls:?}");
         let hl = &hls[0];
@@ -612,11 +653,22 @@ mod tests {
         // Page is 100pt tall; the quad spans y 36..64 bottom-up, so 36..64 top-down becomes
         // top = 100 - 64 = 36, bottom = 100 - 36 = 64.
         let q = hl.quads[0];
-        assert!((q.left - 18.0).abs() < 0.5 && (q.right - 140.0).abs() < 0.5, "{q:?}");
-        assert!((q.top - 36.0).abs() < 0.5 && (q.bottom - 64.0).abs() < 0.5, "{q:?}");
+        assert!(
+            (q.left - 18.0).abs() < 0.5 && (q.right - 140.0).abs() < 0.5,
+            "{q:?}"
+        );
+        assert!(
+            (q.top - 36.0).abs() < 0.5 && (q.bottom - 64.0).abs() < 0.5,
+            "{q:?}"
+        );
         assert_eq!(
             q.quad_corners(),
-            [(q.left, q.top), (q.right, q.top), (q.left, q.bottom), (q.right, q.bottom)]
+            [
+                (q.left, q.top),
+                (q.right, q.top),
+                (q.left, q.bottom),
+                (q.right, q.bottom)
+            ]
         );
         // A highlight must actually tint the render.
         let img = doc.render_page(0, 1.0, Theme::Light).unwrap();
@@ -625,7 +677,10 @@ mod tests {
             [img.data[i], img.data[i + 1], img.data[i + 2]]
         };
         let inside = px(80, 50);
-        assert!(inside[0] > 200 && inside[1] > 200 && inside[2] < 120, "yellowish: {inside:?}");
+        assert!(
+            inside[0] > 200 && inside[1] > 200 && inside[2] < 120,
+            "yellowish: {inside:?}"
+        );
     }
 
     /// Reading highlights *after* rendering used to segfault: the render makes pdfium synthesise
@@ -633,11 +688,17 @@ mod tests {
     /// casts the annotation handle to a page-object handle. See [`annotation_color`].
     #[test]
     fn highlights_survive_a_prior_render() {
-        let Some((_d, doc)) = open_tiny_with(true) else { return };
+        let Some((_d, doc)) = open_tiny_with(true) else {
+            return;
+        };
         doc.render_page(0, 2.0, Theme::Light).unwrap();
         let hls = doc.highlights().unwrap();
         assert_eq!(hls.len(), 1);
-        assert_eq!(hls[0].color, [255, 255, 0, 255], "still yellow after a render");
+        assert_eq!(
+            hls[0].color,
+            [255, 255, 0, 255],
+            "still yellow after a render"
+        );
         assert_eq!(hls[0].quads.len(), 1);
         // And again, now that the appearance stream definitely exists.
         assert_eq!(doc.highlights().unwrap(), hls);
@@ -647,7 +708,9 @@ mod tests {
     /// the only thing preventing that, since pdfium-render 0.9 no longer serialises calls itself.
     #[test]
     fn concurrent_use_does_not_abort() {
-        let Some((dir, doc)) = open_tiny() else { return };
+        let Some((dir, doc)) = open_tiny() else {
+            return;
+        };
         let path = dir.path().join("tiny.pdf");
         std::thread::scope(|s| {
             for _ in 0..4 {
@@ -668,26 +731,40 @@ mod tests {
     fn dark_theme_inverts_lightness_but_keeps_hue() {
         let white = dark_pixel([255, 255, 255, 255]);
         assert!(white[0] < 60 && white[0] > 10, "white -> {white:?}");
-        assert!(white[0] == white[1] && white[1] == white[2], "stays grey: {white:?}");
+        assert!(
+            white[0] == white[1] && white[1] == white[2],
+            "stays grey: {white:?}"
+        );
         assert_eq!(white[3], 255, "alpha preserved");
 
         let black = dark_pixel([0, 0, 0, 255]);
         assert!(black[0] > 200, "black -> {black:?}");
 
         let red = dark_pixel([255, 0, 0, 255]);
-        assert!(red[0] > red[1] + 40 && red[0] > red[2] + 40, "stays reddish: {red:?}");
+        assert!(
+            red[0] > red[1] + 40 && red[0] > red[2] + 40,
+            "stays reddish: {red:?}"
+        );
         assert!(red[1] == red[2], "hue unshifted: {red:?}");
 
         // A yellow highlight must remain a yellow highlight.
         let yellow = dark_pixel([255, 255, 0, 255]);
-        assert!(yellow[0] > yellow[2] + 40 && yellow[1] > yellow[2] + 40, "{yellow:?}");
+        assert!(
+            yellow[0] > yellow[2] + 40 && yellow[1] > yellow[2] + 40,
+            "{yellow:?}"
+        );
     }
 
     #[test]
     fn line_groups_split_on_a_new_line() {
         let g = |ch, left: f32, top: f32| Glyph {
             ch,
-            rect: Rect { left, top, right: left + 5.0, bottom: top + 10.0 },
+            rect: Rect {
+                left,
+                top,
+                right: left + 5.0,
+                bottom: top + 10.0,
+            },
             index: 0,
         };
         let glyphs = [g('a', 0.0, 0.0), g('b', 5.0, 0.0), g('c', 0.0, 12.0)];

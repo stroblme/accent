@@ -69,10 +69,14 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
     if let Some(exp) = expected {
         match &existing {
             Some(m) if Etag::from_meta(m) != exp => {
-                return Err(SaveError::ChangedOnDisk { current: Etag::from_meta(m) });
+                return Err(SaveError::ChangedOnDisk {
+                    current: Etag::from_meta(m),
+                });
             }
             None => {
-                return Err(io::Error::new(io::ErrorKind::NotFound, "file vanished before save").into());
+                return Err(
+                    io::Error::new(io::ErrorKind::NotFound, "file vanished before save").into(),
+                );
             }
             _ => {}
         }
@@ -97,7 +101,9 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
     // ponytail: no directory fsync after the rename. The rename itself is atomic, so a crash can
     // only lose the whole save, never half of it. Add `File::open(parent)?.sync_all()` here if
     // crash-consistency (as opposed to torn-write safety) ever matters.
-    let file = tmp.persist(&canonical).map_err(|e| SaveError::Io(e.error))?;
+    let file = tmp
+        .persist(&canonical)
+        .map_err(|e| SaveError::Io(e.error))?;
     Ok(Etag::from_meta(&file.metadata()?))
 }
 
@@ -106,9 +112,9 @@ fn canonical_target(path: &Path) -> io::Result<PathBuf> {
     match path.canonicalize() {
         Ok(p) => Ok(p),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let name = path
-                .file_name()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "path has no file name")
+            })?;
             let parent = match path.parent() {
                 Some(p) if !p.as_os_str().is_empty() => p,
                 _ => Path::new("."),
@@ -214,7 +220,12 @@ mod tests {
         let (_, etag) = read_note(&link).unwrap();
         write_note(&link, "two", Some(etag)).unwrap();
 
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "two");
         assert_eq!(std::fs::read_to_string(&link).unwrap(), "two");
     }
@@ -252,7 +263,11 @@ mod tests {
     #[test]
     fn expected_etag_on_missing_file_is_an_io_error() {
         let dir = tempfile::tempdir().unwrap();
-        let ghost = Etag { mtime_ns: 1, size: 1, ino: 1 };
+        let ghost = Etag {
+            mtime_ns: 1,
+            size: 1,
+            ino: 1,
+        };
         match write_note(&dir.path().join("Gone.md"), "x", Some(ghost)) {
             Err(SaveError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
             other => panic!("expected NotFound, got {other:?}"),
@@ -266,7 +281,9 @@ mod tests {
         assert!(!is_syncthing_temp("Note.md"));
         assert!(!is_syncthing_temp(".syncthing.Note.md"));
 
-        assert!(is_sync_conflict("Note.sync-conflict-20260903-101500-ABCDEFG.md"));
+        assert!(is_sync_conflict(
+            "Note.sync-conflict-20260903-101500-ABCDEFG.md"
+        ));
         assert!(!is_sync_conflict("Note.md"));
 
         assert_eq!(
@@ -288,14 +305,26 @@ mod tests {
     fn conflict_siblings_finds_copies() {
         let dir = tempfile::tempdir().unwrap();
         let note = dir.path().join("Note.md");
-        let a = dir.path().join("Note.sync-conflict-20260903-101500-AAAAAAA.md");
-        let b = dir.path().join("Note.sync-conflict-20260903-101600-BBBBBBB.md");
+        let a = dir
+            .path()
+            .join("Note.sync-conflict-20260903-101500-AAAAAAA.md");
+        let b = dir
+            .path()
+            .join("Note.sync-conflict-20260903-101600-BBBBBBB.md");
         for p in [&note, &a, &b] {
             std::fs::write(p, "x").unwrap();
         }
-        std::fs::write(dir.path().join("Other.sync-conflict-20260903-101500-CCCCCCC.md"), "x").unwrap();
+        std::fs::write(
+            dir.path()
+                .join("Other.sync-conflict-20260903-101500-CCCCCCC.md"),
+            "x",
+        )
+        .unwrap();
 
-        assert_eq!(conflict_siblings(&note).unwrap(), vec![a.clone(), b.clone()]);
+        assert_eq!(
+            conflict_siblings(&note).unwrap(),
+            vec![a.clone(), b.clone()]
+        );
         // Asking with a conflict copy in hand finds the whole set, including itself.
         assert_eq!(conflict_siblings(&a).unwrap(), vec![a, b]);
     }
