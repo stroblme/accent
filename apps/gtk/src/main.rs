@@ -13,14 +13,17 @@ use accent_core::index::{Index, Progress, ReconcileStats, default_db_path};
 use adw::prelude::*;
 use editor::Tab;
 use gtk::{gdk, gio, glib, pango};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const APP_ID: &str = "io.github.stroblme.Accent";
+
+/// What the switcher lists before the user types anything.
+const RECENT_NOTES: usize = 50;
 
 /// Startup milestones: `RUST_LOG=accent=debug accent <vault>` prints ms since process start at
 /// "main", "tree populated", "window mapped"/"presented" and "reconcile done". Keeping these makes
@@ -79,6 +82,8 @@ struct App {
     root: gio::ListStore,
     backlinks: gtk::StringList,
     open: RefCell<HashMap<String, Rc<Tab>>>,
+    /// Set once, by `sidebar`, which cannot run before `App` exists.
+    tree: OnceCell<tree::Tree>,
 }
 
 impl App {
@@ -228,6 +233,7 @@ fn build_window(gtk_app: &adw::Application, vault: PathBuf, note: Option<String>
         root: root.clone(),
         backlinks: backlinks.clone(),
         open: RefCell::new(HashMap::new()),
+        tree: OnceCell::new(),
     });
 
     // Populate straight from the DB: the window must be up before reconcile finishes.
@@ -298,11 +304,127 @@ fn build_window(gtk_app: &adw::Application, vault: PathBuf, note: Option<String>
     if let Some(rel) = note {
         app.open_note(&rel);
     }
+    install_bench_hooks(&app);
     start_reconcile(&app, db);
 }
 
+// ----------------------------------------------------------------------------------- benchmarks
+
+/// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
+/// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
+/// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
+/// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
+fn install_bench_hooks(app: &Rc<App>) {
+    let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
+    let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
+    if expand.is_none() && switcher.is_none() {
+        return;
+    }
+    let app = app.clone();
+    // After the first frame, so widget realisation is not counted in the numbers.
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(rel) = expand {
+            bench_expand(&app, &rel);
+        }
+        let Some(query) = switcher else {
+            bench_quit(&app);
+            return;
+        };
+        let t0 = Instant::now();
+        let _ = WidgetExt::activate_action(&app.window, "win.switcher", None);
+        println!("bench switcher_open_ms {:.1}", ms_since(t0));
+
+        // A query of "1" just means "open it"; anything else is typed into the entry so the
+        // debounce, the lazy corpus load and the match all get exercised.
+        let entry = (query != "1")
+            .then(|| find_search_entry(app.window.upcast_ref()))
+            .flatten();
+        let Some(entry) = entry else {
+            bench_quit(&app);
+            return;
+        };
+        let t1 = Instant::now();
+        entry.set_text(&query);
+        // Debounced, so the keystroke itself must return immediately.
+        println!("bench switcher_keystroke_ms {:.1}", ms_since(t1));
+        // Long enough for GtkSearchEntry's own ~150 ms delay plus our 50 ms debounce.
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || bench_quit(&app));
+    });
+}
+
+/// First `GtkSearchEntry` in `w`'s subtree. The switcher dialog is hosted inside the window, so
+/// the bench can drive it without a real key press (no xdotool in the headless image).
+fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
+    if let Ok(e) = w.clone().downcast::<gtk::SearchEntry>() {
+        return Some(e);
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_search_entry(&c) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Closing the window is not enough to end the process while a dialog is up: quit the
+/// application so the bench always terminates.
+fn bench_quit(app: &Rc<App>) {
+    match app.window.application() {
+        Some(gtk_app) => gtk_app.quit(),
+        None => app.window.close(),
+    }
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1e3
+}
+
+fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
+    (0..model.n_items()).find_map(|i| {
+        let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
+        let (_, r) = row.item().as_ref().and_then(tree::decode)?;
+        (r == rel).then_some(row)
+    })
+}
+
+fn bench_expand(app: &Rc<App>, rel: &str) {
+    let Some(tree) = app.tree.get() else { return };
+    let model = tree.model();
+    let mut path = String::new();
+    for seg in rel.split('/') {
+        if !path.is_empty() {
+            path.push('/');
+        }
+        path.push_str(seg);
+        let Some(row) = find_row(model, &path) else {
+            println!("bench expand {path} NOT-FOUND");
+            return;
+        };
+        let before = model.n_items();
+        let t0 = Instant::now();
+        row.set_expanded(true);
+        println!(
+            "bench expand {path} revealed {} rows in {:.1} ms",
+            model.n_items().saturating_sub(before),
+            ms_since(t0)
+        );
+    }
+    // `is_expandable` is what `GtkTreeExpander::set_list_row` calls for every row the ListView
+    // binds, i.e. the per-row cost paid while scrolling.
+    let n = model.n_items();
+    let t0 = Instant::now();
+    for i in 0..n {
+        if let Some(row) = model.item(i).and_downcast::<gtk::TreeListRow>() {
+            let _ = row.is_expandable();
+        }
+    }
+    println!("bench bind_probe {n} rows in {:.1} ms", ms_since(t0));
+}
+
 fn sidebar(app: &Rc<App>) -> gtk::Widget {
-    let list = tree::build(app.index.clone(), &app.root, {
+    let t = tree::build(app.index.clone(), &app.root, {
         let app = app.clone();
         move |kind, rel| {
             if kind == 'm' {
@@ -312,6 +434,8 @@ fn sidebar(app: &Rc<App>) -> gtk::Widget {
             }
         }
     });
+    let list = t.view().clone();
+    let _ = app.tree.set(t);
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -433,11 +557,24 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
         Box::new({
             let app = app.clone();
             move || {
-                let files = tree::all_markdown(&app.index);
-                switcher::present(&app.window, files, {
-                    let app = app.clone();
-                    move |rel| app.open_note(rel)
-                });
+                // One indexed query (~50 rows). The borrow ends here, before any GTK call.
+                let recent = app
+                    .index
+                    .borrow()
+                    .recent_notes(RECENT_NOTES)
+                    .unwrap_or_default();
+                switcher::present(
+                    &app.window,
+                    recent,
+                    {
+                        let index = app.index.clone();
+                        move || index.borrow().note_paths().unwrap_or_default()
+                    },
+                    {
+                        let app = app.clone();
+                        move |rel| app.open_note(rel)
+                    },
+                );
             }
         }),
     );
@@ -519,7 +656,9 @@ fn start_reconcile(app: &Rc<App>, db: PathBuf) {
                                 unchanged = stats.unchanged,
                                 "reconcile done"
                             );
-                            tree::fill(&app.root, &app.index, "");
+                            if let Some(t) = app.tree.get() {
+                                t.refresh();
+                            }
                             app.sync_active();
                             app.toast(&format!(
                                 "Indexed {} files ({} new, {} updated)",
@@ -550,7 +689,8 @@ fn install_document_font() {
     let Some(display) = gdk::Display::default() else {
         return;
     };
-    let desc = pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
+    let desc =
+        pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
     let family = desc
         .family()
         .map(|f| f.to_string())
