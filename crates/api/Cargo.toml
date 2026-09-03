@@ -1,0 +1,15 @@
+[package]
+name = "accent-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# android = ["dep:uniffi"]  # enabled in Phase 3
+
+[dependencies]
+accent-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
