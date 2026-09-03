@@ -1,6 +1,8 @@
 //! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
 //! Read-only with respect to the vault — the only thing it writes is the cache db.
 
+mod gen_vault;
+
 use accent_core::index::{Index, Phase, Progress, default_db_path};
 use accent_core::walk::{self, ScanOptions};
 use anyhow::{Context, Result};
@@ -93,6 +95,25 @@ enum Cmd {
     Stats {
         #[command(flatten)]
         common: Common,
+    },
+    /// Generate a synthetic Obsidian-shaped vault for tests and benchmarks.
+    ///
+    /// Writes `<out_dir>` plus an external code tree at `<out_dir>-external` that the vault
+    /// symlinks into. Deterministic for a given --seed. Never reads a real vault.
+    GenVault {
+        /// Directory to create the vault in (must be empty unless --force).
+        out_dir: PathBuf,
+        /// Markdown notes to write.
+        #[arg(long, default_value_t = 3600)]
+        notes: usize,
+        /// Total regular files inside the vault, notes included.
+        #[arg(long, default_value_t = 40000)]
+        files: usize,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Wipe `<out_dir>` and `<out_dir>-external` first.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -196,6 +217,16 @@ fn main() -> Result<()> {
             let s = ix.stats()?;
             println!("{}", serde_json::to_string_pretty(&s)?);
             println!("unresolved links {}", ix.unresolved_links()?.len());
+        }
+        Cmd::GenVault {
+            out_dir,
+            notes,
+            files,
+            seed,
+            force,
+        } => {
+            let s = gen_vault::run(&out_dir, notes, files, seed, force)?;
+            gen_vault::print_summary(&out_dir, &s);
         }
     }
     Ok(())

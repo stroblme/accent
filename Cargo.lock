@@ -11,6 +11,7 @@ dependencies = [
  "anyhow",
  "gtk4",
  "libadwaita",
+ "nucleo-matcher",
  "sourceview5",
  "tracing",
  "tracing-subscriber",
