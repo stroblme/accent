@@ -158,14 +158,10 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         set(name, &|t| t.set_foreground_rgba(Some(&accent)));
     }
     for name in ["marker", "frontmatter", "listmarker"] {
-        set(name, &|t| {
-            t.set_foreground_rgba(Some(&with_alpha(fg, 0.4)))
-        });
+        set(name, &|t| t.set_foreground_rgba(Some(&with_alpha(fg, 0.4))));
     }
     for name in ["quote", "taskdone"] {
-        set(name, &|t| {
-            t.set_foreground_rgba(Some(&with_alpha(fg, 0.6)))
-        });
+        set(name, &|t| t.set_foreground_rgba(Some(&with_alpha(fg, 0.6))));
     }
     for name in ["code", "codeblock"] {
         set(name, &|t| {
