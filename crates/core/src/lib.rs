@@ -4,7 +4,7 @@
 pub mod fs;
 pub mod index;
 pub mod markdown;
-pub mod walk;
-pub mod watch;
 #[cfg(feature = "pdf")]
 pub mod pdf;
+pub mod walk;
+pub mod watch;

@@ -60,33 +60,164 @@ impl Rng {
 
 /// Deliberately excludes "missing": unresolved link targets are built from it.
 const WORDS: &[&str] = &[
-    "quantum", "circuit", "lattice", "ansatz", "qubit", "gate", "noise", "error", "correction",
-    "decoherence", "entanglement", "fidelity", "measurement", "hamiltonian", "spectrum",
-    "eigenvalue", "variational", "optimizer", "gradient", "sampling", "benchmark", "latency",
-    "throughput", "scheduler", "compiler", "transpiler", "backend", "simulator", "kernel",
-    "tensor", "network", "encoding", "decoder", "syndrome", "stabilizer", "surface", "code",
-    "threshold", "overhead", "pipeline", "dataset", "baseline", "ablation", "protocol",
-    "calibration", "pulse", "waveform", "resonator", "transmon", "coupler", "cryostat", "readout",
-    "amplifier", "attenuation", "crosstalk", "dephasing", "relaxation", "coherence", "sequence",
-    "tomography", "estimator", "shots", "expectation", "observable", "commutator", "unitary",
-    "channel", "density", "matrix", "trace", "purity", "entropy", "mutual", "information",
-    "capacity", "bound", "theorem", "lemma", "proof", "sketch", "draft", "outline", "review",
-    "revision", "deadline", "submission", "rebuttal", "poster", "talk", "slides", "meeting",
-    "agenda", "minutes", "action", "item", "followup", "reading", "summary", "question", "answer",
-    "idea", "hypothesis", "experiment", "result", "figure", "table", "appendix", "reference",
-    "citation", "library", "archive", "inbox", "journal", "weekly", "planning", "thesis",
-    "chapter", "section", "paragraph", "footnote", "cluster", "runtime", "budget", "sweep",
+    "quantum",
+    "circuit",
+    "lattice",
+    "ansatz",
+    "qubit",
+    "gate",
+    "noise",
+    "error",
+    "correction",
+    "decoherence",
+    "entanglement",
+    "fidelity",
+    "measurement",
+    "hamiltonian",
+    "spectrum",
+    "eigenvalue",
+    "variational",
+    "optimizer",
+    "gradient",
+    "sampling",
+    "benchmark",
+    "latency",
+    "throughput",
+    "scheduler",
+    "compiler",
+    "transpiler",
+    "backend",
+    "simulator",
+    "kernel",
+    "tensor",
+    "network",
+    "encoding",
+    "decoder",
+    "syndrome",
+    "stabilizer",
+    "surface",
+    "code",
+    "threshold",
+    "overhead",
+    "pipeline",
+    "dataset",
+    "baseline",
+    "ablation",
+    "protocol",
+    "calibration",
+    "pulse",
+    "waveform",
+    "resonator",
+    "transmon",
+    "coupler",
+    "cryostat",
+    "readout",
+    "amplifier",
+    "attenuation",
+    "crosstalk",
+    "dephasing",
+    "relaxation",
+    "coherence",
+    "sequence",
+    "tomography",
+    "estimator",
+    "shots",
+    "expectation",
+    "observable",
+    "commutator",
+    "unitary",
+    "channel",
+    "density",
+    "matrix",
+    "trace",
+    "purity",
+    "entropy",
+    "mutual",
+    "information",
+    "capacity",
+    "bound",
+    "theorem",
+    "lemma",
+    "proof",
+    "sketch",
+    "draft",
+    "outline",
+    "review",
+    "revision",
+    "deadline",
+    "submission",
+    "rebuttal",
+    "poster",
+    "talk",
+    "slides",
+    "meeting",
+    "agenda",
+    "minutes",
+    "action",
+    "item",
+    "followup",
+    "reading",
+    "summary",
+    "question",
+    "answer",
+    "idea",
+    "hypothesis",
+    "experiment",
+    "result",
+    "figure",
+    "table",
+    "appendix",
+    "reference",
+    "citation",
+    "library",
+    "archive",
+    "inbox",
+    "journal",
+    "weekly",
+    "planning",
+    "thesis",
+    "chapter",
+    "section",
+    "paragraph",
+    "footnote",
+    "cluster",
+    "runtime",
+    "budget",
+    "sweep",
 ];
 
 const AREAS: &[&str] = &[
-    "phd", "qc", "reading", "meeting", "idea", "project", "paper", "teaching", "admin", "tool",
-    "theory", "experiment", "hardware", "software", "review", "travel", "conference", "thesis",
-    "grant", "personal",
+    "phd",
+    "qc",
+    "reading",
+    "meeting",
+    "idea",
+    "project",
+    "paper",
+    "teaching",
+    "admin",
+    "tool",
+    "theory",
+    "experiment",
+    "hardware",
+    "software",
+    "review",
+    "travel",
+    "conference",
+    "thesis",
+    "grant",
+    "personal",
 ];
 
 const PROJECTS: &[&str] = &[
-    "proj-a", "proj-b", "qec-scaling", "pulse-shaping", "noise-atlas", "compiler-bench",
-    "thesis-defense", "grant-2026",
+    "proj-a",
+    "proj-b",
+    "qec-scaling",
+    "pulse-shaping",
+    "noise-atlas",
+    "compiler-bench",
+    "thesis-defense",
+    "grant-2026",
 ];
 
 const CONFS: &[&str] = &["QIP", "IEEE-QCE", "Qiskit-Camp", "APS-March"];
@@ -364,7 +495,9 @@ impl Gen {
                     // Fenced code: the walker must NOT see a link or a tag in here.
                     let f = self.words(1);
                     s.push_str("```python\n");
-                    s.push_str(&format!("def {f}(shots=1024):  # [[not a link]] #notatag\n"));
+                    s.push_str(&format!(
+                        "def {f}(shots=1024):  # [[not a link]] #notatag\n"
+                    ));
                     s.push_str("    return sum(range(shots)) / shots\n");
                     s.push_str("```\n\n");
                 }
@@ -406,7 +539,9 @@ impl Gen {
 
     fn jpg(&mut self, n: usize) -> Vec<u8> {
         let mut v = Vec::with_capacity(n);
-        v.extend_from_slice(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00");
+        v.extend_from_slice(
+            b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00",
+        );
         self.payload(n.saturating_sub(20), &mut v);
         v.extend_from_slice(b"\xff\xd9");
         v
@@ -433,7 +568,9 @@ impl Gen {
             out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
         }
         let xref = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
         for off in &offsets {
             out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
         }
@@ -453,7 +590,9 @@ impl Gen {
         while s.len() < n {
             let (k, t) = (self.words(2), self.tag());
             let v = self.rng.range(1, 100_000);
-            s.push_str(&format!("    {{\"key\": \"{k}\", \"tag\": \"{t}\", \"n\": {v}}},\n"));
+            s.push_str(&format!(
+                "    {{\"key\": \"{k}\", \"tag\": \"{t}\", \"n\": {v}}},\n"
+            ));
         }
         s.push_str("    {\"key\": \"end\", \"tag\": \"admin\", \"n\": 0}\n  ]\n}\n");
         s.into_bytes()
@@ -504,7 +643,9 @@ impl Gen {
         for _ in 0..self.rng.range(3, 12) {
             let f = self.words(1);
             let v = self.rng.range(1, 9999);
-            s.push_str(&format!("def {f}_{v}(x=None):\n    return {v} if x is None else x\n\n"));
+            s.push_str(&format!(
+                "def {f}_{v}(x=None):\n    return {v} if x is None else x\n\n"
+            ));
         }
         s.into_bytes()
     }
@@ -521,12 +662,22 @@ fn note_dirs(rng: &mut Rng) -> Vec<String> {
             dirs.push(d);
         }
     };
-    for d in ["Daily", "Templates", "Inbox", "Attachments", "Notes-PHD/thesis"] {
+    for d in [
+        "Daily",
+        "Templates",
+        "Inbox",
+        "Attachments",
+        "Notes-PHD/thesis",
+    ] {
         push(d.to_string(), &mut dirs);
     }
     for top in ["Notes-PHD", "Notes-QC", "Resources"] {
         for _ in 0..10 {
-            let t = format!("{}-{}", WORDS[rng.below(WORDS.len())], WORDS[rng.below(WORDS.len())]);
+            let t = format!(
+                "{}-{}",
+                WORDS[rng.below(WORDS.len())],
+                WORDS[rng.below(WORDS.len())]
+            );
             push(format!("{top}/{t}"), &mut dirs);
             for _ in 0..rng.below(4) {
                 let s = WORDS[rng.below(WORDS.len())];
@@ -568,7 +719,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
         std::env::current_dir()?.join(out)
     };
     if abs.to_string_lossy().contains("Sync/Notes") {
-        bail!("refusing to write inside a Syncthing notes tree: {}", abs.display());
+        bail!(
+            "refusing to write inside a Syncthing notes tree: {}",
+            abs.display()
+        );
     }
     if out.exists() && out.read_dir()?.next().is_some() && !force {
         bail!("{} is not empty (use --force to wipe it)", out.display());
@@ -615,7 +769,12 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
                 let d = i - 4;
                 (
                     "Daily".to_string(),
-                    format!("{}-{:02}-{:02}", 2024 + d / 336, (d % 336) / 28 + 1, d % 28 + 1),
+                    format!(
+                        "{}-{:02}-{:02}",
+                        2024 + d / 336,
+                        (d % 336) / 28 + 1,
+                        d % 28 + 1
+                    ),
                 )
             }
             _ => {
@@ -665,7 +824,11 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
             .map(|_| (b'A' + g.rng.below(26) as u8) as char)
             .collect();
         g.write(
-            &format!("{dir}/{stem}.sync-conflict-2026090{}-10150{}-{dev}.md", k % 9, k % 9),
+            &format!(
+                "{dir}/{stem}.sync-conflict-2026090{}-10150{}-{dev}.md",
+                k % 9,
+                k % 9
+            ),
             body.as_bytes(),
         )?;
     }
@@ -716,7 +879,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     // ---- the external repo the vault symlinks into
     let ext_notes = 8;
     g.write_ext("proj-a/.gitignore", b".venv/\ntarget/\n")?;
-    g.write_ext("proj-a/README.md", b"# proj-a\n\nExternal code tree, reached through a vault symlink.\n")?;
+    g.write_ext(
+        "proj-a/README.md",
+        b"# proj-a\n\nExternal code tree, reached through a vault symlink.\n",
+    )?;
     for f in ["main.rs", "lib.rs", "util.rs"] {
         let body = format!("// {f}\nfn main() {{ println!(\"{}\"); }}\n", g.words(3));
         g.write_ext(&format!("proj-a/src/{f}"), body.as_bytes())?;
@@ -730,7 +896,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
         let m = format!("mod{i:04}");
         let body = g.py_module(&m);
         g.write_ext(
-            &format!("proj-a/.venv/lib/python3.13/site-packages/pkg{:02}/{m}.py", i % 50),
+            &format!(
+                "proj-a/.venv/lib/python3.13/site-packages/pkg{:02}/{m}.py",
+                i % 50
+            ),
             &body,
         )?;
     }
@@ -766,7 +935,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     for i in 0..excal {
         let n = g.rng.range(8 * 1024, 40 * 1024);
         let b = g.excalidraw(n);
-        g.write(&format!("Attachments/Excalidraw/Drawing-{i}.excalidraw.md"), &b)?;
+        g.write(
+            &format!("Attachments/Excalidraw/Drawing-{i}.excalidraw.md"),
+            &b,
+        )?;
     }
     if files >= 5000 {
         for i in 0..6 {
@@ -785,7 +957,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
         }
     }
     for _ in 0..(files / 16).clamp(1, 2400) {
-        bulk.push(format!("Resources/library/storage/{:08X}", g.rng.next_u64() as u32));
+        bulk.push(format!(
+            "Resources/library/storage/{:08X}",
+            g.rng.next_u64() as u32
+        ));
     }
     let mut i = 0usize;
     while g.files < files {
@@ -844,12 +1019,27 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
 
 pub fn print_summary(out: &Path, s: &Summary) {
     println!("vault         {}", out.display());
-    println!("files         {}  (regular files inside the vault)", s.files);
+    println!(
+        "files         {}  (regular files inside the vault)",
+        s.files
+    );
     println!("dirs          {}", s.dirs);
-    println!("markdown      {}  (incl. excalidraw + the external repo's notes)", s.md_files);
-    println!("symlinks      {}  (1 external dir, 1 in-vault dir, 1 loop, 1 file)", s.symlinks);
-    println!("external      {} files in <out>-external (most .gitignore'd at scan time)", s.external_files);
-    println!("bytes         {:.1} MiB", s.bytes as f64 / (1024.0 * 1024.0));
+    println!(
+        "markdown      {}  (incl. excalidraw + the external repo's notes)",
+        s.md_files
+    );
+    println!(
+        "symlinks      {}  (1 external dir, 1 in-vault dir, 1 loop, 1 file)",
+        s.symlinks
+    );
+    println!(
+        "external      {} files in <out>-external (most .gitignore'd at scan time)",
+        s.external_files
+    );
+    println!(
+        "bytes         {:.1} MiB",
+        s.bytes as f64 / (1024.0 * 1024.0)
+    );
     println!("elapsed       {} ms", s.ms);
     println!(
         "note          .accentignore has `# .venv/` commented out, so the {} files under\n\
@@ -889,30 +1079,72 @@ mod tests {
 
         let mut names = Vec::new();
         all_names(&vault, &mut names);
-        assert_eq!(names.iter().filter(|n| n.contains(".sync-conflict-")).count(), 6);
-        assert_eq!(names.iter().filter(|n| n.starts_with(".syncthing.")).count(), 2);
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.contains(".sync-conflict-"))
+                .count(),
+            6
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|n| n.starts_with(".syncthing."))
+                .count(),
+            2
+        );
         assert!(names.iter().any(|n| n == ".stignore"));
         assert!(names.iter().any(|n| n == ".accentignore"));
         assert!(names.iter().any(|n| n == ".stfolder"));
-        for link in ["Submissions/proj-a/code", "Resources/link-to-notes", "Archive/loop", "Notes-QC/alias.md"] {
+        for link in [
+            "Submissions/proj-a/code",
+            "Resources/link-to-notes",
+            "Archive/loop",
+            "Notes-QC/alias.md",
+        ] {
             assert!(vault.join(link).is_symlink(), "{link} must be a symlink");
         }
         assert!(vault.join("Notes-QC/Real.md").is_file());
 
         let r = walk::scan(&vault, &ScanOptions::default());
-        let md = r.files.iter().filter(|f| f.kind == FileKind::Markdown).count();
+        let md = r
+            .files
+            .iter()
+            .filter(|f| f.kind == FileKind::Markdown)
+            .count();
         assert!(md >= 20, "notes indexed: {md}");
-        assert_eq!(r.files.iter().filter(|f| f.kind == FileKind::Conflict).count(), 6);
-        assert!(!r.files.iter().any(|f| f.rel_path.contains(".syncthing.")), "temp files indexed");
-        assert!(!r.aliases.is_empty(), "the file symlink must yield an alias");
+        assert_eq!(
+            r.files
+                .iter()
+                .filter(|f| f.kind == FileKind::Conflict)
+                .count(),
+            6
+        );
+        assert!(
+            !r.files.iter().any(|f| f.rel_path.contains(".syncthing.")),
+            "temp files indexed"
+        );
+        assert!(
+            !r.aliases.is_empty(),
+            "the file symlink must yield an alias"
+        );
 
         // Exactly two symlinks are rejected: the in-vault shortcut and the loop.
         let mut reasons: Vec<_> = r.skipped.iter().map(|s| s.reason).collect();
         reasons.sort_by_key(|r| format!("{r:?}"));
-        assert_eq!(reasons, vec![SkipReason::SymlinkLoop, SkipReason::TargetInsideVault], "{:?}", r.skipped);
+        assert_eq!(
+            reasons,
+            vec![SkipReason::SymlinkLoop, SkipReason::TargetInsideVault],
+            "{:?}",
+            r.skipped
+        );
 
         // The external repo is followed, but its .venv/target are gitignored away.
-        assert!(r.files.iter().any(|f| f.rel_path.starts_with("Submissions/proj-a/code/")));
+        assert!(
+            r.files
+                .iter()
+                .any(|f| f.rel_path.starts_with("Submissions/proj-a/code/"))
+        );
         assert!(!r.files.iter().any(|f| f.rel_path.contains("code/.venv")));
 
         fs::remove_dir_all(&tmp).unwrap();

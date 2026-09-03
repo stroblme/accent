@@ -21,7 +21,10 @@ use crate::fs::{is_sync_conflict, is_syncthing_temp};
 pub enum VaultEvent {
     Changed(PathBuf),
     Removed(PathBuf),
-    Renamed { from: PathBuf, to: PathBuf },
+    Renamed {
+        from: PathBuf,
+        to: PathBuf,
+    },
     /// A `*.sync-conflict-*` file appeared; the UI can offer a merge.
     ConflictAppeared(PathBuf),
     /// Events were dropped (queue overflow or watcher error): re-walk the vault.
@@ -135,7 +138,11 @@ fn ignored(path: &Path) -> bool {
 
 /// A path that just showed up: a conflict copy is worth its own event.
 fn appeared(path: &Path) -> VaultEvent {
-    if path.file_name().and_then(|n| n.to_str()).is_some_and(is_sync_conflict) {
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(is_sync_conflict)
+    {
         VaultEvent::ConflictAppeared(path.to_path_buf())
     } else {
         VaultEvent::Changed(path.to_path_buf())
@@ -156,24 +163,35 @@ fn classify(ev: &notify::Event) -> Vec<VaultEvent> {
         EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if ev.paths.len() == 2 => {
             let (from, to) = (&ev.paths[0], &ev.paths[1]);
             match (ignored(from), ignored(to)) {
-                (false, false) => vec![VaultEvent::Renamed { from: from.clone(), to: to.clone() }],
+                (false, false) => vec![VaultEvent::Renamed {
+                    from: from.clone(),
+                    to: to.clone(),
+                }],
                 // Syncthing finishing a download: the destination is just new content.
                 (true, false) => vec![appeared(to)],
                 (false, true) => vec![VaultEvent::Removed(from.clone())],
                 (true, true) => vec![],
             }
         }
-        EventKind::Modify(ModifyKind::Name(RenameMode::From)) | EventKind::Remove(_) => {
-            live.iter().map(|p| VaultEvent::Removed((*p).clone())).collect()
-        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) | EventKind::Remove(_) => live
+            .iter()
+            .map(|p| VaultEvent::Removed((*p).clone()))
+            .collect(),
         // Backends that cannot tell the two halves apart (poll, kqueue): ask the filesystem.
         EventKind::Modify(ModifyKind::Name(_)) => live
             .iter()
-            .map(|p| if p.exists() { appeared(p) } else { VaultEvent::Removed((*p).clone()) })
+            .map(|p| {
+                if p.exists() {
+                    appeared(p)
+                } else {
+                    VaultEvent::Removed((*p).clone())
+                }
+            })
             .collect(),
-        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any) => {
-            live.iter().map(|p| VaultEvent::Changed((*p).clone())).collect()
-        }
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any) => live
+            .iter()
+            .map(|p| VaultEvent::Changed((*p).clone()))
+            .collect(),
         // Access/Other: nothing the index cares about.
         _ => vec![],
     }
@@ -230,7 +248,10 @@ mod tests {
         std::fs::write(root.join("Note.md"), "hello").unwrap();
 
         let events = drain(&rx, Duration::from_secs(5));
-        assert!(touches(&events, "Note.md"), "expected an event for Note.md, got {events:?}");
+        assert!(
+            touches(&events, "Note.md"),
+            "expected an event for Note.md, got {events:?}"
+        );
     }
 
     #[test]
@@ -244,7 +265,9 @@ mod tests {
 
         let events = drain(&rx, Duration::from_secs(5));
         assert!(
-            events.iter().any(|e| matches!(e, VaultEvent::ConflictAppeared(p) if *p == conflict)),
+            events
+                .iter()
+                .any(|e| matches!(e, VaultEvent::ConflictAppeared(p) if *p == conflict)),
             "expected ConflictAppeared, got {events:?}"
         );
     }
@@ -261,7 +284,10 @@ mod tests {
         std::fs::rename(&tmp, root.join("Note.md")).unwrap();
 
         let events = drain(&rx, Duration::from_secs(5));
-        assert!(touches(&events, "Note.md"), "expected an event for Note.md, got {events:?}");
+        assert!(
+            touches(&events, "Note.md"),
+            "expected an event for Note.md, got {events:?}"
+        );
         assert!(
             !touches(&events, ".syncthing.Note.md.tmp"),
             "temp name leaked into the vault events: {events:?}"
@@ -281,7 +307,11 @@ mod tests {
         use notify::event::{CreateKind, DataChange, RemoveKind};
         let p = |s: &str| PathBuf::from(s);
 
-        let ev = |kind, paths: Vec<PathBuf>| notify::Event { kind, paths, attrs: Default::default() };
+        let ev = |kind, paths: Vec<PathBuf>| notify::Event {
+            kind,
+            paths,
+            attrs: Default::default(),
+        };
 
         assert_eq!(
             classify(&ev(EventKind::Create(CreateKind::File), vec![p("/v/N.md")])),
@@ -292,7 +322,9 @@ mod tests {
                 EventKind::Create(CreateKind::File),
                 vec![p("/v/N.sync-conflict-20260903-101500-ABCDEFG.md")]
             )),
-            vec![VaultEvent::ConflictAppeared(p("/v/N.sync-conflict-20260903-101500-ABCDEFG.md"))]
+            vec![VaultEvent::ConflictAppeared(p(
+                "/v/N.sync-conflict-20260903-101500-ABCDEFG.md"
+            ))]
         );
         assert_eq!(
             classify(&ev(EventKind::Remove(RemoveKind::File), vec![p("/v/N.md")])),
@@ -303,7 +335,10 @@ mod tests {
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
                 vec![p("/v/A.md"), p("/v/B.md")]
             )),
-            vec![VaultEvent::Renamed { from: p("/v/A.md"), to: p("/v/B.md") }]
+            vec![VaultEvent::Renamed {
+                from: p("/v/A.md"),
+                to: p("/v/B.md")
+            }]
         );
         // Temp -> real is a plain content change, not a rename the index should track.
         assert_eq!(

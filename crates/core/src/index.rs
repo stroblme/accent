@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 const BATCH: usize = 500;
@@ -22,6 +22,7 @@ const SCHEMA: &str = r#"
 CREATE TABLE files(
     id           INTEGER PRIMARY KEY,
     rel_path     TEXT UNIQUE NOT NULL,
+    parent_dir   TEXT NOT NULL,
     canonical    TEXT NOT NULL,
     dev          INTEGER NOT NULL,
     ino          INTEGER NOT NULL,
@@ -66,6 +67,8 @@ CREATE INDEX idx_tags_name      ON tags(name);
 CREATE INDEX idx_tags_file      ON tags(file_id);
 CREATE INDEX idx_headings_file  ON headings(file_id);
 CREATE INDEX idx_files_devino   ON files(dev, ino);
+CREATE INDEX idx_files_parent   ON files(parent_dir);
+CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
 "#;
 
@@ -370,9 +373,10 @@ impl Index {
 
                 let id: i64 = tx
                     .prepare_cached(
-                        "INSERT INTO files(rel_path, canonical, dev, ino, mtime_ns, size, kind, title, content_hash)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                        "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
                          ON CONFLICT(rel_path) DO UPDATE SET
+                            parent_dir=excluded.parent_dir,
                             canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
                             mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
                             title=excluded.title, content_hash=excluded.content_hash
@@ -381,6 +385,7 @@ impl Index {
                     .query_row(
                         params![
                             f.rel_path,
+                            parent_dir(&f.rel_path),
                             f.canonical.to_string_lossy(),
                             f.dev as i64,
                             f.ino as i64,
@@ -419,7 +424,11 @@ impl Index {
                         tx.prepare_cached(
                             "INSERT INTO tags(file_id, name, byte_start) VALUES(?1,?2,?3)",
                         )?
-                        .execute(params![id, t.name, t.range.start as i64])?;
+                        .execute(params![
+                            id,
+                            t.name,
+                            t.range.start as i64
+                        ])?;
                     }
                     for h in &a.headings {
                         tx.prepare_cached(
@@ -510,8 +519,7 @@ impl Index {
         tx.execute("UPDATE links SET resolved_file = NULL", [])?;
         let mut resolved = 0usize;
         {
-            let mut up =
-                tx.prepare("UPDATE links SET resolved_file = ?1 WHERE target = ?2")?;
+            let mut up = tx.prepare("UPDATE links SET resolved_file = ?1 WHERE target = ?2")?;
             for t in &targets {
                 let key = t
                     .trim()
@@ -558,6 +566,15 @@ fn strip_ext(s: &str) -> String {
     }
 }
 
+/// Directory part of a vault-relative path: `"a/b/c.md"` -> `"a/b"`, `"a.md"` -> `""`.
+/// Stored per row so one directory level is an index lookup rather than a scan.
+fn parent_dir(rel_path: &str) -> &str {
+    match rel_path.rsplit_once('/') {
+        Some((dir, _)) => dir,
+        None => "",
+    }
+}
+
 fn file_stem(rel_path: &str) -> Option<String> {
     let base = rel_path.rsplit('/').next()?;
     Some(strip_ext(base))
@@ -576,19 +593,37 @@ fn link_kind_i64(k: markdown::LinkKind) -> i64 {
 
 impl Index {
     /// Direct children of `prefix` ("" = vault root). Lazy tree: one level per call.
+    ///
+    /// Matches on the indexed `parent_dir` column, so the cost is proportional to the number of
+    /// children returned. The previous `substr(rel_path, ...)` prefix test was unsargable and made
+    /// every expansion a full scan of the vault.
     pub fn list_files(&self, prefix: &str) -> Result<Vec<FileRow>> {
-        let p = match prefix.trim_matches('/') {
-            "" => String::new(),
-            d => format!("{d}/"),
-        };
         let mut st = self.conn.prepare_cached(
             "SELECT id, rel_path, kind, title, size, mtime_ns FROM files
-             WHERE substr(rel_path, 1, length(?1)) = ?1
-               AND instr(substr(rel_path, length(?1) + 1), '/') = 0
-               AND length(rel_path) > length(?1)
+             WHERE parent_dir = ?1
              ORDER BY kind <> 0, rel_path COLLATE NOCASE",
         )?;
-        let rows = st.query_map([&p], file_row)?;
+        let rows = st.query_map([prefix.trim_matches('/')], file_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every markdown note's rel_path, for the file switcher's fuzzy match.
+    pub fn note_paths(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
+        )?;
+        let rows = st.query_map([FileKind::Markdown.as_i64()], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The `limit` most recently modified notes: what the switcher lists before the user types.
+    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY mtime_ns DESC LIMIT ?2",
+        )?;
+        let rows = st.query_map(params![FileKind::Markdown.as_i64(), limit as i64], |r| {
+            r.get(0)
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -703,7 +738,11 @@ fn fts_query(q: &str) -> String {
         .enumerate()
         .map(|(i, t)| {
             let esc = t.replace('"', "\"\"");
-            if i == last { format!("\"{esc}\"*") } else { format!("\"{esc}\"") }
+            if i == last {
+                format!("\"{esc}\"*")
+            } else {
+                format!("\"{esc}\"")
+            }
         })
         .collect::<Vec<_>>()
         .join(" ")
@@ -717,11 +756,21 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, tempfile::TempDir) {
         let vault = tempfile::tempdir().unwrap();
         fs::create_dir(vault.path().join("sub")).unwrap();
-        fs::write(vault.path().join("a.md"), "# Alpha\nsee [[Beta]] and #rust\n").unwrap();
-        fs::write(vault.path().join("sub/Beta.md"), "# Beta\nbody about ferris\n").unwrap();
+        fs::write(
+            vault.path().join("a.md"),
+            "# Alpha\nsee [[Beta]] and #rust\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("sub/Beta.md"),
+            "# Beta\nbody about ferris\n",
+        )
+        .unwrap();
         fs::write(vault.path().join("c.pdf"), b"%PDF-1.4 not really").unwrap();
         fs::write(
-            vault.path().join("a.sync-conflict-20240101-120000-ABCDEFG.md"),
+            vault
+                .path()
+                .join("a.sync-conflict-20240101-120000-ABCDEFG.md"),
             "conflicted",
         )
         .unwrap();
@@ -838,7 +887,11 @@ mod tests {
         let (vault, db) = fixture();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
-        fs::write(vault.path().join("sub/Beta.md"), "# Beta\nnow about crabs\n").unwrap();
+        fs::write(
+            vault.path().join("sub/Beta.md"),
+            "# Beta\nnow about crabs\n",
+        )
+        .unwrap();
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         assert!(ix.search("ferris", 10).unwrap().is_empty(), "stale FTS row");
@@ -869,7 +922,10 @@ mod tests {
             .unwrap();
         assert_eq!(ix.resolve_links().unwrap(), 2);
         assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 2);
-        assert_eq!(ix.unresolved_links().unwrap(), vec![("a.md".into(), "Nope".into())]);
+        assert_eq!(
+            ix.unresolved_links().unwrap(),
+            vec![("a.md".into(), "Nope".into())]
+        );
     }
 
     #[test]
@@ -898,5 +954,62 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
         assert_eq!(ix.stats().unwrap().aliases, 1);
+    }
+
+    #[test]
+    fn parent_dir_of_rel_path() {
+        assert_eq!(parent_dir("a.md"), "");
+        assert_eq!(parent_dir("sub/Beta.md"), "sub");
+        assert_eq!(parent_dir("a/b/c.md"), "a/b");
+    }
+
+    /// `list_files` is one directory level: the root must not report grandchildren, and a
+    /// subdirectory must report its own children whatever the prefix's slashes look like.
+    #[test]
+    fn list_files_returns_direct_children_only() {
+        let (vault, db) = fixture();
+        fs::create_dir(vault.path().join("sub/deep")).unwrap();
+        fs::write(vault.path().join("sub/deep/d.md"), "# D").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let root: Vec<String> = ix
+            .list_files("")
+            .unwrap()
+            .into_iter()
+            .map(|f| f.rel_path)
+            .collect();
+        assert!(root.contains(&"sub".to_string()), "{root:?}");
+        assert!(root.contains(&"a.md".to_string()), "{root:?}");
+        assert!(
+            !root.iter().any(|r| r.contains('/')),
+            "root level leaked a grandchild: {root:?}"
+        );
+        // Directories sort before files.
+        assert_eq!(root[0], "sub", "{root:?}");
+
+        for prefix in ["sub", "/sub/", "sub/"] {
+            let kids: Vec<String> = ix
+                .list_files(prefix)
+                .unwrap()
+                .into_iter()
+                .map(|f| f.rel_path)
+                .collect();
+            assert_eq!(kids, vec!["sub/deep", "sub/Beta.md"], "prefix {prefix:?}");
+        }
+
+        assert_eq!(ix.list_files("nope").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn note_paths_and_recent_notes_list_markdown_only() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // c.pdf, the conflict copy and the `sub` directory are not notes.
+        assert_eq!(ix.note_paths().unwrap(), vec!["a.md", "sub/Beta.md"]);
+        assert_eq!(ix.recent_notes(50).unwrap().len(), 2);
+        assert_eq!(ix.recent_notes(1).unwrap().len(), 1, "limit is honoured");
     }
 }

@@ -22,9 +22,8 @@ fn main() -> Result<()> {
         bail!("usage: pdf_spike <file.pdf> [page]");
     };
     let page: usize = args.next().map(|p| p.parse()).transpose()?.unwrap_or(0);
-    let out_dir = PathBuf::from(
-        std::env::var("ACCENT_SCRATCH").unwrap_or_else(|_| ".".to_string()),
-    );
+    let out_dir =
+        PathBuf::from(std::env::var("ACCENT_SCRATCH").unwrap_or_else(|_| ".".to_string()));
 
     println!("pdfium dir : {}", accent_core::pdf::library_dir().display());
     if !accent_core::pdf::available() {
@@ -75,13 +74,21 @@ fn main() -> Result<()> {
     let glyphs = doc.page_text(page)?;
     println!("text       : {:>7.1} ms  ({} glyphs)", ms(t), glyphs.len());
     let text: String = glyphs.iter().map(|g| g.ch).collect();
-    println!("  first 200: {:?}", text.chars().take(200).collect::<String>());
+    println!(
+        "  first 200: {:?}",
+        text.chars().take(200).collect::<String>()
+    );
     if let Some(g) = glyphs.first() {
         println!("  glyph[0] : {:?} at {:?}", g.ch, g.rect);
     }
 
     let t = Instant::now();
-    let top_third = Rect { left: 0.0, top: 0.0, right: w, bottom: h / 3.0 };
+    let top_third = Rect {
+        left: 0.0,
+        top: 0.0,
+        right: w,
+        bottom: h / 3.0,
+    };
     let region = doc.text_in_rect(page, top_third);
     println!(
         "in-rect    : {:>7.1} ms  {:?}",
@@ -95,7 +102,11 @@ fn main() -> Result<()> {
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or(path.clone());
-    let sel = Selection { page, start: 0, end: 40.min(glyphs.len()) };
+    let sel = Selection {
+        page,
+        start: 0,
+        end: 40.min(glyphs.len()),
+    };
     let link = doc.selection_link(&rel, &sel)?;
     println!("selection  : {:>7.1} ms", ms(t));
     println!("  link     : {}", link.link);
@@ -105,7 +116,11 @@ fn main() -> Result<()> {
     // --- highlights ----------------------------------------------------------------------
     let t = Instant::now();
     let highlights = doc.highlights()?;
-    println!("highlights : {:>7.1} ms  ({} found)", ms(t), highlights.len());
+    println!(
+        "highlights : {:>7.1} ms  ({} found)",
+        ms(t),
+        highlights.len()
+    );
     for hl in highlights.iter().take(10) {
         println!(
             "  p{} rgba{:?} quads={} {:?}",
