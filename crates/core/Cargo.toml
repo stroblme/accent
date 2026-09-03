@@ -1,0 +1,34 @@
+[package]
+name = "accent-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+pdf = ["dep:pdfium-render"]
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite = { version = "0.38", features = ["bundled"] }
+ignore = "0.4"
+notify = "8"
+notify-debouncer-full = "0.6"
+same-file = "1"
+tempfile = "3"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
+nucleo-matcher = "0.3"
+blake3 = "1"
+pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# `cargo test` builds examples too, so this one must not be built without its feature.
+[[example]]
+name = "pdf_spike"
+required-features = ["pdf"]

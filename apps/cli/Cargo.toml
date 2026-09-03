@@ -1,0 +1,18 @@
+[package]
+name = "accent-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "accent-cli"
+path = "src/main.rs"
+
+[dependencies]
+accent-core.workspace = true
+accent-api.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4", features = ["derive"] }
