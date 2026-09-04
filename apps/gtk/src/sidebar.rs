@@ -22,9 +22,6 @@ use std::time::{Duration, Instant};
 /// Same value as the palette and the switcher (DESIGN.md, Motion): long enough to swallow a burst
 /// of keystrokes, short enough to feel immediate.
 const DEBOUNCE: Duration = Duration::from_millis(50);
-/// The file list under a selected tag shares the pane with the tag list, so it gets a fixed slice
-/// of it (DESIGN.md, Spacing).
-const LIST_HEIGHT: i32 = 120;
 /// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
 /// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
 /// reads as "paste a link here" rather than "what links here", and it is the only icon of the four
@@ -280,6 +277,16 @@ fn row_title(hit: &SearchHit) -> &str {
         Some(t) if !t.trim().is_empty() => t,
         _ => &hit.rel_path,
     }
+}
+
+/// Case-insensitive substring filtering for the Tags pane. An empty needle keeps everything, so
+/// the filter costs nothing until it is typed in.
+fn filtered(all: &[(String, i64)], needle: &str) -> Vec<(String, i64)> {
+    let needle = needle.trim().to_lowercase();
+    all.iter()
+        .filter(|(name, _)| needle.is_empty() || name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect()
 }
 
 /// The system accent as pango markup understands it. `Widget::color()` and the style manager are
@@ -837,7 +844,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
     }
 }
 
-// --- tags ----------------------------------------------------------------------------------
+// --- tags pane ----------------------------------------------------------------------------------
 
 struct TagsPane {
     widget: gtk::Widget,
@@ -849,6 +856,8 @@ struct TagsPane {
 
 fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     let tags = gio::ListStore::new::<glib::BoxedAnyObject>();
+    /// The tag list gets two thirds of the pane, the files under the selected tag the lower third.
+    const TAGS_SHARE: (i32, i32) = (2, 3);
 
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
@@ -902,16 +911,35 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
         .build();
     heading.add_css_class("heading");
 
-    let files_scroller = gtk::ScrolledWindow::builder()
-        .height_request(LIST_HEIGHT)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&path_list(&files, on_open.clone()))
-        .build();
     let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     files_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     files_box.append(&heading);
-    files_box.append(&files_scroller);
+    files_box.append(&scroller(&path_list(&files, on_open.clone())));
     files_box.set_visible(false);
+
+    // A paned rather than a fixed height: the two lists share the pane, and where the user puts
+    // the divider survives the window being resized.
+    let paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .start_child(&scroller(&view))
+        .end_child(&files_box)
+        .resize_start_child(true)
+        .resize_end_child(true)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .vexpand(true)
+        .build();
+    // The default position is set the first time there is anything below the divider, when the
+    // pane already knows how tall it is. Afterwards the position is the user's.
+    let placed = Cell::new(false);
+    files_box.connect_map({
+        let paned = paned.clone();
+        move |_| {
+            if !placed.replace(true) {
+                paned.set_position(paned.height() * TAGS_SHARE.0 / TAGS_SHARE.1);
+            }
+        }
+    });
 
     // Selection drives the filter, so a single click picks a tag and the refill's "no selection"
     // hides the list through the same path.
@@ -940,10 +968,22 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
         }
     });
 
-    let refill: Rc<dyn Fn()> = Rc::new({
-        let (tags, selection, data) = (tags.clone(), selection.clone(), data.clone());
+    let filter = gtk::SearchEntry::builder()
+        .placeholder_text("Filter tags…")
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+
+    // The whole list is kept, so filtering is a splice rather than a query: the tags come from one
+    // GROUP BY over the index and re-running it per keystroke would buy nothing.
+    let all: Rc<RefCell<Vec<(String, i64)>>> = Rc::new(RefCell::new(Vec::new()));
+    let apply: Rc<dyn Fn()> = Rc::new({
+        let (tags, selection, all, filter) =
+            (tags.clone(), selection.clone(), all.clone(), filter.clone());
         move || {
-            let rows: Vec<glib::BoxedAnyObject> = (data.tags)()
+            let rows: Vec<glib::BoxedAnyObject> = filtered(&all.borrow(), &filter.text())
                 .into_iter()
                 .map(glib::BoxedAnyObject::new)
                 .collect();
@@ -951,10 +991,25 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
             selection.set_selected(gtk::INVALID_LIST_POSITION);
         }
     });
+    filter.connect_search_changed({
+        let apply = apply.clone();
+        move |_| apply()
+    });
+
+    let refill: Rc<dyn Fn()> = Rc::new({
+        let (all, apply, data) = (all.clone(), apply.clone(), data.clone());
+        move || {
+            *all.borrow_mut() = (data.tags)();
+            apply();
+        }
+    });
 
     let select: Rc<dyn Fn(&str)> = Rc::new({
-        let (tags, selection) = (tags.clone(), selection.clone());
+        let (tags, selection, filter) = (tags.clone(), selection.clone(), filter.clone());
         move |wanted: &str| {
+            // The tag the caller wants may be filtered out of the list; clearing the filter puts
+            // every tag back before it is looked for.
+            filter.set_text("");
             let found = (0..tags.n_items()).find(|i| {
                 tags.item(*i)
                     .and_downcast::<glib::BoxedAnyObject>()
@@ -965,8 +1020,8 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     });
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    column.append(&scroller(&view));
-    column.append(&files_box);
+    column.append(&filter);
+    column.append(&paned);
 
     TagsPane {
         widget: column.upcast(),
@@ -1043,5 +1098,18 @@ mod tests {
         assert!(replaced.contains("<s>&lt;b&gt;</s>"), "{replaced}");
         assert!(replaced.contains(">&amp;x</span>"), "{replaced}");
         assert!(pango::parse_markup(&replaced, '\u{0}').is_ok());
+    }
+
+    #[test]
+    fn tag_filter_is_a_case_insensitive_substring() {
+        let all = [
+            ("rust".to_string(), 3),
+            ("Rustaceans".to_string(), 1),
+            ("go".to_string(), 2),
+        ];
+        assert_eq!(filtered(&all, "").len(), 3);
+        assert_eq!(filtered(&all, " RUST ").len(), 2);
+        assert_eq!(filtered(&all, "ace")[0].0, "Rustaceans");
+        assert!(filtered(&all, "zzz").is_empty());
     }
 }
