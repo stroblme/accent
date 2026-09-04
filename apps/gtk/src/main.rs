@@ -12,6 +12,7 @@ mod fileops;
 mod highlight;
 mod multicaret;
 mod palette;
+mod paned;
 mod preview;
 mod settings;
 mod sidebar;
@@ -1975,6 +1976,30 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         move |_| app.save_session_soon()
     ));
 
+    // Every divider in the window: double-click resets it, and it thickens while dragged.
+    paned::watch(
+        app.window.upcast_ref(),
+        glib::clone!(
+            #[weak]
+            app,
+            move |divider: &gtk::Paned| {
+                if divider == &app.split {
+                    divider.set_position(Session::default().sidebar_width);
+                } else if divider == &app.paned {
+                    app.centre_handle();
+                } else {
+                    // Any other divider (the sidebar's own, and the pane splitters to come)
+                    // has no remembered default, so half of its own extent is the reset.
+                    let extent = match divider.orientation() {
+                        gtk::Orientation::Vertical => divider.height(),
+                        _ => divider.width(),
+                    };
+                    divider.set_position(extent / 2);
+                }
+            }
+        ),
+    );
+
     // Same rule on the way out of the window: the first buffer that cannot be written stops the
     // close and asks. Answering Discard or Overwrite closes the window again, which picks up
     // where this left off.
@@ -2462,6 +2487,12 @@ fn install_document_font() {
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
+//
+// ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
+// by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
+// outline or a negative margin, was measured: it only ever reaches the side rendered before the
+// handle, because the pane after it paints over the other. A 2 px shift while a divider is being
+// dragged is invisible, so it is the cheaper of the two.
 fn install_chrome_css() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -2477,6 +2508,8 @@ fn install_chrome_css() {
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
              .accent-pill {{ padding: 6px; border-radius: 12px; }} \
+             paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
+               background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
