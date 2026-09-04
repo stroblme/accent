@@ -36,6 +36,14 @@ const CURSOR: Duration = Duration::from_millis(100);
 /// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
 /// interface fonts, and `Reset` in preferences comes back here.
 const DEFAULT_FAMILY: &str = "Adwaita Mono";
+/// The page at 100 %: side gutters, the room above and below the text, and the clamp that caps
+/// the line. [`Tab::set_page`] scales all five with the zoom, so zooming keeps the column's
+/// character count and its gutter instead of squeezing the text into an unchanged page.
+const GUTTER: i32 = 48;
+const TOP: i32 = 24;
+const BOTTOM: i32 = 96;
+const CLAMP_MAX: i32 = 800;
+const CLAMP_TIGHTEN: i32 = 600;
 
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
@@ -85,6 +93,8 @@ pub struct Tab {
     pub buffer: sourceview5::Buffer,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
+    /// The width cap on the document column, scaled with the zoom by [`Tab::set_page`].
+    clamp: adw::Clamp,
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
@@ -146,11 +156,8 @@ pub fn open(
     view.set_widget_name(&next_view_name());
     view.set_wrap_mode(gtk::WrapMode::WordChar);
     view.set_show_line_numbers(false);
-    // Apostrophe-like page: generous side gutters, room to breathe at the ends.
-    view.set_left_margin(48);
-    view.set_right_margin(48);
-    view.set_top_margin(24);
-    view.set_bottom_margin(96);
+    // Apostrophe-like page: generous side gutters, room to breathe at the ends. `set_page`,
+    // called from `set_font` below, puts the zoomed values here.
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
     let numbers = line_numbers(&view, &buffer);
@@ -158,14 +165,10 @@ pub fn open(
     typing::install(&view);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
-    // window the clamp simply stops applying. 800 leaves 704 px of text, which measures ~96
-    // characters in the GNOME document font at its default size: wider than the 60 to 72
+    // window the clamp simply stops applying. `CLAMP_MAX` leaves 704 px of text, which measures
+    // ~96 characters in the GNOME document font at its default size: wider than the 60 to 72
     // DESIGN.md asks for, and requested that way because 580 read as a narrow column here.
-    let clamp = adw::Clamp::builder()
-        .maximum_size(800)
-        .tightening_threshold(600)
-        .child(&view)
-        .build();
+    let clamp = adw::Clamp::builder().child(&view).build();
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -204,6 +207,7 @@ pub fn open(
         view: view.clone(),
         buffer: buffer.clone(),
         scroller: scroller.clone(),
+        clamp,
         map: map.clone(),
         numbers,
         page,
@@ -596,6 +600,7 @@ impl Tab {
     /// `font` of `None` follows the GNOME document font that `main` installs for every editor;
     /// `zoom` scales whichever of the two applies, and only this tab's document.
     pub fn set_font(self: &Rc<Self>, font: Option<&str>, zoom: f64) {
+        self.set_page(zoom);
         let Some(display) = gdk::Display::default() else {
             return;
         };
@@ -625,6 +630,21 @@ impl Tab {
             *self.font.borrow_mut() = Some(provider);
         }
         self.rehang();
+    }
+
+    /// Scale the page with the text. Zoom used to touch the font alone, so a zoomed-in column
+    /// held fewer characters between gutters that stayed 48 px wide, and the heading markers,
+    /// which `highlight::hang` measures against the left margin, ran out of gutter to hang in the
+    /// way h5 and h6 already do. Scaling the gutters and the clamp together with the font keeps
+    /// the page proportional, so zooming reads as moving closer rather than as a narrower column.
+    fn set_page(&self, zoom: f64) {
+        let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
+        self.view.set_left_margin(scale(GUTTER));
+        self.view.set_right_margin(scale(GUTTER));
+        self.view.set_top_margin(scale(TOP));
+        self.view.set_bottom_margin(scale(BOTTOM));
+        self.clamp.set_maximum_size(scale(CLAMP_MAX));
+        self.clamp.set_tightening_threshold(scale(CLAMP_TIGHTEN));
     }
 
     /// Re-measure the hanging heading markers from the next idle. A CSS font change only reaches
