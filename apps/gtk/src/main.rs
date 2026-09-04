@@ -28,6 +28,7 @@ use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -71,6 +72,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.find", "Find", &["<Control>f"]),
     ("win.replace", "Replace", &["<Control>h"]),
+    (
+        "win.replace-in-files",
+        "Replace in Notes",
+        &["<Control><Shift>h"],
+    ),
     ("win.find-next", "Find Next", &["<Control>g"]),
     ("win.find-previous", "Find Previous", &["<Control><Shift>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
@@ -284,7 +290,8 @@ struct Presenting {
 // ----------------------------------------------------------------------------------- app state
 
 struct App {
-    vault: Rc<Vault>,
+    /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
+    vault: Arc<Vault>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
     tabs: adw::TabView,
@@ -423,6 +430,49 @@ impl App {
                 self.sync_conflict_banner(&rel);
             }
             Err(e) => self.toast(&format!("Cannot open {rel}: {e}")),
+        }
+    }
+
+    /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
+    /// exact match rather than the top of the note.
+    ///
+    /// ponytail: the offset is turned into a character offset by counting the text in front of it,
+    /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
+    /// belongs on `Tab` if anything ever needs it per keystroke.
+    fn open_note_at(self: &Rc<Self>, rel: &str, offset: Option<usize>) {
+        self.open_note(rel);
+        let (Some(offset), Some(tab)) = (offset, self.tab_for(rel)) else {
+            return;
+        };
+        let text = tab.text();
+        let Some(head) = text.get(..offset.min(text.len())) else {
+            return;
+        };
+        let iter = tab.buffer.iter_at_offset(head.chars().count() as i32);
+        tab.buffer.place_cursor(&iter);
+        tab.view
+            .scroll_to_mark(&tab.buffer.get_insert(), 0.0, true, 0.0, 0.3);
+        tab.view.grab_focus();
+    }
+
+    /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
+    ///
+    /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
+    /// would come back as a changed-on-disk banner instead of a replacement.
+    fn replace_in_notes(self: &Rc<Self>, re: &accent_api::Regex, replacement: &str, literal: bool) {
+        let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
+        (self.ops().flush)(&open);
+        match self.vault.replace_all(re, replacement, literal) {
+            Ok(report) => {
+                let unsaved = (self.ops().reload)(&report.rewritten);
+                self.toast(&replace_message(
+                    report.matches,
+                    report.rewritten.len(),
+                    report.failed.len(),
+                    unsaved,
+                ));
+            }
+            Err(e) => self.toast(&format!("Cannot replace: {e:#}")),
         }
     }
 
@@ -1216,6 +1266,12 @@ impl App {
                 .set_visible(!self.sidebar_column.is_visible()),
             "pane-files" => self.show_pane("files"),
             "pane-search" => self.show_pane("search"),
+            "replace-in-files" => {
+                self.sidebar_column.set_visible(true);
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.show_replace();
+                }
+            }
             "pane-tags" => self.show_pane("tags"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -1654,7 +1710,7 @@ fn build_window(
             return None;
         }
     };
-    let vault = Rc::new(vault);
+    let vault = Arc::new(vault);
     {
         let mut config = shell.config.borrow_mut();
         config.touch_recent(&root);
@@ -1892,34 +1948,50 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
     let files = tree.widget().clone();
     let _ = app.tree.set(tree);
 
-    let data = sidebar::Data {
-        search: Box::new({
-            let vault = app.vault.clone();
-            move |query| vault.search(query, SEARCH_LIMIT).unwrap_or_default()
-        }),
-        tags: Box::new({
-            let vault = app.vault.clone();
-            move || vault.tags().unwrap_or_default()
-        }),
-        files_with_tag: Box::new({
-            let vault = app.vault.clone();
-            move |tag| {
-                vault
-                    .files_with_tag(tag)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| f.rel_path)
-                    .collect()
-            }
-        }),
-    };
+    let data =
+        sidebar::Data {
+            // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
+            search: Arc::new({
+                let vault = app.vault.clone();
+                move |query| match query {
+                    sidebar::Query::Fts(text) => {
+                        sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
+                    }
+                    sidebar::Query::Grep(re) => {
+                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                        sidebar::Answer::Grep(hits, total)
+                    }
+                }
+            }),
+            replace_all: Box::new(glib::clone!(
+                #[weak]
+                app,
+                move |re: &accent_api::Regex, replacement: &str, literal: bool| app
+                    .replace_in_notes(re, replacement, literal)
+            )),
+            tags: Box::new({
+                let vault = app.vault.clone();
+                move || vault.tags().unwrap_or_default()
+            }),
+            files_with_tag: Box::new({
+                let vault = app.vault.clone();
+                move |tag| {
+                    vault
+                        .files_with_tag(tag)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|f| f.rel_path)
+                        .collect()
+                }
+            }),
+        };
     let pane = sidebar::Sidebar::new(
         files,
         data,
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str| app.open_note(rel)
+            move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
         ),
     );
     // The switcher is the sidebar header's title widget rather than a top bar of its own, so the
@@ -2600,9 +2672,46 @@ fn install_chrome_css() {
     });
 }
 
+/// What the toast says after a Replace All: what it wrote, what it could not, and what is still
+/// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
+fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
+    let plural = |n: usize, one: &str, many: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    };
+    let mut message = match matches {
+        0 => "Nothing to replace".to_string(),
+        _ => format!(
+            "Replaced {} in {}",
+            plural(matches, "match", "matches"),
+            plural(notes, "note", "notes")
+        ),
+    };
+    if failed > 0 {
+        message.push_str(&format!("; {failed} could not be written"));
+    }
+    if unsaved > 0 {
+        message.push_str(&format!(
+            "; {unsaved} have unsaved changes and were not reloaded"
+        ));
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_toast_counts_matches_notes_and_what_went_wrong() {
+        assert_eq!(replace_message(0, 0, 0, 0), "Nothing to replace");
+        assert_eq!(replace_message(1, 1, 0, 0), "Replaced 1 match in 1 note");
+        assert_eq!(replace_message(7, 3, 0, 0), "Replaced 7 matches in 3 notes");
+        assert_eq!(
+            replace_message(7, 3, 1, 2),
+            "Replaced 7 matches in 3 notes; 1 could not be written; 2 have unsaved changes and were not reloaded"
+        );
+    }
 
     #[test]
     fn zoom_steps_in_tenths_and_stops_at_the_ends() {
