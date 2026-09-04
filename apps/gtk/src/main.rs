@@ -2322,9 +2322,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     divider.set_position(Session::default().sidebar_width);
                 } else if divider == &app.paned {
                     app.centre_handle();
-                } else {
-                    // Any other divider (the sidebar's own, and the pane splitters to come)
-                    // has no remembered default, so half of its own extent is the reset.
+                } else if !app
+                    .sidebar
+                    .get()
+                    .is_some_and(|sidebar| sidebar.reset_divider(divider))
+                {
+                    // A divider nobody claims (the pane splitters to come) has no remembered
+                    // default, so half of its own extent is the reset.
                     let extent = match divider.orientation() {
                         gtk::Orientation::Vertical => divider.height(),
                         _ => divider.width(),
