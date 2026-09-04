@@ -13,6 +13,11 @@
 //! Each pass therefore walks with `follow_links(false)` and hands accepted directory symlinks
 //! back as new passes; nested symlinks under a target obey exactly the same rules.
 //!
+//! Inside the vault that leaves dependency trees, which no ignore file mentions because the user
+//! never wrote one: a `.venv` or a `target/` dropped next to the notes. Those are skipped by
+//! their own **marker file** ([`DEPENDENCY_MARKERS`]) rather than by name, so one rule covers
+//! cargo, `python -m venv`, and every other tool that follows the `CACHEDIR.TAG` convention.
+//!
 //! ponytail: unix-only (`MetadataExt` for dev/ino/mtime_nsec). Targets are Linux + Android;
 //! a Windows port would need a `cfg` branch using `FileIndex`/`VolumeSerialNumber`.
 
@@ -25,7 +30,37 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Directory names never worth indexing, whatever the ignore files say.
-const HARD_SKIP_DIRS: &[&str] = &[".git", ".trash", "node_modules"];
+///
+/// Deliberately short: matching dependency trees by name is whack-a-mole, so anything that
+/// plants a marker file is caught by [`is_dependency_tree`] instead. These are the trees that
+/// plant none.
+const HARD_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".trash",
+    "node_modules",
+    "__pycache__",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+];
+
+/// Files that mark their directory as somebody's dependency or build tree.
+///
+/// `CACHEDIR.TAG` is the cross-tool cache marker (`tar --exclude-caches`, borg, restic); cargo
+/// writes one into every `target/`. `pyvenv.cfg` is the PEP 405 virtualenv root marker, written
+/// by `python -m venv` and by virtualenv ≥ 20. Between them they cover the two trees that
+/// actually blow up a vault, with no per-ecosystem name list to maintain.
+const DEPENDENCY_MARKERS: &[&str] = &["CACHEDIR.TAG", "pyvenv.cfg"];
+
+/// Does this directory carry a marker saying nobody's notes live in it?
+///
+/// ponytail: presence is enough. `CACHEDIR.TAG` also fixes its first line to a signature, but
+/// checking it would cost an open per directory instead of a stat, and a file of that exact name
+/// that is not a cache tag has never been seen in the wild.
+fn is_dependency_tree(dir: &Path) -> bool {
+    DEPENDENCY_MARKERS.iter().any(|m| dir.join(m).exists())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FileKind {
@@ -94,6 +129,8 @@ pub enum SkipReason {
     TargetOverlapsSymlink,
     /// `ignore` detected the target is an ancestor of the link: following it would loop.
     SymlinkLoop,
+    /// A dependency or build tree: the directory carries one of [`DEPENDENCY_MARKERS`].
+    DependencyTree,
     /// Broken symlink, permission denied, vanished mid-walk.
     Io,
 }
@@ -104,6 +141,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::TargetInsideVault => "symlink target is inside the vault",
             SkipReason::TargetOverlapsSymlink => "symlink target overlaps another symlink",
             SkipReason::SymlinkLoop => "symlink loop",
+            SkipReason::DependencyTree => "dependency or build tree",
             SkipReason::Io => "io error",
         })
     }
@@ -120,6 +158,14 @@ pub struct ScanOptions {
     /// Honour `.gitignore`/`.ignore` inside directory-symlink targets. On by default: those
     /// are external trees (code repos) whose build output nobody wants in a note index.
     pub target_gitignore: bool,
+    /// Skip directories carrying a [`DEPENDENCY_MARKERS`] file. On by default: one virtualenv
+    /// measured on the author's machine is 105 456 files in 12 390 directories, which is both
+    /// an index nobody wants and 9 % of the kernel's inotify watch budget.
+    ///
+    /// ponytail: no positive escape hatch in the app yet — `.accentignore` can only take more
+    /// away. If someone really keeps notes under a `CACHEDIR.TAG`, this becomes a per-vault
+    /// preference; until then `accent-cli --index-dependency-trees` is the way back.
+    pub skip_dependency_trees: bool,
     /// 0 = one thread per core.
     pub threads: usize,
     pub max_depth: Option<usize>,
@@ -131,6 +177,7 @@ impl Default for ScanOptions {
             follow_links: true,
             vault_gitignore: false,
             target_gitignore: true,
+            skip_dependency_trees: true,
             threads: 0,
             max_depth: None,
         }
@@ -183,14 +230,25 @@ fn file_meta(rel_path: String, path: &Path, meta: &std::fs::Metadata) -> FileMet
 }
 
 /// Stat a single vault path the way [`scan`] would (follows symlinks). `Ok(None)` means the name is
-/// one `scan` never yields: a hard-skipped directory component, a Syncthing temp file, or one of
-/// our own `.accent-` save temporaries.
+/// one `scan` never yields: a hard-skipped directory component, a path inside a dependency tree,
+/// a Syncthing temp file, or one of our own `.accent-` save temporaries.
 ///
 /// This is the watcher's counterpart to `scan`: one changed path costs one stat instead of a walk.
+/// The two must agree, or a `pip install` in a skipped tree would put back, one event at a time,
+/// exactly what the walk refused.
 pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
     if rel.split('/').any(never_walked) || name.starts_with(".accent-") {
         return Ok(None);
+    }
+    // Every directory from the root down, the path itself included: a marker anywhere on the way
+    // means the walk never descended here. The root is the user's choice and is never tested.
+    let mut dir = root.to_path_buf();
+    for part in rel.split('/') {
+        dir.push(part);
+        if is_dependency_tree(&dir) {
+            return Ok(None);
+        }
     }
     let path = root.join(rel);
     let meta = std::fs::metadata(&path)?;
@@ -257,6 +315,13 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
         }
     });
     skipped.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+    // Debug, not a toast: skipping a `.venv` is the expected outcome, not news the user has to
+    // acknowledge on every start. It still has to be findable when a folder is missing from the tree.
+    for s in &skipped {
+        if s.reason == SkipReason::DependencyTree {
+            tracing::debug!(tree = %s.path.display(), "not indexed: dependency or build tree");
+        }
+    }
 
     ScanResult {
         files,
@@ -318,6 +383,7 @@ fn walk_pass(
         let walk_root = pass.root.clone();
         let prefix = pass.prefix.clone();
         let follow_links = opts.follow_links;
+        let skip_deps = opts.skip_dependency_trees;
         Box::new(move |result| {
             let entry = match result {
                 Ok(e) => e,
@@ -330,6 +396,19 @@ fn walk_pass(
             let name = entry.file_name().to_string_lossy().into_owned();
 
             if entry.depth() > 0 && never_walked(&name) {
+                return WalkState::Skip;
+            }
+            // Depth 0 is the walk root — the vault the user opened, or a symlink target they
+            // linked in — and is always kept, marker or not.
+            if skip_deps
+                && entry.depth() > 0
+                && entry.file_type().is_some_and(|t| t.is_dir())
+                && is_dependency_tree(path)
+            {
+                let _ = tx.send(Msg::Skip(Skipped {
+                    path: path.to_path_buf(),
+                    reason: SkipReason::DependencyTree,
+                }));
                 return WalkState::Skip;
             }
             let rel_path = match path.strip_prefix(&walk_root) {
@@ -606,6 +685,77 @@ mod tests {
         );
         assert!(!paths.iter().any(|p| p.starts_with("secret")), "{paths:?}");
         assert!(paths.contains(&".obsidian/app.json"), "{paths:?}");
+    }
+
+    /// The whole point of the marker rule: a dependency tree costs one skip report instead of
+    /// tens of thousands of rows, and a directory of the same shape without a marker is untouched.
+    #[test]
+    fn dependency_markers_skip_the_tree_but_a_plain_directory_survives() {
+        let vault = tempfile::tempdir().unwrap();
+        for (dir, marker) in [(".venv", "pyvenv.cfg"), ("target", "CACHEDIR.TAG")] {
+            fs::create_dir_all(vault.path().join(dir).join("deep")).unwrap();
+            fs::write(vault.path().join(dir).join(marker), "x").unwrap();
+            fs::write(vault.path().join(dir).join("deep/junk.md"), "junk").unwrap();
+        }
+        // Same shape, no marker: an ordinary folder of notes that happens to be called `target`.
+        fs::create_dir_all(vault.path().join("Projects/target/deep")).unwrap();
+        fs::write(vault.path().join("Projects/target/deep/n.md"), "n").unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        let paths = rels(&r);
+        assert!(!paths.iter().any(|p| p.contains("junk.md")), "{paths:?}");
+        assert!(!paths.contains(&".venv"), "{paths:?}");
+        assert!(paths.contains(&"Projects/target/deep/n.md"), "{paths:?}");
+        assert_eq!(
+            r.skipped
+                .iter()
+                .filter(|s| s.reason == SkipReason::DependencyTree)
+                .count(),
+            2,
+            "{:?}",
+            r.skipped
+        );
+
+        // `stat_one` is the watcher's path into the same rows and must agree, or a `pip install`
+        // would put the tree back one event at a time.
+        assert!(
+            stat_one(vault.path(), ".venv/deep/junk.md")
+                .unwrap()
+                .is_none()
+        );
+        assert!(stat_one(vault.path(), "target").unwrap().is_none());
+        assert!(
+            stat_one(vault.path(), "Projects/target/deep/n.md")
+                .unwrap()
+                .is_some()
+        );
+
+        // The escape hatch: opting back in indexes them again.
+        let loose = ScanOptions {
+            skip_dependency_trees: false,
+            ..ScanOptions::default()
+        };
+        assert!(
+            rels(&scan(vault.path(), &loose))
+                .iter()
+                .any(|p| p.contains("junk.md"))
+        );
+    }
+
+    /// `.accentignore` is the negative direction and keeps working inside a tree that the marker
+    /// rule leaves alone.
+    #[test]
+    fn accentignore_still_wins_where_no_marker_applies() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(vault.path().join(".accentignore"), "build/\n").unwrap();
+        fs::create_dir_all(vault.path().join("build")).unwrap();
+        fs::write(vault.path().join("build/out.md"), "out").unwrap();
+        fs::create_dir_all(vault.path().join("__pycache__")).unwrap();
+        fs::write(vault.path().join("__pycache__/m.pyc"), "c").unwrap();
+        fs::write(vault.path().join("n.md"), "n").unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        assert_eq!(rels(&r), vec![".accentignore", "n.md"]);
     }
 
     #[test]

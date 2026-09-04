@@ -650,6 +650,8 @@ struct Batch {
     dirs: BTreeSet<String>,
     removed: BTreeSet<String>,
     resolve: bool,
+    /// A directory was added, so the watch set — one watch per directory — is short one entry.
+    rewatch: bool,
 }
 
 impl Worker {
@@ -657,9 +659,10 @@ impl Worker {
         // Watch before walking, so a change made during the first reconcile is not lost between
         // the two.
         //
-        // ponytail: on a cold cache the first watcher knows no symlinked directories, so changes
-        // inside one during the initial reconcile are missed until the rebuild below. Build the
-        // watch set from the scan result instead of the cache if that ever bites.
+        // ponytail: on a cold cache the index lists no directories yet, so this first watcher
+        // covers the vault root alone and a change made deeper during the initial reconcile is
+        // missed until the rebuild below. Build the watch set from the scan result instead of
+        // the cache if that ever bites.
         self.rebuild_watcher();
         self.reconcile();
 
@@ -706,6 +709,11 @@ impl Worker {
         {
             self.fail("resolving links", e);
         }
+        // A new directory is watched from now on, not from the next reconcile: watches are
+        // per-directory, so `mkdir Ideas` followed by a write into it would otherwise be silent.
+        if batched.rewatch {
+            self.rebuild_watcher();
+        }
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
         }
@@ -718,7 +726,8 @@ impl Worker {
             // nothing about what is inside it: only a walk can find those files. A directory that
             // was renamed — by us or in a terminal — is the same story, and worse: the removal of
             // the old name drops the subtree, and indexing the new one adds back the directory row
-            // alone, so every note under it would vanish until the next restart.
+            // alone, so every note under it would vanish until the next restart. An *empty* new
+            // directory needs no walk, only a watch: see `Batch::rewatch`.
             Msg::Fs(VaultEvent::Changed(p)) => *p != self.root && has_children(p),
             Msg::Fs(VaultEvent::Renamed { to, .. }) => *to != self.root && has_children(to),
             Msg::Update { rel, .. } => !rel.is_empty() && has_children(&self.root.join(rel)),
@@ -766,13 +775,17 @@ impl Worker {
         });
         // Longest target first, so a link inside a linked tree maps through the deeper one.
         symlinks.sort_by_key(|(target, _)| std::cmp::Reverse(target.as_os_str().len()));
-        let targets: Vec<PathBuf> = symlinks.iter().map(|(t, _)| t.clone()).collect();
-        let dirs = self.index.stats().map(|s| s.dirs as usize).unwrap_or(0);
+        // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
+        // must not come back in through a recursive watch on the root.
+        let dirs = self.index.dirs(&self.root).unwrap_or_else(|e| {
+            tracing::warn!("listing the directories to watch: {e:#}");
+            Vec::new()
+        });
 
         let tx = self.tx.clone();
         // Drop the old watch set first: two registrations on one tree would double every event.
         self.watcher = None;
-        match Watcher::new(&self.root, &targets, dirs, move |e| {
+        match Watcher::new(&self.root, &dirs, move |e| {
             let _ = tx.send(Msg::Fs(e));
         }) {
             Ok(w) => {
@@ -853,6 +866,7 @@ impl Worker {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 b.resolve = true;
+                b.rewatch |= kind == FileKind::Dir;
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
                 if kind == FileKind::Markdown && !own && b.removed.remove(rel) {
@@ -1138,6 +1152,45 @@ mod tests {
             || !f.vault.search("kumquat", 10).unwrap().is_empty(),
             BUDGET
         ));
+    }
+
+    /// The watch set is one watch per directory, built from the index, so a subdirectory that was
+    /// already there when the vault opened has to be in it — that is the everyday case of editing
+    /// a note in another editor.
+    #[test]
+    fn an_edit_in_a_pre_existing_subdirectory_reaches_the_ui() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Projects")).unwrap();
+        std::fs::write(root.path().join("Projects/Plan.md"), "one").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        f.write("Projects/Plan.md", "two");
+
+        assert!(
+            f.wait(|e| matches!(e, Event::FileChanged(p) if p == "Projects/Plan.md"))
+                .is_some(),
+            "an edit inside an indexed subdirectory must reach the UI"
+        );
+    }
+
+    /// A linked-in folder is watched through its vault path — `inotify_add_watch` resolves the
+    /// link — which is what keeps "symlinked folders handled" true now that the watch set is a
+    /// list of directories rather than a recursive watch plus the resolved targets.
+    #[test]
+    fn an_edit_inside_a_symlinked_directory_reaches_the_ui() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("Ext.md"), "one").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        std::fs::write(outside.path().join("Ext.md"), "two").unwrap();
+
+        assert!(
+            f.wait(|e| matches!(e, Event::FileChanged(p) if p == "linked/Ext.md"))
+                .is_some(),
+            "an edit in a linked-in folder must reach the UI"
+        );
     }
 
     #[test]
