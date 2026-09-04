@@ -513,14 +513,17 @@ impl App {
     /// Move `page` into a new pane beside `at`. Splitting a pane's only note off it would empty
     /// the pane, which closes it again, so that one is refused rather than done and undone.
     fn split_page(self: &Rc<Self>, at: &Rc<Pane>, side: Side, page: &adw::TabPage) {
-        let from = self.pane_of(page);
-        if from.as_ref().is_some_and(|f| Rc::ptr_eq(f, at)) && at.tabs.n_pages() <= 1 {
+        // Not one of ours: libadwaita raises `is-transferring-page` on every tab view in the
+        // process, so a tab dragged in another window reaches this window's drop sheets too, and
+        // there would be no view to move it out of.
+        let Some(from) = self.pane_of(page) else {
+            return;
+        };
+        if Rc::ptr_eq(&from, at) && at.tabs.n_pages() <= 1 {
             return self.toast("This pane has only one note.");
         }
         let pane = self.split_beside(at, side);
-        if let Some(from) = from {
-            from.tabs.transfer_page(page, &pane.tabs, 0);
-        }
+        from.tabs.transfer_page(page, &pane.tabs, 0);
     }
 
     /// The tab context menu's Split Right and friends: the page that was right-clicked, split off
@@ -611,20 +614,29 @@ impl App {
     /// A tab or a vault path let go over `pane`. `true` when it was taken.
     fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
         if let Ok(page) = value.get::<adw::TabPage>() {
+            // A tab from another window has no pane of ours to leave, and moving it here would
+            // put a note of another vault under this window's tab machinery. Refused; the tab
+            // bars still take it natively, which is libadwaita's own behaviour and its own risk.
+            let Some(from) = self.pane_of(&page) else {
+                return false;
+            };
             return match zone {
                 Zone::Split(side) => {
                     self.split_page(pane, side, &page);
                     true
                 }
-                // Already here: libadwaita would have reordered it, and there is nothing to move.
-                Zone::Here if self.pane_of(&page).is_some_and(|p| Rc::ptr_eq(&p, pane)) => false,
+                // Already here, so the drop is taken and nothing moves. Accepted rather than
+                // refused, because libadwaita's own bar does the same for a tab dropped back
+                // where it started, and a refusal animates the tab flying home for no reason.
+                Zone::Here if Rc::ptr_eq(&from, pane) => true,
                 Zone::Here => {
-                    let Some(from) = self.pane_of(&page) else {
-                        return false;
-                    };
                     from.tabs
                         .transfer_page(&page, &pane.tabs, pane.tabs.n_pages());
                     pane.tabs.set_selected_page(&page);
+                    // Said outright rather than left to the selection notify, which does not
+                    // fire when the transfer already left this page selected.
+                    self.set_active_pane(pane);
+                    self.sync_active();
                     true
                 }
             };
@@ -2304,6 +2316,13 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
                 _ => app.toast("Only markdown notes and images open in this phase"),
             }
         ),
+        // A drag out of the tree is the only notice the panes get that their drop zones should
+        // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
+        glib::clone!(
+            #[weak]
+            app,
+            move |on| app.set_drop_active(on)
+        ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
@@ -2557,6 +2576,26 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         move |_| pane.show_zone(None)
     ));
+    // A tree row let go on the bar itself opens in that pane, which is the shortest way to say
+    // "over there" and the one libadwaita already draws an insertion point for.
+    pane.bar
+        .setup_extra_drop_target(gdk::DragAction::COPY, &[String::static_type()]);
+    pane.bar.connect_extra_drag_drop(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        #[upgrade_or]
+        false,
+        move |_, _, value| {
+            let Ok(rel) = value.get::<String>() else {
+                return false;
+            };
+            app.set_active_pane(&pane);
+            app.open_note(&rel);
+            true
+        }
+    ));
     pane.drop.connect_drop(glib::clone!(
         #[weak]
         app,
@@ -2567,7 +2606,9 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         move |_, value, x, y| {
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
-            pane.show_zone(None);
+            // Belt and braces: the drag is over whatever the source has to say about it, and a
+            // sheet left up would swallow every click meant for the editor under it.
+            app.set_drop_active(false);
             app.dropped(&pane, zone, value)
         }
     ));
@@ -3210,7 +3251,7 @@ fn install_chrome_css() {
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
              .accent-pill {{ padding: 6px; border-radius: 12px; }} \
-             .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.25; }} \
+             .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
