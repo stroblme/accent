@@ -687,13 +687,14 @@ impl App {
         if let Some(tab) = self.tab_for(&rel) {
             return self.reveal_page(&tab.page);
         }
-        let (spellcheck, font, minimap, line_numbers) = {
+        let (spellcheck, font, minimap, line_numbers, column_width) = {
             let config = self.config.borrow();
             (
                 config.spellcheck,
                 config.editor_font.clone(),
                 config.minimap,
                 config.line_numbers,
+                config.column_width,
             )
         };
         let opened = editor::open(
@@ -715,6 +716,7 @@ impl App {
             spellcheck,
             font.as_deref(),
             self.zoom.get(),
+            column_width,
         );
         match opened {
             Ok(tab) => {
@@ -1862,6 +1864,7 @@ impl App {
             tab.set_spellcheck(config.spellcheck);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
+            tab.set_column_width(config.column_width);
             tab.restyle();
         }
         if let Some(preview) = self.preview.borrow().as_ref() {

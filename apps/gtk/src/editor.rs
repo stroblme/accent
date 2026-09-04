@@ -36,14 +36,17 @@ const CURSOR: Duration = Duration::from_millis(100);
 /// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
 /// interface fonts, and `Reset` in preferences comes back here.
 const DEFAULT_FAMILY: &str = "Adwaita Mono";
-/// The page at 100 %: side gutters, the room above and below the text, and the clamp that caps
-/// the line. [`Tab::set_page`] scales all five with the zoom, so zooming keeps the column's
-/// character count and its gutter instead of squeezing the text into an unchanged page.
+/// The page at 100 %: side gutters and the room above and below the text. [`Tab::set_page`]
+/// scales them with the zoom along with the column, so zooming keeps the page's proportions
+/// instead of squeezing the text into unchanged gutters.
 const GUTTER: i32 = 48;
 const TOP: i32 = 24;
 const BOTTOM: i32 = 96;
-const CLAMP_MAX: i32 = 800;
-const CLAMP_TIGHTEN: i32 = 600;
+/// The narrowest the document column is ever capped at, in 100 % pixels. A percentage of a
+/// narrow editor can ask for less than a line worth reading; this leaves 384 px of text between
+/// the gutters, which measures ~52 characters in the GNOME document font. It only ever applies
+/// below 1600 px of editor, because the preferences row's minimum is 30 %.
+const COLUMN_FLOOR: i32 = 480;
 /// How muted an unhovered line number is, as an opacity over the view's background. The style
 /// scheme already draws the gutter in a grey of its own, so this is a step back from that rather
 /// than the whole distance; 0.6 is the alpha `highlight::restyle` gives quotes.
@@ -97,8 +100,13 @@ pub struct Tab {
     pub buffer: sourceview5::Buffer,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
-    /// The width cap on the document column, scaled with the zoom by [`Tab::set_page`].
+    /// The width cap on the document column, sized by [`Tab::set_clamp`].
     clamp: adw::Clamp,
+    /// What the cap is computed from: the document zoom and the column's percentage of the
+    /// editor's width. Kept here because the editor is also resized from the outside, and a
+    /// resize has to recompute the cap without being told the other two again.
+    zoom: Cell<f64>,
+    column: Cell<u32>,
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
@@ -130,7 +138,8 @@ pub struct Tab {
 /// Open `rel` from `root` in a new tab of `tabs`.
 ///
 /// `notes` and `tags` feed the `[[wikilink]]` and `#tag` completions; they are the only way this
-/// module ever reaches the vault. `spellcheck`, `font` and `zoom` are the current preferences.
+/// module ever reaches the vault. `spellcheck`, `font`, `zoom` and `column_width` (the document
+/// column's percentage of the editor's width) are the current preferences.
 #[allow(clippy::too_many_arguments)]
 pub fn open(
     root: &Path,
@@ -141,6 +150,7 @@ pub fn open(
     spellcheck: bool,
     font: Option<&str>,
     zoom: f64,
+    column_width: u32,
 ) -> std::io::Result<Rc<Tab>> {
     let path = root.join(rel);
     let (text, etag) = fs::read_note(&path)?;
@@ -169,9 +179,8 @@ pub fn open(
     typing::install(&view);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
-    // window the clamp simply stops applying. `CLAMP_MAX` leaves 704 px of text, which measures
-    // ~96 characters in the GNOME document font at its default size: wider than the 60 to 72
-    // DESIGN.md asks for, and requested that way because 580 read as a narrow column here.
+    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
+    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
     let clamp = adw::Clamp::builder().child(&view).build();
 
     let scroller = gtk::ScrolledWindow::builder()
@@ -212,6 +221,8 @@ pub fn open(
         buffer: buffer.clone(),
         scroller: scroller.clone(),
         clamp,
+        zoom: Cell::new(zoom),
+        column: Cell::new(column_width),
         map: map.clone(),
         numbers,
         page,
@@ -236,6 +247,17 @@ pub fn open(
     });
     tab.set_font(font, zoom);
     tab.set_spellcheck(spellcheck);
+
+    // The column is a share of the editor's width, so the cap has to be recomputed whenever that
+    // width changes. GTK 4 dropped ::size-allocate, and the scrolled window publishes its
+    // viewport width as the horizontal adjustment's page size, which is the same number.
+    scroller
+        .hadjustment()
+        .connect_page_size_notify(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            move |_| tab.set_clamp()
+        ));
 
     *tab.links.borrow_mut() = highlight::apply(&buffer).links;
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
@@ -321,6 +343,17 @@ pub fn open(
     view.add_controller(motion);
 
     Ok(tab)
+}
+
+/// The clamp's maximum for a column that is `percent` of an editor `available` pixels wide.
+///
+/// Floored at [`COLUMN_FLOOR`] so a narrow window keeps a readable line, then scaled by the zoom
+/// like the rest of the page: the percentage is of the editor at 100 %, and zooming in widens the
+/// cap until it exceeds the editor and the column simply fills it, which is what the fixed 800 px
+/// cap did too.
+fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
+    let wanted = f64::from(available) * f64::from(percent) / 100.0;
+    (wanted.max(f64::from(COLUMN_FLOOR)) * zoom).round() as i32
 }
 
 // -------------------------------------------------------------------------------- line numbers
@@ -653,12 +686,30 @@ impl Tab {
     /// the page proportional, so zooming reads as moving closer rather than as a narrower column.
     fn set_page(&self, zoom: f64) {
         let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
+        self.zoom.set(zoom);
         self.view.set_left_margin(scale(GUTTER));
         self.view.set_right_margin(scale(GUTTER));
         self.view.set_top_margin(scale(TOP));
         self.view.set_bottom_margin(scale(BOTTOM));
-        self.clamp.set_maximum_size(scale(CLAMP_MAX));
-        self.clamp.set_tightening_threshold(scale(CLAMP_TIGHTEN));
+        self.set_clamp();
+    }
+
+    /// Cap the column at its share of the editor's current width. Called on every resize as well
+    /// as on a zoom or a preference change, because the share is of a width nothing reports until
+    /// the window has been laid out.
+    fn set_clamp(&self) {
+        let available = self.scroller.hadjustment().page_size().round() as i32;
+        let max = column_max(available, self.column.get(), self.zoom.get());
+        self.clamp.set_maximum_size(max);
+        // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
+        // is given, so a window too narrow for the cap loses no text to the gutters.
+        self.clamp.set_tightening_threshold(max * 3 / 4);
+    }
+
+    /// The document column as a percentage of the editor's width, from preferences.
+    pub fn set_column_width(&self, percent: u32) {
+        self.column.set(percent);
+        self.set_clamp();
     }
 
     /// Re-measure the hanging heading markers from the next idle. A CSS font change only reaches
@@ -1045,6 +1096,20 @@ impl Drop for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_max_is_a_share_of_the_editor_with_a_floor_under_it() {
+        // The user's maximised window: 1920 less the sidebar, so the default lands within a
+        // couple of dozen pixels of the 800 px the fixed clamp used to give it.
+        assert_eq!(column_max(1639, 50, 1.0), 820);
+        assert_eq!(column_max(1639, 100, 1.0), 1639, "all of it is allowed");
+        assert_eq!(
+            column_max(700, 50, 1.0),
+            COLUMN_FLOOR,
+            "a narrow editor keeps a readable line instead of a sliver"
+        );
+        assert_eq!(column_max(1639, 50, 2.0), 1639, "the zoom scales the page");
+    }
 
     #[test]
     fn font_css_scales_the_point_size_by_the_zoom() {
