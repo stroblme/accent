@@ -20,6 +20,13 @@ use webkit6::prelude::*;
 /// Adwaita Sans and about 62 of Cantarell, so both GNOME document fonts land in the range.
 const COLUMN_CH: u32 = 56;
 
+/// The find bar's own settings, matching the editor's `SearchSettings`: case-insensitive and
+/// wrapping.
+const FIND_OPTIONS: webkit6::FindOptions =
+    webkit6::FindOptions::CASE_INSENSITIVE.union(webkit6::FindOptions::WRAP_AROUND);
+/// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
+const FIND_LIMIT: u32 = 500;
+
 /// WebKit content-blocker rules: refuse every load, then re-allow our own scheme. `decide_policy`
 /// only sees navigations, so without this a note could still reach the network through a
 /// subresource — an `<img>` tracking pixel in raw HTML being the obvious one.
@@ -96,6 +103,9 @@ struct Inner {
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
+    /// What the find bar is looking for, kept because every re-render reloads the page and
+    /// WebKit's find dies with it.
+    query: RefCell<Option<String>>,
 }
 
 impl Inner {
@@ -107,6 +117,23 @@ impl Inner {
             gio::Cancellable::NONE,
             |_| (),
         );
+    }
+
+    /// Run the stored find query against the page that is up now. Searching a page that has not
+    /// finished loading silently finds nothing — measured under Xvfb: the same query returns 0
+    /// matches issued a second after `load_html` and 3 issued five seconds later — so every route
+    /// to a search goes through here and the load handler calls it again.
+    fn refind(&self) {
+        let query = self.query.borrow();
+        let (Some(finder), Some(text)) = (
+            self.view.find_controller(),
+            query.as_deref().filter(|t| !t.is_empty()),
+        ) else {
+            return;
+        };
+        // Counting first is the order WebKit's own MiniBrowser uses; `search` reports no total.
+        finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+        finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
     }
 
     /// Add or drop the mermaid script. It is 3.4 MB of JavaScript to parse, so a note without a
@@ -191,6 +218,7 @@ impl Preview {
             mermaid: RefCell::new(None),
             loaded: Cell::new(false),
             pending: Cell::new(None),
+            query: RefCell::new(None),
         });
 
         inner.view.connect_load_changed(glib::clone!(
@@ -202,6 +230,7 @@ impl Preview {
                     if let Some(line) = inner.pending.take() {
                         inner.scroll(line);
                     }
+                    inner.refind();
                 }
             }
         ));
@@ -306,6 +335,50 @@ impl Preview {
     /// never touches it, so a stylesheet rebuild cannot undo it.
     pub fn set_zoom(&self, zoom: f64) {
         self.inner.view.set_zoom_level(zoom);
+    }
+
+    // --- find ----------------------------------------------------------------------------
+    //
+    // Presentation mode hides the editor column, so Ctrl+F has to address the rendered page
+    // instead of the buffer. WebKit does the searching; the find bar only decides which of the
+    // two it is talking to.
+
+    /// Highlight and jump to the first match of `text`; an empty query clears the search. The
+    /// query is remembered, so it survives the re-render an edit triggers.
+    pub fn find(&self, text: &str) {
+        *self.inner.query.borrow_mut() = Some(text.to_string());
+        if text.is_empty() {
+            return self.find_clear();
+        }
+        if self.inner.loaded.get() {
+            self.inner.refind();
+        }
+    }
+
+    pub fn find_next(&self) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_next();
+        }
+    }
+
+    pub fn find_previous(&self) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_previous();
+        }
+    }
+
+    pub fn find_clear(&self) {
+        *self.inner.query.borrow_mut() = None;
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_finish();
+        }
+    }
+
+    /// Called with the number of matches after every [`Preview::find`].
+    pub fn connect_found(&self, f: impl Fn(u32) + 'static) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.connect_counted_matches(move |_, count| f(count));
+        }
     }
 }
 

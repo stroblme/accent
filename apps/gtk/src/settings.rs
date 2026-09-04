@@ -195,6 +195,20 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&spell);
 
+    let numbers = adw::SwitchRow::builder()
+        .title("Line Numbers")
+        .subtitle("Number every line except the headings, whose markers use the same gutter")
+        .active(config.borrow().line_numbers)
+        .build();
+    numbers.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().line_numbers = r.is_active();
+            save();
+        }
+    });
+    group.add(&numbers);
+
     let minimap = adw::SwitchRow::builder()
         .title("Minimap")
         .subtitle("Show a code map beside the document instead of the scrollbar")
