@@ -28,7 +28,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
 | Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
 | Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
-| Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
+| Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it. The Mine pane is editable, so a conflict can be merged by hand before a side is kept; the alignment fillers are dropped again unless they were typed into |
 | Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
 | Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks. `.compact` inside the sidebar, where the full size dwarfs a 200 to 420 px column |
 | Feedback | `AdwToast` / `AdwBanner` / `AdwAlertDialog`, see States |

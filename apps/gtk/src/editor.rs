@@ -332,7 +332,7 @@ fn digits(line_count: i32) -> usize {
 /// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible line
 /// with a `GutterLines` that hands out the line's start iter, which is all the tag lookup needs.
 /// Same shape as `diff.rs`, which prints source numbers the same way. The renderer is a child of
-/// the view, so the per-tab `#accent-doc-N` font provider reaches it and the zoom follows.
+/// the view, so the per-tab `accent-doc-N` font provider reaches it and the zoom follows.
 fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -481,8 +481,9 @@ impl Tab {
         self.buffer.text(&s, &e, true).to_string()
     }
 
-    /// Replace the buffer with `text` without marking the tab dirty.
-    fn set_text(&self, text: &str) {
+    /// Replace the buffer with `text` without marking the tab dirty. Callers are either loading
+    /// from disk or about to write what they just put in.
+    pub fn set_text(&self, text: &str) {
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);

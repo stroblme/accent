@@ -612,9 +612,11 @@ impl App {
                 tab.rel()
             )),
         );
+        // Compare rather than Reload: reloading threw the buffer away on one click, and the
+        // resolver shows both sides and now lets them be merged by hand.
         dialog.add_responses(&[
             ("cancel", "Cancel"),
-            ("reload", "Reload"),
+            ("compare", "Compare"),
             ("overwrite", "Overwrite"),
         ]);
         dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
@@ -626,11 +628,7 @@ impl App {
             Some(&self.window),
             gio::Cancellable::NONE,
             move |response| match response.as_str() {
-                "reload" => {
-                    if let Err(e) = tab.reload_keep_cursor() {
-                        app.toast(&format!("Reload failed: {e}"));
-                    }
-                }
+                "compare" => app.compare_with_disk(&tab),
                 "overwrite" => match app.write_tab(&tab, &text, None) {
                     Ok(()) => app.toast("Overwritten"),
                     Err(e) => app.toast(&format!("Save failed: {e}")),
@@ -739,11 +737,17 @@ impl App {
             let (app, tab) = (self.clone(), tab.clone());
             move |choice| match choice {
                 // Keeping mine forces the buffer over the file; keeping theirs drops the buffer,
-                // which is a loss the user has now seen spelled out line by line.
-                diff::Choice::KeepMine => match app.write_tab(&tab, &tab.text(), None) {
-                    Ok(()) => app.toast("Saved"),
-                    Err(e) => app.toast(&format!("Save failed: {e}")),
-                },
+                // which is a loss the user has now seen spelled out line by line. A pane edited
+                // in the dialog replaces the buffer first, so what was compared is what is saved.
+                diff::Choice::KeepMine { edited } => {
+                    if let Some(text) = edited {
+                        tab.set_text(&text);
+                    }
+                    match app.write_tab(&tab, &tab.text(), None) {
+                        Ok(()) => app.toast("Saved"),
+                        Err(e) => app.toast(&format!("Save failed: {e}")),
+                    }
+                }
                 diff::Choice::KeepTheirs => {
                     tab.discard();
                     app.refresh_tab(&tab);
@@ -886,16 +890,27 @@ impl App {
             let (app, original, conflict) =
                 (self.clone(), original.to_string(), conflict.to_string());
             move |choice| {
-                // Keeping mine is only the copy going away; keeping theirs adopts it first.
-                if choice == diff::Choice::KeepTheirs {
-                    if let Err(e) = app.vault.adopt_conflict(&original, &conflict) {
-                        return app.toast(&format!("Cannot resolve: {e:#}"));
+                // Keeping mine is only the copy going away, unless the dialog was edited: then
+                // the merged text is written first. Keeping theirs adopts the copy.
+                let rewritten = match choice {
+                    diff::Choice::KeepTheirs => {
+                        if let Err(e) = app.vault.adopt_conflict(&original, &conflict) {
+                            return app.toast(&format!("Cannot resolve: {e:#}"));
+                        }
+                        true
                     }
-                    // The adopted text is on disk now, but a tab with unsaved edits still holds
-                    // the only copy of them: it gets the banner, not a silent overwrite.
-                    if let Some(tab) = app.tab_for(&original) {
-                        app.refresh_tab(&tab);
+                    diff::Choice::KeepMine { edited: Some(text) } => {
+                        if let Err(e) = app.vault.save(&original, &text, None) {
+                            return app.toast(&format!("Cannot resolve: {e}"));
+                        }
+                        true
                     }
+                    diff::Choice::KeepMine { edited: None } => false,
+                };
+                // The note on disk is new text now, but a tab with unsaved edits still holds the
+                // only copy of them: it gets the banner, not a silent overwrite.
+                if rewritten && let Some(tab) = app.tab_for(&original) {
+                    app.refresh_tab(&tab);
                 }
                 fileops::trash(app.ops(), &conflict);
                 app.sync_conflict_banner(&original);
