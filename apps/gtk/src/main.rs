@@ -13,6 +13,7 @@ mod find;
 mod highlight;
 mod multicaret;
 mod palette;
+mod paned;
 mod preview;
 mod settings;
 mod sidebar;
@@ -417,6 +418,9 @@ struct App {
     mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
     zoom: Cell<f64>,
+    /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
+    zoom_pill: gtk::Box,
+    zoom_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -1270,6 +1274,12 @@ impl App {
         self.sidebar_header.add_css_class("chrome-hidden");
         self.header.add_css_class("chrome-hidden");
         self.tabbar.add_css_class("chrome-hidden");
+        self.zoom_pill.add_css_class("chrome-hidden");
+        // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
+        // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().add_css_class("chrome-dimmed");
+        }
     }
 
     fn show_chrome(&self) {
@@ -1281,6 +1291,10 @@ impl App {
         self.sidebar_header.remove_css_class("chrome-hidden");
         self.header.remove_css_class("chrome-hidden");
         self.tabbar.remove_css_class("chrome-hidden");
+        self.zoom_pill.remove_css_class("chrome-hidden");
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().remove_css_class("chrome-dimmed");
+        }
     }
 
     /// Never fade over something that is waiting for an answer: a dialog, a banner, an open
@@ -1427,6 +1441,11 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
         }
+        // 100 % is the state that needs no readout, so Reset makes the pill disappear rather than
+        // leaving a badge saying nothing is going on.
+        self.zoom_label
+            .set_label(&format!("{} %", (zoom * 100.0).round() as i32));
+        self.zoom_pill.set_visible(zoom != 1.0);
         self.save_session_soon();
     }
 
@@ -1864,7 +1883,35 @@ fn build_window(
         .shrink_end_child(false)
         .build();
 
-    toasts.set_child(Some(&paned));
+    // Zoom had no visual feedback at all: the note simply grew. The readout floats over the
+    // document in an overlay rather than sitting in a bar, so it costs the column no width and
+    // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
+    // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
+    // on screen.
+    let zoom_label = gtk::Label::new(Some("100 %"));
+    zoom_label.add_css_class("numeric");
+    let zoom_reset = gtk::Button::builder()
+        .label("Reset")
+        .action_name("win.zoom-reset")
+        .build();
+    zoom_reset.add_css_class("flat");
+    let zoom_pill = gtk::Box::builder()
+        .spacing(6)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .margin_end(12)
+        .visible(false)
+        .build();
+    zoom_pill.append(&zoom_label);
+    zoom_pill.append(&zoom_reset);
+    zoom_pill.add_css_class("osd");
+    zoom_pill.add_css_class("accent-pill");
+    zoom_pill.add_css_class("chrome-fade");
+
+    let document = gtk::Overlay::builder().child(&paned).build();
+    document.add_overlay(&zoom_pill);
+    toasts.set_child(Some(&document));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -1998,6 +2045,8 @@ fn build_window(
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
+        zoom_pill,
+        zoom_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -2121,6 +2170,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
     // title widget, and the header-to-header size group already keeps the two bands equal, so the
     // switcher needs neither a box around it nor a size group of its own.
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
+    // The panes dim rather than hide while the user types, on the same transition as the bars.
+    pane.widget().add_css_class("chrome-fade");
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }
@@ -2259,6 +2310,30 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         app,
         move |_| app.save_session_soon()
     ));
+
+    // Every divider in the window: double-click resets it, and it thickens while dragged.
+    paned::watch(
+        app.window.upcast_ref(),
+        glib::clone!(
+            #[weak]
+            app,
+            move |divider: &gtk::Paned| {
+                if divider == &app.split {
+                    divider.set_position(Session::default().sidebar_width);
+                } else if divider == &app.paned {
+                    app.centre_handle();
+                } else {
+                    // Any other divider (the sidebar's own, and the pane splitters to come)
+                    // has no remembered default, so half of its own extent is the reset.
+                    let extent = match divider.orientation() {
+                        gtk::Orientation::Vertical => divider.height(),
+                        _ => divider.width(),
+                    };
+                    divider.set_position(extent / 2);
+                }
+            }
+        ),
+    );
 
     // Same rule on the way out of the window: the first buffer that cannot be written stops the
     // close and asks. Answering Discard or Overwrite closes the window again, which picks up
@@ -2799,6 +2874,12 @@ thread_local! {
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
+//
+// ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
+// by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
+// outline or a negative margin, was measured: it only ever reaches the side rendered before the
+// handle, because the pane after it paints over the other. A 2 px shift while a divider is being
+// dragged is invisible, so it is the cheaper of the two.
 fn install_chrome_css() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -2812,6 +2893,10 @@ fn install_chrome_css() {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
+             .chrome-dimmed {{ opacity: 0.5; }} \
+             .accent-pill {{ padding: 6px; border-radius: 12px; }} \
+             paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
+               background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
