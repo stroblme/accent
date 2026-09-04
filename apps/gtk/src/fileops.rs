@@ -33,6 +33,9 @@ pub struct Ops {
     pub toast: Box<dyn Fn(&str)>,
     /// Open a note in a tab.
     pub open: Box<dyn Fn(&str)>,
+    /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
+    /// which notes link to which.
+    pub reconciled: Box<dyn Fn() -> bool>,
     /// Save any dirty tab for these paths before the file moves under them, and reload the ones
     /// listed afterwards. Called with the notes a rename is about to rewrite.
     pub flush: Box<dyn Fn(&[String])>,
@@ -196,6 +199,13 @@ pub fn move_to(ops: &Rc<Ops>, rel: &str) {
 
 /// Ask the vault what the move would touch, then either do it or confirm the link rewrites first.
 fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
+    // `plan_rename` reads the backlinks out of the index, so during the first reconcile it finds
+    // none — and an empty rewrite list is also what skips the confirmation dialog, so the rename
+    // would go through in silence and break every wikilink pointing at the note. Both Rename and
+    // Move to… land here, which is why the check sits at the top rather than in either of them.
+    if !(ops.reconciled)() {
+        return (ops.toast)("Still indexing, try again in a moment");
+    }
     match ops.vault.plan_rename(from, to) {
         Ok(plan) if plan.rewrites.is_empty() => apply(ops, &plan, false, verb),
         Ok(plan) => confirm_links(ops, plan, verb),
@@ -358,20 +368,75 @@ fn confirm_delete(ops: &Rc<Ops>, path: &Path, name: &str, rel: &str) {
     });
 }
 
+// ------------------------------------------------------------- clipboard and the file manager
+
+/// Copy the vault-relative path, which is what a wikilink and every accent path notation use.
+///
+/// No toast: the clipboard is the feedback, and DESIGN.md keeps toasts for what the user cannot
+/// otherwise see.
+pub fn copy_relative_path(ops: &Rc<Ops>, rel: &str) {
+    ops.window.clipboard().set_text(rel);
+}
+
+/// Copy the real filesystem path, for pasting into a terminal or another application. Written
+/// out in full rather than `~`-abbreviated: a tilde is a shell convenience, not a path.
+pub fn copy_absolute_path(ops: &Rc<Ops>, rel: &str) {
+    let path = ops.vault.root().join(rel);
+    ops.window.clipboard().set_text(&path.to_string_lossy());
+}
+
+/// Open the file manager on the containing folder with the file selected, through the portal.
+pub fn show_in_files(ops: &Rc<Ops>, rel: &str) {
+    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(ops.vault.root().join(rel))));
+    let window = ops.window.clone();
+    let (ops, name) = (ops.clone(), basename(rel).to_string());
+    launcher.open_containing_folder(Some(&window), gio::Cancellable::NONE, move |result| {
+        // Only the failure is worth saying: a file manager that opened is its own report.
+        if let Err(e) = result {
+            (ops.toast)(&format!("Cannot show {name}: {e}"));
+        }
+    });
+}
+
+/// The vault path of `rel` as GNOME writes it, `$HOME` abbreviated to `~`. Read-only decoration
+/// for tooltips and labels; nothing opens a file by it.
+pub fn display_path(root: &Path, rel: &str) -> String {
+    let home = glib::home_dir();
+    with_home(root, rel, Some(&home))
+}
+
+fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
+    // `join("")` leaves a trailing separator behind, and the vault root is a real caller: the
+    // tree builds every row's tooltip by appending to it.
+    let path = match rel.is_empty() {
+        true => root.to_path_buf(),
+        false => root.join(rel),
+    };
+    crate::start::abbreviate(&path, home)
+}
+
 // ------------------------------------------------------------------------------ context menu
 
-/// Right-click and Menu-key context menu for a tree row. `anchor` is where to point the popover,
-/// in the coordinates of `list`.
+/// Right-click and Menu-key context menu for a tree row. `host` is the tree's outer box, and
+/// `anchor` is where to point the popover in that box's coordinates.
+///
+/// ponytail: the popover is parented to the box rather than to the `GtkListView` inside it,
+/// because GTK only re-presents a popover from its parent's `allocate_native_children`, which a
+/// widget with a custom `size_allocate` such as `GtkListView` never reaches. A menu parented to
+/// the list keeps its first-frame size and `GtkPopoverMenu`'s internal scrolled window turns the
+/// rest into a scrollbar. Fallback if one ever reappears: set that scrolled window's policies to
+/// Never.
 pub fn context_menu(
     ops: &Rc<Ops>,
-    list: &gtk::ListView,
+    host: &gtk::Widget,
     rel: &str,
     is_dir: bool,
     anchor: gdk::Rectangle,
 ) {
+    // On the host, not the list: an action resolves up the widget tree from the popover's parent.
     // Re-inserted per menu: the group holds a clone of `ops` and nothing else, and replacing it
-    // costs six small objects, which is less than remembering whether it is already there.
-    list.insert_action_group(GROUP, Some(&actions(ops)));
+    // costs a handful of small objects, which is less than remembering whether it is already there.
+    host.insert_action_group(GROUP, Some(&actions(ops)));
 
     let menu = gio::Menu::new();
     if is_dir {
@@ -382,13 +447,20 @@ pub fn context_menu(
     }
     menu.append_item(&item("Rename", "rename", rel));
     menu.append_item(&item("Move to…", "move", rel));
+    // Reading the path out and leaving the app are neither edits nor deletions, so they get a
+    // section of their own between the two.
+    let elsewhere = gio::Menu::new();
+    elsewhere.append_item(&item("Copy Relative Path", "copy-rel", rel));
+    elsewhere.append_item(&item("Copy Absolute Path", "copy-abs", rel));
+    elsewhere.append_item(&item("Show in Files", "show", rel));
+    menu.append_section(None, &elsewhere);
     // Its own section, so the one destructive item is never next to Rename by accident.
     let danger = gio::Menu::new();
     danger.append_item(&item("Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
 
     let popover = gtk::PopoverMenu::from_model(Some(&menu));
-    popover.set_parent(list);
+    popover.set_parent(host);
     popover.set_has_arrow(false);
     popover.set_pointing_to(Some(&anchor));
     // A popover parented by hand stays parented: without this every right-click would leave
@@ -426,6 +498,9 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));
     add("move", Box::new(move_to));
+    add("copy-rel", Box::new(copy_relative_path));
+    add("copy-abs", Box::new(copy_absolute_path));
+    add("show", Box::new(show_in_files));
     add("trash", Box::new(trash));
     group
 }
@@ -732,6 +807,20 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&base).expect("cleanup");
+    }
+
+    #[test]
+    fn with_home_abbreviates_the_vault_path_and_survives_an_empty_rel() {
+        let home = Path::new("/home/me");
+        let root = Path::new("/home/me/Vault");
+        assert_eq!(with_home(root, "a/b.md", Some(home)), "~/Vault/a/b.md");
+        // The vault root itself, which is what the tree's tooltip prefix is built from: joining
+        // an empty rel path would otherwise leave a trailing slash on it.
+        assert_eq!(with_home(root, "", Some(home)), "~/Vault");
+        assert_eq!(
+            with_home(Path::new("/mnt/Vault"), "", Some(home)),
+            "/mnt/Vault"
+        );
     }
 
     #[test]
