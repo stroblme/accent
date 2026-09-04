@@ -24,7 +24,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | View modes | Editor / Split / Preview; Split is a `GtkPaned` of the two above |
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
-| Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
+| Start screen | `AdwStatusPage` with app icon, Open Folder button and a recent-vaults list, shown when launched without a vault path and reachable again from Open Folder… and Close Vault in the primary menu. Only ever one of them: a second Open Folder… presents the one already up. Opening a vault gives it a window of its own, one per vault; Close Vault takes the current window away, which is what releases its vault, worker thread and WebKit process |
 | Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
 | Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
 | Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
@@ -79,7 +79,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 | Group | Bindings |
 |---|---|
-| Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Quit `Ctrl+Q` |
+| Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Open folder `Ctrl+Shift+O`, Close vault (unbound), Quit `Ctrl+Q` |
 | Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
 | Editing | Duplicate line `Ctrl+D`, Delete line `Ctrl+L`, Scroll viewport `Ctrl+Up` / `Ctrl+Down`, Add caret above / below `Shift+Alt+Up` / `Shift+Alt+Down` |
 | Zoom | Zoom in `Ctrl++` (also `Ctrl+=` and the keypad), Zoom out `Ctrl+-`, Reset `Ctrl+0`. The document only: the chrome keeps the system interface font, and the preview's WebView is zoomed with the editor so presentation mode follows |

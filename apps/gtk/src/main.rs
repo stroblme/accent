@@ -59,6 +59,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
+    ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
     ("win.palette-files", "Open Note…", &["<Control>e"]),
     (
@@ -138,9 +140,12 @@ fn main() -> glib::ExitCode {
     let shell = Rc::new(Shell {
         config: Rc::new(RefCell::new(Config::load())),
         windows: RefCell::new(Vec::new()),
+        start: glib::WeakRef::new(),
     });
-    app.connect_command_line(move |gtk_app, command_line| {
-        shell.command_line(gtk_app, command_line)
+    shell.install_app_actions(&app);
+    app.connect_command_line({
+        let shell = shell.clone();
+        move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
     });
     app.run()
 }
@@ -150,11 +155,78 @@ fn main() -> glib::ExitCode {
 /// One process, one config, one window per vault.
 struct Shell {
     config: Rc<RefCell<Config>>,
-    /// Weak, so a closed window is collected instead of being handed out again.
-    windows: RefCell<Vec<(PathBuf, glib::WeakRef<adw::ApplicationWindow>)>>,
+    /// The open vaults, and the only strong reference to each window's state: an entry is dropped
+    /// in `forget` when the window closes, which is what releases the vault and its worker thread.
+    windows: RefCell<Vec<(PathBuf, Rc<App>)>>,
+    /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
+    /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
+    start: glib::WeakRef<adw::ApplicationWindow>,
 }
 
 impl Shell {
+    /// The two actions that outlive the window firing them: Open Folder… lands on the start
+    /// screen, and Close Vault takes the current window away, so neither can live on a window the
+    /// way the `win.` actions do. Registered once on the application, where the shell is in scope.
+    fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let open = gio::SimpleAction::new("open-vault", None);
+        open.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.start_screen(&gtk_app)
+        });
+        gtk_app.add_action(&open);
+
+        let close = gio::SimpleAction::new("close-vault", None);
+        close.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.close_vault(&gtk_app)
+        });
+        gtk_app.add_action(&close);
+    }
+
+    /// Close Vault: hand this window's vault back and land on the start screen.
+    ///
+    /// The window goes rather than being emptied out. The vault, its worker thread and its WebKit
+    /// process all hang off the window's [`App`], so closing the window is what releases them, and
+    /// it is the path a user closing the window already takes. The cost is the window's geometry,
+    /// which the next vault takes from the defaults again. The start screen is presented first, so
+    /// the application never stands at zero windows and quits out from under us.
+    fn close_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let Some(window) = gtk_app.active_window() else {
+            return;
+        };
+        // Only a vault window has a vault to close; from the start screen this leads nowhere.
+        let opened = self
+            .windows
+            .borrow()
+            .iter()
+            .any(|(_, app)| app.window.upcast_ref::<gtk::Window>() == &window);
+        if !opened {
+            return;
+        }
+        self.start_screen(gtk_app);
+        window.close();
+    }
+
+    /// Let go of a window's [`App`] once the close is certain. This is the only strong reference
+    /// to it, so the vault, its worker thread and its WebKit process all go with it.
+    ///
+    /// ponytail: the `App` goes here, the vault a moment later — the tree and the sidebar hold
+    /// their own `Rc<Vault>` inside widgets, so the last one drops when GTK destroys the window,
+    /// and `Vault`'s `Drop` joins the worker there. Closing a second into `testvault`'s 2.7 s cold
+    /// reconcile blocked the main loop for 2.3 s, with the window already off screen. `Vault::drop`
+    /// names the fix (a cancellation flag on `reconcile`); until a vault is opened and closed often
+    /// enough for that pause to be felt, one stalled close is cheaper than the flag.
+    fn forget(&self, window: &adw::ApplicationWindow) {
+        let mut windows = self.windows.borrow_mut();
+        let Some(i) = windows.iter().position(|(_, app)| &app.window == window) else {
+            return;
+        };
+        let app = windows.remove(i);
+        // Out of the borrow before the drop: `App` reaches a long way as it goes.
+        drop(windows);
+        drop(app);
+    }
+
     fn command_line(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -187,19 +259,22 @@ impl Shell {
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
-        // The start window closes itself once a vault is chosen, so it has to outlive the closure
-        // that closes it: hence the cell rather than a capture.
-        let window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
-        let opened = start::present(gtk_app, self.config.clone(), {
-            let (shell, gtk_app, window) = (self.clone(), gtk_app.clone(), window.clone());
+        if let Some(window) = self.start.upgrade() {
+            window.present();
+            return;
+        }
+        let window = start::present(gtk_app, self.config.clone(), {
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
             move |root| {
                 shell.open_vault(&gtk_app, root, None);
-                if let Some(window) = window.borrow_mut().take() {
+                // The start window has done its job. It is reached through the shell rather than
+                // captured, which is what keeps the closure it lives in out of its own cycle.
+                if let Some(window) = shell.start.upgrade() {
                     window.close();
                 }
             }
         });
-        *window.borrow_mut() = Some(opened);
+        self.start.set(Some(&window));
     }
 
     fn open_vault(
@@ -212,18 +287,28 @@ impl Shell {
             window.present();
             return;
         }
-        if let Some(window) = build_window(gtk_app, self, root.clone(), note) {
-            self.windows.borrow_mut().push((root, window.downgrade()));
-        }
+        let Some(app) = build_window(gtk_app, self, root.clone(), note) else {
+            return;
+        };
+        // A second `close-request` handler. `wire_window`'s is connected first and can still stop
+        // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
+        // handler does, so this one only ever sees a close that is really happening.
+        app.window.connect_close_request({
+            let shell = Rc::downgrade(self);
+            move |window| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.forget(window);
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.windows.borrow_mut().push((root, app));
     }
 
     fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
-        self.windows
-            .borrow_mut()
-            .retain(|(_, window)| window.upgrade().is_some());
         let windows = self.windows.borrow();
-        let (_, window) = windows.iter().find(|(path, _)| path == root)?;
-        window.upgrade()
+        let (_, app) = windows.iter().find(|(path, _)| path == root)?;
+        Some(app.window.clone())
     }
 }
 
@@ -1519,7 +1604,7 @@ fn build_window(
     shell: &Rc<Shell>,
     root: PathBuf,
     note: Option<String>,
-) -> Option<adw::ApplicationWindow> {
+) -> Option<Rc<App>> {
     install_document_font();
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
@@ -1745,7 +1830,7 @@ fn build_window(
     ));
     install_bench_hooks(&app);
     start_events(&app, events);
-    Some(window)
+    Some(app)
 }
 
 /// Files / Search / Tags / Backlinks over the vault tree.
@@ -2186,7 +2271,9 @@ fn menu_button() -> gtk::MenuButton {
     for group in [
         ["win.new-note", "win.new-folder", "win.save"].as_slice(),
         ["win.find", "win.view-mode", "win.present"].as_slice(),
-        ["win.preferences", "win.about", "app.quit"].as_slice(),
+        ["win.preferences", "win.about"].as_slice(),
+        // What leaves the vault, in the order of how much it takes with it.
+        ["app.open-vault", "app.close-vault", "app.quit"].as_slice(),
     ] {
         let section = gio::Menu::new();
         for action in group {
@@ -2242,13 +2329,15 @@ fn mode_switcher() -> gtk::ToggleButton {
 /// that a closed tab, a finished dialog or a dropped controller cannot keep it alive by accident.
 ///
 /// ponytail: a 120 ms poll instead of wiring an `async-channel` into the GLib context. One timeout
-/// source, no extra dependency, and the latency is below what a progress label needs. The source
-/// never ends, so a closed window keeps its `App` and its vault worker until the process exits;
-/// give it a weak reference plus an explicit teardown on close-request the day a long session
-/// opens and closes many vaults.
+/// source, no extra dependency, and the latency is below what a progress label needs.
 fn start_events(app: &Rc<App>, events: Receiver<Event>) {
-    let app = app.clone();
+    // Weak, and the source ends with the window: `Shell.windows` holds the only strong `App`, so
+    // closing a window drops it along with its vault, its worker thread and its WebKit process.
+    let app = Rc::downgrade(app);
     glib::timeout_add_local(POLL, move || {
+        let Some(app) = app.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
         for event in events.try_iter() {
             app.on_event(event);
         }
@@ -2383,13 +2472,24 @@ fn install_document_font() {
     provider.load_from_string(&format!(
         "textview.accent-doc {{ font-family: \"{family}\"; font-size: {size}pt; }}"
     ));
-    // ponytail: each font change adds a provider instead of replacing the previous one. Font
-    // changes are rare and later providers win; swap for a stored provider if that stops holding.
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
+    // once per window as well as on every font change, so adding would grow the display's
+    // provider list for the life of the process.
+    FONT.with_borrow_mut(|slot| {
+        if let Some(old) = slot.replace(provider.clone()) {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
+}
+
+thread_local! {
+    /// The document-font provider currently on the display, so the next call can take it off.
+    static FONT: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
 /// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
@@ -2457,5 +2557,19 @@ mod tests {
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
+    /// action listed first. The table is the only place that can go wrong, and it is pure data.
+    #[test]
+    fn no_two_actions_claim_the_same_accelerator() {
+        let mut seen = std::collections::HashMap::new();
+        for (name, _, accels) in ACTIONS {
+            for accel in *accels {
+                if let Some(other) = seen.insert(*accel, *name) {
+                    panic!("{accel} is bound to both {other} and {name}");
+                }
+            }
+        }
     }
 }
