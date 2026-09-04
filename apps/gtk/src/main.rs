@@ -10,6 +10,7 @@ mod diff;
 mod editor;
 mod fileops;
 mod highlight;
+mod multicaret;
 mod palette;
 mod preview;
 mod settings;
@@ -42,6 +43,8 @@ const RENDER: Duration = Duration::from_millis(300);
 const SESSION: Duration = Duration::from_secs(1);
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
 const POLL: Duration = Duration::from_millis(120);
+/// One press of Zoom In or Zoom Out, a tenth of the document font.
+const ZOOM_STEP: f64 = 0.1;
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
@@ -62,12 +65,34 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.replace", "Replace", &["<Control>h"]),
     ("win.find-next", "Find Next", &["<Control>g"]),
     ("win.find-previous", "Find Previous", &["<Control><Shift>g"]),
+    ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
+    ("win.delete-line", "Delete Line", &["<Control>l"]),
+    ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
+    ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
+    ("win.caret-above", "Add Caret Above", &["<Shift><Alt>Up"]),
+    ("win.caret-below", "Add Caret Below", &["<Shift><Alt>Down"]),
+    (
+        "win.zoom-in",
+        "Zoom In",
+        &["<Control>plus", "<Control>equal", "<Control>KP_Add"],
+    ),
+    (
+        "win.zoom-out",
+        "Zoom Out",
+        &["<Control>minus", "<Control>KP_Subtract"],
+    ),
+    (
+        "win.zoom-reset",
+        "Reset Zoom",
+        &["<Control>0", "<Control>KP_0"],
+    ),
     ("win.sidebar", "Toggle Sidebar", &["F9"]),
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
+    ("win.minimap", "Toggle Minimap", &[]),
     ("win.follow-link", "Follow Link", &["<Control>Return"]),
     ("win.rename", "Rename", &["F2"]),
     ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
@@ -273,6 +298,8 @@ struct App {
     /// Swaps the tab view for a placeholder while no note is open (DESIGN.md, States).
     content: gtk::Stack,
     mode: Cell<Mode>,
+    /// Document zoom, applied to every tab and to the preview, never to the chrome.
+    zoom: Cell<f64>,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -328,9 +355,13 @@ impl App {
             self.tabs.set_selected_page(&tab.page);
             return;
         }
-        let (spellcheck, font) = {
+        let (spellcheck, font, minimap) = {
             let config = self.config.borrow();
-            (config.spellcheck, config.editor_font.clone())
+            (
+                config.spellcheck,
+                config.editor_font.clone(),
+                config.minimap,
+            )
         };
         let opened = editor::open(
             self.vault.root(),
@@ -350,9 +381,13 @@ impl App {
             },
             spellcheck,
             font.as_deref(),
+            self.zoom.get(),
         );
         match opened {
-            Ok(tab) => self.adopt(tab),
+            Ok(tab) => {
+                tab.set_minimap(minimap);
+                self.adopt(tab);
+            }
             Err(e) => self.toast(&format!("Cannot open {rel}: {e}")),
         }
     }
@@ -846,6 +881,7 @@ impl App {
         if width > 0 {
             self.paned.set_position(width / 2);
         }
+        preview.set_zoom(self.zoom.get());
         *self.preview.borrow_mut() = Some(preview);
     }
 
@@ -985,6 +1021,40 @@ impl App {
                     tab.find_previous();
                 }
             }
+            "duplicate-line" => {
+                if let Some(tab) = self.active() {
+                    tab.duplicate_line();
+                }
+            }
+            "delete-line" => {
+                if let Some(tab) = self.active() {
+                    tab.delete_line();
+                }
+            }
+            "scroll-up" => {
+                if let Some(tab) = self.active() {
+                    tab.scroll_lines(-1);
+                }
+            }
+            "scroll-down" => {
+                if let Some(tab) = self.active() {
+                    tab.scroll_lines(1);
+                }
+            }
+            "caret-above" => {
+                if let Some(tab) = self.active() {
+                    tab.add_caret(false);
+                }
+            }
+            "caret-below" => {
+                if let Some(tab) = self.active() {
+                    tab.add_caret(true);
+                }
+            }
+            "zoom-in" => self.set_zoom(self.zoom.get() + ZOOM_STEP),
+            "zoom-out" => self.set_zoom(self.zoom.get() - ZOOM_STEP),
+            "zoom-reset" => self.set_zoom(1.0),
+            "minimap" => self.toggle_minimap(),
             "sidebar" => self
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
@@ -1017,6 +1087,38 @@ impl App {
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
+        }
+    }
+
+    /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the
+    /// system, and this is the reading size of one note. Presentation mode is the same WebView,
+    /// so it is zoomed along with the preview.
+    fn set_zoom(self: &Rc<Self>, zoom: f64) {
+        let zoom = clamp_zoom(zoom);
+        self.zoom.set(zoom);
+        let font = self.config.borrow().editor_font.clone();
+        for tab in self.open_tabs() {
+            tab.set_font(font.as_deref(), zoom);
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.set_zoom(zoom);
+        }
+        self.save_session_soon();
+    }
+
+    /// The minimap is a global preference with no accelerator, so the palette and the preferences
+    /// dialog are the two ways to it. Both end up here.
+    fn toggle_minimap(self: &Rc<Self>) {
+        let on = {
+            let mut config = self.config.borrow_mut();
+            config.minimap = !config.minimap;
+            if let Err(e) = config.save() {
+                tracing::warn!("saving config: {e:#}");
+            }
+            config.minimap
+        };
+        for tab in self.open_tabs() {
+            tab.set_minimap(on);
         }
     }
 
@@ -1123,8 +1225,9 @@ impl App {
                 move |config: &Config| {
                     app.vault.set_config(config.vault(&root));
                     for tab in app.open_tabs() {
-                        tab.set_font(config.editor_font.as_deref());
+                        tab.set_font(config.editor_font.as_deref(), app.zoom.get());
                         tab.set_spellcheck(config.spellcheck);
+                        tab.set_minimap(config.minimap);
                     }
                 }
             ),
@@ -1180,6 +1283,7 @@ impl App {
                 .get()
                 .map(|s| s.pane())
                 .unwrap_or_else(|| Session::default().pane),
+            zoom: self.zoom.get(),
         };
         if let Err(e) = self.vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
@@ -1189,6 +1293,9 @@ impl App {
     /// Restored after the window is on screen, so nothing here is on the path to the first frame.
     fn restore_session(self: &Rc<Self>) {
         let session = self.vault.session();
+        // Before the tabs, so each one is built at the right size instead of being restyled
+        // afterwards. A state file written before zoom existed defaults to 1.0.
+        self.set_zoom(session.zoom);
         for rel in &session.open {
             self.open_note(rel);
         }
@@ -1205,6 +1312,12 @@ impl App {
             .set_position(sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
     }
+}
+
+/// Zoom in tenths, between half size and triple. Rounded as well as clamped, so stepping does
+/// not drift into 0.7999999999999999 and a hand-edited state file cannot ask for 0.
+fn clamp_zoom(zoom: f64) -> f64 {
+    ((zoom * 10.0).round() / 10.0).clamp(0.5, 3.0)
 }
 
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
@@ -1399,6 +1512,7 @@ fn build_window(
         paned,
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
+        zoom: Cell::new(1.0),
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -1712,6 +1826,11 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         app,
         move |_| {
             install_document_font();
+            // A different document font is a different marker width, so the hanging headings
+            // have to be measured again.
+            for tab in app.open_tabs() {
+                tab.rehang();
+            }
             if let Some(preview) = app.preview.borrow().as_ref() {
                 preview.restyle();
             }
@@ -1814,6 +1933,28 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
         }
         gtk_app.set_accels_for_action(full, accels);
     }
+
+    // GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds
+    // Shift+Alt+Up/Down to move-viewport. Both are class shortcuts, which run in the bubble phase
+    // at the focused view and so get the key before the window's application accelerators ever
+    // see it. Claiming those four chords in the capture phase at the window is the way past that.
+    const CAPTURED: &[(&str, &str)] = &[
+        ("<Control>Up", "win.scroll-up"),
+        ("<Control>Down", "win.scroll-down"),
+        ("<Shift><Alt>Up", "win.caret-above"),
+        ("<Shift><Alt>Down", "win.caret-below"),
+    ];
+    let captured = gtk::ShortcutController::new();
+    captured.set_propagation_phase(gtk::PropagationPhase::Capture);
+    for (chord, action) in CAPTURED {
+        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(chord) {
+            captured.add_shortcut(gtk::Shortcut::new(
+                Some(trigger),
+                Some(gtk::NamedAction::new(action)),
+            ));
+        }
+    }
+    app.window.add_controller(captured);
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -2040,7 +2181,7 @@ fn install_document_font() {
     );
 }
 
-/// The app's own two rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
+/// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
 /// shifts and neither the focus order nor accessibility notices; with `gtk-enable-animations` off
 /// the class still toggles but there is no transition, so the chrome snaps instead of fading and
 /// nothing becomes unreachable. `.accent-flat` puts the two columns on the note's own background
@@ -2049,9 +2190,17 @@ fn install_document_font() {
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
 /// contents in the same band whatever the interface font makes of their height.
-// ponytail: the rule leans on libadwaita's own header padding (6 above a lone header, 3 + 3 above
-// a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing API instead if
-// one ever appears; today the class is the only handle on it.
+///
+/// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
+/// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
+/// `STYLE_PROVIDER_PRIORITY_APPLICATION` outranks both per property, so the document takes the
+/// theme's view colours instead of the scheme's grey, and the completion popup takes the
+/// popover's. The scheme itself stays: dropping it takes the find bar's match highlight with it.
+/// On the `text` node only `color` is ours, because GtkSourceView pins that node's background to
+/// transparent at maximum priority; the background therefore goes on the `textview` node.
+// ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
+// 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
+// API instead if one ever appears; today the class is the only handle on it.
 fn install_chrome_css() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -2066,7 +2215,16 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
-             .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }}"
+             .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
+             textview.accent-doc {{ color: var(--view-fg-color); \
+               background-color: var(--view-bg-color); }} \
+             textview.accent-doc text {{ color: var(--view-fg-color); }} \
+             GtkSourceAssistant.completion {{ background-color: var(--popover-bg-color); \
+               color: var(--popover-fg-color); min-width: 240px; \
+               box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
+             GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
+             GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
+               margin-right: 12px; min-height: 30px; }}"
         ));
         gtk::style_context_add_provider_for_display(
             &display,
@@ -2074,4 +2232,18 @@ fn install_chrome_css() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zoom_steps_in_tenths_and_stops_at_the_ends() {
+        assert_eq!(clamp_zoom(1.0 + ZOOM_STEP), 1.1);
+        assert_eq!(clamp_zoom(1.0 - ZOOM_STEP), 0.9);
+        assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
+        assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
+        assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
 }

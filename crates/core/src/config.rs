@@ -18,6 +18,7 @@ macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
+minimap = false
 
 [vaults."/home/me/Notes"]
 daily_dir = "Daily"
@@ -40,6 +41,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
     pub spellcheck: bool,
+    /// A code map beside the document instead of the scrollbar.
+    pub minimap: bool,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -50,6 +53,7 @@ impl Default for Config {
             recent_vaults: Vec::new(),
             editor_font: None,
             spellcheck: true,
+            minimap: false,
             vaults: BTreeMap::new(),
         }
     }
@@ -93,6 +97,8 @@ pub struct Session {
     pub view: String,
     /// Which sidebar pane was showing: an older state file without the key gets the default.
     pub pane: String,
+    /// Document zoom, 1.0 being the font as GNOME sets it.
+    pub zoom: f64,
 }
 
 impl Default for Session {
@@ -104,6 +110,7 @@ impl Default for Session {
             sidebar_width: 280,
             view: "editor".to_string(),
             pane: "files".to_string(),
+            zoom: 1.0,
         }
     }
 }
@@ -253,6 +260,7 @@ mod tests {
         let c = Config::read(&p).unwrap();
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
+        assert!(!c.minimap);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.daily_dir, "Daily");
@@ -352,6 +360,7 @@ mod tests {
             sidebar_width: 320,
             view: "preview".to_string(),
             pane: "search".to_string(),
+            zoom: 1.2,
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -367,10 +376,12 @@ mod tests {
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.view, "preview");
             assert_eq!(back.pane, "search");
+            assert_eq!(back.zoom, 1.2);
         });
     }
 
-    /// A state file written before `pane` existed must still load, with the default pane.
+    /// A state file written before `pane` and `zoom` existed must still load, with their
+    /// defaults.
     #[test]
     fn session_from_an_older_file_defaults_the_missing_pane() {
         let tmp = tempfile::tempdir().unwrap();
@@ -390,6 +401,7 @@ mod tests {
             let back = Session::load(&vault);
             assert_eq!(back.open, ["a.md"]);
             assert_eq!(back.pane, "files");
+            assert_eq!(back.zoom, 1.0);
         });
     }
 }

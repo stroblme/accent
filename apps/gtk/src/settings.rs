@@ -138,6 +138,20 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&spell);
 
+    let minimap = adw::SwitchRow::builder()
+        .title("Minimap")
+        .subtitle("Show a code map beside the document instead of the scrollbar")
+        .active(config.borrow().minimap)
+        .build();
+    minimap.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().minimap = r.is_active();
+            save();
+        }
+    });
+    group.add(&minimap);
+
     group
 }
 
