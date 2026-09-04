@@ -34,6 +34,8 @@ pub enum Item {
         action: String,
         label: String,
         accel: Option<String>,
+        /// Position in the window's recently-run list, if it is in it at all. Lower is newer.
+        recent: Option<usize>,
     },
     /// A tag to filter by.
     Tag(String),
@@ -112,7 +114,17 @@ fn split_note(rel: &str) -> (&str, &str) {
 ///
 /// This is `Pattern::match_list` with the index kept instead of the string, so the caller can map a
 /// hit back to the [`Item`] it came from. Ties keep corpus order, as nucleo's stable sort does.
-fn rank(haystacks: &[String], query: &str, matcher: &mut Matcher) -> Vec<usize> {
+///
+/// `recent` is either empty or one entry per haystack, holding how recently it was used. Anything
+/// used before and matching at all leads, in use order, and the rest follow by score: a command
+/// run twice is what the user means by that half-typed query, however well something else scores.
+/// This is VS Code's quick-open behaviour.
+fn rank(
+    haystacks: &[String],
+    recent: &[Option<usize>],
+    query: &str,
+    matcher: &mut Matcher,
+) -> Vec<usize> {
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
     let mut buf = Vec::new();
     let mut hits: Vec<(usize, u32)> = haystacks
@@ -124,7 +136,13 @@ fn rank(haystacks: &[String], query: &str, matcher: &mut Matcher) -> Vec<usize> 
                 .map(|score| (i, score))
         })
         .collect();
-    hits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let used = |i: usize| recent.get(i).copied().flatten().unwrap_or(usize::MAX);
+    hits.sort_by(|a, b| {
+        used(a.0)
+            .cmp(&used(b.0))
+            .then(b.1.cmp(&a.1))
+            .then(a.0.cmp(&b.0))
+    });
     hits.into_iter().take(MAX_RESULTS).map(|(i, _)| i).collect()
 }
 
@@ -245,6 +263,15 @@ pub fn present(
     let commands: Rc<Vec<Rc<Item>>> = Rc::new(commands.into_iter().map(Rc::new).collect());
     let command_text: Rc<Vec<String>> =
         Rc::new(commands.iter().map(|c| c.text().to_string()).collect());
+    let command_recent: Rc<Vec<Option<usize>>> = Rc::new(
+        commands
+            .iter()
+            .map(|c| match &**c {
+                Item::Command { recent, .. } => *recent,
+                _ => None,
+            })
+            .collect(),
+    );
     // Filled on first use, then reused for the life of the dialog.
     let notes: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
     let tags: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
@@ -313,8 +340,12 @@ pub fn present(
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, notes, tags) = (recent.clone(), notes.clone(), tags.clone());
-        let (commands, command_text, matcher) =
-            (commands.clone(), command_text.clone(), matcher.clone());
+        let (commands, command_text, command_recent, matcher) = (
+            commands.clone(),
+            command_text.clone(),
+            command_recent.clone(),
+            matcher.clone(),
+        );
         move |raw: &str| {
             let t0 = Instant::now();
             let (mode, query) = parse_query(raw, mode);
@@ -331,7 +362,7 @@ pub fn present(
                     let corpus = cache(&notes, &load_notes);
                     let mut m = matcher.borrow_mut();
                     m.config = Config::DEFAULT.match_paths();
-                    rank(&corpus, query, &mut m)
+                    rank(&corpus, &[], query, &mut m)
                         .into_iter()
                         .map(|i| Rc::new(Item::Note(corpus[i].clone())))
                         .collect()
@@ -340,7 +371,7 @@ pub fn present(
                 Mode::Commands => {
                     let mut m = matcher.borrow_mut();
                     m.config = Config::DEFAULT;
-                    rank(&command_text, query, &mut m)
+                    rank(&command_text, &command_recent, query, &mut m)
                         .into_iter()
                         .map(|i| commands[i].clone())
                         .collect()
@@ -349,7 +380,7 @@ pub fn present(
                     let corpus = cache(&tags, &load_tags);
                     let mut m = matcher.borrow_mut();
                     m.config = Config::DEFAULT;
-                    rank(&corpus, query, &mut m)
+                    rank(&corpus, &[], query, &mut m)
                         .into_iter()
                         .map(|i| Rc::new(Item::Tag(corpus[i].clone())))
                         .collect()
@@ -570,17 +601,32 @@ mod tests {
             "projects/deep-work.md".to_string(),
         ];
         let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, "deep", &mut m), vec![2]);
-        assert_eq!(rank(&corpus, "daily", &mut m), vec![1]);
-        assert!(rank(&corpus, "zzzz", &mut m).is_empty());
+        assert_eq!(rank(&corpus, &[], "deep", &mut m), vec![2]);
+        assert_eq!(rank(&corpus, &[], "daily", &mut m), vec![1]);
+        assert!(rank(&corpus, &[], "zzzz", &mut m).is_empty());
         // An empty pattern matches everything, in corpus order.
-        assert_eq!(rank(&corpus, "", &mut m), vec![0, 1, 2]);
+        assert_eq!(rank(&corpus, &[], "", &mut m), vec![0, 1, 2]);
     }
 
     #[test]
     fn rank_prefers_a_contiguous_match() {
         let corpus = vec!["d-e-e-p.md".to_string(), "deep-work.md".to_string()];
         let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, "deep", &mut m), vec![1, 0]);
+        assert_eq!(rank(&corpus, &[], "deep", &mut m), vec![1, 0]);
+    }
+
+    #[test]
+    fn rank_leads_with_what_was_used_before() {
+        let corpus = vec!["d-e-e-p.md".to_string(), "deep-work.md".to_string()];
+        let mut m = Matcher::new(Config::DEFAULT.match_paths());
+        // The worse match was used last, so it leads; score decides everything below.
+        assert_eq!(rank(&corpus, &[Some(0), None], "deep", &mut m), vec![0, 1]);
+        // Two recent hits keep their use order, not their score order.
+        assert_eq!(
+            rank(&corpus, &[Some(1), Some(0)], "deep", &mut m),
+            vec![1, 0]
+        );
+        // Recency never rescues a non-match.
+        assert!(rank(&corpus, &[Some(0), Some(1)], "zzzz", &mut m).is_empty());
     }
 }

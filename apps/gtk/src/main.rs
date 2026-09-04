@@ -35,6 +35,9 @@ const APP_ID: &str = "io.github.stroblme.Accent";
 
 /// What the palette lists before the user types anything.
 const RECENT_NOTES: usize = 50;
+/// Commands kept in the session's recently-used list. There are only about forty of them, so a
+/// shorter list is still every command the user actually reaches for.
+const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
 /// Rows in a `[[wikilink]]` or `#tag` completion popup.
@@ -331,6 +334,10 @@ struct App {
     tree_painted: Cell<i64>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
+    /// Notes this window showed and commands it ran, most recent first. The palette leads with
+    /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
+    recent_notes: RefCell<Vec<String>>,
+    recent_commands: RefCell<Vec<String>>,
 }
 
 impl App {
@@ -527,6 +534,7 @@ impl App {
             return;
         };
         let rel = tab.rel();
+        self.note_used(&rel);
         self.title.set_subtitle(&rel);
         if let Some(sidebar) = self.sidebar.get() {
             let mut sources: Vec<String> = Vec::new();
@@ -844,6 +852,7 @@ impl App {
                         tab.retarget(self.vault.root(), &format!("{to}/{rest}"));
                     }
                 }
+                accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
@@ -1340,8 +1349,17 @@ impl App {
     }
 
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
+        // Two answers to "recent": what this window opened, and what changed on disk. The first
+        // is what the user means, so it leads and the index's mtime list fills the page below it.
+        let mut recent = self.recent_notes.borrow().clone();
+        for rel in self.vault.recent_notes(RECENT_NOTES).unwrap_or_default() {
+            if !recent.contains(&rel) {
+                recent.push(rel);
+            }
+        }
+        let used = self.recent_commands.borrow();
         let sources = palette::Sources {
-            recent: self.vault.recent_notes(RECENT_NOTES).unwrap_or_default(),
+            recent,
             load_notes: Box::new({
                 let vault = self.vault.clone();
                 move || vault.note_paths().unwrap_or_default()
@@ -1352,6 +1370,7 @@ impl App {
                     action: action.to_string(),
                     label: label.to_string(),
                     accel: accels.first().map(|a| a.to_string()),
+                    recent: used.iter().position(|a| a == action),
                 })
                 .collect(),
             load_tags: Box::new({
@@ -1432,6 +1451,26 @@ impl App {
 
     // --- session -------------------------------------------------------------------------
 
+    /// Remember that this note was just looked at. Called from `sync_active`, so it covers
+    /// opening a note, switching to its tab and coming back to the window.
+    fn note_used(self: &Rc<Self>, rel: &str) {
+        if self.recent_notes.borrow().first().is_some_and(|r| r == rel) {
+            return;
+        }
+        accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        self.save_session_soon();
+    }
+
+    /// Remember a command by full action name, whichever surface fired it.
+    fn command_used(self: &Rc<Self>, action: &str) {
+        accent_core::config::touch(
+            &mut self.recent_commands.borrow_mut(),
+            action,
+            RECENT_COMMANDS,
+        );
+        self.save_session_soon();
+    }
+
     fn save_session_soon(self: &Rc<Self>) {
         if self.session.borrow().is_some() {
             return;
@@ -1467,6 +1506,8 @@ impl App {
                 .map(|s| s.pane())
                 .unwrap_or_else(|| Session::default().pane),
             zoom: self.zoom.get(),
+            recent_notes: self.recent_notes.borrow().clone(),
+            recent_commands: self.recent_commands.borrow().clone(),
         };
         if let Err(e) = self.vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
@@ -1494,6 +1535,10 @@ impl App {
         self.split
             .set_position(sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
+        // Last, because opening the tabs above ran `note_used` for each of them and would
+        // otherwise leave the list in restore order rather than in the order they were used.
+        *self.recent_notes.borrow_mut() = session.recent_notes;
+        *self.recent_commands.borrow_mut() = session.recent_commands;
     }
 }
 
@@ -1706,6 +1751,8 @@ fn build_window(
         tree_painted: Cell::new(0),
         render: RefCell::new(None),
         session: RefCell::new(None),
+        recent_notes: RefCell::new(Vec::new()),
+        recent_commands: RefCell::new(Vec::new()),
     });
     let _ = app.ops.set(build_ops(&app));
 
@@ -2126,6 +2173,7 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
                 move |_, _| {
                     // Any action fired is attention leaving the text (DESIGN.md).
                     app.show_chrome();
+                    app.command_used(full);
                     app.run_action(name);
                 }
             ));
