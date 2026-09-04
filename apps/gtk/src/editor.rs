@@ -1,11 +1,15 @@
-//! One editor tab: a `sourceview5::View` on a note, plus its etag, banner, find bar and the
-//! debounced work that hangs off a keystroke.
+//! One editor tab: a `sourceview5::View` on a note, plus its etag, banner and the debounced
+//! work that hangs off a keystroke.
+//!
+//! Finding and replacing live in `find.rs`, one bar per window: the bar drives the tab's
+//! `SearchContext` from the outside, so the same widgets serve every tab and stay on screen while
+//! presentation mode has hidden the tab stack.
 //!
 //! Nothing here knows about the app. What the tab has to say goes out through a `connect_*`
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{completion, highlight, multicaret};
+use crate::{completion, highlight, multicaret, typing};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::Link;
 use adw::prelude::*;
@@ -82,9 +86,10 @@ pub struct Tab {
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
     map: sourceview5::Map,
+    /// The optional line-number gutter; hidden unless the preference turns it on.
+    numbers: sourceview5::GutterRendererText,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
-    pub search: gtk::SearchBar,
     pub etag: Cell<Option<Etag>>,
     pub modified: Cell<bool>,
     /// Someone else changed the file under a dirty tab. Autosave stops until the user has
@@ -93,10 +98,6 @@ pub struct Tab {
     /// What the banner is asking for, or `None` while it is hidden.
     alert: Cell<Option<Alert>>,
     context: sourceview5::SearchContext,
-    find_entry: gtk::SearchEntry,
-    replace_entry: gtk::Entry,
-    replace_row: gtk::Box,
-    matches: gtk::Label,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -152,7 +153,9 @@ pub fn open(
     view.set_bottom_margin(96);
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
+    let numbers = line_numbers(&view, &buffer);
     completion::install(&view, notes, tags);
+    typing::install(&view);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. 800 leaves 704 px of text, which measures ~96
@@ -181,7 +184,6 @@ pub fn open(
     document.append(&map);
 
     let banner = adw::Banner::new("");
-    let bar = find_bar();
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
@@ -190,7 +192,6 @@ pub fn open(
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
-    column.append(&bar.search);
     column.append(&document);
     let page = tabs.append(&column);
     page.set_title(title_of(rel));
@@ -204,18 +205,14 @@ pub fn open(
         buffer: buffer.clone(),
         scroller: scroller.clone(),
         map: map.clone(),
+        numbers,
         page,
         banner: banner.clone(),
-        search: bar.search.clone(),
         etag: Cell::new(Some(etag)),
         modified: Cell::new(false),
         disk_changed: Cell::new(false),
         alert: Cell::new(None),
-        context: context.clone(),
-        find_entry: bar.find.clone(),
-        replace_entry: bar.replace.clone(),
-        replace_row: bar.replace_row,
-        matches: bar.matches,
+        context,
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
         font: RefCell::new(None),
@@ -315,177 +312,85 @@ pub fn open(
     ));
     view.add_controller(motion);
 
-    wire_find(
-        &tab,
-        &bar.find,
-        &bar.replace,
-        &bar.next,
-        &bar.previous,
-        &bar.replace_one,
-        &bar.replace_all,
-    );
-    context.connect_occurrences_count_notify(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.update_matches()
-    ));
-
     Ok(tab)
 }
 
-// ------------------------------------------------------------------------------------ find bar
+// -------------------------------------------------------------------------------- line numbers
 
-/// The widgets of the find bar, handed back so `open` can both store and wire them.
-struct FindBar {
-    search: gtk::SearchBar,
-    find: gtk::SearchEntry,
-    replace: gtk::Entry,
-    replace_row: gtk::Box,
-    matches: gtk::Label,
-    next: gtk::Button,
-    previous: gtk::Button,
-    replace_one: gtk::Button,
-    replace_all: gtk::Button,
+/// How many digits the last line's number needs. Every label is padded to this width, so they all
+/// measure the same and the gutter cannot change width as the view scrolls.
+fn digits(line_count: i32) -> usize {
+    line_count.max(1).to_string().len()
 }
 
-fn find_bar() -> FindBar {
-    let find = gtk::SearchEntry::builder()
-        .placeholder_text("Find")
-        .hexpand(true)
-        .build();
-    let matches = gtk::Label::builder().css_classes(["dim-label"]).build();
-    let previous = gtk::Button::builder()
-        .icon_name("go-previous-symbolic")
-        .tooltip_text("Find Previous")
-        .build();
-    let next = gtk::Button::builder()
-        .icon_name("go-next-symbolic")
-        .tooltip_text("Find Next")
-        .build();
+/// A line-number gutter that leaves heading lines blank.
+///
+/// An ATX heading's `#` markers hang in the same left gutter (`highlight::hang`), so a number
+/// beside them puts two things in one place; the heading's row is left blank instead, which is
+/// also what stops the numbers from fighting the larger heading font for the reader's eye.
+///
+/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible line
+/// with a `GutterLines` that hands out the line's start iter, which is all the tag lookup needs.
+/// Same shape as `diff.rs`, which prints source numbers the same way. The renderer is a child of
+/// the view, so the per-tab `accent-doc-N` font provider reaches it and the zoom follows.
+fn line_numbers(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+) -> sourceview5::GutterRendererText {
+    let renderer = sourceview5::GutterRendererText::new();
+    renderer.set_xalign(1.0);
+    renderer.set_xpad(6);
+    renderer.set_visible(false);
 
-    let replace = gtk::Entry::builder()
-        .placeholder_text("Replace")
-        .hexpand(true)
-        .build();
-    let replace_one = gtk::Button::with_label("Replace");
-    let replace_all = gtk::Button::with_label("Replace All");
+    let width = Rc::new(Cell::new(digits(buffer.line_count())));
+    renderer.set_text(&" ".repeat(width.get()));
 
-    // 6 px inside a control group, 12 px between the two rows (DESIGN.md, Spacing).
-    let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    top.append(&find);
-    top.append(&matches);
-    top.append(&previous);
-    top.append(&next);
-
-    let replace_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    replace_row.append(&replace);
-    replace_row.append(&replace_one);
-    replace_row.append(&replace_all);
-    replace_row.set_visible(false);
-
-    let rows = gtk::Box::new(gtk::Orientation::Vertical, 12);
-    rows.append(&top);
-    rows.append(&replace_row);
-
-    let search = gtk::SearchBar::builder().show_close_button(true).build();
-    search.set_child(Some(&rows));
-    search.connect_entry(&find);
-
-    FindBar {
-        search,
-        find,
-        replace,
-        replace_row,
-        matches,
-        next,
-        previous,
-        replace_one,
-        replace_all,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn wire_find(
-    tab: &Rc<Tab>,
-    find: &gtk::SearchEntry,
-    replace: &gtk::Entry,
-    next: &gtk::Button,
-    previous: &gtk::Button,
-    replace_one: &gtk::Button,
-    replace_all: &gtk::Button,
-) {
-    find.connect_search_changed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |entry| {
-            tab.context.settings().set_search_text(Some(&entry.text()));
-            // From the current match, not past it: typing must not walk through the document.
-            tab.step(true, true);
-        }
-    ));
-    find.connect_activate(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.step(true, false)
-    ));
-    next.connect_clicked(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.step(true, false)
-    ));
-    previous.connect_clicked(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.step(false, false)
-    ));
-    replace.connect_activate(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.replace_current()
-    ));
-    replace_one.connect_clicked(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.replace_current()
-    ));
-    replace_all.connect_clicked(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.replace_all()
-    ));
-
-    // Escape leaves the bar and puts the caret back where the user was typing.
-    let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, _| {
-            if key != gdk::Key::Escape {
-                return glib::Propagation::Proceed;
-            }
-            tab.close_find();
-            glib::Propagation::Stop
-        }
-    ));
-    tab.search.add_controller(keys);
-    tab.search.connect_search_mode_enabled_notify(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |bar| {
-            if !bar.is_search_mode() {
-                tab.context.set_highlight(false);
+    // Looked up once: the tag table is fixed after `install_tags` and this runs per visible line.
+    let headings: Vec<gtk::TextTag> = (1..=6)
+        .filter_map(|level| buffer.tag_table().lookup(&format!("h{level}")))
+        .collect();
+    renderer.connect_query_data(glib::clone!(
+        #[strong]
+        width,
+        move |renderer, lines, line| {
+            let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() else {
+                return;
+            };
+            let width = width.get();
+            let iter = lines.iter_at_line(line);
+            match headings.iter().any(|tag| iter.has_tag(tag)) {
+                // ponytail: blanked with spaces rather than an empty string, because the width
+                // is measured from whatever text the renderer last held and a proportional
+                // document font would then measure a heading row narrower than a numbered one.
+                true => renderer.set_text(&" ".repeat(width)),
+                false => renderer.set_text(&format!("{:>width$}", line + 1)),
             }
         }
     ));
+    buffer.connect_changed(glib::clone!(
+        #[weak]
+        renderer,
+        #[strong]
+        width,
+        move |buffer| {
+            let wanted = digits(buffer.line_count());
+            if width.replace(wanted) != wanted {
+                renderer.set_text(&" ".repeat(wanted));
+                renderer.queue_resize();
+            }
+        }
+    ));
+
+    // Disambiguated: `TextViewExt` has a `gutter` of its own.
+    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&renderer, 0);
+    renderer
 }
 
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
 /// the window it has to be told about the theme explicitly.
-fn sync_scheme(buffer: &sourceview5::Buffer) {
+pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
@@ -576,8 +481,9 @@ impl Tab {
         self.buffer.text(&s, &e, true).to_string()
     }
 
-    /// Replace the buffer with `text` without marking the tab dirty.
-    fn set_text(&self, text: &str) {
+    /// Replace the buffer with `text` without marking the tab dirty. Callers are either loading
+    /// from disk or about to write what they just put in.
+    pub fn set_text(&self, text: &str) {
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
@@ -732,6 +638,11 @@ impl Tab {
         ));
     }
 
+    /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in.
+    pub fn set_line_numbers(&self, on: bool) {
+        self.numbers.set_visible(on);
+    }
+
     /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
     /// VS Code's code map does and what keeps the document column from losing width twice.
     pub fn set_minimap(&self, on: bool) {
@@ -829,40 +740,34 @@ impl Tab {
             .cloned()
     }
 
-    // --- find and replace ----------------------------------------------------------------
+    // --- find, replace and go to line ------------------------------------------------------
+    //
+    // The widgets live in `find.rs`, one bar per window. What stays here is what belongs to one
+    // buffer: its `SearchContext`, and the caret and scroll moves that follow a match.
 
-    /// Reveal the find bar, prefilled from the selection when there is one worth searching for.
-    pub fn find(&self, replace: bool) {
-        if let Some((s, e)) = self.buffer.selection_bounds() {
-            let selected = self.buffer.text(&s, &e, false);
-            if !selected.is_empty() && !selected.contains('\n') {
-                self.find_entry.set_text(&selected);
-            }
-        }
-        self.replace_row.set_visible(replace);
-        self.context.set_highlight(true);
-        self.search.set_search_mode(true);
-        self.find_entry.grab_focus();
-        self.find_entry.select_region(0, -1);
+    /// The context the window's find bar drives, so it can watch the occurrence count.
+    pub fn search_context(&self) -> &sourceview5::SearchContext {
+        &self.context
     }
 
-    pub fn find_next(&self) {
-        self.step(true, false);
+    pub fn set_query(&self, text: &str) {
+        self.context.settings().set_search_text(Some(text));
     }
 
-    pub fn find_previous(&self) {
-        self.step(false, false);
+    pub fn set_highlight(&self, on: bool) {
+        self.context.set_highlight(on);
     }
 
-    fn close_find(&self) {
-        self.search.set_search_mode(false);
-        self.context.set_highlight(false);
-        self.view.grab_focus();
+    /// A one-line selection, which is what the find bar prefills itself from.
+    pub fn selected_query(&self) -> Option<String> {
+        let (s, e) = self.buffer.selection_bounds()?;
+        let selected = self.buffer.text(&s, &e, false).to_string();
+        (!selected.is_empty() && !selected.contains('\n')).then_some(selected)
     }
 
     /// Move to the next or previous match. `from_current` searches from the start of the current
     /// selection, so growing the query keeps the match the user is looking at.
-    fn step(&self, forward: bool, from_current: bool) {
+    pub fn step(&self, forward: bool, from_current: bool) {
         let insert = self.buffer.iter_at_mark(&self.buffer.get_insert());
         let (start, end) = self.buffer.selection_bounds().unwrap_or((insert, insert));
         let found = match (forward, from_current) {
@@ -875,44 +780,39 @@ impl Tab {
             self.view
                 .scroll_to_mark(&self.buffer.get_insert(), 0.1, false, 0.0, 0.5);
         }
-        self.update_matches();
     }
 
-    fn replace_current(&self) {
+    pub fn replace_current(&self, with: &str) {
         if let Some((mut s, mut e)) = self.buffer.selection_bounds() {
             // Fails when the selection is not itself a match, which is the "nothing to do" case.
-            let _ = self
-                .context
-                .replace(&mut s, &mut e, &self.replace_entry.text());
+            let _ = self.context.replace(&mut s, &mut e, with);
         }
         self.step(true, false);
     }
 
     /// sourceview5 0.11 exposes no `replace_all` binding, so this walks the matches. Each pass
     /// resumes after the text just inserted, so a replacement containing the query terminates.
-    fn replace_all(&self) {
-        let with = self.replace_entry.text();
+    pub fn replace_all(&self, with: &str) {
         let mut from = self.buffer.start_iter();
         self.buffer.begin_user_action();
         while let Some((mut s, mut e, _)) = self.context.forward(&from) {
-            if self.context.replace(&mut s, &mut e, &with).is_err() {
+            if self.context.replace(&mut s, &mut e, with).is_err() {
                 break;
             }
             from = e;
         }
         self.buffer.end_user_action();
-        self.update_matches();
     }
 
     /// "n of m", the way every find bar says it. Blank while GtkSourceView is still counting.
-    fn update_matches(&self) {
+    pub fn matches_label(&self) -> String {
         let count = self.context.occurrences_count();
         let blank = self
             .context
             .settings()
             .search_text()
             .is_none_or(|t| t.is_empty());
-        let label = match (blank, count) {
+        match (blank, count) {
             (true, _) | (_, ..0) => String::new(),
             (_, 0) => "No results".to_string(),
             _ => match self
@@ -923,11 +823,42 @@ impl Tab {
                 Some(position) if position > 0 => format!("{position} of {count}"),
                 _ => format!("{count} matches"),
             },
-        };
-        self.matches.set_text(&label);
+        }
     }
 
-    // --- callbacks -----------------------------------------------------------------------
+    pub fn line_count(&self) -> i32 {
+        self.buffer.line_count()
+    }
+
+    /// Put the caret on a 1-based line and column, both clamped to what the note has.
+    pub fn goto_line(&self, line: i32, column: i32) {
+        let iter = self.line_iter(line, column);
+        self.buffer.place_cursor(&iter);
+        self.view
+            .scroll_to_mark(&self.buffer.get_insert(), 0.0, true, 0.0, 0.25);
+        self.view.grab_focus();
+    }
+
+    /// Scroll a line into view without moving the caret: what the go-to entry previews while the
+    /// number is still being typed.
+    pub fn show_line(&self, line: i32) {
+        let mut iter = self.line_iter(line, 1);
+        self.view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.25);
+    }
+
+    fn line_iter(&self, line: i32, column: i32) -> gtk::TextIter {
+        let line = (line - 1).clamp(0, (self.buffer.line_count() - 1).max(0));
+        let mut iter = self
+            .buffer
+            .iter_at_line(line)
+            .unwrap_or_else(|| self.buffer.end_iter());
+        let mut end = iter;
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        iter.set_line_offset((column - 1).clamp(0, end.line_offset()));
+        iter
+    }
 
     /// Called 1 s after the last edit and when focus leaves the view. Never fires while
     /// `disk_changed` is set.
@@ -1100,6 +1031,16 @@ mod tests {
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+    }
+
+    /// The gutter is as wide as the longest number it will ever print, and never zero wide.
+    #[test]
+    fn gutter_width_follows_the_line_count() {
+        assert_eq!(digits(0), 1);
+        assert_eq!(digits(1), 1);
+        assert_eq!(digits(9), 1);
+        assert_eq!(digits(10), 2);
+        assert_eq!(digits(1000), 4);
     }
 
     #[test]

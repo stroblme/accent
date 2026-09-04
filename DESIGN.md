@@ -24,10 +24,11 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | View modes | Editor / Split / Preview; Split is a `GtkPaned` of the two above |
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
+| Find bar | one `GtkSearchBar` per window, a `GtkStack` of the find/replace row and the go-to-line row. It lives in the editor column's content rather than among the toolbar's top bars, because presentation mode unreveals those and hides the tab stack, and find has to survive both |
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
 | Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme and a destructive `AdwButtonRow` for Restore Defaults |
 | Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
-| Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
+| Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it. The Mine pane is editable, so a conflict can be merged by hand before a side is kept; the alignment fillers are dropped again unless they were typed into |
 | Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
 | Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks. `.compact` inside the sidebar, where the full size dwarfs a 200 to 420 px column |
 | Feedback | `AdwToast` / `AdwBanner` / `AdwAlertDialog`, see States |
@@ -40,6 +41,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 - Prose uses the GNOME **document** font from `AdwStyleManager::document_font_name()`, applied to `textview.accent-doc` in `main.rs::install_document_font` and re-applied when the setting changes. Notes are prose, not code. libadwaita 1.7 also exposes `--document-font-family` / `--document-font-size` as CSS variables, which is the upgrade path away from the hand-built provider.
 - Monospace appears only inside the `code`, `codeblock`, `math`, `html` and `frontmatter` text tags.
 - Heading scale in `highlight.rs`, relative to the document font: h1 1.6, h2 1.4, h3 1.2, h4 1.1; h5 and h6 are bold at 1.0. `strong` and list markers are weight 700, `em` is italic.
+- Line numbers are optional and off by default (`Config::line_numbers`, a switch in preferences). They are drawn by a `GtkSourceGutterRenderer` outside the 48 px page gutter, so turning them on shifts the page right rather than crowding it, and a heading line is left blank: its `#` markers already occupy that gutter, and a number beside them puts two things in one place.
 - An ATX heading's `#` markers hang in the left gutter so its text lands on the body column, as in Apostrophe. `highlight.rs::hang` measures each level's markers in the view's own font at that level's scale and weight, then splits the width between the tag's `left-margin` and a negative `indent`; Pango reads that as a hanging indent, so wrapped heading lines stay on the body column too. A setext heading has no markers to hang. The markers of h5 and h6 are wider than the 48 px gutter and clamp at the window edge.
 - Markup is styled as it is typed, not after a pause, for notes below 16 KB. Above that a full pass outlasts a frame, so it waits for the 150 ms debounce; the cost is dominated by re-tagging the buffer rather than by parsing it.
 - Line length is set by width, not by counting characters. The editor wraps its view in an `AdwClamp`, `maximum-size` 800 and `tightening-threshold` 600, and the preview caps its column at `56ch` (measured at 71 characters in Adwaita Sans, 62 in Cantarell). Measure rather than assume: `ch` is the width of a zero and much wider than an average letter.
@@ -80,7 +82,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Group | Bindings |
 |---|---|
 | Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Quit `Ctrl+Q` |
-| Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Replace in notes `Ctrl+Shift+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
+| Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Replace in notes `Ctrl+Shift+H`, Find next / previous `F3` / `Shift+F3`, Go to line `Ctrl+G` |
 | Editing | Duplicate line `Ctrl+D`, Delete line `Ctrl+L`, Scroll viewport `Ctrl+Up` / `Ctrl+Down`, Add caret above / below `Shift+Alt+Up` / `Shift+Alt+Down` |
 | Zoom | Zoom in `Ctrl++` (also `Ctrl+=` and the keypad), Zoom out `Ctrl+-`, Reset `Ctrl+0`. The document only: the chrome keeps the system interface font, and the preview's WebView is zoomed with the editor so presentation mode follows |
 | Panes | Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, Backlinks `Ctrl+Shift+B` |

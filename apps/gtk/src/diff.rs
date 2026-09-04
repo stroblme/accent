@@ -144,6 +144,9 @@ fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA {
 /// Re-derive the row backgrounds from the resolved theme foreground. Call once the view is mapped
 /// and again on every `notify::dark`, exactly as `highlight::restyle` does for the editor.
 fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+    // GtkSourceView paints from its own style scheme, so the panes follow the four themes the
+    // same way the editor does.
+    crate::editor::sync_scheme(buffer);
     let fg = view.color();
     let table = buffer.tag_table();
     let set = |name: &str, colour: gdk::RGBA| {
@@ -202,12 +205,19 @@ struct Pane {
     view: sourceview5::View,
     buffer: sourceview5::Buffer,
     scroller: gtk::ScrolledWindow,
+    /// One left-gravity mark per alignment filler, so [`Editable::edited`] can tell a padding
+    /// row from a line the user typed into.
+    fillers: Vec<gtk::TextMark>,
 }
 
-fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
+/// `editable` is the Mine pane: a conflict is often resolved by taking a line from each side, and
+/// that is one edit here rather than a resolve followed by a hunt through the note.
+fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side, editable: bool) -> Pane {
     let buffer = sourceview5::Buffer::new(None);
     install_tags(&buffer);
     buffer.set_text(&column_text(rows));
+    crate::editor::sync_scheme(&buffer);
+    let mut fillers = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         let (name, changed) = match row {
             None => (TAG_FILLER, None),
@@ -225,6 +235,11 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
             .iter_at_line(i as i32 + 1)
             .unwrap_or_else(|| buffer.end_iter());
         buffer.apply_tag_by_name(name, &start, &end);
+        if row.is_none() {
+            // Left gravity: text typed on the row lands after the mark, so the row stops being
+            // empty and stops counting as padding.
+            fillers.push(buffer.create_mark(None, &start, true));
+        }
 
         // The diff's ranges are byte offsets into the line; the buffer counts characters.
         if let Some((emph_tag, line)) = changed {
@@ -239,11 +254,17 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
         }
     }
 
+    // Nothing above counts as the user's work, so the dialog opens with a clean buffer.
+    buffer.set_modified(false);
+
     let view = sourceview5::View::new();
     view.set_buffer(Some(&buffer));
-    view.set_editable(false);
-    view.set_cursor_visible(false);
+    view.set_editable(editable);
+    view.set_cursor_visible(editable);
     view.set_monospace(true);
+    // The same class the editor carries, so both panes take the document font and the theme's
+    // view colours rather than the style scheme's own (DESIGN.md, Colour).
+    view.add_css_class("accent-doc");
     // Off on purpose: `install_line_numbers` prints the source numbers instead.
     view.set_show_line_numbers(false);
     view.set_wrap_mode(gtk::WrapMode::None);
@@ -276,6 +297,48 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
         view,
         buffer,
         scroller,
+        fillers,
+    }
+}
+
+/// The Mine pane's buffer, read back once the user has picked a side.
+pub struct Editable {
+    buffer: sourceview5::Buffer,
+    fillers: Vec<gtk::TextMark>,
+    /// Whether the text this pane was built from ended in a newline. `column_text` joins rows,
+    /// so the buffer never carries the final one and it has to be put back.
+    trailing_newline: bool,
+}
+
+impl Editable {
+    /// What the user typed, alignment fillers removed, or `None` if they typed nothing.
+    ///
+    /// A filler row is dropped only while it is still empty: one that was typed into is a line
+    /// of the resolved note like any other.
+    pub fn edited(&self) -> Option<String> {
+        if !self.buffer.is_modified() {
+            return None;
+        }
+        let padding: Vec<i32> = self
+            .fillers
+            .iter()
+            .map(|mark| self.buffer.iter_at_mark(mark))
+            .filter(|iter| iter.starts_line() && iter.ends_line())
+            .map(|iter| iter.line())
+            .collect();
+        let (start, end) = self.buffer.bounds();
+        let text = self.buffer.text(&start, &end, true);
+        let mut kept: String = text
+            .lines()
+            .enumerate()
+            .filter(|(n, _)| !padding.contains(&(*n as i32)))
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.trailing_newline {
+            kept.push('\n');
+        }
+        Some(kept)
     }
 }
 
@@ -285,12 +348,21 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
 /// straight from `diff::lines`. A pair too dissimilar for `similar` to refine gets no emphasis and
 /// falls back to the row colour alone, which is still what a conflict resolver needs; character
 /// granularity is the upgrade, and it would want `InlineChangeMode::Graphemes`.
-pub fn view(left: (&str, &str), right: (&str, &str), lines: &[DiffLine]) -> gtk::Widget {
+pub fn view(
+    left: (&str, &str),
+    right: (&str, &str),
+    lines: &[DiffLine],
+) -> (gtk::Widget, Editable) {
     // The texts are in the signature so a caller that already holds them can hand them over; the
     // panes are built from `lines`, which carries every line of both sides already.
     let (left_rows, right_rows) = align(lines);
-    let old = pane(left.0, &left_rows, Side::Old);
-    let new = pane(right.0, &right_rows, Side::New);
+    let old = pane(left.0, &left_rows, Side::Old, true);
+    let new = pane(right.0, &right_rows, Side::New, false);
+    let edits = Editable {
+        buffer: old.buffer.clone(),
+        fillers: old.fillers.clone(),
+        trailing_newline: left.1.ends_with('\n'),
+    };
     // Vertical is shared, so two views of the same rows cannot drift apart. Horizontal stays per
     // pane: a shared adjustment takes its extent from whichever pane has the shorter longest line,
     // and then the other one cannot be scrolled to the end of its own text.
@@ -353,13 +425,17 @@ pub fn view(left: (&str, &str), right: (&str, &str), lines: &[DiffLine]) -> gtk:
             style.disconnect(id);
         }
     });
-    paned.upcast()
+    (paned.upcast(), edits)
 }
 
 /// What the user decided about a sync conflict.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Choice {
-    KeepMine,
+    /// The buffer wins. `edited` carries the Mine pane's text when the user changed it in the
+    /// dialog, alignment fillers already removed.
+    KeepMine {
+        edited: Option<String>,
+    },
     KeepTheirs,
 }
 
@@ -380,7 +456,10 @@ pub fn present_conflict(
     let lines = accent_core::diff::lines(original.1, conflict.1);
     let mine = format!("Mine — {}", original.0);
     let theirs = format!("Theirs — {}", conflict.0);
-    let diff = view((&mine, original.1), (&theirs, conflict.1), &lines);
+    // ponytail: the Mine pane is editable and its diff tags are not recomputed as it is typed
+    // into, so the green and red rows go stale. They still say what the two texts looked like
+    // when the dialog opened, which is what the reader is comparing against.
+    let (diff, edits) = view((&mine, original.1), (&theirs, conflict.1), &lines);
 
     let header = adw::HeaderBar::new();
     let note = original.0.rsplit('/').next().unwrap_or(original.0);
@@ -414,14 +493,19 @@ pub fn present_conflict(
         .build();
 
     let on_choice = Rc::new(on_choice);
-    for (button, choice) in [
-        (&keep_theirs, Choice::KeepTheirs),
-        (&keep_mine, Choice::KeepMine),
-    ] {
+    let edits = Rc::new(edits);
+    for (button, mine) in [(&keep_theirs, false), (&keep_mine, true)] {
         // Weak dialog: the button is inside it, so a strong capture here is the cycle that kept
         // every resolved conflict, both texts included, alive until the process exited.
-        let (dialog, on_choice) = (dialog.downgrade(), on_choice.clone());
+        let (dialog, on_choice, edits) = (dialog.downgrade(), on_choice.clone(), edits.clone());
         button.connect_clicked(move |_| {
+            // Read before the close, so the answer never depends on when the widgets go.
+            let choice = match mine {
+                true => Choice::KeepMine {
+                    edited: edits.edited(),
+                },
+                false => Choice::KeepTheirs,
+            };
             if let Some(dialog) = dialog.upgrade() {
                 dialog.close();
             }
