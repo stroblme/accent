@@ -1085,6 +1085,26 @@ mod tests {
         );
     }
 
+    /// A linked-in folder is watched through its vault path — `inotify_add_watch` resolves the
+    /// link — which is what keeps "symlinked folders handled" true now that the watch set is a
+    /// list of directories rather than a recursive watch plus the resolved targets.
+    #[test]
+    fn an_edit_inside_a_symlinked_directory_reaches_the_ui() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("Ext.md"), "one").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+
+        std::fs::write(outside.path().join("Ext.md"), "two").unwrap();
+
+        assert!(
+            f.wait(|e| matches!(e, Event::FileChanged(p) if p == "linked/Ext.md"))
+                .is_some(),
+            "an edit in a linked-in folder must reach the UI"
+        );
+    }
+
     #[test]
     fn own_save_updates_the_index_without_a_file_changed_event() {
         let f = Fixture::open(VaultConfig::default());
