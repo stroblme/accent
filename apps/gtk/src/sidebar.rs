@@ -252,13 +252,21 @@ fn path_list(model: &gtk::StringList, on_open: Rc<dyn Fn(&str)>) -> gtk::ListVie
     view
 }
 
+/// The shared empty state of every pane. A full-size `AdwStatusPage` is drawn for a window, not
+/// for a 200 px column: `.compact` takes the icon from 128 to 96 px, drops the title a step and
+/// halves the margins from 36 to 24.
+///
+/// ponytail: libadwaita has no smaller variant than `.compact`, so if it still crowds a narrow
+/// sidebar the next dial is an app CSS rule shrinking the icon inside `statuspage.compact`.
 fn status_page(icon: &str, title: &str, description: &str) -> adw::StatusPage {
-    adw::StatusPage::builder()
+    let page = adw::StatusPage::builder()
         .icon_name(icon)
         .title(title)
         .description(description)
         .vexpand(true)
-        .build()
+        .build();
+    page.add_css_class("compact");
+    page
 }
 
 fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
