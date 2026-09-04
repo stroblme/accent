@@ -186,9 +186,11 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     }
 }
 
-/// Re-analyse the whole buffer and re-apply our tags. ~20 ms per MB, so it runs on the main thread
-/// behind a debounce rather than on a worker (the analysis needs the text as one contiguous copy).
-pub fn apply(buffer: &sourceview5::Buffer) {
+/// Re-analyse the whole buffer, re-apply our tags, and hand the analysis back so a caller that
+/// also wants the links parses the note once instead of twice. Roughly 0.08 ms on a 2 KB note and
+/// 6 ms on half a megabyte, which is what lets short notes restyle on the keystroke; the analysis
+/// needs the text as one contiguous copy, so it stays on the main thread either way.
+pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
     for name in TAG_NAMES {
@@ -206,6 +208,7 @@ pub fn apply(buffer: &sourceview5::Buffer) {
             buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
         }
     }
+    analysis
 }
 
 /// Whether the heading starting at byte `start` writes its own `#` markers. A setext heading is

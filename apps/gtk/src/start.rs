@@ -24,6 +24,8 @@ pub fn present(
     config: Rc<RefCell<Config>>,
     on_open: impl Fn(PathBuf) + 'static,
 ) -> adw::ApplicationWindow {
+    // The start screen is a window like any other, so it follows the same theme preference.
+    crate::theme::apply(config.borrow().theme);
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Accent")

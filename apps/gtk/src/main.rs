@@ -16,10 +16,12 @@ mod preview;
 mod settings;
 mod sidebar;
 mod start;
+mod theme;
 mod tree;
 
 use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
-use accent_core::markdown::{Link, LinkKind};
+use accent_core::index::Phase;
+use accent_core::markdown::{self, Link, LinkKind};
 use adw::prelude::*;
 use editor::{Alert, Tab};
 use gtk::{gdk, gio, glib, pango};
@@ -45,6 +47,9 @@ const SESSION: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(120);
 /// One press of Zoom In or Zoom Out, a tenth of the document font.
 const ZOOM_STEP: f64 = 0.1;
+/// How often the tree may be re-read while the first index is still running, in microseconds:
+/// often enough that a cold start fills in as it goes, rarely enough to stay off the main loop.
+const TREE_REPAINT: i64 = 250_000;
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
@@ -93,6 +98,10 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
+    ("win.copy-relative-path", "Copy Relative Path", &[]),
+    ("win.copy-absolute-path", "Copy Absolute Path", &[]),
+    ("win.show-in-files", "Show in Files", &[]),
+    ("win.reveal-in-sidebar", "Reveal in Sidebar", &[]),
     ("win.follow-link", "Follow Link", &["<Control>Return"]),
     ("win.rename", "Rename", &["F2"]),
     ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
@@ -153,7 +162,13 @@ impl Shell {
     ) -> glib::ExitCode {
         let args = command_line.arguments();
         let Some(arg) = args.get(1) else {
-            self.start_screen(gtk_app);
+            // Launched with no folder: pick up the vault this window was last opened on, and only
+            // fall back to the start screen when there is none or it has gone away.
+            let last = self.config.borrow().recent_vaults.first().cloned();
+            match last.filter(|path| path.is_dir()) {
+                Some(root) => self.open_vault(gtk_app, root, None),
+                None => self.start_screen(gtk_app),
+            }
             return glib::ExitCode::SUCCESS;
         };
         let path = PathBuf::from(arg);
@@ -275,6 +290,8 @@ struct App {
     status: gtk::Label,
     /// A `Vec`, not a map: a rename retargets an open tab, so `rel` is not a stable key.
     open: RefCell<Vec<Rc<Tab>>>,
+    /// View-only image tabs, which have no buffer, no etag and no place in the session.
+    images: RefCell<Vec<(String, adw::TabPage)>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     sidebar: OnceCell<sidebar::Sidebar>,
@@ -306,6 +323,12 @@ struct App {
     /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
     /// rather than the status label, which is also hidden before the first `Progress` arrives.
     reconciled: Cell<bool>,
+    /// The tab `setup-menu` named, so the tab context menu acts on the page that was
+    /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
+    /// what makes the same actions work from the palette.
+    menu_page: RefCell<Option<adw::TabPage>>,
+    /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
+    tree_painted: Cell<i64>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
 }
@@ -387,9 +410,46 @@ impl App {
             Ok(tab) => {
                 tab.set_minimap(minimap);
                 self.adopt(tab);
+                self.sync_conflict_banner(&rel);
             }
             Err(e) => self.toast(&format!("Cannot open {rel}: {e}")),
         }
+    }
+
+    /// An image from the tree, in a tab that only looks at it.
+    ///
+    /// ponytail: the file goes straight into a `GtkPicture` at full resolution, the tab is not
+    /// retargeted by a rename, it is left out of the session, and in split view the preview keeps
+    /// showing the last note. All three want a real tab type, which is what Phase 2's PDF viewer
+    /// has to build anyway.
+    fn open_image(&self, rel: &str) {
+        let Some(rel) = self.safe_rel(rel) else {
+            return self.toast(&format!("{rel} is outside this vault"));
+        };
+        // Cloned out of the borrow: selecting a page runs the handlers that read this list.
+        let open = self
+            .images
+            .borrow()
+            .iter()
+            .find(|(r, _)| *r == rel)
+            .map(|(_, page)| page.clone());
+        if let Some(page) = open {
+            return self.tabs.set_selected_page(&page);
+        }
+        let picture = gtk::Picture::for_filename(self.vault.root().join(&rel));
+        picture.set_content_fit(gtk::ContentFit::ScaleDown);
+        picture.set_can_shrink(true);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .child(&picture)
+            .build();
+        let page = self.tabs.append(&scroller);
+        page.set_title(rel.rsplit('/').next().unwrap_or(&rel));
+        page.set_tooltip(&fileops::display_path(self.vault.root(), &rel));
+        page.set_icon(Some(&gio::ThemedIcon::new("image-x-generic-symbolic")));
+        self.images.borrow_mut().push((rel, page.clone()));
+        self.tabs.set_selected_page(&page);
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
@@ -517,7 +577,7 @@ impl App {
     ) -> Result<(), SaveError> {
         let etag = self.vault.save(&tab.rel(), text, expected)?;
         tab.mark_clean(etag);
-        tab.hide_banner();
+        tab.clear_disk_alert();
         Ok(())
     }
 
@@ -628,6 +688,7 @@ impl App {
     /// `close_page_finish` does not come back through the `close-page` handler.
     fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
         self.open.borrow_mut().retain(|t| &t.page != page);
+        self.images.borrow_mut().retain(|(_, p)| p != page);
         self.sync_active();
         self.save_session_soon();
     }
@@ -643,6 +704,18 @@ impl App {
                 Ok(()) => self.toast("Saved"),
                 Err(e) => self.toast(&format!("Save failed: {e}")),
             },
+            // Looked up again rather than remembered: the copy may have been resolved from
+            // another window, or by Syncthing, since the banner went up.
+            Some(Alert::Conflict) => {
+                let rel = tab.rel();
+                match self.vault.conflicts_of(&rel).unwrap_or_default().first() {
+                    Some(conflict) => self.resolve_conflict(&rel, conflict),
+                    None => {
+                        tab.hide_banner();
+                        self.toast("The conflict copy is gone");
+                    }
+                }
+            }
             None => tab.hide_banner(),
         }
     }
@@ -686,6 +759,19 @@ impl App {
                 self.status
                     .set_label(&format!("Indexing… {}/{} files", p.done, p.total));
                 self.status.set_visible(true);
+                // The indexer commits rows in batches and the walk hands it files depth-first,
+                // so the root level is queryable long before the reconcile ends. Without this the
+                // tree of a cold vault stays empty for the whole two seconds. Throttled, and
+                // deliberately not marking the tags pane dirty: that is a whole-pane rebuild and
+                // it can wait for `Reconciled`.
+                let now = glib::monotonic_time();
+                if p.phase == Phase::Index && now - self.tree_painted.get() >= TREE_REPAINT {
+                    self.tree_painted.set(now);
+                    if let Some(tree) = self.tree.get() {
+                        tree.refresh();
+                        tracing::debug!(t_ms = ms(), rows = tree.model().n_items(), "tree painted");
+                    }
+                }
             }
             Event::Reconciled(stats) => {
                 tracing::debug!(
@@ -703,10 +789,17 @@ impl App {
                     sidebar.mark_tags_dirty();
                 }
                 self.sync_active();
-                self.toast(&format!(
+                // Conflicts on notes nobody has open have no banner to appear on, so the toast
+                // that is already there says how many are waiting in the vault.
+                let mut message = format!(
                     "Indexed {} files ({} new, {} updated)",
                     stats.scanned, stats.added, stats.updated
-                ));
+                );
+                match self.vault.conflicts().unwrap_or_default().len() {
+                    0 => {}
+                    n => message.push_str(&format!(", {n} with sync conflicts")),
+                }
+                self.toast(&message);
             }
             Event::DirsChanged(dirs) => {
                 if let Some(tree) = self.tree.get() {
@@ -726,6 +819,11 @@ impl App {
                 }
             }
             Event::FileRemoved(rel) => {
+                // A conflict copy is never a tab of its own; what its removal changes is the
+                // banner on the note it was a copy of.
+                if let Some(original) = accent_api::conflict_original_rel(&rel) {
+                    self.sync_conflict_banner(&original);
+                }
                 let Some(tab) = self.tab_for(&rel) else {
                     return;
                 };
@@ -748,24 +846,26 @@ impl App {
                 }
                 self.sync_active();
             }
-            Event::Conflict { original, conflict } => self.conflict(original, conflict),
+            Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
             Event::Error(message) => self.toast(&message),
         }
     }
 
-    /// DESIGN.md: a conflict is a state that needs a decision, and the decision can lose data, so
-    /// it is a high-priority toast that opens a dialog rather than a dialog thrown in the face.
-    fn conflict(self: &Rc<Self>, original: String, conflict: String) {
-        let name = original.rsplit('/').next().unwrap_or(&original);
-        let toast = adw::Toast::new(&format!("Sync conflict in {name}"));
-        toast.set_priority(adw::ToastPriority::High);
-        toast.set_button_label(Some("Resolve"));
-        toast.connect_button_clicked(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move |_| app.resolve_conflict(&original, &conflict)
-        ));
-        self.toasts.add_toast(toast);
+    /// Raise or drop the conflict banner on the tab showing `rel`, from what is on disk now.
+    ///
+    /// DESIGN.md, States: a conflict copy is a state that persists and needs a decision, so it is
+    /// a banner on the note it concerns rather than a toast that scrolls past. It displaces a
+    /// "changed on disk" banner if one is up, which loses no work: `disk_changed` still holds
+    /// autosave back and Ctrl+S still raises the overwrite dialog.
+    fn sync_conflict_banner(&self, rel: &str) {
+        let Some(tab) = self.tab_for(rel) else {
+            return;
+        };
+        match self.vault.conflicts_of(rel).unwrap_or_default().is_empty() {
+            false => tab.show_alert(Alert::Conflict),
+            true if tab.alert() == Some(Alert::Conflict) => tab.hide_banner(),
+            true => {}
+        }
     }
 
     fn resolve_conflict(self: &Rc<Self>, original: &str, conflict: &str) {
@@ -790,6 +890,7 @@ impl App {
                     }
                 }
                 fileops::trash(app.ops(), &conflict);
+                app.sync_conflict_banner(&original);
             }
         };
         diff::present_conflict(
@@ -1055,6 +1156,22 @@ impl App {
             "zoom-out" => self.set_zoom(self.zoom.get() - ZOOM_STEP),
             "zoom-reset" => self.set_zoom(1.0),
             "minimap" => self.toggle_minimap(),
+            "copy-relative-path" => {
+                if let Some(rel) = self.menu_rel() {
+                    fileops::copy_relative_path(self.ops(), &rel);
+                }
+            }
+            "copy-absolute-path" => {
+                if let Some(rel) = self.menu_rel() {
+                    fileops::copy_absolute_path(self.ops(), &rel);
+                }
+            }
+            "show-in-files" => {
+                if let Some(rel) = self.menu_rel() {
+                    fileops::show_in_files(self.ops(), &rel);
+                }
+            }
+            "reveal-in-sidebar" => self.reveal_in_sidebar(),
             "sidebar" => self
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
@@ -1145,6 +1262,38 @@ impl App {
         }
     }
 
+    /// The vault path the tab context menu acts on: the page that was right-clicked, or the
+    /// active tab when the same action is fired from the palette.
+    fn menu_rel(&self) -> Option<String> {
+        let Some(page) = self.menu_page.borrow().clone() else {
+            return self.active().map(|tab| tab.rel());
+        };
+        let note = self
+            .open
+            .borrow()
+            .iter()
+            .find(|t| t.page == page)
+            .map(|t| t.rel());
+        note.or_else(|| {
+            self.images
+                .borrow()
+                .iter()
+                .find(|(_, p)| *p == page)
+                .map(|(rel, _)| rel.clone())
+        })
+    }
+
+    /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
+    fn reveal_in_sidebar(&self) {
+        let Some(rel) = self.menu_rel() else { return };
+        self.show_pane("files");
+        if let Some(tree) = self.tree.get()
+            && !tree.reveal(&rel)
+        {
+            self.toast(&format!("{rel} is not in the sidebar"));
+        }
+    }
+
     fn selected_row(&self) -> Option<(char, String)> {
         self.tree.get()?.selected()
     }
@@ -1224,10 +1373,17 @@ impl App {
                 self,
                 move |config: &Config| {
                     app.vault.set_config(config.vault(&root));
+                    // Switching to or away from Solarized does not change the system's dark
+                    // state, so the notify handler that usually restyles never fires here.
+                    theme::apply(config.theme);
                     for tab in app.open_tabs() {
                         tab.set_font(config.editor_font.as_deref(), app.zoom.get());
                         tab.set_spellcheck(config.spellcheck);
                         tab.set_minimap(config.minimap);
+                        tab.restyle();
+                    }
+                    if let Some(preview) = app.preview.borrow().as_ref() {
+                        preview.restyle();
                     }
                 }
             ),
@@ -1339,6 +1495,7 @@ fn build_window(
 ) -> Option<adw::ApplicationWindow> {
     install_document_font();
     install_chrome_css();
+    theme::apply(shell.config.borrow().theme);
 
     let vault_config = shell.config.borrow().vault(&root);
     let (vault, events) = match Vault::open(&root, vault_config) {
@@ -1363,6 +1520,7 @@ fn build_window(
         .unwrap_or_else(|| root.display().to_string());
     let title = adw::WindowTitle::new(&vault_name, "");
     let tabs = adw::TabView::new();
+    tabs.set_menu_model(Some(&tab_menu()));
     let toasts = adw::ToastOverlay::new();
     let status = gtk::Label::builder().label("Indexing…").build();
     status.add_css_class("dim-label");
@@ -1497,6 +1655,7 @@ fn build_window(
         toasts,
         status,
         open: RefCell::new(Vec::new()),
+        images: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         ops: OnceCell::new(),
@@ -1516,6 +1675,8 @@ fn build_window(
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
+        menu_page: RefCell::new(None),
+        tree_painted: Cell::new(0),
         render: RefCell::new(None),
         session: RefCell::new(None),
     });
@@ -1570,7 +1731,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
             app,
             move |kind, rel: &str| match kind {
                 'm' => app.open_note(rel),
-                _ => app.toast("Only markdown notes open in this phase"),
+                _ if markdown::is_image(rel) => app.open_image(rel),
+                _ => app.toast("Only markdown notes and images open in this phase"),
             }
         ),
     );
@@ -1700,6 +1862,14 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             glib::Propagation::Proceed
         }
     ));
+    // `setup-menu` fires with the page just before the popup and with `None` from an idle after
+    // it hides. A model button activates its action before the popdown, so the page is still here
+    // when the action runs, and afterwards `menu_rel` falls back to the active tab.
+    app.tabs.connect_setup_menu(glib::clone!(
+        #[weak]
+        app,
+        move |_, page| *app.menu_page.borrow_mut() = page.cloned()
+    ));
     app.tabs.connect_selected_page_notify(glib::clone!(
         #[weak]
         app,
@@ -1811,6 +1981,9 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                 #[weak]
                 app,
                 move |_, _| {
+                    // Solarized has one palette per system state, so which half is installed is
+                    // decided here, before anything reads the resulting colours back out.
+                    theme::refresh();
                     for tab in app.open_tabs() {
                         tab.restyle();
                     }
@@ -2002,6 +2175,26 @@ fn menu_button() -> gtk::MenuButton {
         .build()
 }
 
+/// The tab's own context menu: what can be done with the file behind a tab without touching it.
+/// Reveal sits in a section of its own because it moves the sidebar rather than the clipboard.
+fn tab_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    for action in [
+        "win.copy-relative-path",
+        "win.copy-absolute-path",
+        "win.show-in-files",
+    ] {
+        menu.append(Some(label_of(action)), Some(action));
+    }
+    let reveal = gio::Menu::new();
+    reveal.append(
+        Some(label_of("win.reveal-in-sidebar")),
+        Some("win.reveal-in-sidebar"),
+    );
+    menu.append_section(None, &reveal);
+    menu
+}
+
 /// One button rather than a two-item group: there are only two states, so the pressed look plus
 /// an icon that names the current one says everything a second toggle would have.
 fn mode_switcher() -> gtk::ToggleButton {
@@ -2109,14 +2302,6 @@ fn ms_since(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
 }
 
-fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
-    (0..model.n_items()).find_map(|i| {
-        let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
-        let (_, r) = row.item().as_ref().and_then(tree::decode)?;
-        (r == rel).then_some(row)
-    })
-}
-
 fn bench_expand(app: &Rc<App>, rel: &str) {
     let Some(tree) = app.tree.get() else { return };
     let model = tree.model();
@@ -2126,7 +2311,7 @@ fn bench_expand(app: &Rc<App>, rel: &str) {
             path.push('/');
         }
         path.push_str(seg);
-        let Some(row) = find_row(model, &path) else {
+        let Some(row) = tree::find_row(model, &path) else {
             println!("bench expand {path} NOT-FOUND");
             return;
         };
