@@ -71,6 +71,7 @@ pub struct Sidebar {
     backlinks: gtk::StringList,
     backlinks_stack: gtk::Stack,
     tags_dirty: Rc<Cell<bool>>,
+    tags_divider: gtk::Paned,
     select_tag: Rc<dyn Fn(&str)>,
 }
 
@@ -150,8 +151,20 @@ impl Sidebar {
             backlinks,
             backlinks_stack,
             tags_dirty: tags.dirty,
+            tags_divider: tags.divider,
             select_tag: tags.select,
         }
+    }
+
+    /// Put `divider` back to its default if it is one of the sidebar's own, reporting whether it
+    /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
+    /// pane lives next to the pane rather than in the shell.
+    pub fn reset_divider(&self, divider: &gtk::Paned) -> bool {
+        if divider != &self.tags_divider {
+            return false;
+        }
+        divider.set_position(divider.height() * TAGS_SHARE.0 / TAGS_SHARE.1);
+        true
     }
 
     /// The pane switcher, the title widget of the sidebar header so that it shares the header band
@@ -850,8 +863,13 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
 
 // --- tags pane ----------------------------------------------------------------------------------
 
+/// The tag list gets two thirds of the pane, the files under the selected tag the lower third.
+const TAGS_SHARE: (i32, i32) = (2, 3);
+
 struct TagsPane {
     widget: gtk::Widget,
+    /// Kept so a double-click on it can be reset to [`TAGS_SHARE`].
+    divider: gtk::Paned,
     /// Set by `mark_tags_dirty`, cleared by the refill the next time the pane is shown.
     dirty: Rc<Cell<bool>>,
     select: Rc<dyn Fn(&str)>,
@@ -860,8 +878,6 @@ struct TagsPane {
 
 fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     let tags = gio::ListStore::new::<glib::BoxedAnyObject>();
-    /// The tag list gets two thirds of the pane, the files under the selected tag the lower third.
-    const TAGS_SHARE: (i32, i32) = (2, 3);
 
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
@@ -1028,6 +1044,7 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     column.append(&paned);
 
     TagsPane {
+        divider: paned.clone(),
         widget: column.upcast(),
         // The first time the pane is shown there is nothing in it yet.
         dirty: Rc::new(Cell::new(true)),
