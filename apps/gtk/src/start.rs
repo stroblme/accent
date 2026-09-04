@@ -81,7 +81,7 @@ pub fn present(
     }
 
     let status = adw::StatusPage::builder()
-        .icon_name("io.github.stroblme.Accent")
+        .icon_name(crate::APP_ID)
         .title("Accent")
         .description("Open a folder of markdown notes to start writing.")
         .child(&column)

@@ -31,7 +31,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fat
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate flatpak cargo-sources help
+        clippy doc run smoke vault validate icons flatpak cargo-sources help
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -124,6 +124,10 @@ uninstall:
 validate:
 	desktop-file-validate data/$(APP_ID).desktop
 	appstreamcli validate --no-net data/$(APP_ID).metainfo.xml
+
+## icons: regenerate the installed icons from data/icons/logo.svg (needs inkscape)
+icons:
+	python3 build-aux/derive-icons.py
 
 ## cargo-sources: regenerate the Flatpak vendored-source list (needed whenever Cargo.lock changes)
 cargo-sources:
