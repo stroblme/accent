@@ -12,6 +12,8 @@ use std::rc::Rc;
 
 const TAG_ADDED: &str = "added";
 const TAG_REMOVED: &str = "removed";
+const TAG_ADDED_EMPH: &str = "added-emph";
+const TAG_REMOVED_EMPH: &str = "removed-emph";
 const TAG_FILLER: &str = "filler";
 
 /// Row backgrounds. This is the one place DESIGN.md's "only accent, foreground and is_dark" rule
@@ -25,6 +27,9 @@ const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
 const CHANGE_ALPHA: f32 = 0.16;
+/// The words that actually differ, in the same hue over the row's own background. Emphasis is
+/// colour only: bold would change advance widths and pull the two panes out of alignment.
+const EMPH_ALPHA: f32 = 0.35;
 /// A filler row has no content, so it whispers instead of shouting. Matches the code-block
 /// background in `highlight.rs` (0.07), which is the same "this area is inert" signal.
 const FILLER_ALPHA: f32 = 0.06;
@@ -44,11 +49,11 @@ impl Side {
         }
     }
 
-    /// The tag a present row gets, or `None` for an unchanged one.
-    fn tag(self, line: &DiffLine) -> Option<&'static str> {
+    /// The row and word-emphasis tags a present row gets, or `None` for an unchanged one.
+    fn tag(self, line: &DiffLine) -> Option<(&'static str, &'static str)> {
         match (self, line.op) {
-            (Side::Old, Op::Delete) => Some(TAG_REMOVED),
-            (Side::New, Op::Insert) => Some(TAG_ADDED),
+            (Side::Old, Op::Delete) => Some((TAG_REMOVED, TAG_REMOVED_EMPH)),
+            (Side::New, Op::Insert) => Some((TAG_ADDED, TAG_ADDED_EMPH)),
             // `align` never puts an insertion on the old side, nor a deletion on the new one.
             _ => None,
         }
@@ -115,7 +120,13 @@ fn numbers(rows: &[Option<&DiffLine>], side: Side) -> Vec<Option<usize>> {
 
 fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
-    for name in [TAG_ADDED, TAG_REMOVED, TAG_FILLER] {
+    for name in [
+        TAG_ADDED,
+        TAG_REMOVED,
+        TAG_ADDED_EMPH,
+        TAG_REMOVED_EMPH,
+        TAG_FILLER,
+    ] {
         table.add(&gtk::TextTag::new(Some(name)));
     }
 }
@@ -142,6 +153,14 @@ fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     };
     set(TAG_ADDED, tint(ADDED_HUE, fg, CHANGE_ALPHA));
     set(TAG_REMOVED, tint(REMOVED_HUE, fg, CHANGE_ALPHA));
+    // A character background, not a paragraph one, so it paints the words on top of the row.
+    let emph = |name: &str, colour: gdk::RGBA| {
+        if let Some(t) = table.lookup(name) {
+            t.set_background_rgba(Some(&colour));
+        }
+    };
+    emph(TAG_ADDED_EMPH, tint(ADDED_HUE, fg, EMPH_ALPHA));
+    emph(TAG_REMOVED_EMPH, tint(REMOVED_HUE, fg, EMPH_ALPHA));
     set(
         TAG_FILLER,
         gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), FILLER_ALPHA),
@@ -190,10 +209,10 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
     install_tags(&buffer);
     buffer.set_text(&column_text(rows));
     for (i, row) in rows.iter().enumerate() {
-        let name = match row {
-            None => TAG_FILLER,
+        let (name, changed) = match row {
+            None => (TAG_FILLER, None),
             Some(line) => match side.tag(line) {
-                Some(name) => name,
+                Some((row_tag, emph_tag)) => (row_tag, Some((emph_tag, *line))),
                 None => continue,
             },
         };
@@ -206,6 +225,18 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
             .iter_at_line(i as i32 + 1)
             .unwrap_or_else(|| buffer.end_iter());
         buffer.apply_tag_by_name(name, &start, &end);
+
+        // The diff's ranges are byte offsets into the line; the buffer counts characters.
+        if let Some((emph_tag, line)) = changed {
+            let at = |byte: usize| {
+                buffer.iter_at_line_offset(i as i32, line.text[..byte].chars().count() as i32)
+            };
+            for range in &line.emphasis {
+                if let (Some(from), Some(to)) = (at(range.start), at(range.end)) {
+                    buffer.apply_tag_by_name(emph_tag, &from, &to);
+                }
+            }
+        }
     }
 
     let view = sourceview5::View::new();
@@ -250,21 +281,21 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side) -> Pane {
 
 /// A two-pane diff. `left` and `right` are (title, text) pairs; `lines` is the precomputed diff.
 ///
-/// ponytail: line granularity only. A one-character edit paints the whole row, which is what a
-/// conflict resolver needs to decide between two files. Word-level highlighting inside a changed
-/// pair is the upgrade (`similar::TextDiff::iter_inline_changes` over the paired rows), and it
-/// wants a second tag pair and per-row char offsets; add it when line rows prove too coarse.
+/// ponytail: the row background says which lines changed and the word emphasis says where, both
+/// straight from `diff::lines`. A pair too dissimilar for `similar` to refine gets no emphasis and
+/// falls back to the row colour alone, which is still what a conflict resolver needs; character
+/// granularity is the upgrade, and it would want `InlineChangeMode::Graphemes`.
 pub fn view(left: (&str, &str), right: (&str, &str), lines: &[DiffLine]) -> gtk::Widget {
     // The texts are in the signature so a caller that already holds them can hand them over; the
     // panes are built from `lines`, which carries every line of both sides already.
     let (left_rows, right_rows) = align(lines);
     let old = pane(left.0, &left_rows, Side::Old);
     let new = pane(right.0, &right_rows, Side::New);
-    // One adjustment per direction: two views of the same rows must not be able to drift apart.
+    // Vertical is shared, so two views of the same rows cannot drift apart. Horizontal stays per
+    // pane: a shared adjustment takes its extent from whichever pane has the shorter longest line,
+    // and then the other one cannot be scrolled to the end of its own text.
     new.scroller
         .set_vadjustment(Some(&old.scroller.vadjustment()));
-    new.scroller
-        .set_hadjustment(Some(&old.scroller.hadjustment()));
 
     // Weak, both because this closure is connected to one of the very views it restyles and
     // because the style manager below outlives the dialog: a strong capture either way is a cycle

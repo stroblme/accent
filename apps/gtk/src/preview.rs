@@ -46,11 +46,57 @@ window.__accentScrollToLine = function (line) {
 };
 "#;
 
+/// Mermaid plus the bootstrap that draws the diagrams, injected only into a note that has one.
+///
+/// The library is vendored rather than fetched: the preview's content filter blocks every load
+/// that is not `accent:`, and a diagram must render with no network at all. Mermaid asks for
+/// nothing at runtime, so nothing else in the hardening moves.
+///
+/// The bootstrap rebuilds each fence as a `<pre class="mermaid">` from the code element's
+/// `textContent`, which undoes pulldown-cmark's HTML escaping and hands mermaid the source exactly
+/// as the author typed it, and puts that source back for any fence mermaid could not draw — the
+/// same contract the math fallback has, so a typo never blanks a block.
+const MERMAID: &str = concat!(
+    include_str!("../../../vendor/mermaid/mermaid.min.js"),
+    "\n",
+    r#"
+(function () {
+  var blocks = document.querySelectorAll('pre > code.language-mermaid');
+  if (!blocks.length) { return; }
+  var nodes = [];
+  for (var i = 0; i < blocks.length; i++) {
+    var fence = blocks[i].parentElement;
+    var pre = document.createElement('pre');
+    pre.className = 'mermaid';
+    pre.textContent = blocks[i].textContent;
+    // The block's scroll-sync marker sits inside the fence and has to outlive it.
+    var mark = fence.querySelector('[data-line]');
+    if (mark) { fence.parentElement.insertBefore(mark, fence); }
+    fence.parentElement.replaceChild(pre, fence);
+    nodes.push(pre);
+  }
+  var sources = nodes.map(function (n) { return n.textContent; });
+  var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
+  var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+  mermaid.initialize({ startOnLoad: false, theme: luma < 0.5 ? 'dark' : 'neutral', suppressErrorRendering: true });
+  mermaid.run({ nodes: nodes }).catch(function () {}).then(function () {
+    // suppressErrorRendering empties a fence it cannot parse rather than drawing an error graphic,
+    // so its source goes back in and a broken diagram stays readable, as a rejected formula does.
+    for (var j = 0; j < nodes.length; j++) {
+      if (!nodes[j].querySelector('svg')) { nodes[j].textContent = sources[j]; }
+    }
+  });
+})();
+"#
+);
+
 struct Inner {
     view: webkit6::WebView,
     content: webkit6::UserContentManager,
     /// The sheet currently injected, so `restyle` can replace instead of stack.
     sheet: RefCell<Option<webkit6::UserStyleSheet>>,
+    /// [`MERMAID`] while a note with a diagram is shown, `None` otherwise.
+    mermaid: RefCell<Option<webkit6::UserScript>>,
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
@@ -65,6 +111,29 @@ impl Inner {
             gio::Cancellable::NONE,
             |_| (),
         );
+    }
+
+    /// Add or drop the mermaid script. It is 3.4 MB of JavaScript to parse, so a note without a
+    /// diagram must not carry it; `remove_script` takes the one script, leaving `SCROLL_SCRIPT`.
+    fn set_mermaid(&self, wanted: bool) {
+        let mut slot = self.mermaid.borrow_mut();
+        if wanted == slot.is_some() {
+            return;
+        }
+        match slot.take() {
+            Some(script) => self.content.remove_script(&script),
+            None => {
+                let script = webkit6::UserScript::new(
+                    MERMAID,
+                    webkit6::UserContentInjectedFrames::TopFrame,
+                    webkit6::UserScriptInjectionTime::End,
+                    &[],
+                    &[],
+                );
+                self.content.add_script(&script);
+                *slot = Some(script);
+            }
+        }
     }
 }
 
@@ -123,6 +192,7 @@ impl Preview {
             view,
             content,
             sheet: RefCell::new(None),
+            mermaid: RefCell::new(None),
             loaded: Cell::new(false),
             pending: Cell::new(None),
         });
@@ -175,6 +245,7 @@ impl Preview {
     /// to a worker is the upgrade path if a large note ever shows up in a profile.
     pub fn render(&self, rel: &str, text: &str) {
         let body = accent_core::markdown::to_html(text);
+        self.inner.set_mermaid(body.contains("language-mermaid"));
         self.inner.loaded.set(false);
         self.inner
             .view

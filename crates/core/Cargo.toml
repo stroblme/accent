@@ -21,10 +21,11 @@ notify-debouncer-full = "0.6"
 same-file = "1"
 tempfile = "3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
+pulldown-latex = "0.8"
 nucleo-matcher = "0.3"
 blake3 = "1"
 toml = "1"
-similar = { version = "3", default-features = false, features = ["text"] }
+similar = { version = "3", default-features = false, features = ["text", "inline"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
