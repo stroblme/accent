@@ -719,8 +719,13 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         .valign(gtk::Align::Center)
         .visible(false)
         .build();
+    // `edit-find-replace-symbolic`, not a chevron: it names what the button reveals rather than
+    // which way a panel opens, and the chevron was invisible for the user who reported this. An
+    // icon theme may replace any Adwaita name with artwork of its own, and WhiteSur's
+    // `pan-down-symbolic` is written with single-quoted attributes, which GTK4's symbolic
+    // recolouring does not parse: the button drew nothing at all (DESIGN.md, Iconography).
     let replace_toggle = gtk::ToggleButton::builder()
-        .icon_name("pan-down-symbolic")
+        .icon_name("edit-find-replace-symbolic")
         .tooltip_text("Toggle Replace")
         .valign(gtk::Align::Center)
         .build();
@@ -741,12 +746,19 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         button.add_css_class("flat");
         button
     });
-    let toggle_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    toggle_row.add_css_class("linked");
-    toggle_row.set_halign(gtk::Align::Start);
+    let options = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    options.add_css_class("linked");
+    options.set_halign(gtk::Align::Start);
+    options.set_hexpand(true);
     for button in &toggles {
-        toggle_row.append(button);
+        options.append(button);
     }
+    // The replace toggle shares the row but not the `.linked` group: the three toggles change what
+    // the query means, this one reveals another control, and a fourth button welded to them would
+    // read as a fourth query option.
+    let toggle_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    toggle_row.append(&options);
+    toggle_row.append(&replace_toggle);
 
     let replace_entry = gtk::Entry::builder()
         .placeholder_text("Replace…")
@@ -836,16 +848,15 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         move |_| search.replace_all()
     });
 
-    let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    entry_row.append(&entry);
-    entry_row.append(&spinner);
-    entry_row.append(&replace_toggle);
-
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
     controls.set_margin_top(6);
     controls.set_margin_bottom(6);
     controls.set_margin_start(6);
     controls.set_margin_end(6);
+    let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    entry_row.append(&entry);
+    entry_row.append(&spinner);
+
     controls.append(&entry_row);
     controls.append(&toggle_row);
     controls.append(&replace_row);
