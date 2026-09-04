@@ -52,11 +52,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     ("app.quit", "Quit", &["<Control>q"]),
-    ("win.palette-files", "Open Note…", &["<Control>p"]),
+    ("win.palette-files", "Open Note…", &["<Control>e"]),
     (
         "win.palette-commands",
         "Run a Command…",
-        &["<Control><Shift>p"],
+        &["<Control>p", "<Control><Shift>p"],
     ),
     ("win.find", "Find", &["<Control>f"]),
     ("win.replace", "Replace", &["<Control>h"]),
@@ -67,10 +67,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
-    ("win.view-mode", "Cycle View Mode", &["<Control>e"]),
+    ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.follow-link", "Follow Link", &["<Control>Return"]),
     ("win.rename", "Rename", &["F2"]),
     ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
+    ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
     ("win.menu", "Primary Menu", &["F10"]),
@@ -188,19 +189,27 @@ impl Shell {
 
 // ---------------------------------------------------------------------------------- view mode
 
+/// The two layouts to work in. Reading the rendered note alone is presentation mode, which is
+/// temporary and belongs to the window rather than here.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Editor,
     Split,
-    Preview,
 }
 
 impl Mode {
     fn next(self) -> Mode {
         match self {
             Mode::Editor => Mode::Split,
-            Mode::Split => Mode::Preview,
-            Mode::Preview => Mode::Editor,
+            Mode::Split => Mode::Editor,
+        }
+    }
+
+    /// The icon that names this mode in the header toggle.
+    fn icon(self) -> &'static str {
+        match self {
+            Mode::Editor => "document-edit-symbolic",
+            Mode::Split => "view-dual-symbolic",
         }
     }
 
@@ -208,18 +217,25 @@ impl Mode {
         match self {
             Mode::Editor => "editor",
             Mode::Split => "split",
-            Mode::Preview => "preview",
         }
     }
 
-    /// Anything unrecognised is the editor: a hand-edited session file must not break the window.
+    /// Anything unrecognised is the editor: a hand-edited session file, or one written when
+    /// "preview" was still a mode, must not break the window.
     fn from_name(name: &str) -> Mode {
         match name {
             "split" => Mode::Split,
-            "preview" => Mode::Preview,
             _ => Mode::Editor,
         }
     }
+}
+
+/// What leaving presentation mode has to put back. The window's size is not part of it: F5 only
+/// takes the chrome away, and fullscreen stays F11's job, so the two compose freely.
+#[derive(Clone, Copy)]
+struct Presenting {
+    mode: Mode,
+    sidebar: bool,
 }
 
 // ----------------------------------------------------------------------------------- app state
@@ -246,14 +262,19 @@ struct App {
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
     sidebar_column: adw::ToolbarView,
     sidebar_header: adw::HeaderBar,
+    /// The editor column: presentation mode hides its header bar and tab bar together by
+    /// unrevealing its top bars.
+    toolbar: adw::ToolbarView,
     header: adw::HeaderBar,
     tabbar: adw::TabBar,
-    modes: adw::ToggleGroup,
+    modes: gtk::ToggleButton,
     menu: gtk::MenuButton,
     paned: gtk::Paned,
     /// Swaps the tab view for a placeholder while no note is open (DESIGN.md, States).
     content: gtk::Stack,
     mode: Cell<Mode>,
+    /// `Some` while presenting, holding what to restore on the way out.
+    presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
@@ -745,19 +766,63 @@ impl App {
 
     fn set_mode(self: &Rc<Self>, mode: Mode) {
         self.mode.set(mode);
-        if mode != Mode::Editor {
+        self.modes.set_icon_name(mode.icon());
+        // Setting `active` re-enters the toggled handler, which compares against `self.mode` and
+        // stops there, so this cannot loop.
+        self.modes.set_active(mode == Mode::Split);
+        self.show_chrome();
+        self.apply_layout();
+        self.save_session_soon();
+    }
+
+    /// Which of the editor column and the preview are on screen. Split shows both; presenting
+    /// shows the preview alone, whatever mode the user will come back to.
+    fn apply_layout(self: &Rc<Self>) {
+        let presenting = self.presenting.get().is_some();
+        if self.shows_preview() {
             self.ensure_preview();
         }
-        self.content.set_visible(mode != Mode::Preview);
+        self.content.set_visible(!presenting);
         if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.widget().set_visible(mode != Mode::Editor);
+            preview.widget().set_visible(self.shows_preview());
         }
-        self.modes.set_active_name(Some(mode.name()));
-        self.show_chrome();
         if let Some(tab) = self.active() {
             self.render(&tab);
         }
-        self.save_session_soon();
+    }
+
+    /// Whether the rendered note is visible at all; nothing is rendered into a hidden preview.
+    fn shows_preview(&self) -> bool {
+        self.mode.get() == Mode::Split || self.presenting.get().is_some()
+    }
+
+    /// F5: the note alone and rendered, with the sidebar, the tab bar and both header bars gone.
+    /// A state of the window rather than a [`Mode`], because it is a way of looking at the current
+    /// note instead of a layout to work in, and it is deliberately not part of the session: a
+    /// window restored chromeless would be hard to get out of.
+    ///
+    /// ponytail: markdown only. A PDF tab keeps showing its own view here; route it through the
+    /// same preview switch once the PDF viewer lands.
+    fn set_presenting(self: &Rc<Self>, on: bool) {
+        match (on, self.presenting.get()) {
+            (true, None) => {
+                self.presenting.set(Some(Presenting {
+                    mode: self.mode.get(),
+                    sidebar: self.sidebar_column.is_visible(),
+                }));
+                self.sidebar_column.set_visible(false);
+                self.toolbar.set_reveal_top_bars(false);
+                self.apply_layout();
+            }
+            (false, Some(before)) => {
+                self.presenting.set(None);
+                self.sidebar_column.set_visible(before.sidebar);
+                self.toolbar.set_reveal_top_bars(true);
+                // Puts the layout back and, with presenting cleared, lets the chrome show again.
+                self.set_mode(before.mode);
+            }
+            _ => {}
+        }
     }
 
     fn ensure_preview(self: &Rc<Self>) {
@@ -781,7 +846,7 @@ impl App {
     }
 
     fn render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if self.mode.get() == Mode::Editor {
+        if !self.shows_preview() {
             return;
         }
         self.ensure_preview();
@@ -792,7 +857,7 @@ impl App {
     }
 
     fn queue_render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if self.mode.get() == Mode::Editor || !self.is_active(tab) {
+        if !self.shows_preview() || !self.is_active(tab) {
             return;
         }
         if let Some(id) = self.render.borrow_mut().take() {
@@ -815,7 +880,7 @@ impl App {
     }
 
     fn sync_scroll(&self, tab: &Rc<Tab>) {
-        if self.mode.get() == Mode::Editor {
+        if !self.shows_preview() {
             return;
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
@@ -850,7 +915,9 @@ impl App {
     }
 
     fn show_chrome(&self) {
-        if !self.chrome_hidden.replace(false) {
+        // Presentation owns the chrome while it lasts: a pointer that crosses the window must not
+        // undo it, or the mode is useless.
+        if self.presenting.get().is_some() || !self.chrome_hidden.replace(false) {
             return;
         }
         self.sidebar_header.remove_css_class("chrome-hidden");
@@ -940,6 +1007,7 @@ impl App {
                 Ok((rel, _)) => self.open_note(&rel),
                 Err(e) => self.toast(&format!("Cannot open today's note: {e:#}")),
             },
+            "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
             "menu" => self.menu.popup(),
@@ -1096,7 +1164,11 @@ impl App {
         let session = Session {
             open: self.open.borrow().iter().map(|tab| tab.rel()).collect(),
             active: self.active().map(|tab| tab.rel()),
-            sidebar: self.sidebar_column.is_visible(),
+            // Presentation is not a session state, so the sidebar it hid is saved as it was.
+            sidebar: match self.presenting.get() {
+                Some(before) => before.sidebar,
+                None => self.sidebar_column.is_visible(),
+            },
             sidebar_width: sidebar_width(self.split.position()),
             view: self.mode.get().name().to_string(),
             pane: self
@@ -1229,6 +1301,7 @@ fn build_window(
     let toggle = gtk::ToggleButton::builder()
         .icon_name("sidebar-show-symbolic")
         .tooltip_text("Toggle Sidebar")
+        .valign(gtk::Align::Center)
         .build();
     header.pack_start(&toggle);
     toggle
@@ -1314,6 +1387,7 @@ fn build_window(
         split,
         sidebar_column,
         sidebar_header,
+        toolbar,
         header,
         tabbar,
         modes: modes.clone(),
@@ -1321,6 +1395,7 @@ fn build_window(
         paned,
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
+        presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         render: RefCell::new(None),
         session: RefCell::new(None),
@@ -1477,7 +1552,7 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
     })
 }
 
-fn wire_window(app: &Rc<App>, modes: &adw::ToggleGroup) {
+fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
     app.tabs.connect_close_page(glib::clone!(
@@ -1515,13 +1590,17 @@ fn wire_window(app: &Rc<App>, modes: &adw::ToggleGroup) {
             app.save_session_soon();
         }
     ));
-    modes.connect_active_notify(glib::clone!(
+    modes.connect_toggled(glib::clone!(
         #[weak]
         app,
-        move |group| {
-            let picked = group.active_name().map(|n| Mode::from_name(&n));
-            if let Some(mode) = picked.filter(|m| *m != app.mode.get()) {
-                app.set_mode(mode);
+        move |button| {
+            let picked = if button.is_active() {
+                Mode::Split
+            } else {
+                Mode::Editor
+            };
+            if picked != app.mode.get() {
+                app.set_mode(picked);
             }
         }
     ));
@@ -1558,11 +1637,21 @@ fn wire_window(app: &Rc<App>, modes: &adw::ToggleGroup) {
 
     // Chrome comes back on pointer motion, on Escape and whenever focus moves; hover alone must
     // never be the way back, or a keyboard-only user is stuck (DESIGN.md).
+    //
+    // GTK also emits `motion` when the widget under a *stationary* pointer changes, which typing
+    // does every time the text reflows past it, Return most of all. So compare against the last
+    // position and ignore an event that did not actually move the pointer, or the chrome pops
+    // back on the first newline.
     let motion = gtk::EventControllerMotion::new();
+    let last: Cell<Option<(f64, f64)>> = Cell::new(None);
     motion.connect_motion(glib::clone!(
         #[weak]
         app,
-        move |_, _, _| app.show_chrome()
+        move |_, x, y| {
+            if last.replace(Some((x, y))) != Some((x, y)) {
+                app.show_chrome();
+            }
+        }
     ));
     app.window.add_controller(motion);
 
@@ -1575,7 +1664,11 @@ fn wire_window(app: &Rc<App>, modes: &adw::ToggleGroup) {
         glib::Propagation::Proceed,
         move |_, key, _, _| {
             if key == gdk::Key::Escape {
-                app.show_chrome();
+                // The way out of presentation, where there is no chrome to bring back.
+                match app.presenting.get().is_some() {
+                    true => app.set_presenting(false),
+                    false => app.show_chrome(),
+                }
             }
             glib::Propagation::Proceed
         }
@@ -1738,7 +1831,7 @@ fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
         ["win.new-note", "win.new-folder", "win.save"].as_slice(),
-        ["win.find", "win.view-mode"].as_slice(),
+        ["win.find", "win.view-mode", "win.present"].as_slice(),
         ["win.preferences", "win.about", "app.quit"].as_slice(),
     ] {
         let section = gio::Menu::new();
@@ -1751,24 +1844,20 @@ fn menu_button() -> gtk::MenuButton {
         .icon_name("open-menu-symbolic")
         .tooltip_text("Main Menu")
         .menu_model(&menu)
+        .valign(gtk::Align::Center)
         .build()
 }
 
-fn mode_switcher() -> adw::ToggleGroup {
-    let group = adw::ToggleGroup::new();
-    for (name, icon, tooltip) in [
-        ("editor", "document-edit-symbolic", "Editor"),
-        ("split", "view-dual-symbolic", "Split"),
-        ("preview", "view-reveal-symbolic", "Preview"),
-    ] {
-        let toggle = adw::Toggle::new();
-        toggle.set_name(Some(name));
-        toggle.set_icon_name(Some(icon));
-        toggle.set_tooltip(tooltip);
-        group.add(toggle);
-    }
-    group.add_css_class("flat");
-    group
+/// One button rather than a two-item group: there are only two states, so the pressed look plus
+/// an icon that names the current one says everything a second toggle would have.
+fn mode_switcher() -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::builder()
+        .icon_name(Mode::Editor.icon())
+        .tooltip_text("Toggle Split View")
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    button
 }
 
 // ---------------------------------------------------------------------------------- indexing

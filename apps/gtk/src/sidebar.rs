@@ -95,11 +95,14 @@ impl Sidebar {
         // gives every toggle the page title as its tooltip, so icon-only stays discoverable. No
         // vertical alignment of its own: as a header title widget it takes the header's full
         // content height, which is what puts its toggles on the same line as the buttons opposite.
+        // Centred rather than filling: a toggle that stretches to the header's height comes out
+        // taller than it is wide, and these are square icon buttons.
         let switcher = adw::InlineViewSwitcher::builder()
             .stack(&stack)
             .display_mode(adw::InlineViewSwitcherDisplayMode::Icons)
             .margin_start(6)
             .margin_end(6)
+            .valign(gtk::Align::Center)
             .build();
         switcher.add_css_class("flat");
 
