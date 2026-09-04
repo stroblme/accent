@@ -302,7 +302,11 @@ impl Index {
                 .iter()
                 .filter(|f| f.kind == FileKind::Conflict)
                 .count(),
-            skipped_symlinks: scan.skipped.len(),
+            skipped_symlinks: scan
+                .skipped
+                .iter()
+                .filter(|s| s.reason != walk::SkipReason::DependencyTree)
+                .count(),
             scan_ms: t_scan.elapsed().as_millis() as u64,
             ..Default::default()
         };
@@ -594,8 +598,27 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every directory the walk kept, as an absolute vault path: the watcher's watch set.
+    ///
+    /// A tree the walk skipped — `.git`, a `.venv`, a cargo `target/` — never got a row here, so
+    /// watching this list instead of the root recursively is what keeps those trees out of the
+    /// kernel's inotify budget as well as out of the index. The root itself is not a row and is
+    /// the watcher's own responsibility.
+    pub fn dirs(&self, root: &Path) -> Result<Vec<std::path::PathBuf>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT rel_path FROM files WHERE kind = 0 ORDER BY rel_path")?;
+        let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for rel in rows {
+            out.push(root.join(rel?));
+        }
+        Ok(out)
+    }
+
     /// `(canonical target, rel_path of the link)` for every directory symlink pointing out of the
-    /// vault. inotify does not traverse symlinks, so each of these needs a watch of its own.
+    /// vault. The watch set above reaches these through the link, so this is what maps an event
+    /// path that arrives canonical anyway back into the vault.
     pub fn symlink_dirs(&self, root: &Path) -> Result<Vec<(std::path::PathBuf, String)>> {
         let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let mut st = self
@@ -1788,7 +1811,11 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        // The plain directory is already covered by the recursive watch on the vault root.
+        // Only the link is listed here; the plain directory is an ordinary member of the watch set.
+        assert_eq!(
+            ix.dirs(vault.path()).unwrap(),
+            vec![vault.path().join("linked"), vault.path().join("plain")]
+        );
         assert_eq!(
             ix.symlink_dirs(vault.path()).unwrap(),
             vec![(outside.path().canonicalize().unwrap(), "linked".to_string())]
