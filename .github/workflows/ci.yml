@@ -1,0 +1,55 @@
+name: CI
+
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: core + api + cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # `--all` covers apps/gtk as well: rustfmt only parses the sources, it never resolves
+      # dependencies, so the missing GTK dev headers on this runner do not matter.
+      - run: cargo fmt --all --check
+      # apps/gtk links gtk4, libadwaita, gtksourceview5, webkit6 and libspelling, whose -devel
+      # packages ubuntu-latest does not carry. The gtk job below lints and tests it instead.
+      - run: cargo clippy --workspace --exclude accent --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  gtk:
+    name: desktop app
+    runs-on: ubuntu-latest
+    # Ubuntu 24.04 ships libadwaita 1.5, older than the v1_7 feature the app is built against.
+    # Fedora 44 packages the whole current GNOME stack, so it is the cheapest runner that links.
+    container: fedora:44
+    steps:
+      # Before checkout: the base image has no git, so actions/checkout would fall back to the API.
+      - run: >
+          dnf install -y git gcc gtk4-devel libadwaita-devel gtksourceview5-devel
+          webkitgtk6.0-devel libspelling-devel xorg-x11-server-Xvfb dejavu-sans-fonts
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p accent --locked -- -D warnings
+      - run: cargo test -p accent --locked
+      - run: cargo build --release --locked -p accent -p accent-cli
+      - run: target/release/accent-cli gen-vault testvault --notes 200 --files 2000
+      - name: Headless smoke run
+        run: |
+          Xvfb :99 &
+          # GSK_RENDERER=cairo   no GPU or GL under Xvfb, the GL renderers abort there
+          # GTK_A11Y=none        no accessibility bus inside the container
+          # G_DEBUG=fatal-criticals  a GTK critical fails the build instead of scrolling past
+          # ACCENT_BENCH_SWITCHER    opens the palette, prints its timings and quits by itself
+          # timeout 60           turns a hang into a failure instead of a six hour job
+          DISPLAY=:99 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals \
+            ACCENT_BENCH_SWITCHER=1 timeout 60 target/release/accent testvault

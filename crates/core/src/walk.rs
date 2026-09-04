@@ -19,6 +19,7 @@
 use ignore::{WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -145,6 +146,11 @@ pub struct ScanResult {
     pub skipped: Vec<Skipped>,
 }
 
+/// Names the walk refuses at any depth, whatever the ignore files say.
+fn never_walked(name: &str) -> bool {
+    HARD_SKIP_DIRS.contains(&name) || crate::fs::is_syncthing_temp(name)
+}
+
 /// Classify by file name. Conflict wins over extension: `Note.sync-conflict-….md` is not a note.
 fn classify(name: &str) -> FileKind {
     if crate::fs::is_sync_conflict(name) {
@@ -155,6 +161,40 @@ fn classify(name: &str) -> FileKind {
         Some(e) if e == "pdf" => FileKind::Pdf,
         _ => FileKind::Other,
     }
+}
+
+/// The row the index stores for one already-stat'ed entry. `meta` must come from a stat that
+/// followed symlinks, so a linked-in note dedups against the inode it really points at.
+fn file_meta(rel_path: String, path: &Path, meta: &std::fs::Metadata) -> FileMeta {
+    let kind = if meta.is_dir() {
+        FileKind::Dir
+    } else {
+        classify(rel_path.rsplit('/').next().unwrap_or(&rel_path))
+    };
+    FileMeta {
+        rel_path,
+        canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+        dev: meta.dev(),
+        ino: meta.ino(),
+        mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
+        size: meta.len(),
+        kind,
+    }
+}
+
+/// Stat a single vault path the way [`scan`] would (follows symlinks). `Ok(None)` means the name is
+/// one `scan` never yields: a hard-skipped directory component, a Syncthing temp file, or one of
+/// our own `.accent-` save temporaries.
+///
+/// This is the watcher's counterpart to `scan`: one changed path costs one stat instead of a walk.
+pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if rel.split('/').any(never_walked) || name.starts_with(".accent-") {
+        return Ok(None);
+    }
+    let path = root.join(rel);
+    let meta = std::fs::metadata(&path)?;
+    Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
@@ -289,9 +329,7 @@ fn walk_pass(
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
 
-            if entry.depth() > 0
-                && (HARD_SKIP_DIRS.contains(&name.as_str()) || crate::fs::is_syncthing_temp(&name))
-            {
+            if entry.depth() > 0 && never_walked(&name) {
                 return WalkState::Skip;
             }
             let rel_path = match path.strip_prefix(&walk_root) {
@@ -309,11 +347,10 @@ fn walk_pass(
 
             // `follow_links(false)` means `entry.metadata()` is an lstat, so a symlink needs an
             // explicit stat of its target: that is what makes file symlinks dedup by (dev, ino).
-            let (meta, is_dir) = if entry.path_is_symlink() {
+            let meta = if entry.path_is_symlink() {
                 match std::fs::metadata(path) {
                     Ok(m) => {
-                        let is_dir = m.is_dir();
-                        if is_dir {
+                        if m.is_dir() {
                             if !follow_links {
                                 return WalkState::Skip;
                             }
@@ -330,7 +367,7 @@ fn walk_pass(
                                 }
                             }
                         }
-                        (m, is_dir)
+                        m
                     }
                     Err(_) => {
                         io_skip(&tx); // broken symlink
@@ -339,10 +376,7 @@ fn walk_pass(
                 }
             } else {
                 match entry.metadata() {
-                    Ok(m) => {
-                        let is_dir = m.is_dir();
-                        (m, is_dir)
-                    }
+                    Ok(m) => m,
                     Err(_) => {
                         io_skip(&tx);
                         return WalkState::Continue;
@@ -350,20 +384,7 @@ fn walk_pass(
                 }
             };
 
-            let kind = if is_dir {
-                FileKind::Dir
-            } else {
-                classify(&name)
-            };
-            let _ = tx.send(Msg::File(FileMeta {
-                rel_path,
-                canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-                dev: meta.dev(),
-                ino: meta.ino(),
-                mtime_ns: meta.mtime() * 1_000_000_000 + meta.mtime_nsec(),
-                size: meta.len(),
-                kind,
-            }));
+            let _ = tx.send(Msg::File(file_meta(rel_path, path, &meta)));
             WalkState::Continue
         })
     });
@@ -633,6 +654,51 @@ mod tests {
         };
         let r = scan(vault.path(), &loose);
         assert!(rels(&r).iter().any(|p| p.contains("junk.md")));
+    }
+
+    /// `stat_one` is the watcher path into the same rows `scan` produces: if the two ever
+    /// disagree, an incremental update writes a row a full reconcile would then rewrite.
+    #[test]
+    fn stat_one_matches_scan_entry() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::create_dir(vault.path().join("sub")).unwrap();
+        fs::write(vault.path().join("sub/n.md"), "n").unwrap();
+        fs::write(
+            vault
+                .path()
+                .join("n.sync-conflict-20240101-120000-ABCDEFG.md"),
+            "c",
+        )
+        .unwrap();
+        fs::create_dir(vault.path().join(".git")).unwrap();
+        fs::write(vault.path().join(".git/config"), "c").unwrap();
+        fs::write(vault.path().join(".accent-xyz"), "t").unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        for rel in [
+            "sub",
+            "sub/n.md",
+            "n.sync-conflict-20240101-120000-ABCDEFG.md",
+        ] {
+            let from_scan = r.files.iter().find(|f| f.rel_path == rel).unwrap();
+            let from_stat = stat_one(vault.path(), rel).unwrap().unwrap();
+            assert_eq!(&from_stat, from_scan, "{rel}");
+        }
+        assert_eq!(
+            r.files.iter().find(|f| f.rel_path == "sub").unwrap().kind,
+            FileKind::Dir
+        );
+
+        for hidden in [".git/config", ".accent-xyz", ".syncthing.n.md.tmp"] {
+            assert!(
+                stat_one(vault.path(), hidden).unwrap().is_none(),
+                "{hidden}"
+            );
+        }
+        assert_eq!(
+            stat_one(vault.path(), "gone.md").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 
     #[test]

@@ -5,7 +5,6 @@
 //! `X.sync-conflict-….md` (so the UI wants to know the moment one shows up).
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -61,19 +60,20 @@ impl Watcher {
     /// `dir_count` is how many directories the caller's walk found. If that is close to the
     /// kernel's inotify budget the watcher falls back to polling instead of silently missing
     /// changes (inotify fails per-directory once the budget is gone).
+    ///
+    /// `on_event` runs on the debouncer's own thread, so it must not block: hand the event to a
+    /// channel or the UI's main context and return.
     pub fn new(
         root: &Path,
         extra_dirs: &[PathBuf],
         dir_count: usize,
-        tx: Sender<VaultEvent>,
+        on_event: impl Fn(VaultEvent) + Send + 'static,
     ) -> anyhow::Result<Watcher> {
         let handler = move |result: DebounceEventResult| match result {
             Ok(events) => {
                 for event in events {
                     for mapped in classify(&event.event) {
-                        if tx.send(mapped).is_err() {
-                            return; // receiver gone; the watcher will be dropped shortly
-                        }
+                        on_event(mapped);
                     }
                 }
             }
@@ -81,7 +81,7 @@ impl Watcher {
                 for e in &errors {
                     tracing::warn!(error = %e, "watch error; asking for a rescan");
                 }
-                let _ = tx.send(VaultEvent::Rescan);
+                on_event(VaultEvent::Rescan);
             }
         };
 
@@ -127,13 +127,15 @@ fn watch_all<T: notify::Watcher, C: FileIdCache>(
     Ok(())
 }
 
-/// Paths we never report: git internals and Syncthing's in-flight downloads.
+/// Paths we never report: git internals, Syncthing's in-flight downloads, and the temporaries
+/// [`crate::fs::write_note`] renames into place: a save of ours must reach the UI as one event
+/// for the note, never as a stray `.accent-` file.
 fn ignored(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == ".git")
         || path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(is_syncthing_temp)
+            .is_some_and(|n| is_syncthing_temp(n) || n.starts_with(".accent-"))
 }
 
 /// A path that just showed up: a conflict copy is worth its own event.
@@ -233,7 +235,10 @@ mod tests {
 
     fn start(root: &Path) -> (Watcher, Receiver<VaultEvent>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Watcher::new(root, &[], 0, tx).unwrap();
+        let w = Watcher::new(root, &[], 0, move |e| {
+            let _ = tx.send(e);
+        })
+        .unwrap();
         // Let the watcher settle before the test perturbs the directory.
         std::thread::sleep(Duration::from_millis(200));
         (w, rx)
@@ -291,6 +296,41 @@ mod tests {
         assert!(
             !touches(&events, ".syncthing.Note.md.tmp"),
             "temp name leaked into the vault events: {events:?}"
+        );
+    }
+
+    /// A save writes `.accent-XXXX` next to the note and renames it into place; the UI must see
+    /// the note and never the temporary.
+    ///
+    /// The read before the write is what a real editor does, and it matters: once the debouncer
+    /// has the note's inode cached it reports the rename over it as `Remove` + `Create` rather
+    /// than as a modification. Nothing here can tell the two apart, which is why the façade
+    /// re-stats a removed path before believing it.
+    #[test]
+    fn accent_temp_rename_reports_only_the_final_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let note = root.join("Note.md");
+        std::fs::write(&note, "one").unwrap();
+        let (_w, rx) = start(&root);
+
+        let _ = std::fs::read_to_string(&note).unwrap();
+        crate::fs::write_note(&note, "two", None).unwrap();
+
+        let events = drain(&rx, Duration::from_secs(5));
+        assert!(
+            touches(&events, "Note.md"),
+            "no event for the note: {events:?}"
+        );
+        assert!(
+            events.iter().all(
+                |e| matches!(e, VaultEvent::Changed(p) | VaultEvent::Removed(p) if *p == note)
+            ),
+            "expected only events for {note:?}, got {events:?}"
+        );
+        assert!(
+            note.exists(),
+            "the note the watcher reported on is still there"
         );
     }
 

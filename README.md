@@ -8,6 +8,15 @@ This is an opinionated
 
 cross-platform (without compromises) and blazing fast.
 
+## Getting Started
+
+```
+cargo build            # core + api + cli
+cargo test
+cargo build -p accent  # GTK app
+cargo run --release -p accent -- testvault
+```
+
 ## Architecture (decided 2026-09-03)
 
 - **One Rust core** (`crates/core`): SQLite/FTS5 index as a disposable cache over plain markdown files, Syncthing-safe atomic saves, symlink-aware reconcile, markdown → styling spans/links/tags, PDF via pdfium.

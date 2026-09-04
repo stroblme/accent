@@ -72,6 +72,11 @@ fn tag_name(style: Style) -> &'static str {
     }
 }
 
+/// Heading scale factors, indexed by level - 1: what [`install_tags`] gives the `h1`..`h4` tags,
+/// and the 1.0 that leaves `h5` and `h6` at the body size. [`hang`] measures the markers with
+/// them, so the two lists cannot drift apart unnoticed.
+const HEADING_SCALES: [f64; 6] = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0];
+
 const TAG_NAMES: &[&str] = &[
     "h1",
     "h2",
@@ -79,6 +84,12 @@ const TAG_NAMES: &[&str] = &[
     "h4",
     "h5",
     "h6",
+    "hang1",
+    "hang2",
+    "hang3",
+    "hang4",
+    "hang5",
+    "hang6",
     "em",
     "strong",
     "strike",
@@ -118,6 +129,11 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     for name in ["h5", "h6"] {
         let t = tag(name);
         t.set_weight(700);
+    }
+    // Paragraph tags with nothing visual of their own: `hang` gives them the margins that pull
+    // an ATX heading's `#` markers out into the gutter.
+    for level in 1..=HEADING_SCALES.len() {
+        tag(&format!("hang{level}"));
     }
     tag("strong").set_weight(700);
     tag("em").set_style(pango::Style::Italic);
@@ -184,6 +200,51 @@ pub fn apply(buffer: &sourceview5::Buffer) {
         let s = buffer.iter_at_offset(offsets.char_of(span.range.start));
         let e = buffer.iter_at_offset(offsets.char_of(span.range.end));
         buffer.apply_tag_by_name(tag_name(span.style), &s, &e);
+        if let Style::Heading(level) = span.style
+            && is_atx(&text, span.range.start)
+        {
+            buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
+        }
+    }
+}
+
+/// Whether the heading starting at byte `start` writes its own `#` markers. A setext heading is
+/// underlined on the line below instead, so it has no marker to hang in the gutter.
+fn is_atx(text: &str, start: usize) -> bool {
+    text[start..].starts_with('#')
+}
+
+/// Pull each ATX heading's `#` markers out into the left gutter, so heading text lines up with
+/// body text the way it does in Apostrophe. The markers are measured rather than guessed: their
+/// width follows the document font, the heading's scale and the current zoom.
+///
+/// Pango reads a negative indent as a *hanging* indent, so the first line of the paragraph sits
+/// at the tag's left margin and the wrapped ones at `left_margin + |indent|`; a tag's left margin
+/// replaces the view's rather than adding to it. Putting the marker's width in both therefore
+/// starts the heading line that much left of the gutter and lands everything after the marker,
+/// wrapped lines included, on the body column.
+///
+/// ponytail: the 48 px gutter is not widened, so `##### ` and `###### ` are wider than it, clamp
+/// at the window edge and start their text a few pixels right of the body column. Widen the
+/// gutter, or scale it with the zoom, if that ever reads as a misalignment.
+pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+    let table = buffer.tag_table();
+    let gutter = view.left_margin();
+    for (level, scale) in HEADING_SCALES.iter().enumerate() {
+        let Some(tag) = table.lookup(&format!("hang{}", level + 1)) else {
+            continue;
+        };
+        // The layout inherits the view's font from its pango context, so whatever CSS says about
+        // the document font and the zoom is already in it; the two attributes are exactly what
+        // the matching `h{n}` tag adds on top of it.
+        let layout = view.create_pango_layout(Some(&format!("{} ", "#".repeat(level + 1))));
+        let attrs = pango::AttrList::new();
+        attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
+        attrs.insert(pango::AttrFloat::new_scale(*scale));
+        layout.set_attributes(Some(&attrs));
+        let width = layout.pixel_size().0;
+        tag.set_left_margin((gutter - width).max(0));
+        tag.set_indent(-width.min(gutter));
     }
 }
 
@@ -246,6 +307,22 @@ mod tests {
                 "{s:?} maps to an uninstalled tag"
             );
         }
+    }
+
+    /// Only a heading that carries its own `#` markers has anything to hang in the gutter.
+    #[test]
+    fn only_atx_headings_hang() {
+        let text = "# Head\n\nSetext\n======\n";
+        let a = markdown::analyze(text);
+        let starts: Vec<usize> = a
+            .spans
+            .iter()
+            .filter(|s| matches!(s.style, Style::Heading(_)))
+            .map(|s| s.range.start)
+            .collect();
+        assert_eq!(starts.len(), 2, "one ATX and one setext heading");
+        assert!(is_atx(text, starts[0]));
+        assert!(!is_atx(text, starts[1]));
     }
 
     /// The span offsets we feed to the buffer must land on real character boundaries for a note

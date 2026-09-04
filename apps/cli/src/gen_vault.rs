@@ -747,7 +747,7 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    let floor = notes + 16 + venv_in + flat_imgs + flat_pdfs + excal;
+    let floor = notes + 20 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -864,6 +864,33 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     g.write(
         ".obsidian/plugins/foo/data.json",
         b"{\n  \"enabled\": true,\n  \"folder\": \"Templates\",\n  \"dateFormat\": \"YYYY-MM-DD\"\n}\n",
+    )?;
+    g.write(
+        ".obsidian/daily-notes.json",
+        b"{\"folder\":\"Daily\",\"format\":\"YYYY-MM-DD\",\"template\":\"Templates/Daily\"}\n",
+    )?;
+
+    // ---- real templates: written verbatim, because template expansion is what they are for
+    g.write(
+        "Templates/Daily.md",
+        b"---\ndate: {{date}}\ntags: [daily]\n---\n\n\
+          # {{date:%A, %d %B %Y}}\n\n\
+          ## Log\n\n\
+          - {{time}} {{cursor}}\n",
+    )?;
+    g.write(
+        "Templates/Meeting.md",
+        b"# {{title}}\n\n\
+          ## Attendees\n\n- Me\n\n\
+          ## Agenda\n\n{{cursor}}\n\n\
+          ## Actions\n\n- [ ] follow up\n",
+    )?;
+    g.write(
+        "Templates/Paper.md",
+        b"---\nadded: {{date:%Y-%m-%dT%H:%M}}\ntags: [paper]\n---\n\n\
+          # {{title}}\n\n\
+          ![[Attachments/paper-0.pdf]]\n\n\
+          ## Notes\n\n{{cursor}}\n",
     )?;
 
     // ---- a real .venv inside the vault: only .accentignore could hide it, and it is commented out
@@ -1105,6 +1132,17 @@ mod tests {
             assert!(vault.join(link).is_symlink(), "{link} must be a symlink");
         }
         assert!(vault.join("Notes-QC/Real.md").is_file());
+
+        for t in ["Daily", "Meeting", "Paper"] {
+            assert!(
+                vault.join(format!("Templates/{t}.md")).is_file(),
+                "Templates/{t}.md must exist"
+            );
+        }
+        let daily = fs::read_to_string(vault.join("Templates/Daily.md")).unwrap();
+        assert!(daily.contains("{{cursor}}"), "{daily}");
+        assert!(daily.contains("{{date:"), "{daily}");
+        assert!(vault.join(".obsidian/daily-notes.json").is_file());
 
         let r = walk::scan(&vault, &ScanOptions::default());
         let md = r

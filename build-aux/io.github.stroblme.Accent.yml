@@ -1,0 +1,78 @@
+id: io.github.stroblme.Accent
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: accent
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Vaults are Syncthing folders holding directory symlinks into arbitrary host trees, and inotify
+  # only fires on the real paths behind those symlinks. Neither the file chooser portal nor a
+  # narrower --filesystem= can express "wherever the symlink target happens to live", so the app
+  # needs the host filesystem.
+  - --filesystem=host
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    # cargo-sources.json unpacks the registry into <builddir>/cargo/vendor and writes the vendor
+    # config to <builddir>/cargo/config, so CARGO_HOME has to be exactly that directory. The path
+    # follows the module name below.
+    CARGO_HOME: /run/build/accent/cargo
+
+modules:
+  # The GNOME 50 runtime ships enchant and hunspell but not libspelling, so the app has to build it.
+  - name: libspelling
+    buildsystem: meson
+    config-opts:
+      - -Ddocs=false
+      - -Dintrospection=disabled
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/libspelling/0.4/libspelling-0.4.10.tar.xz
+        sha256: 56e3f01a3a18b575beea4c34349f99cdaba316e1f7c271b1231f7bcf5d9af73b
+
+  # Phase 2, cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core
+  # looks for it in ACCENT_PDFIUM_DIR (crates/core/src/pdf.rs), so enabling this module also means
+  # adding --env=ACCENT_PDFIUM_DIR=/app/lib/pdfium to finish-args above. Build 8035 matches the
+  # copy in vendor/pdfium. TODO: fill in the sha256 of the release asset before enabling.
+  # - name: pdfium
+  #   buildsystem: simple
+  #   build-commands:
+  #     - install -Dm755 lib/libpdfium.so -t /app/lib/pdfium
+  #   sources:
+  #     - type: archive
+  #       url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
+  #       sha256: TODO
+  #       strip-components: 0
+
+  - name: accent
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml
+      - cargo --offline build --release -p accent
+      # Five install lines beat adding a meson build system that nothing else in the tree needs.
+      - install -Dm755 target/release/accent -t /app/bin
+      - install -Dm644 data/io.github.stroblme.Accent.desktop -t /app/share/applications
+      - install -Dm644 data/io.github.stroblme.Accent.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.stroblme.Accent.svg -t /app/share/icons/hicolor/scalable/apps
+      - install -Dm644 data/icons/hicolor/symbolic/apps/io.github.stroblme.Accent-symbolic.svg -t /app/share/icons/hicolor/symbolic/apps
+    sources:
+      - type: dir
+        path: ..
+        # target/ alone is several GB and would be copied into the build dir on every run.
+        skip:
+          - .flatpak-builder
+          - .git
+          - build-aux/build
+          - target
+          - testvault
+          - testvault-external
+          - vendor
+      # Regenerate whenever Cargo.lock changes, see the command in the repo README/report.
+      - cargo-sources.json

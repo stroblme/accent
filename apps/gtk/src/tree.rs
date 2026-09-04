@@ -1,8 +1,8 @@
 //! Lazy vault file tree: `gtk::ListView` over a `gtk::TreeListModel` whose children come from
-//! `Index::list_files(prefix)`, one directory level per expansion.
+//! `Vault::list_dir(prefix)`, one directory level per expansion.
 
+use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
-use accent_core::index::Index;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -38,20 +38,57 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
         || rel.rsplit('/').next().is_some_and(is_sync_conflict)
 }
 
-/// Replace `store`'s contents with the direct children of `prefix`. `list_files` already returns
+/// Bring `store` in step with the direct children of `prefix`. `list_dir` already returns
 /// directories first, then names case-insensitively.
-pub fn fill(store: &gio::ListStore, index: &Rc<RefCell<Index>>, prefix: &str) {
-    // The borrow ends with this statement: `list_files` hands back owned rows, so no `Index`
-    // borrow is ever live across the GTK calls below.
-    let rows = index.borrow().list_files(prefix).unwrap_or_default();
-    let items: Vec<gtk::StringObject> = rows
+pub fn fill(store: &gio::ListStore, vault: &Rc<Vault>, prefix: &str) {
+    let rows = match vault.list_dir(prefix) {
+        Ok(rows) => rows,
+        // Leaving the rows alone beats blanking a directory the index simply could not answer for.
+        Err(e) => return tracing::warn!(dir = prefix, "listing the directory failed: {e:#}"),
+    };
+    let items: Vec<String> = rows
         .into_iter()
         .filter(|r| !hidden(r.kind, &r.rel_path))
-        .map(|r| gtk::StringObject::new(&encode(r.kind, &r.rel_path)))
+        .map(|r| encode(r.kind, &r.rel_path))
+        .collect();
+    let Some((at, removed, added)) = changed_span(&current(store), &items) else {
+        return;
+    };
+    let new: Vec<gtk::StringObject> = items[at..at + added]
+        .iter()
+        .map(|s| gtk::StringObject::new(s))
         .collect();
     // One splice, one `items-changed`. Appending row by row made a 2 400-child directory emit
     // 2 400 signals out through TreeListModel -> SingleSelection -> ListView.
-    store.splice(0, store.n_items(), &items);
+    store.splice(at as u32, removed as u32, &new);
+}
+
+/// The encoded value of every row currently in `store`.
+fn current(store: &gio::ListStore) -> Vec<String> {
+    (0..store.n_items())
+        .filter_map(|i| store.item(i).and_downcast::<gtk::StringObject>())
+        .map(|s| s.string().to_string())
+        .collect()
+}
+
+/// The one span `old` and `new` differ in, as (start, rows to remove, rows to insert), or `None`
+/// when they are already the same.
+///
+/// A row's expanded children hang off the *object* in the store, so a blanket splice collapses
+/// every expanded directory and jumps the scroll position. Trimming the equal head and tail means
+/// a reindex that changed nothing splices nothing, and one added or removed file touches one row.
+fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)> {
+    let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    match (old.len() - head - tail, new.len() - head - tail) {
+        (0, 0) => None,
+        (removed, added) => Some((head, removed, added)),
+    }
 }
 
 fn icon_name(kind: char) -> &'static str {
@@ -68,11 +105,12 @@ fn icon_name(kind: char) -> &'static str {
 /// The cache is not an optimisation of last resort, it is what makes binding a row free:
 /// `GtkTreeExpander::set_list_row` asks `gtk_tree_list_row_is_expandable()`, which calls the
 /// `TreeListModel` create-func and *throws the model away again*. Without the cache every row
-/// scrolling into view ran a fresh `list_files` query.
+/// scrolling into view ran a fresh `list_dir` query.
 pub struct Tree {
+    host: gtk::Box,
     view: gtk::ListView,
     model: gtk::TreeListModel,
-    index: Rc<RefCell<Index>>,
+    vault: Rc<Vault>,
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
 }
@@ -82,26 +120,120 @@ impl Tree {
         &self.view
     }
 
+    /// What the sidebar puts in its Files pane, and what the context menu parents itself to.
+    pub fn widget(&self) -> &gtk::Widget {
+        self.host.upcast_ref()
+    }
+
     /// The row model, for tests and the `ACCENT_BENCH_*` hooks in `main`.
     pub fn model(&self) -> &gtk::TreeListModel {
         &self.model
     }
 
-    /// Re-read the vault root after a reconcile.
-    ///
-    /// ponytail: cached child models are dropped rather than re-filled, so a directory that is
-    /// expanded *right now* keeps showing pre-reconcile children until it is collapsed and opened
-    /// again (which is what the tree did before it cached at all). Re-filling every cached store
-    /// would be a query per directory the user has ever scrolled past; do that behind the file
-    /// watcher instead, where the changed paths are known.
+    /// Re-read the root and every level that has already been expanded, after a full reconcile
+    /// changed everything at once. The cached models are refilled rather than dropped: dropping
+    /// them would leave the rows that are still expanded showing a listing nothing refreshes.
     pub fn refresh(&self) {
-        self.cache.borrow_mut().clear();
-        fill(&self.root, &self.index, "");
+        let mut dirs: Vec<String> = vec![String::new()];
+        dirs.extend(self.cache.borrow().keys().cloned());
+        self.invalidate(&dirs);
+    }
+
+    /// Refill only these directories' cached child models ("" is the root). A background reindex
+    /// touches a handful of directories, not the whole tree.
+    pub fn invalidate(&self, dirs: &[String]) {
+        // Looked up first, so no cache borrow is live while `fill` reaches into the index. A
+        // directory that was never expanded has no model to refill: it is filled on first expand.
+        let stores: Vec<(&String, gio::ListStore)> = {
+            let cache = self.cache.borrow();
+            dirs.iter()
+                .filter_map(|dir| match dir.is_empty() {
+                    true => Some((dir, self.root.clone())),
+                    false => cache.get(dir).map(|s| (dir, s.clone())),
+                })
+                .collect()
+        };
+        for (dir, store) in stores {
+            // A directory that is gone keeps no model: a same-named one created later must be
+            // listed afresh instead of re-expanding into the files this one used to hold.
+            if !dir.is_empty() && !self.vault.root().join(dir).is_dir() {
+                self.cache.borrow_mut().remove(dir);
+                continue;
+            }
+            fill(&store, &self.vault, dir);
+        }
+    }
+
+    /// The selected row, as (kind char, rel path).
+    pub fn selected(&self) -> Option<(char, String)> {
+        self.view
+            .model()
+            .and_downcast::<gtk::SingleSelection>()?
+            .selected_item()
+            .and_downcast::<gtk::TreeListRow>()?
+            .item()
+            .as_ref()
+            .and_then(decode)
+    }
+
+    /// The row under a pointer position, for the context menu.
+    pub fn row_at(&self, x: f64, y: f64) -> Option<(char, String)> {
+        let mut widget = self.view.pick(x, y, gtk::PickFlags::DEFAULT)?;
+        // `pick` lands on the label or the icon; the row identity hangs off the expander above it.
+        let expander = loop {
+            match widget.downcast::<gtk::TreeExpander>() {
+                Ok(expander) => break expander,
+                Err(w) => widget = w.parent()?,
+            }
+        };
+        expander.list_row()?.item().as_ref().and_then(decode)
+    }
+
+    /// Expand everything above `rel`, then select it and scroll it into view. False when the path
+    /// is not in the tree at all, so a caller can say so rather than silently doing nothing.
+    // Nothing calls it yet: the "Reveal in Sidebar" action, which also has to switch the sidebar
+    // to the Files pane and un-hide it, lands with the tab context menu.
+    #[allow(dead_code)]
+    pub fn reveal(&self, rel: &str) -> bool {
+        for dir in ancestors(rel) {
+            match find_row(&self.model, dir) {
+                Some(row) => row.set_expanded(true),
+                None => return false,
+            }
+        }
+        let Some(row) = find_row(&self.model, rel) else {
+            return false;
+        };
+        self.view.scroll_to(
+            row.position(),
+            gtk::ListScrollFlags::SELECT | gtk::ListScrollFlags::FOCUS,
+            None,
+        );
+        true
     }
 }
 
+/// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
+fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
+    rel.match_indices('/').map(|(at, _)| &rel[..at])
+}
+
+/// The row holding `rel`, or `None` while its parent is still collapsed.
+///
+/// ponytail: a linear scan of the rows the model currently has, which is every *visible* row and
+/// not the whole vault. `reveal` runs it once per path segment, so revealing a note five levels
+/// deep in a 2 400-row expansion is six scans of a few thousand items. Build a rel-path to row
+/// index alongside the child-model cache if that ever shows up in a profile.
+pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
+    (0..model.n_items()).find_map(|i| {
+        let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
+        let (_, r) = row.item().as_ref().and_then(decode)?;
+        (r == rel).then_some(row)
+    })
+}
+
 fn children_model(
-    index: &Rc<RefCell<Index>>,
+    vault: &Rc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
     rel: &str,
 ) -> gio::ListStore {
@@ -112,7 +244,7 @@ fn children_model(
     }
     let t0 = Instant::now();
     let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, index, rel);
+    fill(&store, vault, rel);
     cache.borrow_mut().insert(rel.to_string(), store.clone());
     tracing::debug!(
         dir = rel,
@@ -125,21 +257,24 @@ fn children_model(
 
 /// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row.
 pub fn build(
-    index: Rc<RefCell<Index>>,
+    vault: Rc<Vault>,
     root: &gio::ListStore,
     on_activate: impl Fn(char, &str) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
-        let (index, cache) = (index.clone(), cache.clone());
+        let (vault, cache) = (vault.clone(), cache.clone());
         move |obj| {
             let (kind, rel) = decode(obj)?;
-            (kind == 'd').then(|| children_model(&index, &cache, &rel).upcast())
+            (kind == 'd').then(|| children_model(&vault, &cache, &rel).upcast())
         }
     });
 
+    // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
+    // window is open, and the label is only ever a prefix of a tooltip.
+    let root_label = crate::fileops::display_path(vault.root(), "");
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
         let label = gtk::Label::builder()
             .xalign(0.0)
@@ -150,6 +285,20 @@ pub fn build(
         row.append(&label);
         let expander = gtk::TreeExpander::new();
         expander.set_child(Some(&row));
+        // The name is ellipsized in the middle inside a 200 px sidebar, so the only way to read
+        // where a row really lives is to hover it. Answered on hover rather than written on bind:
+        // `set_tooltip_text` triggers a tooltip query on the whole window, and paying that per
+        // bound row tripled the cost of expanding a 2 400-child directory (12 ms to 40 ms).
+        expander.set_has_tooltip(true);
+        let root_label = root_label.clone();
+        expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
+            let row = expander.list_row().and_then(|row| row.item());
+            let Some((_, rel)) = row.as_ref().and_then(decode) else {
+                return false;
+            };
+            tooltip.set_text(Some(&format!("{root_label}/{rel}")));
+            true
+        });
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&expander));
@@ -205,11 +354,91 @@ pub fn build(
             on_activate(kind, &rel);
         }
     });
+    let scroller = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&view)
+        .build();
+    // ponytail: a plain `GtkBox` around the scroller, purely so the context menu has a
+    // layout-managed widget to hang off. GTK re-presents a popover from its parent's
+    // `allocate_native_children`, which only runs for widgets that use a layout manager;
+    // `GtkListView` has a custom `size_allocate` and never re-presents its popover children, so a
+    // menu parented to the list is frozen at its first-frame size and `GtkPopoverMenu`'s inner
+    // scrolled window turns everything that grows afterwards into a scrollbar. If a scrollbar
+    // ever comes back, the next dial is setting that inner scrolled window's policies to Never.
+    let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    host.append(&scroller);
     Tree {
+        host,
         view,
         model,
-        index,
+        vault,
         root: root.clone(),
         cache,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ancestors_lists_the_directories_reveal_has_to_expand() {
+        let dirs = |rel| ancestors(rel).collect::<Vec<_>>();
+        assert_eq!(dirs("a/b/c.md"), ["a", "a/b"]);
+        // A note at the vault root has nothing above it to expand.
+        assert_eq!(dirs("c.md"), [] as [&str; 0]);
+        assert_eq!(dirs(""), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn changed_span_reports_nothing_when_the_listing_is_unchanged() {
+        let same = rows(&["dNotes", "ma.md", "mb.md"]);
+        assert_eq!(changed_span(&same, &same), None);
+        assert_eq!(changed_span(&[], &[]), None);
+    }
+
+    #[test]
+    fn changed_span_covers_only_the_rows_that_moved() {
+        let old = rows(&["dNotes", "ma.md", "mc.md"]);
+        // Inserted in the middle: one row added, none removed.
+        assert_eq!(
+            changed_span(&old, &rows(&["dNotes", "ma.md", "mb.md", "mc.md"])),
+            Some((2, 0, 1))
+        );
+        // Removed from the middle.
+        assert_eq!(
+            changed_span(&old, &rows(&["dNotes", "mc.md"])),
+            Some((1, 1, 0))
+        );
+        // Renamed in place.
+        assert_eq!(
+            changed_span(&old, &rows(&["dNotes", "ma.md", "mz.md"])),
+            Some((2, 1, 1))
+        );
+        // Appended at the end, so the head is everything that was already there.
+        assert_eq!(
+            changed_span(&old, &rows(&["dNotes", "ma.md", "mc.md", "md.md"])),
+            Some((3, 0, 1))
+        );
+    }
+
+    #[test]
+    fn changed_span_handles_an_empty_side() {
+        let listing = rows(&["dNotes", "ma.md"]);
+        assert_eq!(changed_span(&[], &listing), Some((0, 0, 2)));
+        assert_eq!(changed_span(&listing, &[]), Some((0, 2, 0)));
+    }
+
+    #[test]
+    fn changed_span_keeps_a_repeated_row_from_widening_the_span() {
+        // Equal head and tail must not overlap, or the span would remove more than there is.
+        let old = rows(&["ma.md", "ma.md"]);
+        assert_eq!(changed_span(&old, &rows(&["ma.md"])), Some((1, 1, 0)));
+        assert_eq!(changed_span(&rows(&["ma.md"]), &old), Some((1, 0, 1)));
     }
 }
