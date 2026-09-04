@@ -34,6 +34,7 @@ pub fn is_double(prev: Click, now: Click, within_ms: u32, within_px: f64) -> boo
 /// Watch every paned in `window`. `reset` is called with the paned whose handle was
 /// double-clicked and decides where its default position is.
 pub fn watch(window: &gtk::Window, reset: impl Fn(&gtk::Paned) + 'static) {
+    let reset: std::rc::Rc<dyn Fn(&gtk::Paned)> = std::rc::Rc::new(reset);
     let controller = gtk::EventControllerLegacy::new();
     controller.set_propagation_phase(gtk::PropagationPhase::Capture);
     // `last` remembers the press a double-click would complete; `dragging` remembers the paned
@@ -41,6 +42,12 @@ pub fn watch(window: &gtk::Window, reset: impl Fn(&gtk::Paned) + 'static) {
     // meanwhile left the handle.
     let last: std::cell::RefCell<Option<(gtk::Paned, Click)>> = std::cell::RefCell::new(None);
     let dragging: std::cell::RefCell<Option<gtk::Paned>> = std::cell::RefCell::new(None);
+    // The paned a completed double-click is waiting to reset. The reset cannot happen on the
+    // press that completes it: the paned's own drag gesture has already begun on that press and
+    // recorded where the handle was, so the next motion writes the handle straight back to the
+    // pointer and the default position is visible for a single frame. Holding it until the
+    // release, and then one turn of the main loop later, lets that gesture finish first.
+    let pending: std::cell::RefCell<Option<gtk::Paned>> = std::cell::RefCell::new(None);
     controller.connect_event(glib::clone!(
         #[weak]
         window,
@@ -66,7 +73,7 @@ pub fn watch(window: &gtk::Window, reset: impl Fn(&gtk::Paned) + 'static) {
                         && before == paned
                         && is_double(first, now, time, distance)
                     {
-                        reset(&paned);
+                        *pending.borrow_mut() = Some(paned.clone());
                         // A third press starts a new pair rather than resetting again.
                         *last.borrow_mut() = None;
                     }
@@ -74,6 +81,10 @@ pub fn watch(window: &gtk::Window, reset: impl Fn(&gtk::Paned) + 'static) {
                 gdk::EventType::ButtonRelease => {
                     if let Some(paned) = dragging.borrow_mut().take() {
                         paned.remove_css_class(DRAGGING);
+                    }
+                    if let Some(paned) = pending.borrow_mut().take() {
+                        let reset = reset.clone();
+                        glib::idle_add_local_once(move || reset(&paned));
                     }
                 }
                 _ => {}

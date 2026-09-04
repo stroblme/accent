@@ -1474,7 +1474,6 @@ impl App {
         for pane in self.panes.borrow().iter() {
             pane.bar.add_css_class("chrome-hidden");
         }
-        self.zoom_pill.add_css_class("chrome-hidden");
         // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
         // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
         if let Some(sidebar) = self.sidebar.get() {
@@ -1493,7 +1492,6 @@ impl App {
         for pane in self.panes.borrow().iter() {
             pane.bar.remove_css_class("chrome-hidden");
         }
-        self.zoom_pill.remove_css_class("chrome-hidden");
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.widget().remove_css_class("chrome-dimmed");
         }
@@ -2099,30 +2097,25 @@ fn build_window(
     // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
     // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
     // on screen.
+    // The zoom readout rides in the header beside the view-mode button rather than floating over
+    // the document: an `.osd` pill is the styling for something laid over content, and this is
+    // chrome. It needs no fade class of its own, because the header it sits in already carries
+    // one and takes its children with it.
     let zoom_label = gtk::Label::new(Some("100 %"));
     zoom_label.add_css_class("numeric");
+    zoom_label.add_css_class("dim-label");
     let zoom_reset = gtk::Button::builder()
-        .label("Reset")
+        .icon_name("zoom-original-symbolic")
+        .tooltip_text("Reset Zoom")
         .action_name("win.zoom-reset")
+        .valign(gtk::Align::Center)
         .build();
     zoom_reset.add_css_class("flat");
-    let zoom_pill = gtk::Box::builder()
-        .spacing(6)
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Start)
-        .margin_top(12)
-        .margin_end(12)
-        .visible(false)
-        .build();
+    let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
     zoom_pill.append(&zoom_label);
     zoom_pill.append(&zoom_reset);
-    zoom_pill.add_css_class("osd");
-    zoom_pill.add_css_class("accent-pill");
-    zoom_pill.add_css_class("chrome-fade");
 
-    let document = gtk::Overlay::builder().child(&paned).build();
-    document.add_overlay(&zoom_pill);
-    toasts.set_child(Some(&document));
+    toasts.set_child(Some(&paned));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -2174,6 +2167,7 @@ fn build_window(
     header.pack_end(&menu);
     header.pack_end(&status);
     header.pack_end(&modes);
+    header.pack_end(&zoom_pill);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -3250,7 +3244,6 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
-             .accent-pill {{ padding: 6px; border-radius: 12px; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
