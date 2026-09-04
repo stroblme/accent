@@ -400,7 +400,10 @@ struct App {
     toasts: adw::ToastOverlay,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
-    status: gtk::Label,
+    /// Indexing progress, a thin bar under the main header. It replaces the status label that
+    /// used to sit in the header band, which the vault name and note path were already competing
+    /// with.
+    status: gtk::ProgressBar,
     /// A `Vec`, not a map: a rename retargets an open tab, so `rel` is not a stable key.
     open: RefCell<Vec<Rc<Tab>>>,
     /// View-only image tabs, which have no buffer, no etag and no place in the session.
@@ -687,13 +690,14 @@ impl App {
         if let Some(tab) = self.tab_for(&rel) {
             return self.reveal_page(&tab.page);
         }
-        let (spellcheck, font, minimap, line_numbers) = {
+        let (spellcheck, font, minimap, line_numbers, column_width) = {
             let config = self.config.borrow();
             (
                 config.spellcheck,
                 config.editor_font.clone(),
                 config.minimap,
                 config.line_numbers,
+                config.column_width,
             )
         };
         let opened = editor::open(
@@ -715,6 +719,7 @@ impl App {
             spellcheck,
             font.as_deref(),
             self.zoom.get(),
+            column_width,
         );
         match opened {
             Ok(tab) => {
@@ -1116,9 +1121,15 @@ impl App {
     fn on_event(self: &Rc<Self>, event: Event) {
         match event {
             Event::Progress(p) => {
-                self.status
-                    .set_label(&format!("Indexing… {}/{} files", p.done, p.total));
                 self.status.set_visible(true);
+                self.status
+                    .set_tooltip_text(Some(&format!("Indexing… {}/{} files", p.done, p.total)));
+                match p.total {
+                    0 => self.status.pulse(),
+                    total => self
+                        .status
+                        .set_fraction((p.done as f64 / total as f64).clamp(0.0, 1.0)),
+                }
                 // The indexer commits rows in batches and the walk hands it files depth-first,
                 // so the root level is queryable long before the reconcile ends. Without this the
                 // tree of a cold vault stays empty for the whole two seconds. Throttled, and
@@ -1860,6 +1871,7 @@ impl App {
             tab.set_spellcheck(config.spellcheck);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
+            tab.set_column_width(config.column_width);
             tab.restyle();
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
@@ -2065,8 +2077,10 @@ fn build_window(
     let title = adw::WindowTitle::new(&vault_name, "");
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
-    let status = gtk::Label::builder().label("Indexing…").build();
-    status.add_css_class("dim-label");
+    // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
+    // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
+    // would slide it away instead if that ever reads as a jump.
+    let status = gtk::ProgressBar::builder().visible(false).build();
 
     // An empty vault window should say so rather than showing a blank rectangle.
     let placeholder = adw::StatusPage::builder()
@@ -2165,7 +2179,6 @@ fn build_window(
     let modes = mode_switcher();
     let menu = menu_button();
     header.pack_end(&menu);
-    header.pack_end(&status);
     header.pack_end(&modes);
     header.pack_end(&zoom_pill);
 
@@ -2194,6 +2207,7 @@ fn build_window(
     // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&status);
     toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it

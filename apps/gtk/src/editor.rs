@@ -36,14 +36,21 @@ const CURSOR: Duration = Duration::from_millis(100);
 /// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
 /// interface fonts, and `Reset` in preferences comes back here.
 const DEFAULT_FAMILY: &str = "Adwaita Mono";
-/// The page at 100 %: side gutters, the room above and below the text, and the clamp that caps
-/// the line. [`Tab::set_page`] scales all five with the zoom, so zooming keeps the column's
-/// character count and its gutter instead of squeezing the text into an unchanged page.
+/// The page at 100 %: side gutters and the room above and below the text. [`Tab::set_page`]
+/// scales them with the zoom along with the column, so zooming keeps the page's proportions
+/// instead of squeezing the text into unchanged gutters.
 const GUTTER: i32 = 48;
 const TOP: i32 = 24;
 const BOTTOM: i32 = 96;
-const CLAMP_MAX: i32 = 800;
-const CLAMP_TIGHTEN: i32 = 600;
+/// The narrowest the document column is ever capped at, in 100 % pixels. A percentage of a
+/// narrow editor can ask for less than a line worth reading; this leaves 384 px of text between
+/// the gutters, which measures ~52 characters in the GNOME document font. It only ever applies
+/// below 1600 px of editor, because the preferences row's minimum is 30 %.
+const COLUMN_FLOOR: i32 = 480;
+/// How muted an unhovered line number is, as an opacity over the view's background. The style
+/// scheme already draws the gutter in a grey of its own, so this is a step back from that rather
+/// than the whole distance; 0.6 is the alpha `highlight::restyle` gives quotes.
+const DIM: f64 = 0.6;
 
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
@@ -93,8 +100,13 @@ pub struct Tab {
     pub buffer: sourceview5::Buffer,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
-    /// The width cap on the document column, scaled with the zoom by [`Tab::set_page`].
+    /// The width cap on the document column, sized by [`Tab::set_clamp`].
     clamp: adw::Clamp,
+    /// What the cap is computed from: the document zoom and the column's percentage of the
+    /// editor's width. Kept here because the editor is also resized from the outside, and a
+    /// resize has to recompute the cap without being told the other two again.
+    zoom: Cell<f64>,
+    column: Cell<u32>,
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
@@ -126,7 +138,8 @@ pub struct Tab {
 /// Open `rel` from `root` in a new tab of `tabs`.
 ///
 /// `notes` and `tags` feed the `[[wikilink]]` and `#tag` completions; they are the only way this
-/// module ever reaches the vault. `spellcheck`, `font` and `zoom` are the current preferences.
+/// module ever reaches the vault. `spellcheck`, `font`, `zoom` and `column_width` (the document
+/// column's percentage of the editor's width) are the current preferences.
 #[allow(clippy::too_many_arguments)]
 pub fn open(
     root: &Path,
@@ -137,6 +150,7 @@ pub fn open(
     spellcheck: bool,
     font: Option<&str>,
     zoom: f64,
+    column_width: u32,
 ) -> std::io::Result<Rc<Tab>> {
     let path = root.join(rel);
     let (text, etag) = fs::read_note(&path)?;
@@ -165,9 +179,8 @@ pub fn open(
     typing::install(&view);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
-    // window the clamp simply stops applying. `CLAMP_MAX` leaves 704 px of text, which measures
-    // ~96 characters in the GNOME document font at its default size: wider than the 60 to 72
-    // DESIGN.md asks for, and requested that way because 580 read as a narrow column here.
+    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
+    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
     let clamp = adw::Clamp::builder().child(&view).build();
 
     let scroller = gtk::ScrolledWindow::builder()
@@ -208,6 +221,8 @@ pub fn open(
         buffer: buffer.clone(),
         scroller: scroller.clone(),
         clamp,
+        zoom: Cell::new(zoom),
+        column: Cell::new(column_width),
         map: map.clone(),
         numbers,
         page,
@@ -232,6 +247,17 @@ pub fn open(
     });
     tab.set_font(font, zoom);
     tab.set_spellcheck(spellcheck);
+
+    // The column is a share of the editor's width, so the cap has to be recomputed whenever that
+    // width changes. GTK 4 dropped ::size-allocate, and the scrolled window publishes its
+    // viewport width as the horizontal adjustment's page size, which is the same number.
+    scroller
+        .hadjustment()
+        .connect_page_size_notify(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            move |_| tab.set_clamp()
+        ));
 
     *tab.links.borrow_mut() = highlight::apply(&buffer).links;
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
@@ -319,6 +345,17 @@ pub fn open(
     Ok(tab)
 }
 
+/// The clamp's maximum for a column that is `percent` of an editor `available` pixels wide.
+///
+/// Floored at [`COLUMN_FLOOR`] so a narrow window keeps a readable line, then scaled by the zoom
+/// like the rest of the page: the percentage is of the editor at 100 %, and zooming in widens the
+/// cap until it exceeds the editor and the column simply fills it, which is what the fixed 800 px
+/// cap did too.
+fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
+    let wanted = f64::from(available) * f64::from(percent) / 100.0;
+    (wanted.max(f64::from(COLUMN_FLOOR)) * zoom).round() as i32
+}
+
 // -------------------------------------------------------------------------------- line numbers
 
 /// How many digits the last line's number needs. Every label is padded to this width, so they all
@@ -327,16 +364,22 @@ fn digits(line_count: i32) -> usize {
     line_count.max(1).to_string().len()
 }
 
-/// A line-number gutter that leaves heading lines blank.
+/// A line-number gutter: every line numbered, dimmed, and lifted to full strength while the
+/// pointer is in the gutter.
 ///
-/// An ATX heading's `#` markers hang in the same left gutter (`highlight::hang`), so a number
-/// beside them puts two things in one place; the heading's row is left blank instead, which is
-/// also what stops the numbers from fighting the larger heading font for the reader's eye.
+/// Headings are numbered like everything else. Their `#` markers hang in the 48 px page gutter
+/// (`highlight::hang`), which is a column away from the numbers, so the two read as two margins
+/// rather than as two things in one place.
 ///
-/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible line
-/// with a `GutterLines` that hands out the line's start iter, which is all the tag lookup needs.
-/// Same shape as `diff.rs`, which prints source numbers the same way. The renderer is a child of
-/// the view, so the per-tab `accent-doc-N` font provider reaches it and the zoom follows.
+/// Dimmed by the widget's own opacity rather than by a colour, because a gutter renderer has no
+/// colour to set: composited over the view's background that is the same thing as the foreground
+/// at an alpha, which is how `highlight::restyle` dims everything else. The pointer takes it back
+/// to the full strength it was drawn at before, which is the style scheme's own gutter grey.
+///
+/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible
+/// line and only has to print a number. Same shape as `diff.rs`, which prints source numbers the
+/// same way. The renderer is a child of the view, so the per-tab `accent-doc-N` font provider
+/// reaches it and the zoom follows.
 fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -345,30 +388,17 @@ fn line_numbers(
     renderer.set_xalign(1.0);
     renderer.set_xpad(6);
     renderer.set_visible(false);
+    renderer.set_opacity(DIM);
 
     let width = Rc::new(Cell::new(digits(buffer.line_count())));
     renderer.set_text(&" ".repeat(width.get()));
 
-    // Looked up once: the tag table is fixed after `install_tags` and this runs per visible line.
-    let headings: Vec<gtk::TextTag> = (1..=6)
-        .filter_map(|level| buffer.tag_table().lookup(&format!("h{level}")))
-        .collect();
     renderer.connect_query_data(glib::clone!(
         #[strong]
         width,
-        move |renderer, lines, line| {
-            let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() else {
-                return;
-            };
+        move |renderer, _, line| {
             let width = width.get();
-            let iter = lines.iter_at_line(line);
-            match headings.iter().any(|tag| iter.has_tag(tag)) {
-                // ponytail: blanked with spaces rather than an empty string, because the width
-                // is measured from whatever text the renderer last held and a proportional
-                // document font would then measure a heading row narrower than a numbered one.
-                true => renderer.set_text(&" ".repeat(width)),
-                false => renderer.set_text(&format!("{:>width$}", line + 1)),
-            }
+            renderer.set_text(&format!("{:>width$}", line + 1));
         }
     ));
     buffer.connect_changed(glib::clone!(
@@ -386,7 +416,24 @@ fn line_numbers(
     ));
 
     // Disambiguated: `TextViewExt` has a `gutter` of its own.
-    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&renderer, 0);
+    let gutter = sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left);
+    gutter.insert(&renderer, 0);
+
+    // Gutter-wide rather than per line: the pointer anywhere in the column lifts every number at
+    // once. GTK picks the renderer itself under the pointer, but the controller goes on its
+    // parent, whose `contains-pointer` covers the whole column, padding included.
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter(glib::clone!(
+        #[weak]
+        renderer,
+        move |_, _, _| renderer.set_opacity(1.0)
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak]
+        renderer,
+        move |_| renderer.set_opacity(DIM)
+    ));
+    gutter.add_controller(motion);
     renderer
 }
 
@@ -639,12 +686,30 @@ impl Tab {
     /// the page proportional, so zooming reads as moving closer rather than as a narrower column.
     fn set_page(&self, zoom: f64) {
         let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
+        self.zoom.set(zoom);
         self.view.set_left_margin(scale(GUTTER));
         self.view.set_right_margin(scale(GUTTER));
         self.view.set_top_margin(scale(TOP));
         self.view.set_bottom_margin(scale(BOTTOM));
-        self.clamp.set_maximum_size(scale(CLAMP_MAX));
-        self.clamp.set_tightening_threshold(scale(CLAMP_TIGHTEN));
+        self.set_clamp();
+    }
+
+    /// Cap the column at its share of the editor's current width. Called on every resize as well
+    /// as on a zoom or a preference change, because the share is of a width nothing reports until
+    /// the window has been laid out.
+    fn set_clamp(&self) {
+        let available = self.scroller.hadjustment().page_size().round() as i32;
+        let max = column_max(available, self.column.get(), self.zoom.get());
+        self.clamp.set_maximum_size(max);
+        // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
+        // is given, so a window too narrow for the cap loses no text to the gutters.
+        self.clamp.set_tightening_threshold(max * 3 / 4);
+    }
+
+    /// The document column as a percentage of the editor's width, from preferences.
+    pub fn set_column_width(&self, percent: u32) {
+        self.column.set(percent);
+        self.set_clamp();
     }
 
     /// Re-measure the hanging heading markers from the next idle. A CSS font change only reaches
@@ -1031,6 +1096,20 @@ impl Drop for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn column_max_is_a_share_of_the_editor_with_a_floor_under_it() {
+        // The user's maximised window: 1920 less the sidebar, so the default lands within a
+        // couple of dozen pixels of the 800 px the fixed clamp used to give it.
+        assert_eq!(column_max(1639, 50, 1.0), 820);
+        assert_eq!(column_max(1639, 100, 1.0), 1639, "all of it is allowed");
+        assert_eq!(
+            column_max(700, 50, 1.0),
+            COLUMN_FLOOR,
+            "a narrow editor keeps a readable line instead of a sliver"
+        );
+        assert_eq!(column_max(1639, 50, 2.0), 1639, "the zoom scales the page");
+    }
 
     #[test]
     fn font_css_scales_the_point_size_by_the_zoom() {
