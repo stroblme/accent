@@ -2,14 +2,22 @@
 //!
 //! The pane knows nothing about the vault. The file tree arrives as a finished widget and every
 //! query goes through a closure in [`Data`], so this module never touches app state and the
-//! integration step only has to hand it three closures.
+//! integration step only has to hand it four closures.
+//!
+//! Search runs off the main loop. [`Data::search`] is called on a worker thread, so a full-vault
+//! query never costs a keystroke; a spinner beside the entry says one is running and the previous
+//! results stay on screen until the new ones arrive. Exactly one query is in flight at a time:
+//! when it lands and the box has moved on since, the current one is started instead of painted.
 
-use accent_core::index::SearchHit;
+use accent_core::index::{Match, SearchHit};
+use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, Ref, RefCell};
+use std::ops::Range;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Same value as the palette and the switcher (DESIGN.md, Motion): long enough to swallow a burst
 /// of keystrokes, short enough to feel immediate.
@@ -23,14 +31,37 @@ const LIST_HEIGHT: i32 = 120;
 /// whose artwork is off centre, sitting a pixel low in its 16 px box.
 const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
 
+/// Open a note, at a byte offset inside it when the row that was activated names one.
+type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
+
+/// One query, already compiled. Built on the main thread from what the search box says, so an
+/// invalid pattern is reported without a worker thread being spent on it.
+pub enum Query {
+    /// Ranked full text: what a plain query with no toggle means, and the fast path.
+    Fts(String),
+    /// Exact matching over note bodies, one result row per match.
+    Grep(Regex),
+}
+
+/// What a [`Query`] answered. The `usize` is the total match count, which the capped list cannot
+/// give and a Replace All has to be measured against.
+pub enum Answer {
+    Fts(Vec<SearchHit>),
+    Grep(Vec<Match>, usize),
+}
+
 /// Everything the sidebar needs from the index, as closures so it never sees a vault handle.
 // Boxed closures returning a `Vec` are the whole point of this struct; a type alias per field would
 // only hide the signature the caller has to write.
 #[allow(clippy::type_complexity)]
 pub struct Data {
-    pub search: Box<dyn Fn(&str) -> Vec<SearchHit>>,
+    /// Runs on a worker thread, so it may touch nothing the main loop owns.
+    pub search: Arc<dyn Fn(Query) -> Answer + Send + Sync>,
     pub tags: Box<dyn Fn() -> Vec<(String, i64)>>,
     pub files_with_tag: Box<dyn Fn(&str) -> Vec<String>>,
+    /// Rewrite every match in the vault. `literal` says whether `$1` in the replacement is a
+    /// capture group or two characters.
+    pub replace_all: Box<dyn Fn(&Regex, &str, bool)>,
 }
 
 pub struct Sidebar {
@@ -38,6 +69,8 @@ pub struct Sidebar {
     switcher: gtk::Widget,
     stack: adw::ViewStack,
     search_entry: gtk::SearchEntry,
+    replace_toggle: gtk::ToggleButton,
+    replace_entry: gtk::Entry,
     backlinks: gtk::StringList,
     backlinks_stack: gtk::Stack,
     tags_dirty: Rc<Cell<bool>>,
@@ -47,10 +80,14 @@ pub struct Sidebar {
 impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
     /// `on_open` is called with a vault-relative path when the user activates a result, a tagged
-    /// file or a backlink.
-    pub fn new(files: gtk::Widget, data: Data, on_open: impl Fn(&str) + 'static) -> Sidebar {
+    /// file or a backlink, plus the byte offset of the match when the row is one.
+    pub fn new(
+        files: gtk::Widget,
+        data: Data,
+        on_open: impl Fn(&str, Option<usize>) + 'static,
+    ) -> Sidebar {
         let data = Rc::new(data);
-        let on_open: Rc<dyn Fn(&str)> = Rc::new(on_open);
+        let on_open: OnOpen = Rc::new(on_open);
 
         let stack = adw::ViewStack::builder().vexpand(true).build();
         stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
@@ -111,6 +148,8 @@ impl Sidebar {
             switcher: switcher.upcast(),
             stack,
             search_entry: search.entry,
+            replace_toggle: search.replace_toggle,
+            replace_entry: search.replace_entry,
             backlinks,
             backlinks_stack,
             tags_dirty: tags.dirty,
@@ -150,6 +189,16 @@ impl Sidebar {
         self.stack.set_visible_child_name(name);
         if name == "search" {
             self.search_entry.grab_focus();
+        }
+    }
+
+    /// Ctrl+Shift+H: the Search pane with its replace row open, focused where there is still
+    /// something to type.
+    pub fn show_replace(&self) {
+        self.show_pane("search");
+        self.replace_toggle.set_active(true);
+        if !self.search_entry.text().is_empty() {
+            self.replace_entry.grab_focus();
         }
     }
 
@@ -203,6 +252,28 @@ fn snippet_markup(snippet: &str) -> String {
     out
 }
 
+/// A grep row's snippet: the matched line with the match in bold, or, once the replace row is
+/// open, the match struck through beside what it would become. `accent` is the only colour this
+/// module names and it comes from the style manager (DESIGN.md, Colour).
+fn match_markup(line: &str, range: Range<usize>, replaced: Option<&str>, accent: &str) -> String {
+    let esc = |s: &str| glib::markup_escape_text(s).to_string();
+    let (before, matched, after) = (
+        &line[..range.start],
+        &line[range.clone()],
+        &line[range.end..],
+    );
+    match replaced {
+        None => format!("{}<b>{}</b>{}", esc(before), esc(matched), esc(after)),
+        Some(new) => format!(
+            "{}<s>{}</s> <span foreground=\"{accent}\">{}</span>{}",
+            esc(before),
+            esc(matched),
+            esc(new),
+            esc(after)
+        ),
+    }
+}
+
 /// A note without frontmatter or a heading has no title, so the path is the only name it has.
 fn row_title(hit: &SearchHit) -> &str {
     match hit.title.as_deref() {
@@ -211,10 +282,34 @@ fn row_title(hit: &SearchHit) -> &str {
     }
 }
 
+/// The system accent as pango markup understands it. `Widget::color()` and the style manager are
+/// the only colour sources in the app, and pango's parser takes `#rrggbb` and colour names only,
+/// so the resolved accent is spelled out here rather than handed over as a CSS function.
+fn accent_markup_colour() -> String {
+    let c = adw::StyleManager::default().accent_color_rgba();
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        byte(c.red()),
+        byte(c.green()),
+        byte(c.blue())
+    )
+}
+
 // --- widgets ------------------------------------------------------------------------------------
 
+/// A finished result row. Both query kinds meet here, already marked up, so binding a row costs
+/// nothing and the factory does not have to know which kind produced it.
+struct Row {
+    rel_path: String,
+    /// Where in the note the match is, for a grep row; `None` opens the note at the top.
+    offset: Option<usize>,
+    title: String,
+    snippet: String,
+}
+
 /// A `GtkListView` of plain strings — backlinks and the files carrying a tag are the same row.
-fn path_list(model: &gtk::StringList, on_open: Rc<dyn Fn(&str)>) -> gtk::ListView {
+fn path_list(model: &gtk::StringList, on_open: OnOpen) -> gtk::ListView {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let label = gtk::Label::builder()
@@ -246,7 +341,7 @@ fn path_list(model: &gtk::StringList, on_open: Rc<dyn Fn(&str)>) -> gtk::ListVie
             .and_then(|m| m.item(pos))
             .and_downcast::<gtk::StringObject>()
         {
-            on_open(&s.string());
+            on_open(&s.string(), None);
         }
     });
     view
@@ -277,15 +372,227 @@ fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
+// --- search pane --------------------------------------------------------------------------------
+
+/// What the search box is asking for. Compared instead of the compiled [`Query`], because `Regex`
+/// has no equality and two searches are the same search when the same text and toggles made them.
+#[derive(Clone, PartialEq, Eq)]
+struct Key {
+    text: String,
+    options: Options,
+    /// Exact matching rather than ranked full text: any toggle on, or the replace row open.
+    grep: bool,
+}
+
+/// The search pane's query loop and the widgets it drives, in one `Rc` so the future that waits
+/// on a worker thread can hold all of it without cloning a dozen handles.
+struct Search {
+    data: Rc<Data>,
+    entry: gtk::SearchEntry,
+    toggles: [gtk::ToggleButton; 3],
+    replace_row: gtk::Revealer,
+    replace_entry: gtk::Entry,
+    apply: gtk::Button,
+    spinner: adw::Spinner,
+    body: gtk::Stack,
+    results: gio::ListStore,
+    /// A query is on a worker thread. Only one runs at a time; the rest of the box is read again
+    /// when it lands.
+    busy: Cell<bool>,
+}
+
+impl Search {
+    fn key(&self) -> Key {
+        let options = Options {
+            case: self.toggles[0].is_active(),
+            word: self.toggles[1].is_active(),
+            regex: self.toggles[2].is_active(),
+        };
+        Key {
+            text: self.entry.text().to_string(),
+            options,
+            // Replacing is an exact operation, so opening the replace row switches modes too:
+            // a ranked full-text hit is not a place in a file that can be rewritten.
+            grep: options.any() || self.replace_row.reveals_child(),
+        }
+    }
+
+    /// What Replace All would write, or `None` while the replace row is closed.
+    fn replacement(&self) -> Option<String> {
+        self.replace_row
+            .reveals_child()
+            .then(|| self.replace_entry.text().to_string())
+    }
+
+    /// Run what the box currently asks for, or note that the running query has to be redone.
+    fn start(self: &Rc<Self>) {
+        let key = self.key();
+        if key.text.trim().is_empty() {
+            self.entry.remove_css_class("error");
+            self.results.remove_all();
+            self.body.set_visible_child_name("prompt");
+            self.set_total(0);
+            return;
+        }
+        let query = match compile(&key) {
+            Ok(query) => query,
+            // Only regex mode can fail to compile, and the message is always "that is not a
+            // pattern", so the entry says it in place rather than through a toast.
+            Err(e) => {
+                tracing::debug!("invalid search pattern {:?}: {e}", key.text);
+                self.entry.add_css_class("error");
+                self.body.set_visible_child_name("invalid");
+                self.set_total(0);
+                return;
+            }
+        };
+        self.entry.remove_css_class("error");
+        if self.busy.get() {
+            return;
+        }
+        self.busy.set(true);
+        self.spinner.set_visible(true);
+        self.apply.set_sensitive(false);
+
+        let search = self.clone();
+        glib::spawn_future_local(async move {
+            let run = search.data.search.clone();
+            let t0 = Instant::now();
+            let answer = gio::spawn_blocking(move || run(query)).await;
+            search.busy.set(false);
+            let Ok(answer) = answer else {
+                search.spinner.set_visible(false);
+                return tracing::warn!("the search worker panicked");
+            };
+            tracing::debug!(
+                query = key.text,
+                grep = key.grep,
+                ms = t0.elapsed().as_secs_f64() * 1e3,
+                "sidebar query"
+            );
+            // The box may have moved on while this ran; then its answer is stale and the current
+            // question is asked instead. Old results stay on screen until one of them is current.
+            if search.key() == key {
+                search.show(&key, answer);
+                search.spinner.set_visible(false);
+            } else {
+                search.start();
+            }
+        });
+    }
+
+    fn show(&self, key: &Key, answer: Answer) {
+        let rows = match answer {
+            Answer::Fts(hits) => {
+                self.set_total(0);
+                hits.into_iter()
+                    .map(|hit| Row {
+                        title: row_title(&hit).to_string(),
+                        snippet: snippet_markup(&hit.snippet),
+                        rel_path: hit.rel_path,
+                        offset: None,
+                    })
+                    .collect()
+            }
+            Answer::Grep(hits, total) => {
+                self.set_total(total);
+                let Ok(re) = compile_regex(key) else {
+                    return;
+                };
+                let replacement = self.replacement();
+                let accent = accent_markup_colour();
+                grep_rows(
+                    hits,
+                    &re,
+                    replacement.as_deref(),
+                    !key.options.regex,
+                    &accent,
+                )
+            }
+        };
+        self.body
+            .set_visible_child_name(if rows.is_empty() { "empty" } else { "results" });
+        let objects: Vec<glib::BoxedAnyObject> =
+            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        self.results.splice(0, self.results.n_items(), &objects);
+    }
+
+    /// How many matches a Replace All would rewrite. The list is capped, the count is not.
+    fn set_total(&self, total: usize) {
+        self.apply.set_label(&format!("Replace All ({total})"));
+        self.apply.set_sensitive(total > 0);
+    }
+
+    /// Rewrite the vault, then ask the same question again so the rows show what is there now.
+    fn replace_all(self: &Rc<Self>) {
+        let key = self.key();
+        let (Ok(re), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
+            return;
+        };
+        (self.data.replace_all)(&re, &replacement, !key.options.regex);
+        self.start();
+    }
+}
+
+/// A [`Key`] as the worker thread needs it.
+fn compile(key: &Key) -> Result<Query, search::Error> {
+    match key.grep {
+        true => Ok(Query::Grep(compile_regex(key)?)),
+        false => Ok(Query::Fts(key.text.clone())),
+    }
+}
+
+fn compile_regex(key: &Key) -> Result<Regex, search::Error> {
+    search::pattern(&key.text, key.options)
+}
+
+/// One row per match, with the diff against the replacement when there is one.
+///
+/// ponytail: the replacement is computed by running `re` over the matched text again, which is
+/// what makes `$1` expand in the preview. A pattern whose groups depend on context outside the
+/// match would preview wrongly; the regex crate has no lookaround, so today that cannot happen.
+fn grep_rows(
+    hits: Vec<Match>,
+    re: &Regex,
+    replacement: Option<&str>,
+    literal: bool,
+    accent: &str,
+) -> Vec<Row> {
+    hits.into_iter()
+        .map(|m| {
+            let matched = &m.line_text[m.range.clone()];
+            let replaced = replacement.map(|r| match literal {
+                true => re.replace(matched, search::NoExpand(r)).into_owned(),
+                false => re.replace(matched, r).into_owned(),
+            });
+            Row {
+                title: format!(
+                    "{} — line {}",
+                    m.title
+                        .as_deref()
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or(&m.rel_path),
+                    m.line
+                ),
+                snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
+                rel_path: m.rel_path,
+                offset: Some(m.offset),
+            }
+        })
+        .collect()
+}
+
 struct SearchPane {
     widget: gtk::Widget,
     entry: gtk::SearchEntry,
+    replace_toggle: gtk::ToggleButton,
+    replace_entry: gtk::Entry,
 }
 
-fn search_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> SearchPane {
-    // ponytail: rows are `glib::BoxedAnyObject`s wrapping a `SearchHit` instead of a GObject with
-    // typed properties, the same trade `tree.rs` documents. Define a real item type if the row
-    // ever needs bindable state.
+fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
+    // ponytail: rows are `glib::BoxedAnyObject`s wrapping a `Row` instead of a GObject with typed
+    // properties, the same trade `tree.rs` documents. Define a real item type if the row ever
+    // needs bindable state.
     let results = gio::ListStore::new::<glib::BoxedAnyObject>();
 
     let factory = gtk::SignalListItemFactory::new();
@@ -324,9 +631,9 @@ fn search_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> SearchPane {
         let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
             return;
         };
-        let hit: Ref<SearchHit> = boxed.borrow();
-        title.set_text(row_title(&hit));
-        snippet.set_markup(&snippet_markup(&hit.snippet));
+        let hit: Ref<Row> = boxed.borrow();
+        title.set_text(&hit.title);
+        snippet.set_markup(&hit.snippet);
     });
 
     let view = gtk::ListView::new(
@@ -342,8 +649,8 @@ fn search_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> SearchPane {
                 .and_then(|m| m.item(pos))
                 .and_downcast::<glib::BoxedAnyObject>()
             {
-                let rel = boxed.borrow::<SearchHit>().rel_path.clone();
-                on_open(&rel);
+                let row = boxed.borrow::<Row>();
+                on_open(&row.rel_path, row.offset);
             }
         }
     });
@@ -365,64 +672,172 @@ fn search_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> SearchPane {
         ),
         Some("empty"),
     );
+    body.add_named(
+        &status_page(
+            "dialog-warning-symbolic",
+            "Invalid Pattern",
+            "This is not a valid regular expression.",
+        ),
+        Some("invalid"),
+    );
     body.add_named(&scroller(&view), Some("results"));
     body.set_visible_child_name("prompt");
 
-    let refresh: Rc<dyn Fn(&str)> = Rc::new({
-        let (results, body, data) = (results.clone(), body.clone(), data.clone());
-        move |query: &str| {
-            if query.trim().is_empty() {
-                results.remove_all();
-                body.set_visible_child_name("prompt");
-                return;
-            }
-            let hits: Vec<glib::BoxedAnyObject> = (data.search)(query)
-                .into_iter()
-                .map(glib::BoxedAnyObject::new)
-                .collect();
-            body.set_visible_child_name(if hits.is_empty() { "empty" } else { "results" });
-            results.splice(0, results.n_items(), &hits);
-        }
-    });
-
     let entry = gtk::SearchEntry::builder()
         .placeholder_text("Search notes…")
-        .margin_top(6)
-        .margin_bottom(6)
-        .margin_start(6)
-        .margin_end(6)
+        .hexpand(true)
         .build();
+    // Not an `AdwSpinner` in the entry's own icon area: `GtkSearchEntry` owns both of its icons,
+    // and a 16 px spinner beside it is what DESIGN.md's Loading rule asks for anyway.
+    let spinner = adw::Spinner::builder()
+        .width_request(16)
+        .height_request(16)
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    let replace_toggle = gtk::ToggleButton::builder()
+        .icon_name("pan-down-symbolic")
+        .tooltip_text("Toggle Replace")
+        .valign(gtk::Align::Center)
+        .build();
+    replace_toggle.add_css_class("flat");
 
-    // Debounce: one pending source at a time, replaced on every keystroke. Clearing the entry is
-    // free, so it cancels the pending query and repaints immediately.
-    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-    entry.connect_search_changed(move |entry| {
-        if let Some(id) = pending.borrow_mut().take() {
-            id.remove();
-        }
-        let query = entry.text().to_string();
-        if query.trim().is_empty() {
-            refresh("");
-            return;
-        }
-        let id = glib::timeout_add_local_once(DEBOUNCE, {
-            let (refresh, pending) = (refresh.clone(), pending.clone());
-            move || {
-                *pending.borrow_mut() = None;
-                refresh(&query);
-            }
-        });
-        *pending.borrow_mut() = Some(id);
+    // Text buttons, not icons: Adwaita has no glyph for any of the three, and VS Code's `Aa`,
+    // `Word` and `.*` are what a user arriving from there already reads.
+    let toggles = [
+        ("Aa", "Match Case"),
+        ("Word", "Match Whole Word"),
+        (".*", "Use Regular Expression"),
+    ]
+    .map(|(label, tooltip)| {
+        let button = gtk::ToggleButton::builder()
+            .label(label)
+            .tooltip_text(tooltip)
+            .build();
+        button.add_css_class("flat");
+        button
+    });
+    let toggle_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    toggle_row.add_css_class("linked");
+    toggle_row.set_halign(gtk::Align::Start);
+    for button in &toggles {
+        toggle_row.append(button);
+    }
+
+    let replace_entry = gtk::Entry::builder()
+        .placeholder_text("Replace…")
+        .hexpand(true)
+        .build();
+    let apply = gtk::Button::builder()
+        .label("Replace All (0)")
+        .halign(gtk::Align::End)
+        .sensitive(false)
+        .build();
+    apply.add_css_class("suggested-action");
+    // Stacked rather than side by side: the sidebar's floor is 200 px, where an entry and a button
+    // on one line leave neither of them readable.
+    let replace_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    replace_box.append(&replace_entry);
+    replace_box.append(&apply);
+    let replace_row = gtk::Revealer::builder().child(&replace_box).build();
+
+    let search = Rc::new(Search {
+        data: data.clone(),
+        entry: entry.clone(),
+        toggles: toggles.clone(),
+        replace_row: replace_row.clone(),
+        replace_entry: replace_entry.clone(),
+        apply: apply.clone(),
+        spinner: spinner.clone(),
+        body: body.clone(),
+        results,
+        busy: Cell::new(false),
     });
 
+    // Debounce: one pending source at a time, replaced on every keystroke. A toggle is a click
+    // rather than a burst, so it re-runs the query straight away.
+    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let debounced: Rc<dyn Fn()> = Rc::new({
+        let (search, pending) = (search.clone(), pending.clone());
+        move || {
+            if let Some(id) = pending.borrow_mut().take() {
+                id.remove();
+            }
+            let id = glib::timeout_add_local_once(DEBOUNCE, {
+                let (search, pending) = (search.clone(), pending.clone());
+                move || {
+                    *pending.borrow_mut() = None;
+                    search.start();
+                }
+            });
+            *pending.borrow_mut() = Some(id);
+        }
+    });
+
+    entry.connect_search_changed({
+        let (search, debounced, pending) = (search.clone(), debounced.clone(), pending.clone());
+        move |entry| {
+            // Clearing the entry is free, so it cancels the pending query and repaints at once.
+            if entry.text().trim().is_empty() {
+                if let Some(id) = pending.borrow_mut().take() {
+                    id.remove();
+                }
+                return search.start();
+            }
+            debounced();
+        }
+    });
+    // ponytail: a changed replacement re-runs the whole query, because the rows carry finished
+    // markup rather than the matches they were built from. Off the main thread it costs nothing
+    // the user can feel; cache the last answer if a huge vault ever makes it visible.
+    replace_entry.connect_changed({
+        let debounced = debounced.clone();
+        move |_| debounced()
+    });
+    for button in &toggles {
+        button.connect_toggled({
+            let search = search.clone();
+            move |_| search.start()
+        });
+    }
+    replace_toggle.connect_toggled({
+        let (search, replace_row) = (search.clone(), replace_row.clone());
+        move |toggle| {
+            replace_row.set_reveal_child(toggle.is_active());
+            search.start();
+        }
+    });
+    apply.connect_clicked({
+        let search = search.clone();
+        move |_| search.replace_all()
+    });
+
+    let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    entry_row.append(&entry);
+    entry_row.append(&spinner);
+    entry_row.append(&replace_toggle);
+
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    controls.set_margin_top(6);
+    controls.set_margin_bottom(6);
+    controls.set_margin_start(6);
+    controls.set_margin_end(6);
+    controls.append(&entry_row);
+    controls.append(&toggle_row);
+    controls.append(&replace_row);
+
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    column.append(&entry);
+    column.append(&controls);
     column.append(&body);
     SearchPane {
         widget: column.upcast(),
         entry,
+        replace_toggle,
+        replace_entry,
     }
 }
+
+// --- tags ----------------------------------------------------------------------------------
 
 struct TagsPane {
     widget: gtk::Widget,
@@ -432,7 +847,7 @@ struct TagsPane {
     refill: Rc<dyn Fn()>,
 }
 
-fn tags_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> TagsPane {
+fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     let tags = gio::ListStore::new::<glib::BoxedAnyObject>();
 
     let factory = gtk::SignalListItemFactory::new();
@@ -562,7 +977,7 @@ fn tags_pane(data: &Rc<Data>, on_open: &Rc<dyn Fn(&str)>) -> TagsPane {
     }
 }
 
-fn backlinks_body(model: &gtk::StringList, on_open: Rc<dyn Fn(&str)>) -> gtk::Stack {
+fn backlinks_body(model: &gtk::StringList, on_open: OnOpen) -> gtk::Stack {
     let stack = gtk::Stack::builder().vexpand(true).build();
     stack.add_named(
         &status_page(
@@ -614,5 +1029,19 @@ mod tests {
         assert_eq!(row_title(&hit(Some("Deep Thought"))), "Deep Thought");
         assert_eq!(row_title(&hit(None)), "notes/deep/thought.md");
         assert_eq!(row_title(&hit(Some("  "))), "notes/deep/thought.md");
+    }
+
+    #[test]
+    fn a_grep_row_marks_the_match_and_then_the_replacement() {
+        // A colour name, not a hex literal: DESIGN.md's pre-flight grep allows neither outside
+        // `theme.rs`, and pango parses both.
+        let plain = match_markup("a <b> c", 2..5, None, "teal");
+        assert_eq!(plain, "a <b>&lt;b&gt;</b> c");
+        assert!(pango::parse_markup(&plain, '\u{0}').is_ok());
+
+        let replaced = match_markup("a <b> c", 2..5, Some("&x"), "teal");
+        assert!(replaced.contains("<s>&lt;b&gt;</s>"), "{replaced}");
+        assert!(replaced.contains(">&amp;x</span>"), "{replaced}");
+        assert!(pango::parse_markup(&replaced, '\u{0}').is_ok());
     }
 }
