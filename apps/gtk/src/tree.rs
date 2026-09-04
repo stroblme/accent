@@ -10,6 +10,7 @@ use gtk::{gio, glib};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// ponytail: rows are `gtk::StringObject`s holding `"<kind char><rel_path>"` instead of a custom
@@ -44,7 +45,7 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
 
 /// Bring `store` in step with the direct children of `prefix`. `list_dir` already returns
 /// directories first, then names case-insensitively.
-pub fn fill(store: &gio::ListStore, vault: &Rc<Vault>, prefix: &str) {
+pub fn fill(store: &gio::ListStore, vault: &Arc<Vault>, prefix: &str) {
     let rows = match vault.list_dir(prefix) {
         Ok(rows) => rows,
         // Leaving the rows alone beats blanking a directory the index simply could not answer for.
@@ -115,7 +116,7 @@ pub struct Tree {
     host: gtk::Box,
     view: gtk::ListView,
     model: gtk::TreeListModel,
-    vault: Rc<Vault>,
+    vault: Arc<Vault>,
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
 }
@@ -235,7 +236,7 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
 }
 
 fn children_model(
-    vault: &Rc<Vault>,
+    vault: &Arc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
     rel: &str,
 ) -> gio::ListStore {
@@ -259,7 +260,7 @@ fn children_model(
 
 /// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row.
 pub fn build(
-    vault: Rc<Vault>,
+    vault: Arc<Vault>,
     root: &gio::ListStore,
     on_activate: impl Fn(char, &str) + 'static,
 ) -> Tree {

@@ -231,6 +231,15 @@ mod provider_imp {
             // carries them again. Anything outside that range is untouched.
             let mut begin = end;
             begin.set_line_offset(line[..start].chars().count() as i32);
+            // `typing::pair` closes a `[` as it is typed, so the caret usually sits in front of
+            // the `]]` it left behind. The inserted link brings its own, so they go too.
+            if self.kind.get() == Kind::WikiLink {
+                for _ in 0..2 {
+                    if !end.ends_line() && end.char() == ']' {
+                        end.forward_char();
+                    }
+                }
+            }
             let text = match self.kind.get() {
                 Kind::WikiLink => format!("[[{}]]", proposal.text()),
                 Kind::Tag => format!("#{}", proposal.text()),

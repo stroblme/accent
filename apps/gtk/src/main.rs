@@ -9,15 +9,18 @@ mod completion;
 mod diff;
 mod editor;
 mod fileops;
+mod find;
 mod highlight;
 mod multicaret;
 mod palette;
+mod paned;
 mod preview;
 mod settings;
 mod sidebar;
 mod start;
 mod theme;
 mod tree;
+mod typing;
 
 use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
 use accent_core::index::Phase;
@@ -28,6 +31,7 @@ use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -35,6 +39,9 @@ const APP_ID: &str = "io.github.stroblme.Accent";
 
 /// What the palette lists before the user types anything.
 const RECENT_NOTES: usize = 50;
+/// Commands kept in the session's recently-used list. There are only about forty of them, so a
+/// shorter list is still every command the user actually reaches for.
+const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
 /// Rows in a `[[wikilink]]` or `#tag` completion popup.
@@ -59,6 +66,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
+    ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
     ("win.palette-files", "Open Note…", &["<Control>e"]),
     (
@@ -68,8 +77,14 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.find", "Find", &["<Control>f"]),
     ("win.replace", "Replace", &["<Control>h"]),
-    ("win.find-next", "Find Next", &["<Control>g"]),
-    ("win.find-previous", "Find Previous", &["<Control><Shift>g"]),
+    (
+        "win.replace-in-files",
+        "Replace in Notes",
+        &["<Control><Shift>h"],
+    ),
+    ("win.find-next", "Find Next", &["F3"]),
+    ("win.find-previous", "Find Previous", &["<Shift>F3"]),
+    ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
@@ -138,9 +153,12 @@ fn main() -> glib::ExitCode {
     let shell = Rc::new(Shell {
         config: Rc::new(RefCell::new(Config::load())),
         windows: RefCell::new(Vec::new()),
+        start: glib::WeakRef::new(),
     });
-    app.connect_command_line(move |gtk_app, command_line| {
-        shell.command_line(gtk_app, command_line)
+    shell.install_app_actions(&app);
+    app.connect_command_line({
+        let shell = shell.clone();
+        move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
     });
     app.run()
 }
@@ -150,11 +168,78 @@ fn main() -> glib::ExitCode {
 /// One process, one config, one window per vault.
 struct Shell {
     config: Rc<RefCell<Config>>,
-    /// Weak, so a closed window is collected instead of being handed out again.
-    windows: RefCell<Vec<(PathBuf, glib::WeakRef<adw::ApplicationWindow>)>>,
+    /// The open vaults, and the only strong reference to each window's state: an entry is dropped
+    /// in `forget` when the window closes, which is what releases the vault and its worker thread.
+    windows: RefCell<Vec<(PathBuf, Rc<App>)>>,
+    /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
+    /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
+    start: glib::WeakRef<adw::ApplicationWindow>,
 }
 
 impl Shell {
+    /// The two actions that outlive the window firing them: Open Folder… lands on the start
+    /// screen, and Close Vault takes the current window away, so neither can live on a window the
+    /// way the `win.` actions do. Registered once on the application, where the shell is in scope.
+    fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let open = gio::SimpleAction::new("open-vault", None);
+        open.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.start_screen(&gtk_app)
+        });
+        gtk_app.add_action(&open);
+
+        let close = gio::SimpleAction::new("close-vault", None);
+        close.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.close_vault(&gtk_app)
+        });
+        gtk_app.add_action(&close);
+    }
+
+    /// Close Vault: hand this window's vault back and land on the start screen.
+    ///
+    /// The window goes rather than being emptied out. The vault, its worker thread and its WebKit
+    /// process all hang off the window's [`App`], so closing the window is what releases them, and
+    /// it is the path a user closing the window already takes. The cost is the window's geometry,
+    /// which the next vault takes from the defaults again. The start screen is presented first, so
+    /// the application never stands at zero windows and quits out from under us.
+    fn close_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let Some(window) = gtk_app.active_window() else {
+            return;
+        };
+        // Only a vault window has a vault to close; from the start screen this leads nowhere.
+        let opened = self
+            .windows
+            .borrow()
+            .iter()
+            .any(|(_, app)| app.window.upcast_ref::<gtk::Window>() == &window);
+        if !opened {
+            return;
+        }
+        self.start_screen(gtk_app);
+        window.close();
+    }
+
+    /// Let go of a window's [`App`] once the close is certain. This is the only strong reference
+    /// to it, so the vault, its worker thread and its WebKit process all go with it.
+    ///
+    /// ponytail: the `App` goes here, the vault a moment later — the tree and the sidebar hold
+    /// their own `Rc<Vault>` inside widgets, so the last one drops when GTK destroys the window,
+    /// and `Vault`'s `Drop` joins the worker there. Closing a second into `testvault`'s 2.7 s cold
+    /// reconcile blocked the main loop for 2.3 s, with the window already off screen. `Vault::drop`
+    /// names the fix (a cancellation flag on `reconcile`); until a vault is opened and closed often
+    /// enough for that pause to be felt, one stalled close is cheaper than the flag.
+    fn forget(&self, window: &adw::ApplicationWindow) {
+        let mut windows = self.windows.borrow_mut();
+        let Some(i) = windows.iter().position(|(_, app)| &app.window == window) else {
+            return;
+        };
+        let app = windows.remove(i);
+        // Out of the borrow before the drop: `App` reaches a long way as it goes.
+        drop(windows);
+        drop(app);
+    }
+
     fn command_line(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -187,19 +272,22 @@ impl Shell {
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
-        // The start window closes itself once a vault is chosen, so it has to outlive the closure
-        // that closes it: hence the cell rather than a capture.
-        let window: Rc<RefCell<Option<adw::ApplicationWindow>>> = Rc::new(RefCell::new(None));
-        let opened = start::present(gtk_app, self.config.clone(), {
-            let (shell, gtk_app, window) = (self.clone(), gtk_app.clone(), window.clone());
+        if let Some(window) = self.start.upgrade() {
+            window.present();
+            return;
+        }
+        let window = start::present(gtk_app, self.config.clone(), {
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
             move |root| {
                 shell.open_vault(&gtk_app, root, None);
-                if let Some(window) = window.borrow_mut().take() {
+                // The start window has done its job. It is reached through the shell rather than
+                // captured, which is what keeps the closure it lives in out of its own cycle.
+                if let Some(window) = shell.start.upgrade() {
                     window.close();
                 }
             }
         });
-        *window.borrow_mut() = Some(opened);
+        self.start.set(Some(&window));
     }
 
     fn open_vault(
@@ -212,18 +300,28 @@ impl Shell {
             window.present();
             return;
         }
-        if let Some(window) = build_window(gtk_app, self, root.clone(), note) {
-            self.windows.borrow_mut().push((root, window.downgrade()));
-        }
+        let Some(app) = build_window(gtk_app, self, root.clone(), note) else {
+            return;
+        };
+        // A second `close-request` handler. `wire_window`'s is connected first and can still stop
+        // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
+        // handler does, so this one only ever sees a close that is really happening.
+        app.window.connect_close_request({
+            let shell = Rc::downgrade(self);
+            move |window| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.forget(window);
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        self.windows.borrow_mut().push((root, app));
     }
 
     fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
-        self.windows
-            .borrow_mut()
-            .retain(|(_, window)| window.upgrade().is_some());
         let windows = self.windows.borrow();
-        let (_, window) = windows.iter().find(|(path, _)| path == root)?;
-        window.upgrade()
+        let (_, app) = windows.iter().find(|(path, _)| path == root)?;
+        Some(app.window.clone())
     }
 }
 
@@ -281,12 +379,15 @@ struct Presenting {
 // ----------------------------------------------------------------------------------- app state
 
 struct App {
-    vault: Rc<Vault>,
+    /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
+    vault: Arc<Vault>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
     tabs: adw::TabView,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// Find, replace and go to line, one bar for the window rather than one per tab.
+    find: Rc<find::Bar>,
     status: gtk::Label,
     /// A `Vec`, not a map: a rename retargets an open tab, so `rel` is not a stable key.
     open: RefCell<Vec<Rc<Tab>>>,
@@ -317,6 +418,9 @@ struct App {
     mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
     zoom: Cell<f64>,
+    /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
+    zoom_pill: gtk::Box,
+    zoom_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -331,6 +435,13 @@ struct App {
     tree_painted: Cell<i64>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
+    /// Notes this window showed and commands it ran, most recent first. The palette leads with
+    /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
+    recent_notes: RefCell<Vec<String>>,
+    recent_commands: RefCell<Vec<String>>,
+    /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
+    /// rebind has to rebuild it: see [`fill_captured`].
+    captured: gtk::ShortcutController,
 }
 
 impl App {
@@ -378,12 +489,13 @@ impl App {
             self.tabs.set_selected_page(&tab.page);
             return;
         }
-        let (spellcheck, font, minimap) = {
+        let (spellcheck, font, minimap, line_numbers) = {
             let config = self.config.borrow();
             (
                 config.spellcheck,
                 config.editor_font.clone(),
                 config.minimap,
+                config.line_numbers,
             )
         };
         let opened = editor::open(
@@ -409,10 +521,54 @@ impl App {
         match opened {
             Ok(tab) => {
                 tab.set_minimap(minimap);
+                tab.set_line_numbers(line_numbers);
                 self.adopt(tab);
                 self.sync_conflict_banner(&rel);
             }
             Err(e) => self.toast(&format!("Cannot open {rel}: {e}")),
+        }
+    }
+
+    /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
+    /// exact match rather than the top of the note.
+    ///
+    /// ponytail: the offset is turned into a character offset by counting the text in front of it,
+    /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
+    /// belongs on `Tab` if anything ever needs it per keystroke.
+    fn open_note_at(self: &Rc<Self>, rel: &str, offset: Option<usize>) {
+        self.open_note(rel);
+        let (Some(offset), Some(tab)) = (offset, self.tab_for(rel)) else {
+            return;
+        };
+        let text = tab.text();
+        let Some(head) = text.get(..offset.min(text.len())) else {
+            return;
+        };
+        let iter = tab.buffer.iter_at_offset(head.chars().count() as i32);
+        tab.buffer.place_cursor(&iter);
+        tab.view
+            .scroll_to_mark(&tab.buffer.get_insert(), 0.0, true, 0.0, 0.3);
+        tab.view.grab_focus();
+    }
+
+    /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
+    ///
+    /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
+    /// would come back as a changed-on-disk banner instead of a replacement.
+    fn replace_in_notes(self: &Rc<Self>, re: &accent_api::Regex, replacement: &str, literal: bool) {
+        let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
+        (self.ops().flush)(&open);
+        match self.vault.replace_all(re, replacement, literal) {
+            Ok(report) => {
+                let unsaved = (self.ops().reload)(&report.rewritten);
+                self.toast(&replace_message(
+                    report.matches,
+                    report.rewritten.len(),
+                    report.failed.len(),
+                    unsaved,
+                ));
+            }
+            Err(e) => self.toast(&format!("Cannot replace: {e:#}")),
         }
     }
 
@@ -519,6 +675,7 @@ impl App {
 
     /// Keep the window subtitle, the backlinks pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
+        self.find.retarget(self.active());
         let Some(tab) = self.active() else {
             self.title.set_subtitle("");
             if let Some(sidebar) = self.sidebar.get() {
@@ -527,6 +684,7 @@ impl App {
             return;
         };
         let rel = tab.rel();
+        self.note_used(&rel);
         self.title.set_subtitle(&rel);
         if let Some(sidebar) = self.sidebar.get() {
             let mut sources: Vec<String> = Vec::new();
@@ -604,9 +762,11 @@ impl App {
                 tab.rel()
             )),
         );
+        // Compare rather than Reload: reloading threw the buffer away on one click, and the
+        // resolver shows both sides and now lets them be merged by hand.
         dialog.add_responses(&[
             ("cancel", "Cancel"),
-            ("reload", "Reload"),
+            ("compare", "Compare"),
             ("overwrite", "Overwrite"),
         ]);
         dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
@@ -618,11 +778,7 @@ impl App {
             Some(&self.window),
             gio::Cancellable::NONE,
             move |response| match response.as_str() {
-                "reload" => {
-                    if let Err(e) = tab.reload_keep_cursor() {
-                        app.toast(&format!("Reload failed: {e}"));
-                    }
-                }
+                "compare" => app.compare_with_disk(&tab),
                 "overwrite" => match app.write_tab(&tab, &text, None) {
                     Ok(()) => app.toast("Overwritten"),
                     Err(e) => app.toast(&format!("Save failed: {e}")),
@@ -731,11 +887,17 @@ impl App {
             let (app, tab) = (self.clone(), tab.clone());
             move |choice| match choice {
                 // Keeping mine forces the buffer over the file; keeping theirs drops the buffer,
-                // which is a loss the user has now seen spelled out line by line.
-                diff::Choice::KeepMine => match app.write_tab(&tab, &tab.text(), None) {
-                    Ok(()) => app.toast("Saved"),
-                    Err(e) => app.toast(&format!("Save failed: {e}")),
-                },
+                // which is a loss the user has now seen spelled out line by line. A pane edited
+                // in the dialog replaces the buffer first, so what was compared is what is saved.
+                diff::Choice::KeepMine { edited } => {
+                    if let Some(text) = edited {
+                        tab.set_text(&text);
+                    }
+                    match app.write_tab(&tab, &tab.text(), None) {
+                        Ok(()) => app.toast("Saved"),
+                        Err(e) => app.toast(&format!("Save failed: {e}")),
+                    }
+                }
                 diff::Choice::KeepTheirs => {
                     tab.discard();
                     app.refresh_tab(&tab);
@@ -844,6 +1006,7 @@ impl App {
                         tab.retarget(self.vault.root(), &format!("{to}/{rest}"));
                     }
                 }
+                accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
@@ -878,16 +1041,27 @@ impl App {
             let (app, original, conflict) =
                 (self.clone(), original.to_string(), conflict.to_string());
             move |choice| {
-                // Keeping mine is only the copy going away; keeping theirs adopts it first.
-                if choice == diff::Choice::KeepTheirs {
-                    if let Err(e) = app.vault.adopt_conflict(&original, &conflict) {
-                        return app.toast(&format!("Cannot resolve: {e:#}"));
+                // Keeping mine is only the copy going away, unless the dialog was edited: then
+                // the merged text is written first. Keeping theirs adopts the copy.
+                let rewritten = match choice {
+                    diff::Choice::KeepTheirs => {
+                        if let Err(e) = app.vault.adopt_conflict(&original, &conflict) {
+                            return app.toast(&format!("Cannot resolve: {e:#}"));
+                        }
+                        true
                     }
-                    // The adopted text is on disk now, but a tab with unsaved edits still holds
-                    // the only copy of them: it gets the banner, not a silent overwrite.
-                    if let Some(tab) = app.tab_for(&original) {
-                        app.refresh_tab(&tab);
+                    diff::Choice::KeepMine { edited: Some(text) } => {
+                        if let Err(e) = app.vault.save(&original, &text, None) {
+                            return app.toast(&format!("Cannot resolve: {e}"));
+                        }
+                        true
                     }
+                    diff::Choice::KeepMine { edited: None } => false,
+                };
+                // The note on disk is new text now, but a tab with unsaved edits still holds the
+                // only copy of them: it gets the banner, not a silent overwrite.
+                if rewritten && let Some(tab) = app.tab_for(&original) {
+                    app.refresh_tab(&tab);
                 }
                 fileops::trash(app.ops(), &conflict);
                 app.sync_conflict_banner(&original);
@@ -1010,6 +1184,11 @@ impl App {
         );
         self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
+        preview.connect_found(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |count| app.find.set_matches(count)
+        ));
         *self.preview.borrow_mut() = Some(preview);
     }
 
@@ -1047,6 +1226,21 @@ impl App {
         *self.render.borrow_mut() = Some(id);
     }
 
+    /// The find bar addressing the rendered preview, which is what it does while presenting.
+    fn preview_find(&self, op: find::PreviewOp) {
+        let preview = self.preview.borrow();
+        let Some(preview) = preview.as_ref() else {
+            return;
+        };
+        match op {
+            find::PreviewOp::Find(text) => preview.find(&text),
+            find::PreviewOp::Next => preview.find_next(),
+            find::PreviewOp::Previous => preview.find_previous(),
+            find::PreviewOp::Clear => preview.find_clear(),
+            find::PreviewOp::Line(line) => preview.scroll_to_line(line),
+        }
+    }
+
     fn sync_scroll(&self, tab: &Rc<Tab>) {
         if !self.shows_preview() {
             return;
@@ -1080,6 +1274,12 @@ impl App {
         self.sidebar_header.add_css_class("chrome-hidden");
         self.header.add_css_class("chrome-hidden");
         self.tabbar.add_css_class("chrome-hidden");
+        self.zoom_pill.add_css_class("chrome-hidden");
+        // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
+        // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().add_css_class("chrome-dimmed");
+        }
     }
 
     fn show_chrome(&self) {
@@ -1091,6 +1291,10 @@ impl App {
         self.sidebar_header.remove_css_class("chrome-hidden");
         self.header.remove_css_class("chrome-hidden");
         self.tabbar.remove_css_class("chrome-hidden");
+        self.zoom_pill.remove_css_class("chrome-hidden");
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().remove_css_class("chrome-dimmed");
+        }
     }
 
     /// Never fade over something that is waiting for an answer: a dialog, a banner, an open
@@ -1103,9 +1307,8 @@ impl App {
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
         in_popover
-            || self
-                .active()
-                .is_some_and(|tab| tab.banner.is_revealed() || tab.search.is_search_mode())
+            || self.find.is_open()
+            || self.active().is_some_and(|tab| tab.banner.is_revealed())
     }
 
     // --- actions -------------------------------------------------------------------------
@@ -1129,26 +1332,11 @@ impl App {
             }
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
-            "find" => {
-                if let Some(tab) = self.active() {
-                    tab.find(false);
-                }
-            }
-            "replace" => {
-                if let Some(tab) = self.active() {
-                    tab.find(true);
-                }
-            }
-            "find-next" => {
-                if let Some(tab) = self.active() {
-                    tab.find_next();
-                }
-            }
-            "find-previous" => {
-                if let Some(tab) = self.active() {
-                    tab.find_previous();
-                }
-            }
+            "find" => self.find.open(find::Mode::Find),
+            "replace" => self.find.open(find::Mode::Replace),
+            "goto-line" => self.find.open(find::Mode::Goto),
+            "find-next" => self.find.step(true),
+            "find-previous" => self.find.step(false),
             "duplicate-line" => {
                 if let Some(tab) = self.active() {
                     tab.duplicate_line();
@@ -1204,6 +1392,12 @@ impl App {
                 .set_visible(!self.sidebar_column.is_visible()),
             "pane-files" => self.show_pane("files"),
             "pane-search" => self.show_pane("search"),
+            "replace-in-files" => {
+                self.sidebar_column.set_visible(true);
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.show_replace();
+                }
+            }
             "pane-tags" => self.show_pane("tags"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -1247,6 +1441,11 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
         }
+        // 100 % is the state that needs no readout, so Reset makes the pill disappear rather than
+        // leaving a badge saying nothing is going on.
+        self.zoom_label
+            .set_label(&format!("{} %", (zoom * 100.0).round() as i32));
+        self.zoom_pill.set_visible(zoom != 1.0);
         self.save_session_soon();
     }
 
@@ -1340,18 +1539,29 @@ impl App {
     }
 
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
+        // Two answers to "recent": what this window opened, and what changed on disk. The first
+        // is what the user means, so it leads and the index's mtime list fills the page below it.
+        let mut recent = self.recent_notes.borrow().clone();
+        for rel in self.vault.recent_notes(RECENT_NOTES).unwrap_or_default() {
+            if !recent.contains(&rel) {
+                recent.push(rel);
+            }
+        }
+        let used = self.recent_commands.borrow();
+        let config = self.config.borrow();
         let sources = palette::Sources {
-            recent: self.vault.recent_notes(RECENT_NOTES).unwrap_or_default(),
+            recent,
             load_notes: Box::new({
                 let vault = self.vault.clone();
                 move || vault.note_paths().unwrap_or_default()
             }),
             commands: ACTIONS
                 .iter()
-                .map(|(action, label, accels)| palette::Item::Command {
+                .map(|(action, label, _)| palette::Item::Command {
                     action: action.to_string(),
                     label: label.to_string(),
-                    accel: accels.first().map(|a| a.to_string()),
+                    accels: accels_for(&config, action),
+                    recent: used.iter().position(|a| a == action),
                 })
                 .collect(),
             load_tags: Box::new({
@@ -1365,7 +1575,18 @@ impl App {
                         .collect()
                 }
             }),
+            // Weak, like the pick callback below: this closure outlives the call and a strong
+            // handle here would keep the window alive through the dialog.
+            on_rebind: Box::new({
+                let app = Rc::downgrade(self);
+                move |action: &str, accels: Option<Vec<String>>| match app.upgrade() {
+                    Some(app) => app.rebind(action, accels),
+                    None => Vec::new(),
+                }
+            }),
         };
+        drop(config);
+        drop(used);
         palette::present(
             &self.window,
             initial,
@@ -1389,30 +1610,83 @@ impl App {
         );
     }
 
+    /// Push the accelerators in force into the application and rebuild the four captured chords.
+    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
+    /// them a config change touched.
+    fn apply_accels(&self) {
+        let Some(gtk_app) = self.window.application() else {
+            return;
+        };
+        let config = self.config.borrow();
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+        fill_captured(&self.captured, &config);
+    }
+
+    /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
+    /// override, so the action goes back to what [`ACTIONS`] says. Returns what is in force after.
+    fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
+        {
+            let mut config = self.config.borrow_mut();
+            match accels {
+                Some(accels) => config.shortcuts.insert(action.to_string(), accels),
+                None => config.shortcuts.remove(action),
+            };
+            if let Err(e) = config.save() {
+                tracing::warn!("saving config: {e:#}");
+            }
+        }
+        self.apply_accels();
+        accels_for(&self.config.borrow(), action)
+    }
+
+    /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
+    /// or a re-read from disk can have changed.
+    fn apply_config(self: &Rc<Self>, config: &Config) {
+        self.vault.set_config(config.vault(self.vault.root()));
+        // Switching to or away from Solarized does not change the system's dark state, so the
+        // notify handler that usually restyles never fires here.
+        theme::apply(config.theme);
+        self.apply_accels();
+        for tab in self.open_tabs() {
+            tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            tab.set_spellcheck(config.spellcheck);
+            tab.set_minimap(config.minimap);
+            tab.set_line_numbers(config.line_numbers);
+            tab.restyle();
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.restyle();
+        }
+    }
+
     fn preferences(self: &Rc<Self>) {
-        let root = self.vault.root().to_path_buf();
+        // The config is read once at startup and every row here writes the whole struct back, so
+        // an edit made in the file while accent runs would be undone by the next switch touched.
+        // Re-reading as the dialog opens keeps the file the source of truth; a file that no
+        // longer parses is left alone, exactly as at startup.
+        match Config::read(&accent_core::config::config_path()) {
+            Ok(fresh) => {
+                *self.config.borrow_mut() = fresh;
+                let config = self.config.borrow().clone();
+                self.apply_config(&config);
+            }
+            Err(e) if accent_core::config::config_path().exists() => {
+                tracing::warn!("re-reading the config: {e:#}")
+            }
+            Err(_) => {}
+        }
         settings::present(
             &self.window,
             self.config.clone(),
-            root.clone(),
+            self.vault.root().to_path_buf(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |config: &Config| {
-                    app.vault.set_config(config.vault(&root));
-                    // Switching to or away from Solarized does not change the system's dark
-                    // state, so the notify handler that usually restyles never fires here.
-                    theme::apply(config.theme);
-                    for tab in app.open_tabs() {
-                        tab.set_font(config.editor_font.as_deref(), app.zoom.get());
-                        tab.set_spellcheck(config.spellcheck);
-                        tab.set_minimap(config.minimap);
-                        tab.restyle();
-                    }
-                    if let Some(preview) = app.preview.borrow().as_ref() {
-                        preview.restyle();
-                    }
-                }
+                move |config: &Config| app.apply_config(config)
             ),
         );
     }
@@ -1431,6 +1705,26 @@ impl App {
     }
 
     // --- session -------------------------------------------------------------------------
+
+    /// Remember that this note was just looked at. Called from `sync_active`, so it covers
+    /// opening a note, switching to its tab and coming back to the window.
+    fn note_used(self: &Rc<Self>, rel: &str) {
+        if self.recent_notes.borrow().first().is_some_and(|r| r == rel) {
+            return;
+        }
+        accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        self.save_session_soon();
+    }
+
+    /// Remember a command by full action name, whichever surface fired it.
+    fn command_used(self: &Rc<Self>, action: &str) {
+        accent_core::config::touch(
+            &mut self.recent_commands.borrow_mut(),
+            action,
+            RECENT_COMMANDS,
+        );
+        self.save_session_soon();
+    }
 
     fn save_session_soon(self: &Rc<Self>) {
         if self.session.borrow().is_some() {
@@ -1467,6 +1761,8 @@ impl App {
                 .map(|s| s.pane())
                 .unwrap_or_else(|| Session::default().pane),
             zoom: self.zoom.get(),
+            recent_notes: self.recent_notes.borrow().clone(),
+            recent_commands: self.recent_commands.borrow().clone(),
         };
         if let Err(e) = self.vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
@@ -1494,6 +1790,20 @@ impl App {
         self.split
             .set_position(sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
+        // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
+        // of them, and the order they happened to restore in says nothing about how they were
+        // used. Touching the stored list back to front puts it in front of those, and a note the
+        // restore opened that the stored list does not know about still keeps its place at the end.
+        for rel in session.recent_notes.iter().rev() {
+            accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        }
+        for action in session.recent_commands.iter().rev() {
+            accent_core::config::touch(
+                &mut self.recent_commands.borrow_mut(),
+                action,
+                RECENT_COMMANDS,
+            );
+        }
     }
 }
 
@@ -1519,7 +1829,7 @@ fn build_window(
     shell: &Rc<Shell>,
     root: PathBuf,
     note: Option<String>,
-) -> Option<adw::ApplicationWindow> {
+) -> Option<Rc<App>> {
     install_document_font();
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
@@ -1532,7 +1842,7 @@ fn build_window(
             return None;
         }
     };
-    let vault = Rc::new(vault);
+    let vault = Arc::new(vault);
     {
         let mut config = shell.config.borrow_mut();
         config.touch_recent(&root);
@@ -1573,7 +1883,35 @@ fn build_window(
         .shrink_end_child(false)
         .build();
 
-    toasts.set_child(Some(&paned));
+    // Zoom had no visual feedback at all: the note simply grew. The readout floats over the
+    // document in an overlay rather than sitting in a bar, so it costs the column no width and
+    // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
+    // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
+    // on screen.
+    let zoom_label = gtk::Label::new(Some("100 %"));
+    zoom_label.add_css_class("numeric");
+    let zoom_reset = gtk::Button::builder()
+        .label("Reset")
+        .action_name("win.zoom-reset")
+        .build();
+    zoom_reset.add_css_class("flat");
+    let zoom_pill = gtk::Box::builder()
+        .spacing(6)
+        .halign(gtk::Align::End)
+        .valign(gtk::Align::Start)
+        .margin_top(12)
+        .margin_end(12)
+        .visible(false)
+        .build();
+    zoom_pill.append(&zoom_label);
+    zoom_pill.append(&zoom_reset);
+    zoom_pill.add_css_class("osd");
+    zoom_pill.add_css_class("accent-pill");
+    zoom_pill.add_css_class("chrome-fade");
+
+    let document = gtk::Overlay::builder().child(&paned).build();
+    document.add_overlay(&zoom_pill);
+    toasts.set_child(Some(&document));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -1641,10 +1979,17 @@ fn build_window(
     header.add_css_class("chrome-fade");
     tabbar.add_css_class("chrome-fade");
 
+    // The find bar goes in the toolbar's content rather than among its top bars: presentation
+    // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
+    let find = find::Bar::new();
+    let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    editor_column.append(find.widget());
+    editor_column.append(&toasts);
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&tabbar);
-    toolbar.set_content(Some(&toasts));
+    toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
     // the two columns sit on `--window-bg-color` and band against the note. The header bars and
@@ -1680,6 +2025,7 @@ fn build_window(
         tabs: tabs.clone(),
         title,
         toasts,
+        find,
         status,
         open: RefCell::new(Vec::new()),
         images: RefCell::new(Vec::new()),
@@ -1699,6 +2045,8 @@ fn build_window(
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
+        zoom_pill,
+        zoom_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -1706,6 +2054,9 @@ fn build_window(
         tree_painted: Cell::new(0),
         render: RefCell::new(None),
         session: RefCell::new(None),
+        recent_notes: RefCell::new(Vec::new()),
+        recent_commands: RefCell::new(Vec::new()),
+        captured: gtk::ShortcutController::new(),
     });
     let _ = app.ops.set(build_ops(&app));
 
@@ -1745,7 +2096,7 @@ fn build_window(
     ));
     install_bench_hooks(&app);
     start_events(&app, events);
-    Some(window)
+    Some(app)
 }
 
 /// Files / Search / Tags / Backlinks over the vault tree.
@@ -1767,34 +2118,50 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
     let files = tree.widget().clone();
     let _ = app.tree.set(tree);
 
-    let data = sidebar::Data {
-        search: Box::new({
-            let vault = app.vault.clone();
-            move |query| vault.search(query, SEARCH_LIMIT).unwrap_or_default()
-        }),
-        tags: Box::new({
-            let vault = app.vault.clone();
-            move || vault.tags().unwrap_or_default()
-        }),
-        files_with_tag: Box::new({
-            let vault = app.vault.clone();
-            move |tag| {
-                vault
-                    .files_with_tag(tag)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| f.rel_path)
-                    .collect()
-            }
-        }),
-    };
+    let data =
+        sidebar::Data {
+            // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
+            search: Arc::new({
+                let vault = app.vault.clone();
+                move |query| match query {
+                    sidebar::Query::Fts(text) => {
+                        sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
+                    }
+                    sidebar::Query::Grep(re) => {
+                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                        sidebar::Answer::Grep(hits, total)
+                    }
+                }
+            }),
+            replace_all: Box::new(glib::clone!(
+                #[weak]
+                app,
+                move |re: &accent_api::Regex, replacement: &str, literal: bool| app
+                    .replace_in_notes(re, replacement, literal)
+            )),
+            tags: Box::new({
+                let vault = app.vault.clone();
+                move || vault.tags().unwrap_or_default()
+            }),
+            files_with_tag: Box::new({
+                let vault = app.vault.clone();
+                move |tag| {
+                    vault
+                        .files_with_tag(tag)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|f| f.rel_path)
+                        .collect()
+                }
+            }),
+        };
     let pane = sidebar::Sidebar::new(
         files,
         data,
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str| app.open_note(rel)
+            move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
         ),
     );
     // The switcher is the sidebar header's title widget rather than a top bar of its own, so the
@@ -1803,6 +2170,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
     // title widget, and the header-to-header size group already keeps the two bands equal, so the
     // switcher needs neither a box around it nor a size group of its own.
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
+    // The panes dim rather than hide while the user types, on the same transition as the bars.
+    pane.widget().add_css_class("chrome-fade");
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }
@@ -1860,6 +2229,23 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
 }
 
 fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
+    // While presenting there is no editor on screen, so find and go to line address the rendered
+    // preview instead. Two closures rather than a back-reference, so `find.rs` never sees `App`.
+    app.find.wire(find::Wiring {
+        presenting: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[upgrade_or]
+            false,
+            move || app.presenting.get().is_some()
+        )),
+        preview: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |op| app.preview_find(op)
+        )),
+    });
+
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
     app.tabs.connect_close_page(glib::clone!(
@@ -1924,6 +2310,34 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         app,
         move |_| app.save_session_soon()
     ));
+
+    // Every divider in the window: double-click resets it, and it thickens while dragged.
+    paned::watch(
+        app.window.upcast_ref(),
+        glib::clone!(
+            #[weak]
+            app,
+            move |divider: &gtk::Paned| {
+                if divider == &app.split {
+                    divider.set_position(Session::default().sidebar_width);
+                } else if divider == &app.paned {
+                    app.centre_handle();
+                } else if !app
+                    .sidebar
+                    .get()
+                    .is_some_and(|sidebar| sidebar.reset_divider(divider))
+                {
+                    // A divider nobody claims (the pane splitters to come) has no remembered
+                    // default, so half of its own extent is the reset.
+                    let extent = match divider.orientation() {
+                        gtk::Orientation::Vertical => divider.height(),
+                        _ => divider.width(),
+                    };
+                    divider.set_position(extent / 2);
+                }
+            }
+        ),
+    );
 
     // Same rule on the way out of the window: the first buffer that cannot be written stops the
     // close and asks. Answering Discard or Overwrite closes the window again, which picks up
@@ -2116,8 +2530,54 @@ fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
     }
 }
 
+/// What `action` is bound to right now: the user's override from the config if there is one, the
+/// built-in table otherwise. An override that is an empty list leaves the action unbound, which is
+/// a binding too — it still lists in the palette, just without a chord.
+fn accels_for(config: &Config, action: &str) -> Vec<String> {
+    if let Some(accels) = config.shortcuts.get(action) {
+        return accels.clone();
+    }
+    ACTIONS
+        .iter()
+        .find(|(name, _, _)| *name == action)
+        .map(|(_, _, accels)| accels.iter().map(|a| a.to_string()).collect())
+        .unwrap_or_default()
+}
+
+// GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds Shift+Alt+Up/Down
+// to move-viewport. Both are class shortcuts, which run in the bubble phase at the focused view
+// and so get the key before the window's application accelerators ever see it. Claiming these four
+// actions in the capture phase at the window is the way past that; whichever chords they carry.
+const CAPTURED: &[&str] = &[
+    "win.scroll-up",
+    "win.scroll-down",
+    "win.caret-above",
+    "win.caret-below",
+];
+
+/// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
+/// moves a chord away from one of the four does not leave the old one claimed.
+fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
+    let old: Vec<gtk::Shortcut> = (0..controller.n_items())
+        .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())
+        .collect();
+    for shortcut in old {
+        controller.remove_shortcut(&shortcut);
+    }
+    for action in CAPTURED {
+        for accel in accels_for(config, action) {
+            if let Some(trigger) = gtk::ShortcutTrigger::parse_string(&accel) {
+                controller.add_shortcut(gtk::Shortcut::new(
+                    Some(trigger),
+                    Some(gtk::NamedAction::new(action)),
+                ));
+            }
+        }
+    }
+}
+
 fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
-    for (full, _, accels) in ACTIONS {
+    for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
             let action = gio::SimpleAction::new(name, None);
             action.connect_activate(glib::clone!(
@@ -2126,35 +2586,18 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
                 move |_, _| {
                     // Any action fired is attention leaving the text (DESIGN.md).
                     app.show_chrome();
+                    app.command_used(full);
                     app.run_action(name);
                 }
             ));
             app.window.add_action(&action);
         }
-        gtk_app.set_accels_for_action(full, accels);
     }
 
-    // GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds
-    // Shift+Alt+Up/Down to move-viewport. Both are class shortcuts, which run in the bubble phase
-    // at the focused view and so get the key before the window's application accelerators ever
-    // see it. Claiming those four chords in the capture phase at the window is the way past that.
-    const CAPTURED: &[(&str, &str)] = &[
-        ("<Control>Up", "win.scroll-up"),
-        ("<Control>Down", "win.scroll-down"),
-        ("<Shift><Alt>Up", "win.caret-above"),
-        ("<Shift><Alt>Down", "win.caret-below"),
-    ];
-    let captured = gtk::ShortcutController::new();
-    captured.set_propagation_phase(gtk::PropagationPhase::Capture);
-    for (chord, action) in CAPTURED {
-        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(chord) {
-            captured.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            ));
-        }
-    }
-    app.window.add_controller(captured);
+    app.captured
+        .set_propagation_phase(gtk::PropagationPhase::Capture);
+    app.window.add_controller(app.captured.clone());
+    app.apply_accels();
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -2186,7 +2629,9 @@ fn menu_button() -> gtk::MenuButton {
     for group in [
         ["win.new-note", "win.new-folder", "win.save"].as_slice(),
         ["win.find", "win.view-mode", "win.present"].as_slice(),
-        ["win.preferences", "win.about", "app.quit"].as_slice(),
+        ["win.preferences", "win.about"].as_slice(),
+        // What leaves the vault, in the order of how much it takes with it.
+        ["app.open-vault", "app.close-vault", "app.quit"].as_slice(),
     ] {
         let section = gio::Menu::new();
         for action in group {
@@ -2242,13 +2687,15 @@ fn mode_switcher() -> gtk::ToggleButton {
 /// that a closed tab, a finished dialog or a dropped controller cannot keep it alive by accident.
 ///
 /// ponytail: a 120 ms poll instead of wiring an `async-channel` into the GLib context. One timeout
-/// source, no extra dependency, and the latency is below what a progress label needs. The source
-/// never ends, so a closed window keeps its `App` and its vault worker until the process exits;
-/// give it a weak reference plus an explicit teardown on close-request the day a long session
-/// opens and closes many vaults.
+/// source, no extra dependency, and the latency is below what a progress label needs.
 fn start_events(app: &Rc<App>, events: Receiver<Event>) {
-    let app = app.clone();
+    // Weak, and the source ends with the window: `Shell.windows` holds the only strong `App`, so
+    // closing a window drops it along with its vault, its worker thread and its WebKit process.
+    let app = Rc::downgrade(app);
     glib::timeout_add_local(POLL, move || {
+        let Some(app) = app.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
         for event in events.try_iter() {
             app.on_event(event);
         }
@@ -2285,7 +2732,11 @@ fn install_bench_hooks(app: &Rc<App>) {
         // A query of "1" just means "open it"; anything else is typed into the entry so the
         // debounce, the lazy corpus load and the match all get exercised.
         let entry = (query != "1")
-            .then(|| find_search_entry(app.window.upcast_ref()))
+            .then(|| {
+                app.window
+                    .visible_dialog()
+                    .and_then(|d| find_search_entry(d.upcast_ref()))
+            })
             .flatten();
         let Some(entry) = entry else {
             bench_quit(&app);
@@ -2300,8 +2751,12 @@ fn install_bench_hooks(app: &Rc<App>) {
     });
 }
 
-/// First `GtkSearchEntry` in `w`'s subtree. The palette is hosted inside the window, so the bench
-/// can drive it without a real key press (no xdotool in the headless image).
+/// First `GtkSearchEntry` in `w`'s subtree, which the bench drives directly because the headless
+/// image has no xdotool.
+///
+/// The caller must pass the palette dialog, not the window: a window holds the sidebar's search
+/// entry too, and it comes first in tree order, so searching from the window typed the benchmark's
+/// query into the sidebar and measured nothing.
 fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
     if let Ok(e) = w.clone().downcast::<gtk::SearchEntry>() {
         return Some(e);
@@ -2383,13 +2838,24 @@ fn install_document_font() {
     provider.load_from_string(&format!(
         "textview.accent-doc {{ font-family: \"{family}\"; font-size: {size}pt; }}"
     ));
-    // ponytail: each font change adds a provider instead of replacing the previous one. Font
-    // changes are rare and later providers win; swap for a stored provider if that stops holding.
-    gtk::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
+    // once per window as well as on every font change, so adding would grow the display's
+    // provider list for the life of the process.
+    FONT.with_borrow_mut(|slot| {
+        if let Some(old) = slot.replace(provider.clone()) {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
+}
+
+thread_local! {
+    /// The document-font provider currently on the display, so the next call can take it off.
+    static FONT: RefCell<Option<gtk::CssProvider>> = const { RefCell::new(None) };
 }
 
 /// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
@@ -2412,6 +2878,12 @@ fn install_document_font() {
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
+//
+// ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
+// by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
+// outline or a negative margin, was measured: it only ever reaches the side rendered before the
+// handle, because the pane after it paints over the other. A 2 px shift while a divider is being
+// dragged is invisible, so it is the cheaper of the two.
 fn install_chrome_css() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -2425,6 +2897,10 @@ fn install_chrome_css() {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
+             .chrome-dimmed {{ opacity: 0.5; }} \
+             .accent-pill {{ padding: 6px; border-radius: 12px; }} \
+             paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
+               background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
@@ -2446,9 +2922,46 @@ fn install_chrome_css() {
     });
 }
 
+/// What the toast says after a Replace All: what it wrote, what it could not, and what is still
+/// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
+fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
+    let plural = |n: usize, one: &str, many: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    };
+    let mut message = match matches {
+        0 => "Nothing to replace".to_string(),
+        _ => format!(
+            "Replaced {} in {}",
+            plural(matches, "match", "matches"),
+            plural(notes, "note", "notes")
+        ),
+    };
+    if failed > 0 {
+        message.push_str(&format!("; {failed} could not be written"));
+    }
+    if unsaved > 0 {
+        message.push_str(&format!(
+            "; {unsaved} have unsaved changes and were not reloaded"
+        ));
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_toast_counts_matches_notes_and_what_went_wrong() {
+        assert_eq!(replace_message(0, 0, 0, 0), "Nothing to replace");
+        assert_eq!(replace_message(1, 1, 0, 0), "Replaced 1 match in 1 note");
+        assert_eq!(replace_message(7, 3, 0, 0), "Replaced 7 matches in 3 notes");
+        assert_eq!(
+            replace_message(7, 3, 1, 2),
+            "Replaced 7 matches in 3 notes; 1 could not be written; 2 have unsaved changes and were not reloaded"
+        );
+    }
 
     #[test]
     fn zoom_steps_in_tenths_and_stops_at_the_ends() {
@@ -2457,5 +2970,49 @@ mod tests {
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn accels_for_prefers_the_override() {
+        let mut config = Config::default();
+        assert_eq!(accels_for(&config, "win.save"), ["<Control>s"]);
+        assert!(accels_for(&config, "win.about").is_empty());
+        assert!(accels_for(&config, "win.nonexistent").is_empty());
+
+        config.shortcuts.insert(
+            "win.save".to_string(),
+            vec!["<Control><Shift>s".to_string()],
+        );
+        // An override replaces the whole list rather than adding to it.
+        assert_eq!(accels_for(&config, "win.save"), ["<Control><Shift>s"]);
+        // An empty override is "unbound", not "fall back to the default".
+        config.shortcuts.insert("win.find".to_string(), Vec::new());
+        assert!(accels_for(&config, "win.find").is_empty());
+    }
+
+    /// Every action the capture controller claims has to be in the table it reads its chords from,
+    /// or a rebind would silently drop it.
+    #[test]
+    fn captured_actions_are_in_the_action_table() {
+        for action in CAPTURED {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| name == action),
+                "{action} is captured but not in ACTIONS"
+            );
+        }
+    }
+
+    /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
+    /// action listed first. The table is the only place that can go wrong, and it is pure data.
+    #[test]
+    fn no_two_actions_claim_the_same_accelerator() {
+        let mut seen = std::collections::HashMap::new();
+        for (name, _, accels) in ACTIONS {
+            for accel in *accels {
+                if let Some(other) = seen.insert(*accel, *name) {
+                    panic!("{accel} is bound to both {other} and {name}");
+                }
+            }
+        }
     }
 }

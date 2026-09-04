@@ -8,6 +8,7 @@ pub mod index;
 pub mod markdown;
 #[cfg(feature = "pdf")]
 pub mod pdf;
+pub mod search;
 pub mod template;
 pub mod walk;
 pub mod watch;

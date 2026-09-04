@@ -15,6 +15,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The response id the three name dialogs confirm with.
 const CONFIRM: &str = "confirm";
@@ -28,7 +29,7 @@ const LISTED: usize = 20;
 // signature the caller has to write anyway.
 #[allow(clippy::type_complexity)]
 pub struct Ops {
-    pub vault: Rc<Vault>,
+    pub vault: Arc<Vault>,
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
     /// Open a note in a tab.

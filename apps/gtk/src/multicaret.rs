@@ -196,6 +196,13 @@ impl View {
         self.queue_draw();
     }
 
+    /// Whether a key press is going to be replayed at more than one caret. `typing.rs` asks
+    /// before it acts: its controller sits on the same widget in the same phase, so the order
+    /// GTK runs the two in is not something to depend on.
+    pub fn has_carets(&self) -> bool {
+        !self.imp().carets.borrow().is_empty()
+    }
+
     pub fn clear_carets(&self) {
         let buffer = self.buffer();
         {
