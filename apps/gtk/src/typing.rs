@@ -339,7 +339,8 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             let mut at = buffer.iter_at_mark(&from);
             buffer.insert(&mut at, &open.to_string());
             buffer.end_user_action();
-            buffer.select_range(&buffer.iter_at_mark(&from), &buffer.iter_at_mark(&to));
+            // Cursor at the end of the wrapped text, the way a selection normally ends up.
+            buffer.select_range(&buffer.iter_at_mark(&to), &buffer.iter_at_mark(&from));
             buffer.delete_mark(&from);
             buffer.delete_mark(&to);
         }
