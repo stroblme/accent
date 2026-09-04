@@ -1456,30 +1456,49 @@ impl App {
         accels_for(&self.config.borrow(), action)
     }
 
+    /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
+    /// or a re-read from disk can have changed.
+    fn apply_config(self: &Rc<Self>, config: &Config) {
+        self.vault.set_config(config.vault(self.vault.root()));
+        // Switching to or away from Solarized does not change the system's dark state, so the
+        // notify handler that usually restyles never fires here.
+        theme::apply(config.theme);
+        self.apply_accels();
+        for tab in self.open_tabs() {
+            tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            tab.set_spellcheck(config.spellcheck);
+            tab.set_minimap(config.minimap);
+            tab.restyle();
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.restyle();
+        }
+    }
+
     fn preferences(self: &Rc<Self>) {
-        let root = self.vault.root().to_path_buf();
+        // The config is read once at startup and every row here writes the whole struct back, so
+        // an edit made in the file while accent runs would be undone by the next switch touched.
+        // Re-reading as the dialog opens keeps the file the source of truth; a file that no
+        // longer parses is left alone, exactly as at startup.
+        match Config::read(&accent_core::config::config_path()) {
+            Ok(fresh) => {
+                *self.config.borrow_mut() = fresh;
+                let config = self.config.borrow().clone();
+                self.apply_config(&config);
+            }
+            Err(e) if accent_core::config::config_path().exists() => {
+                tracing::warn!("re-reading the config: {e:#}")
+            }
+            Err(_) => {}
+        }
         settings::present(
             &self.window,
             self.config.clone(),
-            root.clone(),
+            self.vault.root().to_path_buf(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |config: &Config| {
-                    app.vault.set_config(config.vault(&root));
-                    // Switching to or away from Solarized does not change the system's dark
-                    // state, so the notify handler that usually restyles never fires here.
-                    theme::apply(config.theme);
-                    for tab in app.open_tabs() {
-                        tab.set_font(config.editor_font.as_deref(), app.zoom.get());
-                        tab.set_spellcheck(config.spellcheck);
-                        tab.set_minimap(config.minimap);
-                        tab.restyle();
-                    }
-                    if let Some(preview) = app.preview.borrow().as_ref() {
-                        preview.restyle();
-                    }
-                }
+                move |config: &Config| app.apply_config(config)
             ),
         );
     }
@@ -1583,10 +1602,20 @@ impl App {
         self.split
             .set_position(sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
-        // Last, because opening the tabs above ran `note_used` for each of them and would
-        // otherwise leave the list in restore order rather than in the order they were used.
-        *self.recent_notes.borrow_mut() = session.recent_notes;
-        *self.recent_commands.borrow_mut() = session.recent_commands;
+        // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
+        // of them, and the order they happened to restore in says nothing about how they were
+        // used. Touching the stored list back to front puts it in front of those, and a note the
+        // restore opened that the stored list does not know about still keeps its place at the end.
+        for rel in session.recent_notes.iter().rev() {
+            accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        }
+        for action in session.recent_commands.iter().rev() {
+            accent_core::config::touch(
+                &mut self.recent_commands.borrow_mut(),
+                action,
+                RECENT_COMMANDS,
+            );
+        }
     }
 }
 

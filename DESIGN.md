@@ -25,7 +25,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
-| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
+| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme and a destructive `AdwButtonRow` for Restore Defaults |
 | Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
 | Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
 | Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
