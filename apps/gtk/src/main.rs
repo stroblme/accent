@@ -9,6 +9,7 @@ mod completion;
 mod diff;
 mod editor;
 mod fileops;
+mod find;
 mod highlight;
 mod multicaret;
 mod palette;
@@ -69,8 +70,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.find", "Find", &["<Control>f"]),
     ("win.replace", "Replace", &["<Control>h"]),
-    ("win.find-next", "Find Next", &["<Control>g"]),
-    ("win.find-previous", "Find Previous", &["<Control><Shift>g"]),
+    ("win.find-next", "Find Next", &["F3"]),
+    ("win.find-previous", "Find Previous", &["<Shift>F3"]),
+    ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
@@ -288,6 +290,8 @@ struct App {
     tabs: adw::TabView,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// Find, replace and go to line, one bar for the window rather than one per tab.
+    find: Rc<find::Bar>,
     status: gtk::Label,
     /// A `Vec`, not a map: a rename retargets an open tab, so `rel` is not a stable key.
     open: RefCell<Vec<Rc<Tab>>>,
@@ -522,6 +526,7 @@ impl App {
 
     /// Keep the window subtitle, the backlinks pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
+        self.find.retarget(self.active());
         let Some(tab) = self.active() else {
             self.title.set_subtitle("");
             if let Some(sidebar) = self.sidebar.get() {
@@ -1013,6 +1018,11 @@ impl App {
         );
         self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
+        preview.connect_found(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |count| app.find.set_matches(count)
+        ));
         *self.preview.borrow_mut() = Some(preview);
     }
 
@@ -1048,6 +1058,21 @@ impl App {
             ),
         );
         *self.render.borrow_mut() = Some(id);
+    }
+
+    /// The find bar addressing the rendered preview, which is what it does while presenting.
+    fn preview_find(&self, op: find::PreviewOp) {
+        let preview = self.preview.borrow();
+        let Some(preview) = preview.as_ref() else {
+            return;
+        };
+        match op {
+            find::PreviewOp::Find(text) => preview.find(&text),
+            find::PreviewOp::Next => preview.find_next(),
+            find::PreviewOp::Previous => preview.find_previous(),
+            find::PreviewOp::Clear => preview.find_clear(),
+            find::PreviewOp::Line(line) => preview.scroll_to_line(line),
+        }
     }
 
     fn sync_scroll(&self, tab: &Rc<Tab>) {
@@ -1106,9 +1131,8 @@ impl App {
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
         in_popover
-            || self
-                .active()
-                .is_some_and(|tab| tab.banner.is_revealed() || tab.search.is_search_mode())
+            || self.find.is_open()
+            || self.active().is_some_and(|tab| tab.banner.is_revealed())
     }
 
     // --- actions -------------------------------------------------------------------------
@@ -1132,26 +1156,11 @@ impl App {
             }
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
-            "find" => {
-                if let Some(tab) = self.active() {
-                    tab.find(false);
-                }
-            }
-            "replace" => {
-                if let Some(tab) = self.active() {
-                    tab.find(true);
-                }
-            }
-            "find-next" => {
-                if let Some(tab) = self.active() {
-                    tab.find_next();
-                }
-            }
-            "find-previous" => {
-                if let Some(tab) = self.active() {
-                    tab.find_previous();
-                }
-            }
+            "find" => self.find.open(find::Mode::Find),
+            "replace" => self.find.open(find::Mode::Replace),
+            "goto-line" => self.find.open(find::Mode::Goto),
+            "find-next" => self.find.step(true),
+            "find-previous" => self.find.step(false),
             "duplicate-line" => {
                 if let Some(tab) = self.active() {
                     tab.duplicate_line();
@@ -1645,10 +1654,17 @@ fn build_window(
     header.add_css_class("chrome-fade");
     tabbar.add_css_class("chrome-fade");
 
+    // The find bar goes in the toolbar's content rather than among its top bars: presentation
+    // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
+    let find = find::Bar::new();
+    let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    editor_column.append(find.widget());
+    editor_column.append(&toasts);
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&tabbar);
-    toolbar.set_content(Some(&toasts));
+    toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
     // the two columns sit on `--window-bg-color` and band against the note. The header bars and
@@ -1684,6 +1700,7 @@ fn build_window(
         tabs: tabs.clone(),
         title,
         toasts,
+        find,
         status,
         open: RefCell::new(Vec::new()),
         images: RefCell::new(Vec::new()),
@@ -1864,6 +1881,23 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
 }
 
 fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
+    // While presenting there is no editor on screen, so find and go to line address the rendered
+    // preview instead. Two closures rather than a back-reference, so `find.rs` never sees `App`.
+    app.find.wire(find::Wiring {
+        presenting: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[upgrade_or]
+            false,
+            move || app.presenting.get().is_some()
+        )),
+        preview: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |op| app.preview_find(op)
+        )),
+    });
+
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
     app.tabs.connect_close_page(glib::clone!(

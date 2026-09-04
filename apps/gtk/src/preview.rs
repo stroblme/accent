@@ -20,6 +20,13 @@ use webkit6::prelude::*;
 /// Adwaita Sans and about 62 of Cantarell, so both GNOME document fonts land in the range.
 const COLUMN_CH: u32 = 56;
 
+/// The find bar's own settings, matching the editor's `SearchSettings`: case-insensitive and
+/// wrapping.
+const FIND_OPTIONS: webkit6::FindOptions =
+    webkit6::FindOptions::CASE_INSENSITIVE.union(webkit6::FindOptions::WRAP_AROUND);
+/// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
+const FIND_LIMIT: u32 = 500;
+
 /// WebKit content-blocker rules: refuse every load, then re-allow our own scheme. `decide_policy`
 /// only sees navigations, so without this a note could still reach the network through a
 /// subresource — an `<img>` tracking pixel in raw HTML being the obvious one.
@@ -306,6 +313,50 @@ impl Preview {
     /// never touches it, so a stylesheet rebuild cannot undo it.
     pub fn set_zoom(&self, zoom: f64) {
         self.inner.view.set_zoom_level(zoom);
+    }
+
+    // --- find ----------------------------------------------------------------------------
+    //
+    // Presentation mode hides the editor column, so Ctrl+F has to address the rendered page
+    // instead of the buffer. WebKit does the searching; the find bar only decides which of the
+    // two it is talking to.
+
+    /// Highlight and jump to the first match of `text`; an empty query clears the search.
+    pub fn find(&self, text: &str) {
+        let Some(finder) = self.inner.view.find_controller() else {
+            return;
+        };
+        if text.is_empty() {
+            return finder.search_finish();
+        }
+        finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+        // `search` alone reports no total; the count arrives on `counted-matches`.
+        finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+    }
+
+    pub fn find_next(&self) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_next();
+        }
+    }
+
+    pub fn find_previous(&self) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_previous();
+        }
+    }
+
+    pub fn find_clear(&self) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.search_finish();
+        }
+    }
+
+    /// Called with the number of matches after every [`Preview::find`].
+    pub fn connect_found(&self, f: impl Fn(u32) + 'static) {
+        if let Some(finder) = self.inner.view.find_controller() {
+            finder.connect_counted_matches(move |_, count| f(count));
+        }
     }
 }
 
