@@ -197,7 +197,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let numbers = adw::SwitchRow::builder()
         .title("Line Numbers")
-        .subtitle("Number every line except the headings, whose markers use the same gutter")
+        .subtitle("Number every line in a gutter of its own, left of the page")
         .active(config.borrow().line_numbers)
         .build();
     numbers.connect_active_notify({

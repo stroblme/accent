@@ -44,6 +44,10 @@ const TOP: i32 = 24;
 const BOTTOM: i32 = 96;
 const CLAMP_MAX: i32 = 800;
 const CLAMP_TIGHTEN: i32 = 600;
+/// How muted an unhovered line number is, as an opacity over the view's background. The style
+/// scheme already draws the gutter in a grey of its own, so this is a step back from that rather
+/// than the whole distance; 0.6 is the alpha `highlight::restyle` gives quotes.
+const DIM: f64 = 0.6;
 
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
@@ -327,16 +331,22 @@ fn digits(line_count: i32) -> usize {
     line_count.max(1).to_string().len()
 }
 
-/// A line-number gutter that leaves heading lines blank.
+/// A line-number gutter: every line numbered, dimmed, and lifted to full strength while the
+/// pointer is in the gutter.
 ///
-/// An ATX heading's `#` markers hang in the same left gutter (`highlight::hang`), so a number
-/// beside them puts two things in one place; the heading's row is left blank instead, which is
-/// also what stops the numbers from fighting the larger heading font for the reader's eye.
+/// Headings are numbered like everything else. Their `#` markers hang in the 48 px page gutter
+/// (`highlight::hang`), which is a column away from the numbers, so the two read as two margins
+/// rather than as two things in one place.
 ///
-/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible line
-/// with a `GutterLines` that hands out the line's start iter, which is all the tag lookup needs.
-/// Same shape as `diff.rs`, which prints source numbers the same way. The renderer is a child of
-/// the view, so the per-tab `accent-doc-N` font provider reaches it and the zoom follows.
+/// Dimmed by the widget's own opacity rather than by a colour, because a gutter renderer has no
+/// colour to set: composited over the view's background that is the same thing as the foreground
+/// at an alpha, which is how `highlight::restyle` dims everything else. The pointer takes it back
+/// to the full strength it was drawn at before, which is the style scheme's own gutter grey.
+///
+/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible
+/// line and only has to print a number. Same shape as `diff.rs`, which prints source numbers the
+/// same way. The renderer is a child of the view, so the per-tab `accent-doc-N` font provider
+/// reaches it and the zoom follows.
 fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -345,30 +355,17 @@ fn line_numbers(
     renderer.set_xalign(1.0);
     renderer.set_xpad(6);
     renderer.set_visible(false);
+    renderer.set_opacity(DIM);
 
     let width = Rc::new(Cell::new(digits(buffer.line_count())));
     renderer.set_text(&" ".repeat(width.get()));
 
-    // Looked up once: the tag table is fixed after `install_tags` and this runs per visible line.
-    let headings: Vec<gtk::TextTag> = (1..=6)
-        .filter_map(|level| buffer.tag_table().lookup(&format!("h{level}")))
-        .collect();
     renderer.connect_query_data(glib::clone!(
         #[strong]
         width,
-        move |renderer, lines, line| {
-            let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() else {
-                return;
-            };
+        move |renderer, _, line| {
             let width = width.get();
-            let iter = lines.iter_at_line(line);
-            match headings.iter().any(|tag| iter.has_tag(tag)) {
-                // ponytail: blanked with spaces rather than an empty string, because the width
-                // is measured from whatever text the renderer last held and a proportional
-                // document font would then measure a heading row narrower than a numbered one.
-                true => renderer.set_text(&" ".repeat(width)),
-                false => renderer.set_text(&format!("{:>width$}", line + 1)),
-            }
+            renderer.set_text(&format!("{:>width$}", line + 1));
         }
     ));
     buffer.connect_changed(glib::clone!(
@@ -386,7 +383,24 @@ fn line_numbers(
     ));
 
     // Disambiguated: `TextViewExt` has a `gutter` of its own.
-    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&renderer, 0);
+    let gutter = sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left);
+    gutter.insert(&renderer, 0);
+
+    // Gutter-wide rather than per line: the pointer anywhere in the column lifts every number at
+    // once. GTK picks the renderer itself under the pointer, but the controller goes on its
+    // parent, whose `contains-pointer` covers the whole column, padding included.
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_enter(glib::clone!(
+        #[weak]
+        renderer,
+        move |_, _, _| renderer.set_opacity(1.0)
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak]
+        renderer,
+        move |_| renderer.set_opacity(DIM)
+    ));
+    gutter.add_controller(motion);
     renderer
 }
 
