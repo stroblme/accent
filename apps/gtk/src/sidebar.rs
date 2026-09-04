@@ -257,12 +257,22 @@ fn snippet_markup(snippet: &str) -> String {
                     out.push_str("</b>");
                 }
             }
+            // Runs of whitespace collapse to one space, and that includes the newlines an FTS
+            // snippet carries out of the note body. Pango counts `lines(2)` per paragraph, so a
+            // snippet spanning a frontmatter block rendered a dozen lines and one hit filled the
+            // pane; as a single paragraph the row ellipsizes after two lines as intended.
+            c if c.is_whitespace() => {
+                if !out.ends_with(' ') && !out.is_empty() {
+                    out.push(' ');
+                }
+            }
             _ => out.push(c),
         }
     }
     if depth > 0 {
         out.push_str("</b>");
     }
+    out.truncate(out.trim_end().len());
     out
 }
 
@@ -1140,6 +1150,16 @@ mod tests {
         let out = snippet_markup("a «b» < c & d");
         assert_eq!(out, "a <b>b</b> &lt; c &amp; d");
         assert!(pango::parse_markup(&out, '\u{0}').is_ok());
+    }
+
+    #[test]
+    fn a_snippet_is_one_paragraph_however_the_note_was_wrapped() {
+        // `lines(2)` on the row label is counted per paragraph, so a newline here is a row that
+        // grows without limit.
+        let out = snippet_markup("---\ntitle: x\n---\n\nthe «body»");
+        assert!(!out.contains('\n'), "{out:?}");
+        assert_eq!(out, "--- title: x --- the <b>body</b>");
+        assert_eq!(snippet_markup("  padded  "), "padded");
     }
 
     #[test]
