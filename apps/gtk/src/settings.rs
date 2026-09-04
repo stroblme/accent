@@ -200,14 +200,12 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 fn font_subtitle(font: Option<&str>) -> String {
     match font {
         Some(f) => f.to_string(),
-        None => "Following the GNOME document font".to_string(),
+        None => format!("{} (default)", crate::editor::default_font()),
     }
 }
 
 fn system_font() -> String {
-    adw::StyleManager::default()
-        .document_font_name()
-        .to_string()
+    crate::editor::default_font()
 }
 
 // ------------------------------------------------------------------------------- this vault

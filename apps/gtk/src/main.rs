@@ -926,9 +926,40 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.widget().set_visible(self.shows_preview());
         }
+        if self.mode.get() == Mode::Split && !presenting {
+            self.even_split();
+        }
         if let Some(tab) = self.active() {
             self.render(&tab);
         }
+    }
+
+    /// Put the handle back in the middle whenever the preview comes on screen. A `GtkPaned` keeps
+    /// whatever position it was left at, and one that has never been allocated has none at all, so
+    /// the editor's natural width could take the whole row and the preview open with nothing to
+    /// show: the "clicked the button and nothing happened" report. Presentation mode never hit it,
+    /// because there the editor column is hidden outright.
+    fn even_split(self: &Rc<Self>) {
+        if self.centre_handle() {
+            return;
+        }
+        // No allocation yet, which is where a session restored straight into split mode lands.
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move || {
+                app.centre_handle();
+            }
+        ));
+    }
+
+    /// Centres the paned handle, or reports that there is no width to centre within yet.
+    fn centre_handle(&self) -> bool {
+        let width = self.paned.width();
+        if width > 0 {
+            self.paned.set_position(width / 2);
+        }
+        width > 0
     }
 
     /// Whether the rendered note is visible at all; nothing is rendered into a hidden preview.
@@ -978,10 +1009,6 @@ impl App {
             ),
         );
         self.paned.set_end_child(Some(preview.widget()));
-        let width = self.paned.width();
-        if width > 0 {
-            self.paned.set_position(width / 2);
-        }
         preview.set_zoom(self.zoom.get());
         *self.preview.borrow_mut() = Some(preview);
     }
@@ -2343,12 +2370,11 @@ fn install_document_font() {
     let Some(display) = gdk::Display::default() else {
         return;
     };
-    let desc =
-        pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
+    let desc = pango::FontDescription::from_string(&editor::default_font());
     let family = desc
         .family()
         .map(|f| f.to_string())
-        .unwrap_or_else(|| "Cantarell".to_string());
+        .unwrap_or_else(|| "Monospace".to_string());
     let size = match desc.size() as f64 / pango::SCALE as f64 {
         s if s > 0.0 => s,
         _ => 11.0,
@@ -2409,7 +2435,8 @@ fn install_chrome_css() {
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
              GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
              GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
-               margin-right: 12px; min-height: 30px; }}"
+               margin-right: 12px; min-height: 30px; }} \
+             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}"
         ));
         gtk::style_context_add_provider_for_display(
             &display,

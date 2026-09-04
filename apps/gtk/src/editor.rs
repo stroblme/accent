@@ -29,6 +29,9 @@ const INSTANT: i32 = 16 * 1024;
 const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
+/// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
+/// interface fonts, and `Reset` in preferences comes back here.
+const DEFAULT_FAMILY: &str = "Adwaita Mono";
 
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
@@ -510,11 +513,17 @@ fn next_view_name() -> String {
     })
 }
 
-/// The GNOME document font, which is what `main::install_document_font` puts on every editor.
-fn system_font() -> String {
-    adw::StyleManager::default()
-        .document_font_name()
-        .to_string()
+/// The editor's default font: Adwaita Mono at the size of the GNOME document font, and what
+/// `main::install_document_font` puts on every editor until a preference overrides it.
+///
+/// The family is ours and the size still follows the system. DESIGN.md used to take the document
+/// font whole on the grounds that notes are prose, but a vault is prose with code fences, tables
+/// and wikilinks in it, and none of those line up in a proportional face.
+pub fn default_font() -> String {
+    let mut desc =
+        pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
+    desc.set_family(DEFAULT_FAMILY);
+    desc.to_str().to_string()
 }
 
 /// The text a duplicated line is inserted as. A line that already ends in a newline can be
@@ -692,7 +701,7 @@ impl Tab {
         // name a font anyway, because CSS has no way to scale a size it cannot see.
         let name = match font.filter(|f| !f.is_empty()) {
             Some(font) => Some(font.to_string()),
-            None if zoom != 1.0 => Some(system_font()),
+            None if zoom != 1.0 => Some(default_font()),
             None => None,
         };
         if let Some(name) = name {

@@ -154,15 +154,12 @@ mod provider_imp {
                 return store;
             };
             let Some((_, prefix)) = scan(self.kind.get(), &line, line.len()) else {
-                // ponytail: GtkSourceView hides the popup once every provider's model is empty,
-                // but one opened on a trigger the cursor has since left occasionally stays up
-                // until the window is reloaded, so ask for the hide as well. Remove it once the
-                // built-in `notify::empty` path proves sufficient on its own. It has to wait for
-                // an idle: `populate` and `refilter` run while the caller still holds `context`,
-                // and hiding it from under them would drop that context mid-iteration.
-                if let Some(completion) = context.completion() {
-                    glib::idle_add_local_once(move || completion.hide());
-                }
+                // Nothing for *this* provider to offer, which is not the same as nothing to show:
+                // both providers are populated on every completion, so the wikilink one runs while
+                // a tag is being typed and vice versa. Asking the popup to hide from here took the
+                // other provider's proposals down with it, which is why `[[` only flashed and `#`
+                // never appeared at all. Emptying our own model is the whole job; GtkSourceView
+                // hides the popup once every provider's model is empty.
                 return store;
             };
             if let Some(candidates) = self.candidates.borrow().as_ref() {
