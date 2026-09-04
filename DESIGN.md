@@ -22,7 +22,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Editor | `sourceview5::View` inside an `AdwClamp` inside a `GtkScrolledWindow` |
 | Preview | read-only WebKitGTK 6 view, same clamp width, stylesheet generated from `AdwStyleManager` |
 | View modes | Editor / Split / Preview; Split is a `GtkPaned` of the two above |
-| Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
+| Tabs | one `AdwTabView` + `AdwTabBar` per pane; panes nest in `GtkPaned`s. Each bar lives in the document column with the `.inline` style class rather than among the toolbar's top bars, so a bar spans its own pane and presentation mode takes it away with the document. A bar hides itself only while its pane is the only one and holds a single tab: with several panes the bar is what says which notes are where. A pane is split from the tab or tree context menu, from `win.split-*`, or by dropping a tab or a tree row on one of its four edges; a pane whose last note is closed or moved out closes with it, and the window always keeps one |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
 | Find bar | one `GtkSearchBar` per window, a `GtkStack` of the find/replace row and the go-to-line row. It lives in the editor column's content rather than among the toolbar's top bars, because presentation mode unreveals those and hides the tab stack, and find has to survive both |
 | Start screen | `AdwStatusPage` with app icon, Open Folder button and a recent-vaults list, shown when launched without a vault path and reachable again from Open Folder… and Close Vault in the primary menu. Only ever one of them: a second Open Folder… presents the one already up. Opening a vault gives it a window of its own, one per vault; Close Vault takes the current window away, which is what releases its vault, worker thread and WebKit process |
@@ -89,7 +89,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Notes | Follow link `Ctrl+Return`, Rename `F2`, Move to trash `Delete` (tree only), Daily note `Ctrl+Shift+D` |
 | Views | Toggle split `Ctrl+M`, Presentation `F5` (`Esc` leaves it, window size unchanged) |
 | Window | Fullscreen `F11`, Preferences `Ctrl+comma`, Primary menu `F10` |
-| Tabs | `Ctrl+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9` |
+| Tabs and panes | `Ctrl+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9`; Split Right `Ctrl+\`, the other three sides from the menus and the palette |
 
 Never bind: `Super`+anything (the shell owns it), `Alt+Tab`, `Alt+F4`, `Alt+F7`, `Alt+F8`, `Ctrl+Alt+*` (workspace switching), `F1` (help), `Ctrl+Shift+U` (IBus unicode entry), `Ctrl+Space` (input-method switch), and the GtkSourceView built-ins (`Ctrl+Z`/`Ctrl+Y`, `Ctrl+A`, `Ctrl+X`/`C`/`V`, `Ctrl+K`, `Alt+Up`/`Alt+Down`, `Ctrl+Home`/`Ctrl+End`).
 
