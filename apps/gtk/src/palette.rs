@@ -331,7 +331,7 @@ fn capture_shortcut(
     let dialog = adw::AlertDialog::builder()
         .heading(format!("Shortcut for {label}"))
         .body(format!(
-            "Press the new shortcut. Backspace clears it.\n\n{RESERVED}"
+            "Press the new shortcut. Backspace clears it, Escape cancels.\n\n{RESERVED}"
         ))
         .close_response("cancel")
         .build();
@@ -359,8 +359,16 @@ fn capture_shortcut(
                 return glib::Propagation::Proceed;
             };
             let mods = state & gtk::accelerator_get_default_mod_mask();
-            // Escape leaves; the dialog's own close response handles it.
-            if key == gdk::Key::Escape && mods.is_empty() {
+            // Escape leaves; the dialog's own close response handles it. Tab, Return and Space
+            // reach the responses instead of being captured, or Restore Default would be
+            // mouse-only (DESIGN.md pre-flight 9). Unmodified, they are no loss as chords.
+            let navigation = matches!(key, gdk::Key::Tab | gdk::Key::ISO_Left_Tab)
+                || (mods.is_empty()
+                    && matches!(
+                        key,
+                        gdk::Key::Escape | gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::space
+                    ));
+            if navigation {
                 return glib::Propagation::Proceed;
             }
             if key == gdk::Key::BackSpace && mods.is_empty() {
