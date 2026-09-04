@@ -18,7 +18,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 |---|---|
 | Window shell | `AdwApplicationWindow` > `GtkPaned`, one `AdwToolbarView` per side, each with its own `AdwHeaderBar` |
 | Header bars | two, so the sidebar reaches the top of the window and the tab bar spans only the editor column. Sidebar header: the start window controls, and otherwise empty. Main header: the sidebar toggle (always visible, so a collapsed sidebar can be brought back without the keyboard), `AdwWindowTitle` with vault name and note path, view-mode toggle group, indexing status label, primary menu, end window controls. The main header takes over the start window controls when the sidebar is hidden |
-| Sidebar | `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of four equal panes: Files, Search, Tags, Backlinks. The switcher is a top bar of the sidebar's `AdwToolbarView`, not part of its content, so it shares a band with the tab bar. Width is dragged on the `GtkPaned` handle, floor 200 |
+| Sidebar | `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of four equal panes: Files, Search, Tags, Backlinks. The switcher is the title widget of the sidebar's header bar, so the pane icons sit on the same line as the sidebar toggle and the mode group, and the tree's first row lines up with the tabs. Width is dragged on the `GtkPaned` handle, floor 200 |
 | Editor | `sourceview5::View` inside an `AdwClamp` inside a `GtkScrolledWindow` |
 | Preview | read-only WebKitGTK 6 view, same clamp width, stylesheet generated from `AdwStyleManager` |
 | View modes | Editor / Split / Preview; Split is a `GtkPaned` of the two above |
@@ -55,7 +55,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 
 ## Spacing
 
-The scale is 6, 12, 18, 24, 36 and nothing between: 6 inside a control group, 12 between related widgets, 18 between groups, 24 for dialog and page padding, 36 for empty-state breathing room. (The current HIG has no spacing page; this is the long-standing GNOME convention.) Current values: window 1100x760; sidebar floor 200, dragged on the paned handle and remembered in the session; editor margins left 48, right 48, top 24, bottom 96, with 2 px above and below lines (`main.rs`, `editor.rs`). Two vertical `GtkSizeGroup`s keep the two columns in one horizontal rhythm whatever the interface font: one across the two header bars, one across the switcher row and the tab bar. The second is held at `SizeGroupMode::None` while a single tab hides the tab bar, so no empty band is reserved above the document. The editor margins sit off the scale on purpose: they are page gutters inside the clamp, not layout spacing.
+The scale is 6, 12, 18, 24, 36 and nothing between: 6 inside a control group, 12 between related widgets, 18 between groups, 24 for dialog and page padding, 36 for empty-state breathing room. (The current HIG has no spacing page; this is the long-standing GNOME convention.) Current values: window 1100x760; sidebar floor 200, dragged on the paned handle and remembered in the session; editor margins left 48, right 48, top 24, bottom 96, with 2 px above and below lines (`main.rs`, `editor.rs`). A vertical `GtkSizeGroup` across the two header bars keeps both columns on one rhythm whatever the interface font, since the switcher rides in the sidebar header and the tree starts where the tab bar does. One CSS correction goes with it: libadwaita pads a header differently when it is the only bar in its `AdwToolbarView` than when it shares the area, which put the pane icons 3 px high, so `.accent-lone-header` cancels the difference. Every icon button in a header, the pane switcher included, is `Align::Center` rather than filling: a button stretched to the band's height comes out 34 by 40, and these read as square 34 by 34. The editor margins sit off the scale on purpose: they are page gutters inside the clamp, not layout spacing.
 
 ## Chrome auto-hide
 
@@ -63,7 +63,7 @@ The point of the app. Header bar and tab bar fade out while the user types and c
 
 - Hides: the header bar and the tab bar. Trigger: the first keystroke into the editor buffer.
 - Returns on pointer motion anywhere in the window, Escape, focus change, a view-mode change, an action fired from the palette or a menu, and any keyboard focus move out of the editor. Hover must never be the only route back, or a keyboard-only user is stuck with hidden chrome.
-- Never hides: the sidebar, the editor, toasts, banners, dialogs. Suspended entirely while a dialog, banner, popover, the palette or the find bar is open.
+- Never hides: the sidebar's panes, the editor, toasts, banners, dialogs. The pane switcher is the exception, and deliberately so: it rides in the sidebar header, so it fades with the rest of the top band and the two columns stay in step. The pane's own content stays put, so no context is lost. Suspended entirely while a dialog, banner, popover, the palette or the find bar is open.
 - Implementation: a CSS `opacity` transition on a `.chrome-hidden` class. Opacity only, so the layout never shifts and the widgets keep their size and focus order. `AdwToolbarView:reveal-top-bars` is the named upgrade path if the CSS approach ever fights the toolbar view (<https://gnome.pages.gitlab.gnome.org/libadwaita/doc/1.7/class.ToolbarView.html>).
 - With `gtk-enable-animations` false the class still toggles but the transition is zero-length, so chrome jumps instead of fading and nothing becomes unreachable (<https://docs.gtk.org/gtk4/property.Settings.gtk-enable-animations.html>).
 
@@ -74,9 +74,10 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Group | Bindings |
 |---|---|
 | Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Quit `Ctrl+Q` |
-| Palette and find | Files `Ctrl+P`, Commands `Ctrl+Shift+P`, Find `Ctrl+F`, Replace `Ctrl+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
-| Panes | Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, Backlinks `Ctrl+Shift+B`, Cycle view mode `Ctrl+E` |
+| Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
+| Panes | Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, Backlinks `Ctrl+Shift+B` |
 | Notes | Follow link `Ctrl+Return`, Rename `F2`, Move to trash `Delete` (tree only), Daily note `Ctrl+Shift+D` |
+| Views | Toggle split `Ctrl+M`, Presentation `F5` (`Esc` leaves it, window size unchanged) |
 | Window | Fullscreen `F11`, Preferences `Ctrl+comma`, Primary menu `F10` |
 | Tabs | `Ctrl+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9` |
 
@@ -84,15 +85,17 @@ Never bind: `Super`+anything (the shell owns it), `Alt+Tab`, `Alt+F4`, `Alt+F7`,
 
 One deliberate HIG deviation: the HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview. accent has no printing, and its users arrive from VS Code and Obsidian where both open the palette. Revisit if printing is ever added.
 
+The view control is a single toggle button, not a group: two states need one button, and the icon names the state it is in (a pencil in Editor, split panes in Split) on top of the pressed styling. It matches `Ctrl+M`. Preview is not a third state: `F5` is presentation mode, which hides the sidebar, the tab bar and both header bars and shows the note rendered. It deliberately does not resize the window; fullscreen stays `F11`'s job, so the two compose. The bars go through `AdwToolbarView::set_reveal_top_bars(false)` rather than the opacity fade, because a fade leaves an empty band where a presentation needs the whole window, and the pointer-motion reveal is suppressed while it is on. It is deliberately not saved in the session: restoring into a chromeless window would be hard to leave.
+
 There is no shortcuts window. `AdwShortcutsDialog` needs libadwaita 1.8 and we build against 1.7; `GtkShortcutsWindow` is deprecated since GTK 4.18 and will be removed in GTK 5. Until the libadwaita floor moves to 1.8 the palette's command mode is the shortcuts reference, so it must show the accelerator next to every command.
 
 ## Iconography
 
 Symbolic icons from the Adwaita theme only: no bundled glyphs, no emoji (<https://developer.gnome.org/hig/guidelines/ui-icons.html>). All of the following were confirmed present in `/usr/share/icons/Adwaita/symbolic/` on the development machine (adwaita-icon-theme 50):
 
-`sidebar-show-symbolic`, `open-menu-symbolic`, `document-new-symbolic`, `folder-new-symbolic`, `document-save-symbolic`, `document-edit-symbolic`, `document-open-recent-symbolic`, `document-revert-symbolic`, `edit-find-symbolic`, `edit-find-replace-symbolic`, `system-search-symbolic`, `edit-clear-symbolic`, `view-dual-symbolic`, `view-reveal-symbolic`, `view-fullscreen-symbolic`, `view-refresh-symbolic`, `user-bookmarks-symbolic`, `insert-link-symbolic`, `x-office-calendar-symbolic`, `user-trash-symbolic`, `folder-symbolic`, `text-x-generic-symbolic`, `x-office-document-symbolic`, `window-close-symbolic`, `preferences-system-symbolic`, `dialog-warning-symbolic`, `object-select-symbolic`, `go-previous-symbolic`, `go-next-symbolic`, `list-add-symbolic`.
+`sidebar-show-symbolic`, `open-menu-symbolic`, `document-new-symbolic`, `folder-new-symbolic`, `document-save-symbolic`, `document-edit-symbolic`, `document-open-recent-symbolic`, `document-revert-symbolic`, `edit-find-symbolic`, `edit-find-replace-symbolic`, `system-search-symbolic`, `edit-clear-symbolic`, `view-dual-symbolic`, `view-reveal-symbolic`, `view-fullscreen-symbolic`, `view-refresh-symbolic`, `user-bookmarks-symbolic`, `mail-reply-sender-symbolic`, `x-office-calendar-symbolic`, `user-trash-symbolic`, `folder-symbolic`, `text-x-generic-symbolic`, `x-office-document-symbolic`, `window-close-symbolic`, `preferences-system-symbolic`, `dialog-warning-symbolic`, `object-select-symbolic`, `go-previous-symbolic`, `go-next-symbolic`, `list-add-symbolic`.
 
-This theme has no `tag-symbolic`, so the Tags pane uses `user-bookmarks-symbolic`. If a glyph is missing: take the closest existing Adwaita name first, and only if nothing fits ship one in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme. Never ship a coloured icon.
+This theme has no `tag-symbolic`, so the Tags pane uses `user-bookmarks-symbolic`. Backlinks uses `mail-reply-sender-symbolic`, an arrow turning back, for "what points here": the theme's only link-named glyph, `insert-link-symbolic`, is a text-insertion mark and sits 2 units high on its own canvas, which is visible as an off-centre icon in a switcher. If a glyph is missing: take the closest existing Adwaita name first, and only if nothing fits ship one in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme. Never ship a coloured icon.
 
 ## States
 
