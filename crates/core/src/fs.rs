@@ -107,6 +107,36 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
     Ok(Etag::from_meta(&file.metadata()?))
 }
 
+/// Create a new note, refusing to clobber an existing file. Missing parent directories are created.
+///
+/// `File::create_new` claims the name in one syscall, so two writers racing for the same new note
+/// cannot both believe they won it. The content then goes through [`write_note`], which is what
+/// gives a brand new note the same atomic-rename guarantees as every later save.
+pub fn create_note(path: &Path, text: &str) -> io::Result<Etag> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::File::create_new(path)?; // AlreadyExists if the name is taken
+    write_note(path, text, None).map_err(io::Error::other)
+}
+
+/// Move a file or directory, refusing to overwrite an existing target.
+///
+/// `std::fs::rename` moves a symlink itself rather than what it points at, which is what a vault
+/// wants: renaming a linked-in note must not copy the target into the vault.
+///
+/// ponytail: the existence check races a concurrent create, and a move across mount points still
+/// fails with `EXDEV`. `renameat2(RENAME_NOREPLACE)` closes the first, copy-then-delete the second.
+pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    if to.symlink_metadata().is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", to.display()),
+        ));
+    }
+    std::fs::rename(from, to)
+}
+
 /// `canonicalize()`, but tolerating a file that does not exist yet by resolving its parent.
 fn canonical_target(path: &Path) -> io::Result<PathBuf> {
     match path.canonicalize() {
@@ -258,6 +288,55 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(leftovers, vec!["New.md".to_string()]);
+    }
+
+    #[test]
+    fn create_note_refuses_existing_and_creates_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("sub/deep/New.md");
+
+        let etag = create_note(&note, "hello").unwrap();
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), "hello");
+        assert_eq!(etag, Etag::of(&note).unwrap());
+
+        match create_note(&note, "other") {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::AlreadyExists),
+            Ok(_) => panic!("clobbered an existing note"),
+        }
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), "hello");
+
+        let leftovers: Vec<_> = std::fs::read_dir(note.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, vec!["New.md".to_string()]);
+    }
+
+    #[test]
+    fn rename_refuses_overwrite_and_moves_the_symlink_not_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real.md");
+        let link = dir.path().join("link.md");
+        std::fs::write(&target, "one").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        match rename(&link, &target) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::AlreadyExists),
+            Ok(()) => panic!("overwrote an existing file"),
+        }
+
+        let moved = dir.path().join("moved.md");
+        rename(&link, &moved).unwrap();
+        assert!(
+            std::fs::symlink_metadata(&moved)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself must move, not its target"
+        );
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert!(target.exists(), "the target stayed where it was");
+        assert_eq!(std::fs::read_to_string(&moved).unwrap(), "one");
     }
 
     #[test]

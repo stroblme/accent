@@ -13,7 +13,7 @@ use std::path::Path;
 use std::time::Instant;
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 const BATCH: usize = 500;
@@ -44,20 +44,24 @@ CREATE TABLE links(
 );
 CREATE TABLE tags(file_id INTEGER NOT NULL, name TEXT NOT NULL, byte_start INTEGER NOT NULL);
 CREATE TABLE headings(file_id INTEGER NOT NULL, level INTEGER NOT NULL, text TEXT NOT NULL, byte_start INTEGER NOT NULL);
-CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT NOT NULL);
 
+-- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
+-- bm25 weights below read in the same order: body first, title second.
 CREATE VIRTUAL TABLE notes_fts USING fts5(
-    body, content='notes', content_rowid='file_id', tokenize="unicode61 remove_diacritics 2"
+    body, title, content='notes', content_rowid='file_id', tokenize="unicode61 remove_diacritics 2"
 );
 CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
-    INSERT INTO notes_fts(rowid, body) VALUES (new.file_id, new.body);
+    INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
 END;
 CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
-    INSERT INTO notes_fts(notes_fts, rowid, body) VALUES ('delete', old.file_id, old.body);
+    INSERT INTO notes_fts(notes_fts, rowid, body, title)
+    VALUES ('delete', old.file_id, old.body, old.title);
 END;
 CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
-    INSERT INTO notes_fts(notes_fts, rowid, body) VALUES ('delete', old.file_id, old.body);
-    INSERT INTO notes_fts(rowid, body) VALUES (new.file_id, new.body);
+    INSERT INTO notes_fts(notes_fts, rowid, body, title)
+    VALUES ('delete', old.file_id, old.body, old.title);
+    INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
 END;
 
 CREATE INDEX idx_links_target   ON links(target);
@@ -92,14 +96,9 @@ pub struct Index {
 /// `$XDG_CACHE_HOME/accent/<blake3 of the canonical vault path>.db`.
 /// The index is disposable, so it belongs in the cache dir, never next to the notes.
 pub fn default_db_path(vault: &Path) -> std::path::PathBuf {
-    let canonical = vault.canonicalize().unwrap_or_else(|_| vault.to_path_buf());
-    let digest = blake3::hash(canonical.as_os_str().as_encoded_bytes()).to_hex();
-    let base = std::env::var_os("XDG_CACHE_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".cache")))
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("accent").join(format!("{}.db", &digest[..16]))
+    crate::config::xdg("XDG_CACHE_HOME", ".cache")
+        .join("accent")
+        .join(format!("{}.db", crate::config::vault_hash(vault)))
 }
 
 // ---------------------------------------------------------------- public data
@@ -156,6 +155,25 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadingRow {
+    pub level: u8,
+    pub text: String,
+    pub byte_start: i64,
+}
+
+/// What [`Index::update_file`] did, so the caller knows whether to tell the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    /// A name the index never stores: a temp file or a hard-skipped directory.
+    Ignored,
+    /// Stat identical to the indexed row: typically the watcher echo of our own save.
+    Unchanged,
+    Added(FileKind),
+    Updated(FileKind),
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Backlink {
     pub src_rel_path: String,
     pub byte_start: i64,
@@ -165,6 +183,8 @@ pub struct Backlink {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {
     pub files: i64,
+    /// Directories, which the watcher weighs against the inotify budget.
+    pub dirs: i64,
     pub notes: i64,
     pub links: i64,
     pub tags: i64,
@@ -314,135 +334,7 @@ impl Index {
         for chunk in jobs.chunks(BATCH) {
             let tx = self.conn.transaction()?;
             for job in chunk {
-                let f = &scan.files[job.idx];
-                let indexable = f.kind == FileKind::Markdown;
-
-                // ponytail: only markdown is read and hashed. PDFs and binaries are cheap
-                // `(mtime, size, ino)` rows here; the `pdf` feature will add text extraction
-                // and can reuse the same hash column when it does.
-                let (hash, text) = if indexable {
-                    match std::fs::read(&f.canonical) {
-                        Ok(bytes) => {
-                            stats.bytes_read += bytes.len() as u64;
-                            let h = blake3::hash(&bytes);
-                            (Some(h), Some(String::from_utf8_lossy(&bytes).into_owned()))
-                        }
-                        // Vanished or unreadable mid-walk: keep the stat row, drop the content.
-                        Err(_) => (None, None),
-                    }
-                } else {
-                    (None, None)
-                };
-
-                // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
-                // the arbiter for "did the content really change".
-                let same_content = match (job.existing_id, hash.as_ref()) {
-                    (Some(id), Some(h)) => {
-                        let old: Option<Vec<u8>> = tx
-                            .prepare_cached("SELECT content_hash FROM files WHERE id = ?1")?
-                            .query_row([id], |r| r.get(0))
-                            .optional()?
-                            .flatten();
-                        old.as_deref() == Some(h.as_bytes().as_slice())
-                    }
-                    _ => false,
-                };
-
-                if same_content {
-                    tx.prepare_cached(
-                        "UPDATE files SET canonical=?2, dev=?3, ino=?4, mtime_ns=?5, size=?6 WHERE id=?1",
-                    )?
-                    .execute(params![
-                        job.existing_id.unwrap(),
-                        f.canonical.to_string_lossy(),
-                        f.dev as i64,
-                        f.ino as i64,
-                        f.mtime_ns,
-                        f.size as i64,
-                    ])?;
-                    stats.touched += 1;
-                    done += 1;
-                    continue;
-                }
-
-                let analysis = text.as_deref().map(markdown::analyze);
-                let title = analysis
-                    .as_ref()
-                    .and_then(|a| a.title.clone())
-                    .or_else(|| file_stem(&f.rel_path));
-
-                let id: i64 = tx
-                    .prepare_cached(
-                        "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-                         ON CONFLICT(rel_path) DO UPDATE SET
-                            parent_dir=excluded.parent_dir,
-                            canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
-                            mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
-                            title=excluded.title, content_hash=excluded.content_hash
-                         RETURNING id",
-                    )?
-                    .query_row(
-                        params![
-                            f.rel_path,
-                            parent_dir(&f.rel_path),
-                            f.canonical.to_string_lossy(),
-                            f.dev as i64,
-                            f.ino as i64,
-                            f.mtime_ns,
-                            f.size as i64,
-                            f.kind.as_i64(),
-                            title,
-                            hash.as_ref().map(|h| h.as_bytes().to_vec()),
-                        ],
-                        |r| r.get(0),
-                    )?;
-
-                if job.existing_id.is_some() {
-                    clear_derived(&tx, id)?;
-                    stats.updated += 1;
-                } else {
-                    stats.added += 1;
-                }
-
-                if let (Some(a), Some(body)) = (analysis.as_ref(), text.as_ref()) {
-                    for l in &a.links {
-                        tx.prepare_cached(
-                            "INSERT INTO links(src_file, target, resolved_file, kind, anchor, byte_start, byte_end)
-                             VALUES(?1,?2,NULL,?3,?4,?5,?6)",
-                        )?
-                        .execute(params![
-                            id,
-                            l.target,
-                            link_kind_i64(l.kind),
-                            l.anchor,
-                            l.range.start as i64,
-                            l.range.end as i64,
-                        ])?;
-                    }
-                    for t in &a.tags {
-                        tx.prepare_cached(
-                            "INSERT INTO tags(file_id, name, byte_start) VALUES(?1,?2,?3)",
-                        )?
-                        .execute(params![
-                            id,
-                            t.name,
-                            t.range.start as i64
-                        ])?;
-                    }
-                    for h in &a.headings {
-                        tx.prepare_cached(
-                            "INSERT INTO headings(file_id, level, text, byte_start) VALUES(?1,?2,?3,?4)",
-                        )?
-                        .execute(params![id, h.level as i64, h.text, h.range.start as i64])?;
-                    }
-                    // Explicit delete + insert: REPLACE would only fire the FTS delete trigger
-                    // with recursive_triggers on.
-                    tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
-                        .execute([id])?;
-                    tx.prepare_cached("INSERT INTO notes(file_id, body) VALUES(?1,?2)")?
-                        .execute(params![id, body])?;
-                }
+                upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
                 done += 1;
             }
             tx.commit()?;
@@ -479,10 +371,11 @@ impl Index {
     /// Obsidian link resolution: a target matches a file's path or name, with or without the
     /// extension, case-insensitively; the shortest `rel_path` wins. Unmatched stays NULL.
     ///
-    /// ponytail: this re-resolves the whole `links` table on every dirty reconcile, because
-    /// adding one note can resolve dangling links anywhere in the vault. At ~23k links on the
-    /// reference vault that is tens of milliseconds and runs off the UI thread. If it ever
-    /// shows up, narrow it to the targets whose candidate set actually changed.
+    /// ponytail: this re-resolves the whole `links` table, because adding one note can resolve
+    /// dangling links anywhere in the vault. It costs 225 ms at the 56k links of `testvault/`,
+    /// so callers that change many files must batch (see [`update_file_batched`](Self::update_file_batched))
+    /// and pay it once. Narrow it to the targets whose candidate set actually changed if even
+    /// once per batch becomes too much.
     pub fn resolve_links(&mut self) -> Result<usize> {
         let mut by_key: HashMap<String, (usize, i64)> = HashMap::new();
         {
@@ -494,11 +387,7 @@ impl Index {
                 let id: i64 = r.get(0)?;
                 let rel: String = r.get(1)?;
                 let len = rel.len();
-                let stem = strip_ext(&rel);
-                let base = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-                let base_stem = strip_ext(&base);
-                for key in [rel.clone(), stem, base, base_stem] {
-                    let key = key.to_lowercase();
+                for key in markdown::path_keys(&rel) {
                     match by_key.get(&key) {
                         Some((best, _)) if *best <= len => {}
                         _ => {
@@ -521,11 +410,7 @@ impl Index {
         {
             let mut up = tx.prepare("UPDATE links SET resolved_file = ?1 WHERE target = ?2")?;
             for t in &targets {
-                let key = t
-                    .trim()
-                    .trim_start_matches("./")
-                    .replace('\\', "/")
-                    .to_lowercase();
+                let key = markdown::link_key(t);
                 if let Some((_, id)) = by_key.get(&key) {
                     resolved += up.execute(params![id, t])?;
                 }
@@ -534,6 +419,303 @@ impl Index {
         tx.commit()?;
         Ok(resolved)
     }
+
+    /// Bring one path in line with the disk. This is the watcher's entry point: the caller turns a
+    /// filesystem event into a vault-relative path and lets the index decide what it means.
+    ///
+    /// A row whose `(mtime_ns, size, ino)` still match the disk is left completely untouched, which
+    /// is what makes the echo of our own save free, and lets the UI ignore the resulting
+    /// [`Change::Unchanged`] instead of reloading the buffer the user is typing in.
+    ///
+    /// ponytail: no `(dev, ino)` dedup here, so a note linked in twice gets a row per path until
+    /// the next full reconcile collapses them. Aliases are rare and never wrong, only duplicated.
+    pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
+        let change = self.update_file_batched(root, rel)?;
+        // A new note can resolve links written long before it existed, and a removed one can
+        // hand its incoming links to a namesake deeper in the vault.
+        if matches!(
+            change,
+            Change::Added(_) | Change::Updated(_) | Change::Removed
+        ) {
+            self.resolve_links()?;
+        }
+        Ok(change)
+    }
+
+    /// [`update_file`](Self::update_file) without the link resolution, for a caller that is
+    /// working through a batch of files and calls [`resolve_links`](Self::resolve_links) once
+    /// when it is done. Links into the file stay unresolved until it does.
+    pub fn update_file_batched(&mut self, root: &Path, rel: &str) -> Result<Change> {
+        let meta = match walk::stat_one(root, rel) {
+            Ok(Some(meta)) => meta,
+            Ok(None) => return Ok(Change::Ignored),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                self.remove_file_batched(rel)?;
+                return Ok(Change::Removed);
+            }
+            Err(e) => return Err(e).with_context(|| format!("stat {rel}")),
+        };
+
+        let existing: Option<(i64, i64, i64, i64)> = self
+            .conn
+            .prepare_cached("SELECT id, mtime_ns, size, ino FROM files WHERE rel_path = ?1")?
+            .query_row([rel], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .optional()?;
+        if let Some((_, mtime_ns, size, ino)) = existing
+            && mtime_ns == meta.mtime_ns
+            && size == meta.size as i64
+            && ino == meta.ino as i64
+        {
+            return Ok(Change::Unchanged);
+        }
+
+        let existing_id = existing.map(|(id, ..)| id);
+        let tx = self.conn.transaction()?;
+        upsert(&tx, &meta, existing_id, &mut ReconcileStats::default())?;
+        tx.commit()?;
+        Ok(match existing_id {
+            Some(_) => Change::Updated(meta.kind),
+            None => Change::Added(meta.kind),
+        })
+    }
+
+    /// Drop `rel` and everything below it. A directory removal arrives as one event, so the
+    /// subtree has to go with it. Returns how many rows went.
+    pub fn remove_file(&mut self, rel: &str) -> Result<usize> {
+        let removed = self.remove_file_batched(rel)?;
+        if removed > 0 {
+            // Links into the removed subtree are NULL again; some may now match a shallower file.
+            self.resolve_links()?;
+        }
+        Ok(removed)
+    }
+
+    /// [`remove_file`](Self::remove_file) without the link resolution; see
+    /// [`update_file_batched`](Self::update_file_batched).
+    pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
+        // `'0'` is the byte after `'/'`, so `[rel/, rel0)` is exactly the descendants of `rel`
+        // and the range stays on the `rel_path` index.
+        let ids: Vec<i64> = {
+            let mut st = self.conn.prepare_cached(
+                "SELECT id FROM files WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
+            )?;
+            let rows = st.query_map(params![rel, format!("{rel}/"), format!("{rel}0")], |r| {
+                r.get(0)
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let tx = self.conn.transaction()?;
+        for id in &ids {
+            delete_file_rows(&tx, *id)?;
+        }
+        tx.commit()?;
+        Ok(ids.len())
+    }
+
+    /// The file one link target points at, by the rules of [`resolve_links`](Self::resolve_links).
+    /// `None` means the link dangles, which is what the UI offers to create.
+    ///
+    /// ponytail: one pass over the file paths, not the key map `resolve_links` builds, because a
+    /// map costs four strings per file and this answers a single click. If a caller ever needs
+    /// hundreds of targets at once, give it a batch method that builds the map once.
+    pub fn resolve_target(&self, target: &str) -> Result<Option<String>> {
+        let key = markdown::link_key(target);
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT rel_path FROM files WHERE kind <> 0")?;
+        let mut rows = st.query([])?;
+        let mut best: Option<String> = None;
+        while let Some(r) = rows.next()? {
+            let rel: String = r.get(0)?;
+            let shorter = best.as_ref().is_none_or(|b| rel.len() < b.len());
+            if shorter && markdown::path_keys(&rel).contains(&key) {
+                best = Some(rel);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Headings of one note in document order: the outline pane and heading-scoped edits.
+    pub fn headings(&self, rel: &str) -> Result<Vec<HeadingRow>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT h.level, h.text, h.byte_start FROM headings h
+             JOIN files f ON f.id = h.file_id
+             WHERE f.rel_path = ?1 ORDER BY h.byte_start",
+        )?;
+        let rows = st.query_map([rel], |r| {
+            Ok(HeadingRow {
+                level: r.get::<_, i64>(0)? as u8,
+                text: r.get(1)?,
+                byte_start: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every `*.sync-conflict-*` copy in the vault, for the resolve UI.
+    pub fn conflicts(&self) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path")?;
+        let rows = st.query_map([FileKind::Conflict.as_i64()], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `(canonical target, rel_path of the link)` for every directory symlink pointing out of the
+    /// vault. inotify does not traverse symlinks, so each of these needs a watch of its own.
+    pub fn symlink_dirs(&self, root: &Path) -> Result<Vec<(std::path::PathBuf, String)>> {
+        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT canonical, rel_path FROM files WHERE kind = 0")?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (canonical, rel) = row?;
+            let canonical = std::path::PathBuf::from(canonical);
+            if !canonical.starts_with(&canonical_root) && root.join(&rel).is_symlink() {
+                out.push((canonical, rel));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Index one scanned entry: read and hash markdown, then replace its file row and everything
+/// derived from it. `existing_id` is the row it replaces, if any. Returns the file id.
+///
+/// The one place a file becomes index rows, shared by the full reconcile and the watcher's
+/// [`Index::update_file`] so the two can never drift apart.
+fn upsert(
+    tx: &rusqlite::Transaction<'_>,
+    f: &walk::FileMeta,
+    existing_id: Option<i64>,
+    stats: &mut ReconcileStats,
+) -> Result<i64> {
+    // ponytail: only markdown is read and hashed. PDFs and binaries are cheap
+    // `(mtime, size, ino)` rows here; the `pdf` feature will add text extraction
+    // and can reuse the same hash column when it does.
+    let (hash, text) = if f.kind == FileKind::Markdown {
+        match std::fs::read(&f.canonical) {
+            Ok(bytes) => {
+                stats.bytes_read += bytes.len() as u64;
+                let h = blake3::hash(&bytes);
+                (Some(h), Some(String::from_utf8_lossy(&bytes).into_owned()))
+            }
+            // Vanished or unreadable mid-walk: keep the stat row, drop the content.
+            Err(_) => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
+    // the arbiter for "did the content really change".
+    let same_content = match (existing_id, hash.as_ref()) {
+        (Some(id), Some(h)) => {
+            let old: Option<Vec<u8>> = tx
+                .prepare_cached("SELECT content_hash FROM files WHERE id = ?1")?
+                .query_row([id], |r| r.get(0))
+                .optional()?
+                .flatten();
+            old.as_deref() == Some(h.as_bytes().as_slice())
+        }
+        _ => false,
+    };
+
+    if same_content && let Some(id) = existing_id {
+        tx.prepare_cached(
+            "UPDATE files SET canonical=?2, dev=?3, ino=?4, mtime_ns=?5, size=?6 WHERE id=?1",
+        )?
+        .execute(params![
+            id,
+            f.canonical.to_string_lossy(),
+            f.dev as i64,
+            f.ino as i64,
+            f.mtime_ns,
+            f.size as i64,
+        ])?;
+        stats.touched += 1;
+        return Ok(id);
+    }
+
+    let analysis = text.as_deref().map(markdown::analyze);
+    let title = analysis
+        .as_ref()
+        .and_then(|a| a.title.clone())
+        .or_else(|| file_stem(&f.rel_path));
+
+    let id: i64 = tx
+        .prepare_cached(
+            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+             ON CONFLICT(rel_path) DO UPDATE SET
+                parent_dir=excluded.parent_dir,
+                canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
+                mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
+                title=excluded.title, content_hash=excluded.content_hash
+             RETURNING id",
+        )?
+        .query_row(
+            params![
+                f.rel_path,
+                parent_dir(&f.rel_path),
+                f.canonical.to_string_lossy(),
+                f.dev as i64,
+                f.ino as i64,
+                f.mtime_ns,
+                f.size as i64,
+                f.kind.as_i64(),
+                title,
+                hash.as_ref().map(|h| h.as_bytes().to_vec()),
+            ],
+            |r| r.get(0),
+        )?;
+
+    if existing_id.is_some() {
+        clear_derived(tx, id)?;
+        stats.updated += 1;
+    } else {
+        stats.added += 1;
+    }
+
+    if let (Some(a), Some(body)) = (analysis.as_ref(), text.as_ref()) {
+        for l in &a.links {
+            tx.prepare_cached(
+                "INSERT INTO links(src_file, target, resolved_file, kind, anchor, byte_start, byte_end)
+                 VALUES(?1,?2,NULL,?3,?4,?5,?6)",
+            )?
+            .execute(params![
+                id,
+                l.target,
+                link_kind_i64(l.kind),
+                l.anchor,
+                l.range.start as i64,
+                l.range.end as i64,
+            ])?;
+        }
+        for t in &a.tags {
+            tx.prepare_cached("INSERT INTO tags(file_id, name, byte_start) VALUES(?1,?2,?3)")?
+                .execute(params![id, t.name, t.range.start as i64])?;
+        }
+        for h in &a.headings {
+            tx.prepare_cached(
+                "INSERT INTO headings(file_id, level, text, byte_start) VALUES(?1,?2,?3,?4)",
+            )?
+            .execute(params![id, h.level as i64, h.text, h.range.start as i64])?;
+        }
+        // Explicit delete + insert: REPLACE would only fire the FTS delete trigger
+        // with recursive_triggers on.
+        tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
+            .execute([id])?;
+        tx.prepare_cached("INSERT INTO notes(file_id, body, title) VALUES(?1,?2,?3)")?
+            .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
+    }
+    Ok(id)
 }
 
 fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
@@ -559,13 +741,6 @@ fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     Ok(())
 }
 
-fn strip_ext(s: &str) -> String {
-    match s.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && !ext.contains('/') => stem.to_string(),
-        _ => s.to_string(),
-    }
-}
-
 /// Directory part of a vault-relative path: `"a/b/c.md"` -> `"a/b"`, `"a.md"` -> `""`.
 /// Stored per row so one directory level is an index lookup rather than a scan.
 fn parent_dir(rel_path: &str) -> &str {
@@ -577,7 +752,7 @@ fn parent_dir(rel_path: &str) -> &str {
 
 fn file_stem(rel_path: &str) -> Option<String> {
     let base = rel_path.rsplit('/').next()?;
-    Some(strip_ext(base))
+    Some(markdown::strip_ext(base))
 }
 
 fn link_kind_i64(k: markdown::LinkKind) -> i64 {
@@ -634,7 +809,18 @@ impl Index {
         Ok(st.query_row([rel_path], file_row).optional()?)
     }
 
-    /// Full-text search over note bodies. Conflict/PDF/binary files are never in `notes`.
+    /// Full-text search over note titles and bodies. Conflict/PDF/binary files are never in
+    /// `notes`.
+    ///
+    /// Ranking is "the note you named, then the notes that are about it": a title equal to the
+    /// query, ignoring case, comes first, and the rest go by `bm25` with the title weighted ten
+    /// times the body. bm25 is negative in SQLite, so ascending is best-first, and the weights
+    /// follow the `notes_fts` column order (body, title).
+    ///
+    /// Weight 10 was measured on the 3.6k notes of `testvault/`: searching a note's own title
+    /// puts that note first for 47 of 60 sampled notes, against 2 of 60 with the title
+    /// unweighted. Raising it to 20 buys one more note and costs a lot: three quarters of an
+    /// ordinary body search's top ten then come from a title word rather than the body.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let q = fts_query(query);
         if q.is_empty() {
@@ -644,9 +830,10 @@ impl Index {
             "SELECT f.rel_path, f.title, snippet(notes_fts, 0, '«', '»', '…', 12)
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
              WHERE notes_fts MATCH ?1
-             ORDER BY bm25(notes_fts) LIMIT ?2",
+             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
+             LIMIT ?3",
         )?;
-        let rows = st.query_map(params![q, limit as i64], |r| {
+        let rows = st.query_map(params![q, query.trim(), limit as i64], |r| {
             Ok(SearchHit {
                 rel_path: r.get(0)?,
                 title: r.get(1)?,
@@ -708,6 +895,7 @@ impl Index {
         let one = |sql: &str| -> Result<i64> { Ok(self.conn.query_row(sql, [], |r| r.get(0))?) };
         Ok(Stats {
             files: one("SELECT COUNT(*) FROM files WHERE kind <> 0")?,
+            dirs: one("SELECT COUNT(*) FROM files WHERE kind = 0")?,
             notes: one("SELECT COUNT(*) FROM notes")?,
             links: one("SELECT COUNT(*) FROM links")?,
             tags: one("SELECT COUNT(DISTINCT name) FROM tags")?,
@@ -882,6 +1070,119 @@ mod tests {
         assert!(ix.search("", 10).unwrap().is_empty());
     }
 
+    /// Two notes for the ranking tests: the query is `target.md`'s title, and also a phrase
+    /// `spam.md` repeats. Ranking on the body alone sorts these the wrong way round.
+    fn ranking_vault() -> (tempfile::TempDir, tempfile::TempDir) {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("target.md"),
+            "# Quantum Coherence Ledger\nA short paragraph on where the numbers come from.\n",
+        )
+        .unwrap();
+        // A long note that says the words a handful of times, which is what beat the note the
+        // user was looking for before the title was indexed.
+        fs::write(
+            vault.path().join("spam.md"),
+            format!(
+                "# Meeting Notes\n{}",
+                "quantum coherence ledger, plus a sentence of unrelated meeting prose. ".repeat(5)
+            ),
+        )
+        .unwrap();
+        (vault, tempfile::tempdir().unwrap())
+    }
+
+    #[test]
+    fn exact_title_outranks_a_body_that_repeats_the_words() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("Quantum Coherence Ledger", 10).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+
+        // Case and stray whitespace must not lose the exact-title match.
+        let hits = ix.search("  quantum COHERENCE ledger ", 10).unwrap();
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+    }
+
+    #[test]
+    fn partial_title_match_outranks_a_body_match() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // Not the whole title, so only the bm25 title weight can decide this one.
+        let hits = ix.search("coherence ledger", 10).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+    }
+
+    /// The delete half of the FTS triggers, which is the half that fails silently: a stale title
+    /// row would keep answering searches for a name the note no longer has.
+    #[test]
+    fn retitling_a_note_leaves_no_stale_title_in_the_index() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        fs::write(
+            vault.path().join("target.md"),
+            "# Photon Budget\nA short paragraph on where the numbers come from.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "target.md").unwrap(),
+            Change::Updated(FileKind::Markdown)
+        );
+
+        assert_eq!(
+            ix.search("Photon Budget", 10).unwrap()[0].rel_path,
+            "target.md"
+        );
+        let hits = ix.search("Quantum Coherence Ledger", 10).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["spam.md"],
+            "the old title is still in the index"
+        );
+        ix.conn
+            .execute(
+                "INSERT INTO notes_fts(notes_fts) VALUES('integrity-check')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn snippet_comes_from_the_body_not_the_title() {
+        let vault = tempfile::tempdir().unwrap();
+        // No H1 and no frontmatter, so the title is the file stem and lives only in the title
+        // column: a hit on it can only quote the body.
+        fs::write(
+            vault.path().join("Kryptonite Ledger.md"),
+            "plain prose about a lattice, never naming the file\n",
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("kryptonite", 10).unwrap();
+        assert_eq!(hits.len(), 1, "the title must be searchable: {hits:?}");
+        assert!(
+            hits[0].snippet.starts_with("plain prose"),
+            "{:?}",
+            hits[0].snippet
+        );
+        assert!(
+            !hits[0].snippet.contains("Kryptonite"),
+            "the snippet must quote the body, not the title: {:?}",
+            hits[0].snippet
+        );
+    }
+
     #[test]
     fn edited_note_leaves_the_fts_index_consistent() {
         let (vault, db) = fixture();
@@ -954,6 +1255,295 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
         assert_eq!(ix.stats().unwrap().aliases, 1);
+    }
+
+    /// Every row two indexes must agree on, keyed by path: `ino`, `mtime` and `canonical` are
+    /// per-vault by nature, so comparing them across two temp dirs would say nothing.
+    fn dump(ix: &Index) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut push = |sql: &str, cols: usize| {
+            let mut st = ix.conn.prepare(sql).unwrap();
+            let rows = st
+                .query_map([], |r| {
+                    let mut line = String::new();
+                    for i in 0..cols {
+                        line.push_str(&format!("{:?}|", r.get_ref(i).unwrap()));
+                    }
+                    Ok(line)
+                })
+                .unwrap();
+            out.extend(rows.map(|r| r.unwrap()));
+        };
+        push(
+            "SELECT rel_path, parent_dir, kind, title FROM files ORDER BY rel_path",
+            4,
+        );
+        push(
+            "SELECT s.rel_path, l.target, t.rel_path, l.kind, l.anchor, l.byte_start, l.byte_end
+             FROM links l JOIN files s ON s.id = l.src_file
+             LEFT JOIN files t ON t.id = l.resolved_file
+             ORDER BY s.rel_path, l.byte_start",
+            7,
+        );
+        push(
+            "SELECT f.rel_path, g.name, g.byte_start FROM tags g JOIN files f ON f.id = g.file_id
+             ORDER BY 1, 3",
+            3,
+        );
+        push(
+            "SELECT f.rel_path, h.level, h.text, h.byte_start FROM headings h
+             JOIN files f ON f.id = h.file_id ORDER BY 1, 4",
+            4,
+        );
+        out
+    }
+
+    #[test]
+    fn update_file_adds_note_and_resolves_incoming_links() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("a.md"), "# Alpha\nsee [[Gamma]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.unresolved_links().unwrap().len(), 1);
+
+        fs::write(vault.path().join("Gamma.md"), "# Gamma\n").unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "Gamma.md").unwrap(),
+            Change::Added(FileKind::Markdown)
+        );
+        assert!(
+            ix.unresolved_links().unwrap().is_empty(),
+            "the new note must resolve the link that was waiting for it"
+        );
+        assert_eq!(ix.backlinks("Gamma.md").unwrap().len(), 1);
+        assert_eq!(
+            ix.get_file("Gamma.md").unwrap().unwrap().title.unwrap(),
+            "Gamma"
+        );
+    }
+
+    /// The worker indexes a whole batch and resolves once at the end: resolution is a
+    /// whole-vault pass, so paying for it per file turns a Syncthing pull into seconds of work.
+    #[test]
+    fn batched_update_leaves_link_resolution_to_the_caller() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("a.md"), "# Alpha\nsee [[Gamma]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.unresolved_links().unwrap().len(), 1);
+
+        fs::write(vault.path().join("Gamma.md"), "# Gamma\n").unwrap();
+        assert_eq!(
+            ix.update_file_batched(vault.path(), "Gamma.md").unwrap(),
+            Change::Added(FileKind::Markdown)
+        );
+        assert_eq!(
+            ix.unresolved_links().unwrap().len(),
+            1,
+            "the batched variant must not resolve on its own"
+        );
+
+        ix.resolve_links().unwrap();
+        assert!(ix.unresolved_links().unwrap().is_empty());
+        assert_eq!(ix.backlinks("Gamma.md").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_file_unchanged_when_stat_matches() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // A hand-edited title only survives if `update_file` wrote nothing at all.
+        ix.conn
+            .execute(
+                "UPDATE files SET title = 'sentinel' WHERE rel_path = 'a.md'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "a.md").unwrap(),
+            Change::Unchanged
+        );
+        assert_eq!(
+            ix.get_file("a.md").unwrap().unwrap().title.as_deref(),
+            Some("sentinel")
+        );
+    }
+
+    #[test]
+    fn update_file_keeps_fts_consistent() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        fs::write(
+            vault.path().join("sub/Beta.md"),
+            "# Beta\nnow about crabs\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "sub/Beta.md").unwrap(),
+            Change::Updated(FileKind::Markdown)
+        );
+        assert!(ix.search("ferris", 10).unwrap().is_empty(), "stale FTS row");
+        assert_eq!(ix.search("crabs", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn update_file_ignores_temp_and_hard_skipped_names() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        fs::create_dir(vault.path().join(".git")).unwrap();
+        fs::write(vault.path().join(".git/config"), "c").unwrap();
+        fs::write(vault.path().join(".syncthing.n.md.tmp"), "t").unwrap();
+        fs::write(vault.path().join(".accent-xyz"), "t").unwrap();
+
+        for rel in [".git/config", ".syncthing.n.md.tmp", ".accent-xyz"] {
+            assert_eq!(
+                ix.update_file(vault.path(), rel).unwrap(),
+                Change::Ignored,
+                "{rel}"
+            );
+            assert!(ix.get_file(rel).unwrap().is_none(), "{rel}");
+        }
+    }
+
+    #[test]
+    fn remove_file_drops_prefix_and_unresolves_links() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
+
+        // One event for the directory has to take the note under it with it.
+        assert_eq!(ix.remove_file("sub").unwrap(), 2);
+        assert!(ix.get_file("sub").unwrap().is_none());
+        assert!(ix.get_file("sub/Beta.md").unwrap().is_none());
+        assert!(ix.search("ferris", 10).unwrap().is_empty());
+        assert_eq!(
+            ix.unresolved_links().unwrap(),
+            vec![("a.md".to_string(), "Beta".to_string())]
+        );
+        assert_eq!(
+            ix.remove_file("sub").unwrap(),
+            0,
+            "removing twice is a no-op"
+        );
+    }
+
+    #[test]
+    fn resolve_target_prefers_shortest_path_case_insensitively() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        assert_eq!(
+            ix.resolve_target("beta").unwrap().as_deref(),
+            Some("sub/Beta.md")
+        );
+        assert_eq!(
+            ix.resolve_target("Beta.md").unwrap().as_deref(),
+            Some("sub/Beta.md")
+        );
+        assert_eq!(
+            ix.resolve_target("./A.MD").unwrap().as_deref(),
+            Some("a.md")
+        );
+        assert_eq!(
+            ix.resolve_target("sub/beta.md").unwrap().as_deref(),
+            Some("sub/Beta.md")
+        );
+        assert_eq!(ix.resolve_target("Nope").unwrap(), None);
+        assert_eq!(
+            ix.resolve_target("sub").unwrap(),
+            None,
+            "a directory is not a link target"
+        );
+
+        // A deeper namesake must not win over the shallower one.
+        fs::create_dir(vault.path().join("sub/deep")).unwrap();
+        fs::write(vault.path().join("sub/deep/Beta.md"), "# Beta\n").unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(
+            ix.resolve_target("beta").unwrap().as_deref(),
+            Some("sub/Beta.md")
+        );
+    }
+
+    /// The incremental path must produce the rows a full reconcile would, or the index slowly
+    /// drifts away from the vault between restarts.
+    #[test]
+    fn reconcile_and_update_file_yield_identical_rows() {
+        let (whole, db_whole) = fixture();
+        let mut ix_whole = open(&db_whole);
+        ix_whole.reconcile(whole.path(), |_| {}).unwrap();
+
+        let (partial, db_partial) = fixture();
+        let note = partial.path().join("sub/Beta.md");
+        let body = fs::read_to_string(&note).unwrap();
+        fs::remove_file(&note).unwrap();
+        let mut ix_partial = open(&db_partial);
+        ix_partial.reconcile(partial.path(), |_| {}).unwrap();
+
+        fs::write(&note, &body).unwrap();
+        assert_eq!(
+            ix_partial
+                .update_file(partial.path(), "sub/Beta.md")
+                .unwrap(),
+            Change::Added(FileKind::Markdown)
+        );
+        assert_eq!(dump(&ix_partial), dump(&ix_whole));
+    }
+
+    #[test]
+    fn headings_read_back() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("h.md"), "# One\ntext\n\n## Two\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hs = ix.headings("h.md").unwrap();
+        assert_eq!(
+            hs.iter()
+                .map(|h| (h.level, h.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1, "One"), (2, "Two")]
+        );
+        assert_eq!(hs[0].byte_start, 0);
+        assert!(ix.headings("nope.md").unwrap().is_empty());
+    }
+
+    #[test]
+    fn conflicts_lists_conflict_copies() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(
+            ix.conflicts().unwrap(),
+            vec!["a.sync-conflict-20240101-120000-ABCDEFG.md".to_string()]
+        );
+    }
+
+    #[test]
+    fn symlink_dirs_lists_external_targets() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("ext.md"), "ext").unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        fs::create_dir(vault.path().join("plain")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), vault.path().join("linked")).unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // The plain directory is already covered by the recursive watch on the vault root.
+        assert_eq!(
+            ix.symlink_dirs(vault.path()).unwrap(),
+            vec![(outside.path().canonicalize().unwrap(), "linked".to_string())]
+        );
+        assert_eq!(ix.stats().unwrap().dirs, 2);
     }
 
     #[test]

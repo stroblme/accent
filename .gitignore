@@ -6,3 +6,5 @@
 /testvault
 /testvault-external
 /.codegraph
+/build-aux/build
+/.flatpak-builder
