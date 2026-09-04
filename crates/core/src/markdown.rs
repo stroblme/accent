@@ -617,7 +617,8 @@ fn push_fm_tag(raw: &str, base: usize, a: &mut Analysis) {
 
 const IMAGE_EXT: [&str; 8] = ["png", "jpg", "jpeg", "gif", "svg", "webp", "bmp", "avif"];
 
-fn is_image(target: &str) -> bool {
+/// Whether a link target names an image, by extension: `![[x.png]]` embeds, `![[x.pdf]]` links.
+pub fn is_image(target: &str) -> bool {
     target
         .rsplit_once('.')
         .is_some_and(|(_, e)| IMAGE_EXT.contains(&e.to_ascii_lowercase().as_str()))
@@ -653,6 +654,36 @@ fn is_block_start(ev: &Event) -> bool {
                 | Cm::HtmlBlock
         )
     )
+}
+
+/// A `$…$` or `$$…$$` formula as MathML, or `None` if the LaTeX does not parse.
+///
+/// The renderer itself never reports a failure — it writes `<merror>` and carries on — so the
+/// parser events are collected first, and that is what decides between MathML and the caller's
+/// raw-source fallback. WebKit draws MathML natively, so no stylesheet or script goes with it.
+fn mathml(src: &str, display: bool) -> Option<String> {
+    use pulldown_latex::config::DisplayMode;
+    use pulldown_latex::{ParserError, RenderConfig, Storage};
+
+    let storage = Storage::new();
+    let events = pulldown_latex::Parser::new(src, &storage)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let mut out = String::new();
+    pulldown_latex::push_mathml(
+        &mut out,
+        events.into_iter().map(Ok::<_, ParserError>),
+        RenderConfig {
+            display_mode: if display {
+                DisplayMode::Block
+            } else {
+                DisplayMode::Inline
+            },
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    Some(out)
 }
 
 /// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
@@ -735,6 +766,15 @@ pub fn to_html(text: &str) -> String {
                     evts.push(Event::Html("</a>".into()));
                 } else {
                     evts.push(ev);
+                }
+            }
+            Event::InlineMath(ref src) | Event::DisplayMath(ref src) => {
+                let html = mathml(src, matches!(ev, Event::DisplayMath(_)));
+                // A typo must never blank a formula: without MathML the original event goes on and
+                // pulldown-cmark's `.math` span shows the source as the author wrote it.
+                match html {
+                    Some(html) => evts.push(Event::Html(html.into())),
+                    None => evts.push(ev),
                 }
             }
             _ => evts.push(ev),
@@ -1165,6 +1205,44 @@ mod tests {
         let h = bare("# Hi\n\n[x](y.md)\n");
         assert!(h.contains("<h1>Hi</h1>"), "{h}");
         assert!(h.contains("<a href=\"y.md\">x</a>"), "{h}");
+    }
+
+    #[test]
+    fn html_renders_math_as_mathml() {
+        let h = bare("$x^2$");
+        assert!(h.contains("<math display=\"inline\">"), "{h}");
+        assert!(h.contains("<msup>"), "{h}");
+
+        let h = bare("$$\\frac{a}{b}$$");
+        assert!(h.contains("<math display=\"block\">"), "{h}");
+        assert!(h.contains("<mfrac>"), "{h}");
+
+        // A formula the parser rejects keeps its source on screen rather than rendering as
+        // nothing, so a typo is visible and fixable.
+        let h = bare("$\\nosuchcommand$");
+        assert!(h.contains("class=\"math math-inline\""), "{h}");
+        assert!(h.contains("\\nosuchcommand"), "{h}");
+    }
+
+    /// Both embed forms have to end up as a URL the preview's `accent:` scheme can serve: a
+    /// markdown image relative to the note's directory, a wikilink embed rooted at the vault.
+    #[test]
+    fn html_resolves_both_image_forms() {
+        let h = bare("![alt](Attachments/img-0.png)");
+        assert!(
+            h.contains("<img src=\"Attachments/img-0.png\" alt=\"alt\" />"),
+            "{h}"
+        );
+
+        let h = bare("![[Attachments/img 1.png]]");
+        assert!(
+            h.contains("<img src=\"accent://file/Attachments/img%201.png\">"),
+            "{h}"
+        );
+
+        // A space needs the pointy-bracket form in markdown, and is escaped the same way.
+        let h = bare("![alt](<Attachments/img 0.png>)");
+        assert!(h.contains("src=\"Attachments/img%200.png\""), "{h}");
     }
 
     #[test]
