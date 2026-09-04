@@ -75,13 +75,17 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 |---|---|
 | Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Quit `Ctrl+Q` |
 | Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
+| Editing | Duplicate line `Ctrl+D`, Delete line `Ctrl+L`, Scroll viewport `Ctrl+Up` / `Ctrl+Down`, Add caret above / below `Shift+Alt+Up` / `Shift+Alt+Down` |
+| Zoom | Zoom in `Ctrl++` (also `Ctrl+=` and the keypad), Zoom out `Ctrl+-`, Reset `Ctrl+0`. The document only: the chrome keeps the system interface font, and the preview's WebView is zoomed with the editor so presentation mode follows |
 | Panes | Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, Backlinks `Ctrl+Shift+B` |
 | Notes | Follow link `Ctrl+Return`, Rename `F2`, Move to trash `Delete` (tree only), Daily note `Ctrl+Shift+D` |
 | Views | Toggle split `Ctrl+M`, Presentation `F5` (`Esc` leaves it, window size unchanged) |
 | Window | Fullscreen `F11`, Preferences `Ctrl+comma`, Primary menu `F10` |
 | Tabs | `Ctrl+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9` |
 
-Never bind: `Super`+anything (the shell owns it), `Alt+Tab`, `Alt+F4`, `Alt+F7`, `Alt+F8`, `Ctrl+Alt+*` (workspace switching), `F1` (help), `Ctrl+Shift+U` (IBus unicode entry), `Ctrl+Space` (input-method switch), `Ctrl+D`, and the GtkSourceView built-ins (`Ctrl+Z`/`Ctrl+Y`, `Ctrl+A`, `Ctrl+X`/`C`/`V`, `Ctrl+K`, `Alt+Up`/`Alt+Down`, `Ctrl+Home`/`Ctrl+End`).
+Never bind: `Super`+anything (the shell owns it), `Alt+Tab`, `Alt+F4`, `Alt+F7`, `Alt+F8`, `Ctrl+Alt+*` (workspace switching), `F1` (help), `Ctrl+Shift+U` (IBus unicode entry), `Ctrl+Space` (input-method switch), and the GtkSourceView built-ins (`Ctrl+Z`/`Ctrl+Y`, `Ctrl+A`, `Ctrl+X`/`C`/`V`, `Ctrl+K`, `Alt+Up`/`Alt+Down`, `Ctrl+Home`/`Ctrl+End`).
+
+Four of the Editing chords are already spoken for by the widget: GtkTextView binds `Ctrl+Up`/`Ctrl+Down` to paragraph movement and GtkSourceView binds `Shift+Alt+Up`/`Shift+Alt+Down` to `move-viewport`. Both are class shortcuts, which run at the focused view before the window's application accelerators, so `install_actions` claims those four in a capture-phase `GtkShortcutController` on the window that forwards them to the same actions. Taking a widget binding needs that much deliberation; it is not the default way to add a shortcut.
 
 One deliberate HIG deviation: the HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview. accent has no printing, and its users arrive from VS Code and Obsidian where both open the palette. Revisit if printing is ever added.
 
