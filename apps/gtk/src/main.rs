@@ -1084,6 +1084,11 @@ impl App {
         self.header.add_css_class("chrome-hidden");
         self.tabbar.add_css_class("chrome-hidden");
         self.zoom_pill.add_css_class("chrome-hidden");
+        // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
+        // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().add_css_class("chrome-dimmed");
+        }
     }
 
     fn show_chrome(&self) {
@@ -1096,6 +1101,9 @@ impl App {
         self.header.remove_css_class("chrome-hidden");
         self.tabbar.remove_css_class("chrome-hidden");
         self.zoom_pill.remove_css_class("chrome-hidden");
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.widget().remove_css_class("chrome-dimmed");
+        }
     }
 
     /// Never fade over something that is waiting for an answer: a dialog, a banner, an open
@@ -1843,6 +1851,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
     // title widget, and the header-to-header size group already keeps the two bands equal, so the
     // switcher needs neither a box around it nor a size group of its own.
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
+    // The panes dim rather than hide while the user types, on the same transition as the bars.
+    pane.widget().add_css_class("chrome-fade");
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }
@@ -2465,6 +2475,7 @@ fn install_chrome_css() {
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
+             .chrome-dimmed {{ opacity: 0.5; }} \
              .accent-pill {{ padding: 6px; border-radius: 12px; }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
