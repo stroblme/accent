@@ -32,7 +32,7 @@ type LinkHook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>, &Link)>>>;
 /// pressed, so the button always does what its label says: deriving it from the file system meant
 /// a Reload that could arrive as a Save, and a Save that quietly reloaded.
 ///
-/// Both states only ever appear on a tab with unsaved edits: a clean tab is reloaded silently.
+/// The first two only ever appear on a tab with unsaved edits: a clean tab is reloaded silently.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Alert {
     /// Someone else wrote the file while this buffer had edits. The button opens the diff, which
@@ -40,6 +40,9 @@ pub enum Alert {
     Compare,
     /// The file is gone and this buffer is the only copy left. The button writes it back.
     Restore,
+    /// Syncthing left a `*.sync-conflict-*` copy of this note beside it. The button opens the
+    /// same side-by-side resolver the tree offers, on the copy the vault reports.
+    Conflict,
 }
 
 impl Alert {
@@ -47,6 +50,7 @@ impl Alert {
         match self {
             Alert::Compare => "This note changed on disk",
             Alert::Restore => "This note was deleted on disk",
+            Alert::Conflict => "A sync conflict copy of this note exists",
         }
     }
 
@@ -54,6 +58,7 @@ impl Alert {
         match self {
             Alert::Compare => "Compare",
             Alert::Restore => "Save",
+            Alert::Conflict => "Resolve",
         }
     }
 }
@@ -179,6 +184,8 @@ pub fn open(
     column.append(&document);
     let page = tabs.append(&column);
     page.set_title(title_of(rel));
+    // The title is only the file name, so where the note really lives is a hover away.
+    page.set_tooltip(&crate::fileops::display_path(root, rel));
 
     let tab = Rc::new(Tab {
         rel: RefCell::new(rel.to_string()),
@@ -467,13 +474,9 @@ fn wire_find(
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
-/// the window it has to be told about dark mode explicitly.
+/// the window it has to be told about the theme explicitly.
 fn sync_scheme(buffer: &sourceview5::Buffer) {
-    let id = if adw::StyleManager::default().is_dark() {
-        "Adwaita-dark"
-    } else {
-        "Adwaita"
-    };
+    let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
 }
@@ -548,6 +551,8 @@ impl Tab {
         *self.rel.borrow_mut() = new_rel.to_string();
         *self.path.borrow_mut() = root.join(new_rel);
         self.page.set_title(&self.tab_title());
+        self.page
+            .set_tooltip(&crate::fileops::display_path(root, new_rel));
     }
 
     pub fn text(&self) -> String {
@@ -583,7 +588,7 @@ impl Tab {
         self.view
             .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.5);
         self.mark_clean(etag);
-        self.hide_banner();
+        self.clear_disk_alert();
         Ok(())
     }
 
@@ -611,13 +616,22 @@ impl Tab {
         self.banner.set_revealed(false);
     }
 
+    /// Take down a banner about the file on disk, and only that. A save or a reload answers
+    /// "changed on disk" and "deleted on disk"; it says nothing about a conflict copy sitting
+    /// next to the note, whose banner has to survive the first autosave.
+    pub fn clear_disk_alert(&self) {
+        if matches!(self.alert.get(), Some(Alert::Compare | Alert::Restore)) {
+            self.hide_banner();
+        }
+    }
+
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing
     /// downstream tries to save it on the way out.
     pub fn discard(&self) {
         self.modified.set(false);
         self.disk_changed.set(false);
         self.page.set_title(&self.tab_title());
-        self.hide_banner();
+        self.clear_disk_alert();
     }
 
     /// 1-based, the way an editor counts lines and the preview's `data-line` markers do.

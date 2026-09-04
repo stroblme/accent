@@ -477,6 +477,15 @@ impl Vault {
         conflict_pairs(&self.index())
     }
 
+    /// The conflict copies of one note, for the banner a tab raises over it.
+    pub fn conflicts_of(&self, rel: &str) -> Result<Vec<String>> {
+        Ok(conflict_pairs(&self.index())?
+            .into_iter()
+            .filter(|(original, _)| original == rel)
+            .map(|(_, copy)| copy)
+            .collect())
+    }
+
     /// Notes for the `[[` completion: prefix on the name or the whole path, shortest path first
     /// because that is the one the user most likely means.
     pub fn complete_notes(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
@@ -868,8 +877,8 @@ fn conflict_pairs(index: &Index) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-/// `Dir/Note.sync-conflict-….md` -> `Dir/Note.md`.
-fn conflict_original_rel(copy: &str) -> Option<String> {
+/// `Dir/Note.sync-conflict-….md` -> `Dir/Note.md`, or `None` when `copy` is not one.
+pub fn conflict_original_rel(copy: &str) -> Option<String> {
     let (dir, name) = split_parent(copy);
     let original = fs::conflict_original(name)?;
     Some(if dir.is_empty() {
@@ -1113,6 +1122,8 @@ mod tests {
             || f.vault.conflicts().unwrap() == [("Note.md".to_string(), CONFLICT.to_string())],
             BUDGET
         ));
+        assert_eq!(f.vault.conflicts_of("Note.md").unwrap(), [CONFLICT]);
+        assert!(f.vault.conflicts_of("Other.md").unwrap().is_empty());
         assert!(
             f.vault.search("wombat", 10).unwrap().is_empty(),
             "a conflict copy is never a note"

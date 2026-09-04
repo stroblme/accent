@@ -25,7 +25,8 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
-| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow` |
+| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
+| Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
 | Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
 | Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks |
 | Feedback | `AdwToast` / `AdwBanner` / `AdwAlertDialog`, see States |
@@ -49,9 +50,11 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 - The only three colour sources in code are `StyleManager::accent_color_rgba()`, `Widget::color()` (the resolved theme foreground) and `StyleManager::is_dark()`.
 - GTK CSS uses `var(--accent-bg-color)`, `var(--view-bg-color)`, `var(--window-fg-color)` and friends. Never `@named_colors`, never a literal hex.
 - Editor tag colours, all derived, in `highlight.rs::restyle`: `link`, `wikilink`, `tag` and `image` take the accent at full alpha; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4; `quote` and `taskdone` the foreground at alpha 0.6; `code` and `codeblock` get a foreground background at alpha 0.07. 23 tags in total; no other colour is set anywhere.
-- The preview stylesheet derives everything from three values: foreground, background, accent. WebKitGTK cannot see GTK's CSS variables, so the light/dark background pair is written out as `#ffffff` / `#1d1d20` (libadwaita's `--view-bg-color`). That pair is the only hex allowed in the codebase; anything else is a bug the pre-flight grep catches.
+- The preview stylesheet derives everything from three values: foreground, background, accent. WebKitGTK cannot see GTK's CSS variables, so it is handed the background as a literal, from `theme::view_bg`.
+- **`theme.rs` is the only file allowed to write a hex literal**, and anything outside it is a bug the pre-flight grep catches. It holds libadwaita's own `--view-bg-color` pair (`#ffffff` / `#1d1d20`) for the preview, and the Solarized palette: `#fdf6e3` / `#eee8d5` / `#657b83` light, `#002b36` / `#073642` / `#839496` dark.
 - One flat background. The sidebar, both header bars, the tab bar and the document all paint `var(--view-bg-color)` through the `accent-flat` class, so the window reads as one surface rather than banded panels. The 1 px paned separator is the only division.
-- Light/dark parity is by construction: nothing is picked per theme, so there is no second palette to keep in sync. Same for the accent, which the user can change at any moment.
+- Four themes: System, Light, Dark and Solarized, chosen in preferences. The first three are `AdwStyleManager` colour schemes and paint nothing of ours. Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` variables on `:root` from an app-priority provider, so every widget follows without being touched, and it keeps following the system between its light and dark halves. It deliberately leaves accent, shade and border variables alone, so the one-accent rule holds in all four.
+- Light/dark parity is by construction: outside `theme.rs` nothing is picked per theme, so there is no second palette to keep in sync. Same for the accent, which the user can change at any moment.
 
 ## Spacing
 
@@ -105,7 +108,7 @@ This theme has no `tag-symbolic`, so the Tags pane uses `user-bookmarks-symbolic
 
 - Empty: `AdwStatusPage` with a symbolic icon, a header-capitalised title, one sentence of body text and at most one button (<https://developer.gnome.org/hig/patterns/feedback/placeholders.html>).
 - Loading: the header status label, as `start_reconcile` already does ("Indexing… 1200/42700 files"). Indexing and saving never block the window, so no spinner covers content and no progress bar owns the window.
-- Toast for a thing that happened and is over ("Saved", "Moved to Trash" with an Undo button). Banner for a state that persists and needs a decision ("This note changed on disk", "Conflict copy found"). `AdwAlertDialog` only when the choice can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
+- Toast for a thing that happened and is over ("Saved", "Moved to Trash" with an Undo button). Banner for a state that persists and needs a decision ("This note changed on disk", "A sync conflict copy of this note exists"). A conflict raises the banner on the tab showing the note it concerns, never a toast per conflict copy in the vault: on a synced vault that was a wall of them at startup. Conflicts on notes nobody has open are counted on the end of the "Indexed N files" toast instead. `AdwAlertDialog` only when the choice can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
 
 ## Motion
 
@@ -148,7 +151,7 @@ Ten mechanical checks before shipping a UI change. None of them needs judgement.
 4. Headless smoke run (ROADMAP §6): `Xvfb :99 & DISPLAY=:99 G_DEBUG=fatal-criticals target/release/accent testvault`
 5. Dark: `gsettings set org.gnome.desktop.interface color-scheme prefer-dark`, look, then set it back to `default`
 6. Accent: `gsettings set org.gnome.desktop.interface accent-color teal`, look, then set it back to `blue`
-7. No stray colours: `grep -rnE '#[0-9a-fA-F]{3,8}' apps/gtk/src` returns only the preview background pair
+7. No stray colours: `grep -rnE '#[0-9a-fA-F]{3,8}' apps/gtk/src | grep -v theme.rs` returns nothing
 8. Reduced motion: `gsettings set org.gnome.desktop.interface enable-animations false`, check nothing became unreachable, then set it back to `true`
 9. Keyboard-only pass with the pointer unplugged: reach every action in the accelerator table, and get the auto-hidden chrome back without a mouse
 10. `GDK_SCALE=2 target/release/accent testvault` for scaling, plus an IME check (ibus, type CJK into a note and confirm the preedit lands in the right place)

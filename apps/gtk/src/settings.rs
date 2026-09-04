@@ -5,7 +5,7 @@
 //! the shared config, the vault it is editing and one callback, which is what lets `main` wire it
 //! up without a cycle.
 
-use accent_core::config::{Config, VaultConfig};
+use accent_core::config::{Config, Theme, VaultConfig};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::pango;
@@ -15,6 +15,14 @@ use std::rc::Rc;
 
 /// Shown instead of today's file name when chrono rejects the daily pattern.
 const INVALID: &str = "Invalid format";
+
+/// The theme choices, in the order the combo row lists them.
+const THEMES: [(Theme, &str); 4] = [
+    (Theme::System, "System"),
+    (Theme::Light, "Light"),
+    (Theme::Dark, "Dark"),
+    (Theme::Solarized, "Solarized"),
+];
 
 /// `root` identifies which vault's per-vault settings are being edited. `on_change` is called
 /// after every edit, with the config already saved to disk, so the caller can apply it live.
@@ -38,6 +46,7 @@ pub fn present(
     });
 
     let page = adw::PreferencesPage::new();
+    page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
     page.add(&vault_group(&config, &root, &save));
 
@@ -46,6 +55,38 @@ pub fn present(
         .build();
     dialog.add(&page);
     dialog.present(Some(parent));
+}
+
+// ------------------------------------------------------------------------------- appearance
+
+fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Appearance").build();
+
+    let chosen = config.borrow().theme;
+    let names: Vec<&str> = THEMES.iter().map(|(_, name)| *name).collect();
+    let row = adw::ComboRow::builder()
+        .title("Theme")
+        .subtitle("Solarized follows the system light and dark setting")
+        .model(&gtk::StringList::new(&names))
+        .selected(index_of(chosen))
+        .build();
+    row.connect_selected_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            let Some((theme, _)) = THEMES.get(r.selected() as usize) else {
+                return;
+            };
+            config.borrow_mut().theme = *theme;
+            save();
+        }
+    });
+    group.add(&row);
+    group
+}
+
+/// Where `theme` sits in [`THEMES`], which is the row's selected index.
+fn index_of(theme: Theme) -> u32 {
+    THEMES.iter().position(|(t, _)| *t == theme).unwrap_or(0) as u32
 }
 
 // ----------------------------------------------------------------------------------- editor
@@ -321,6 +362,13 @@ mod tests {
 
     /// A Thursday afternoon, the same instant `template`'s own tests use.
     const NOW: &str = "2026-09-03T14:05:00";
+
+    #[test]
+    fn every_theme_has_a_row_to_pick_it_with() {
+        for (theme, _) in THEMES {
+            assert_eq!(THEMES[index_of(theme) as usize].0, theme);
+        }
+    }
 
     #[test]
     fn folder_entries_are_vault_relative_and_trimmed() {
