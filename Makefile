@@ -86,7 +86,10 @@ smoke: gtk vault
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
 	@pgrep -f "Xvfb :$(DISPLAY_NUM)" >/dev/null || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
 	@sleep 2
-	$(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
+	@# A private session bus per run: accent is a single-instance GApplication, so without one a
+	@# second invocation forwards its arguments to whatever instance is already up and exits 0,
+	@# which makes this check pass while proving nothing.
+	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
 ## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
 install: all
