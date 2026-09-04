@@ -107,6 +107,7 @@ fn icon_name(kind: char) -> &'static str {
 /// `TreeListModel` create-func and *throws the model away again*. Without the cache every row
 /// scrolling into view ran a fresh `list_dir` query.
 pub struct Tree {
+    host: gtk::Box,
     view: gtk::ListView,
     model: gtk::TreeListModel,
     vault: Rc<Vault>,
@@ -117,6 +118,11 @@ pub struct Tree {
 impl Tree {
     pub fn view(&self) -> &gtk::ListView {
         &self.view
+    }
+
+    /// What the sidebar puts in its Files pane, and what the context menu parents itself to.
+    pub fn widget(&self) -> &gtk::Widget {
+        self.host.upcast_ref()
     }
 
     /// The row model, for tests and the `ACCENT_BENCH_*` hooks in `main`.
@@ -182,6 +188,48 @@ impl Tree {
         };
         expander.list_row()?.item().as_ref().and_then(decode)
     }
+
+    /// Expand everything above `rel`, then select it and scroll it into view. False when the path
+    /// is not in the tree at all, so a caller can say so rather than silently doing nothing.
+    // Nothing calls it yet: the "Reveal in Sidebar" action, which also has to switch the sidebar
+    // to the Files pane and un-hide it, lands with the tab context menu.
+    #[allow(dead_code)]
+    pub fn reveal(&self, rel: &str) -> bool {
+        for dir in ancestors(rel) {
+            match find_row(&self.model, dir) {
+                Some(row) => row.set_expanded(true),
+                None => return false,
+            }
+        }
+        let Some(row) = find_row(&self.model, rel) else {
+            return false;
+        };
+        self.view.scroll_to(
+            row.position(),
+            gtk::ListScrollFlags::SELECT | gtk::ListScrollFlags::FOCUS,
+            None,
+        );
+        true
+    }
+}
+
+/// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
+fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
+    rel.match_indices('/').map(|(at, _)| &rel[..at])
+}
+
+/// The row holding `rel`, or `None` while its parent is still collapsed.
+///
+/// ponytail: a linear scan of the rows the model currently has, which is every *visible* row and
+/// not the whole vault. `reveal` runs it once per path segment, so revealing a note five levels
+/// deep in a 2 400-row expansion is six scans of a few thousand items. Build a rel-path to row
+/// index alongside the child-model cache if that ever shows up in a profile.
+pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
+    (0..model.n_items()).find_map(|i| {
+        let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
+        let (_, r) = row.item().as_ref().and_then(decode)?;
+        (r == rel).then_some(row)
+    })
 }
 
 fn children_model(
@@ -222,8 +270,11 @@ pub fn build(
         }
     });
 
+    // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
+    // window is open, and the label is only ever a prefix of a tooltip.
+    let root_label = crate::fileops::display_path(vault.root(), "");
     let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
+    factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
         let label = gtk::Label::builder()
             .xalign(0.0)
@@ -234,6 +285,20 @@ pub fn build(
         row.append(&label);
         let expander = gtk::TreeExpander::new();
         expander.set_child(Some(&row));
+        // The name is ellipsized in the middle inside a 200 px sidebar, so the only way to read
+        // where a row really lives is to hover it. Answered on hover rather than written on bind:
+        // `set_tooltip_text` triggers a tooltip query on the whole window, and paying that per
+        // bound row tripled the cost of expanding a 2 400-child directory (12 ms to 40 ms).
+        expander.set_has_tooltip(true);
+        let root_label = root_label.clone();
+        expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
+            let row = expander.list_row().and_then(|row| row.item());
+            let Some((_, rel)) = row.as_ref().and_then(decode) else {
+                return false;
+            };
+            tooltip.set_text(Some(&format!("{root_label}/{rel}")));
+            true
+        });
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&expander));
@@ -289,7 +354,22 @@ pub fn build(
             on_activate(kind, &rel);
         }
     });
+    let scroller = gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&view)
+        .build();
+    // ponytail: a plain `GtkBox` around the scroller, purely so the context menu has a
+    // layout-managed widget to hang off. GTK re-presents a popover from its parent's
+    // `allocate_native_children`, which only runs for widgets that use a layout manager;
+    // `GtkListView` has a custom `size_allocate` and never re-presents its popover children, so a
+    // menu parented to the list is frozen at its first-frame size and `GtkPopoverMenu`'s inner
+    // scrolled window turns everything that grows afterwards into a scrollbar. If a scrollbar
+    // ever comes back, the next dial is setting that inner scrolled window's policies to Never.
+    let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    host.append(&scroller);
     Tree {
+        host,
         view,
         model,
         vault,
@@ -304,6 +384,15 @@ mod tests {
 
     fn rows(names: &[&str]) -> Vec<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ancestors_lists_the_directories_reveal_has_to_expand() {
+        let dirs = |rel| ancestors(rel).collect::<Vec<_>>();
+        assert_eq!(dirs("a/b/c.md"), ["a", "a/b"]);
+        // A note at the vault root has nothing above it to expand.
+        assert_eq!(dirs("c.md"), [] as [&str; 0]);
+        assert_eq!(dirs(""), [] as [&str; 0]);
     }
 
     #[test]

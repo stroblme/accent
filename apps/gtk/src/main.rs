@@ -276,6 +276,9 @@ struct App {
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
+    /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
+    /// rather than the status label, which is also hidden before the first `Progress` arrives.
+    reconciled: Cell<bool>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
 }
@@ -657,6 +660,7 @@ impl App {
                     "reconcile done"
                 );
                 self.status.set_visible(false);
+                self.reconciled.set(true);
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
@@ -1397,6 +1401,7 @@ fn build_window(
         mode: Cell::new(Mode::Editor),
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
+        reconciled: Cell::new(false),
         render: RefCell::new(None),
         session: RefCell::new(None),
     });
@@ -1455,11 +1460,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
             }
         ),
     );
-    let scroller = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(tree.view())
-        .build();
+    // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
+    let files = tree.widget().clone();
     let _ = app.tree.set(tree);
 
     let data = sidebar::Data {
@@ -1484,7 +1486,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
         }),
     };
     let pane = sidebar::Sidebar::new(
-        scroller.upcast(),
+        files,
         data,
         glib::clone!(
             #[weak]
@@ -1510,6 +1512,7 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
+    let reconciled = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: app.vault.clone(),
         window: app.window.clone(),
@@ -1523,6 +1526,7 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
                 app.open_note(rel);
             }
         }),
+        reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {
             let Some(app) = flush.upgrade() else { return };
             for rel in rels {
@@ -1734,8 +1738,16 @@ fn wire_tree(app: &Rc<App>) {
                 return;
             };
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-            fileops::context_menu(app.ops(), tree.view(), &rel, kind == 'd', anchor);
+            // The menu hangs off the host box, so the click has to be translated out of the
+            // list's coordinates or it would point at the wrong row once the list is scrolled.
+            let Some(at) = tree.view().compute_point(
+                tree.widget(),
+                &gtk::graphene::Point::new(x as f32, y as f32),
+            ) else {
+                return;
+            };
+            let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            fileops::context_menu(app.ops(), tree.widget(), &rel, kind == 'd', anchor);
         }
     ));
     list.add_controller(click);
@@ -1757,10 +1769,10 @@ fn wire_tree(app: &Rc<App>) {
                 gdk::Key::Delete => fileops::trash(app.ops(), &rel),
                 gdk::Key::Menu => fileops::context_menu(
                     app.ops(),
-                    tree.view(),
+                    tree.widget(),
                     &rel,
                     kind == 'd',
-                    row_anchor(tree.view()),
+                    row_anchor(tree.view(), tree.widget()),
                 ),
                 _ => return glib::Propagation::Proceed,
             }
@@ -1770,9 +1782,10 @@ fn wire_tree(app: &Rc<App>) {
     list.add_controller(keys);
 }
 
-/// Where a Menu-key popover points: the focused row, or the top of the list.
-fn row_anchor(list: &gtk::ListView) -> gdk::Rectangle {
-    let bounds = list.focus_child().and_then(|row| row.compute_bounds(list));
+/// Where a Menu-key popover points: the focused row, or the top of the list. In `host`'s
+/// coordinates, since that is what the popover is parented to.
+fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
+    let bounds = list.focus_child().and_then(|row| row.compute_bounds(host));
     match bounds {
         Some(r) => gdk::Rectangle::new(
             r.x() as i32,

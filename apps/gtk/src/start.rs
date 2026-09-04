@@ -177,7 +177,7 @@ fn recent_row(
 }
 
 /// The path as GNOME writes it: under `home`, `/home/me/Notes` becomes `~/Notes`.
-fn abbreviate(path: &Path, home: Option<&Path>) -> String {
+pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
     let stripped = home
         .filter(|h| !h.as_os_str().is_empty())
         .and_then(|h| path.strip_prefix(h).ok());
