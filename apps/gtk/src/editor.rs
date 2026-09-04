@@ -5,7 +5,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{completion, highlight, multicaret};
+use crate::{completion, highlight, multicaret, typing};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::Link;
 use adw::prelude::*;
@@ -156,6 +156,7 @@ pub fn open(
     view.set_pixels_below_lines(2);
     let numbers = line_numbers(&view, &buffer);
     completion::install(&view, notes, tags);
+    typing::install(&view);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. 800 leaves 704 px of text, which measures ~96

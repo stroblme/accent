@@ -18,6 +18,7 @@ mod sidebar;
 mod start;
 mod theme;
 mod tree;
+mod typing;
 
 use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
 use accent_core::index::Phase;
