@@ -211,10 +211,15 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
     analysis
 }
 
-/// Whether the heading starting at byte `start` writes its own `#` markers. A setext heading is
-/// underlined on the line below instead, so it has no marker to hang in the gutter.
+/// Whether the heading starting at byte `start` writes its own `#` markers *and* has closed them
+/// with a space. A setext heading is underlined on the line below instead, so it has no marker to
+/// hang. The space matters while typing: a bare `#` still parses as an empty heading, so hanging
+/// it would pull the line left the moment the key is pressed and push it back as soon as the next
+/// character turns it into a `#tag`.
 fn is_atx(text: &str, start: usize) -> bool {
-    text[start..].starts_with('#')
+    let rest = &text[start..];
+    let after = rest.trim_start_matches('#');
+    after.len() < rest.len() && after.starts_with([' ', '\t'])
 }
 
 /// Pull each ATX heading's `#` markers out into the left gutter, so heading text lines up with
@@ -326,6 +331,11 @@ mod tests {
         assert_eq!(starts.len(), 2, "one ATX and one setext heading");
         assert!(is_atx(text, starts[0]));
         assert!(!is_atx(text, starts[1]));
+        // A heading is only a heading once the space is there; until then the line may still turn
+        // into a tag, and a marker that hangs and un-hangs per keystroke is worse than one that waits.
+        assert!(!is_atx("#", 0));
+        assert!(!is_atx("#tag", 0));
+        assert!(is_atx("### Deep", 0));
     }
 
     /// The span offsets we feed to the buffer must land on real character boundaries for a note

@@ -16,10 +16,11 @@
 //! * secondary carets do not blink, they are painted;
 //! * the completion popup can open at several carets at once, since it follows the primary.
 //!
-//! Everything not mirrored — Escape, any Ctrl or Alt combination, any other key — clears the
-//! carets and is then handled as usual, so undo, paste and every accelerator keep working on the
-//! primary caret. One undo step covers a whole multi-caret edit, because each replay runs inside
-//! a single `begin_user_action`.
+//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, and the arrow,
+//! Home and End motions, so a column of carets can be moved and edited as one. Everything else —
+//! Escape, any Ctrl or Alt combination, any other key — clears the carets and is then handled as
+//! usual, so undo, paste and every accelerator keep working on the primary caret. One undo step
+//! covers a whole multi-caret edit, because each replay runs inside a single `begin_user_action`.
 
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -37,6 +38,8 @@ enum Edit {
 enum Motion {
     Left,
     Right,
+    Up,
+    Down,
     Home,
     End,
 }
@@ -50,6 +53,8 @@ fn edit_for(key: gdk::Key) -> Option<Edit> {
         gdk::Key::Delete | gdk::Key::KP_Delete => Some(Edit::Delete),
         gdk::Key::Left | gdk::Key::KP_Left => Some(Edit::Move(Motion::Left)),
         gdk::Key::Right | gdk::Key::KP_Right => Some(Edit::Move(Motion::Right)),
+        gdk::Key::Up | gdk::Key::KP_Up => Some(Edit::Move(Motion::Up)),
+        gdk::Key::Down | gdk::Key::KP_Down => Some(Edit::Move(Motion::Down)),
         gdk::Key::Home | gdk::Key::KP_Home => Some(Edit::Move(Motion::Home)),
         gdk::Key::End | gdk::Key::KP_End => Some(Edit::Move(Motion::End)),
         // ponytail: a literal tab above, and no `insert-spaces-instead-of-tabs`, because the
@@ -282,6 +287,27 @@ impl View {
                         }
                         Motion::Right => {
                             at.forward_char();
+                        }
+                        Motion::Up | Motion::Down => {
+                            let step = if matches!(motion, Motion::Down) {
+                                1
+                            } else {
+                                -1
+                            };
+                            let line = at.line() + step;
+                            // The column is kept, not remembered: a caret that walks past a short
+                            // line settles at its end, the way one caret does in any editor.
+                            if let Some(mut moved) = (0..buffer.line_count())
+                                .contains(&line)
+                                .then(|| buffer.iter_at_line(line))
+                                .flatten()
+                            {
+                                moved.set_line_offset(clamp_offset(
+                                    at.line_offset(),
+                                    line_length(&buffer, line),
+                                ));
+                                at = moved;
+                            }
                         }
                         Motion::Home => at.set_line_offset(0),
                         Motion::End => at = line_end(&buffer, at.line()),
