@@ -2653,7 +2653,11 @@ fn install_bench_hooks(app: &Rc<App>) {
         // A query of "1" just means "open it"; anything else is typed into the entry so the
         // debounce, the lazy corpus load and the match all get exercised.
         let entry = (query != "1")
-            .then(|| find_search_entry(app.window.upcast_ref()))
+            .then(|| {
+                app.window
+                    .visible_dialog()
+                    .and_then(|d| find_search_entry(d.upcast_ref()))
+            })
             .flatten();
         let Some(entry) = entry else {
             bench_quit(&app);
@@ -2668,8 +2672,12 @@ fn install_bench_hooks(app: &Rc<App>) {
     });
 }
 
-/// First `GtkSearchEntry` in `w`'s subtree. The palette is hosted inside the window, so the bench
-/// can drive it without a real key press (no xdotool in the headless image).
+/// First `GtkSearchEntry` in `w`'s subtree, which the bench drives directly because the headless
+/// image has no xdotool.
+///
+/// The caller must pass the palette dialog, not the window: a window holds the sidebar's search
+/// entry too, and it comes first in tree order, so searching from the window typed the benchmark's
+/// query into the sidebar and measured nothing.
 fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
     if let Ok(e) = w.clone().downcast::<gtk::SearchEntry>() {
         return Some(e);
