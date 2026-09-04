@@ -378,12 +378,13 @@ impl App {
             self.tabs.set_selected_page(&tab.page);
             return;
         }
-        let (spellcheck, font, minimap) = {
+        let (spellcheck, font, minimap, line_numbers) = {
             let config = self.config.borrow();
             (
                 config.spellcheck,
                 config.editor_font.clone(),
                 config.minimap,
+                config.line_numbers,
             )
         };
         let opened = editor::open(
@@ -409,6 +410,7 @@ impl App {
         match opened {
             Ok(tab) => {
                 tab.set_minimap(minimap);
+                tab.set_line_numbers(line_numbers);
                 self.adopt(tab);
                 self.sync_conflict_banner(&rel);
             }
@@ -1407,6 +1409,7 @@ impl App {
                         tab.set_font(config.editor_font.as_deref(), app.zoom.get());
                         tab.set_spellcheck(config.spellcheck);
                         tab.set_minimap(config.minimap);
+                        tab.set_line_numbers(config.line_numbers);
                         tab.restyle();
                     }
                     if let Some(preview) = app.preview.borrow().as_ref() {

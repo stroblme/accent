@@ -82,6 +82,8 @@ pub struct Tab {
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
     map: sourceview5::Map,
+    /// The optional line-number gutter; hidden unless the preference turns it on.
+    numbers: sourceview5::GutterRendererText,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
     pub search: gtk::SearchBar,
@@ -152,6 +154,7 @@ pub fn open(
     view.set_bottom_margin(96);
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
+    let numbers = line_numbers(&view, &buffer);
     completion::install(&view, notes, tags);
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
@@ -204,6 +207,7 @@ pub fn open(
         buffer: buffer.clone(),
         scroller: scroller.clone(),
         map: map.clone(),
+        numbers,
         page,
         banner: banner.clone(),
         search: bar.search.clone(),
@@ -481,11 +485,82 @@ fn wire_find(
     ));
 }
 
+// -------------------------------------------------------------------------------- line numbers
+
+/// How many digits the last line's number needs. Every label is padded to this width, so they all
+/// measure the same and the gutter cannot change width as the view scrolls.
+fn digits(line_count: i32) -> usize {
+    line_count.max(1).to_string().len()
+}
+
+/// A line-number gutter that leaves heading lines blank.
+///
+/// An ATX heading's `#` markers hang in the same left gutter (`highlight::hang`), so a number
+/// beside them puts two things in one place; the heading's row is left blank instead, which is
+/// also what stops the numbers from fighting the larger heading font for the reader's eye.
+///
+/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible line
+/// with a `GutterLines` that hands out the line's start iter, which is all the tag lookup needs.
+/// Same shape as `diff.rs`, which prints source numbers the same way. The renderer is a child of
+/// the view, so the per-tab `#accent-doc-N` font provider reaches it and the zoom follows.
+fn line_numbers(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+) -> sourceview5::GutterRendererText {
+    let renderer = sourceview5::GutterRendererText::new();
+    renderer.set_xalign(1.0);
+    renderer.set_xpad(6);
+    renderer.set_visible(false);
+
+    let width = Rc::new(Cell::new(digits(buffer.line_count())));
+    renderer.set_text(&" ".repeat(width.get()));
+
+    // Looked up once: the tag table is fixed after `install_tags` and this runs per visible line.
+    let headings: Vec<gtk::TextTag> = (1..=6)
+        .filter_map(|level| buffer.tag_table().lookup(&format!("h{level}")))
+        .collect();
+    renderer.connect_query_data(glib::clone!(
+        #[strong]
+        width,
+        move |renderer, lines, line| {
+            let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() else {
+                return;
+            };
+            let width = width.get();
+            let iter = lines.iter_at_line(line);
+            match headings.iter().any(|tag| iter.has_tag(tag)) {
+                // ponytail: blanked with spaces rather than an empty string, because the width
+                // is measured from whatever text the renderer last held and a proportional
+                // document font would then measure a heading row narrower than a numbered one.
+                true => renderer.set_text(&" ".repeat(width)),
+                false => renderer.set_text(&format!("{:>width$}", line + 1)),
+            }
+        }
+    ));
+    buffer.connect_changed(glib::clone!(
+        #[weak]
+        renderer,
+        #[strong]
+        width,
+        move |buffer| {
+            let wanted = digits(buffer.line_count());
+            if width.replace(wanted) != wanted {
+                renderer.set_text(&" ".repeat(wanted));
+                renderer.queue_resize();
+            }
+        }
+    ));
+
+    // Disambiguated: `TextViewExt` has a `gutter` of its own.
+    sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&renderer, 0);
+    renderer
+}
+
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
 /// the window it has to be told about the theme explicitly.
-fn sync_scheme(buffer: &sourceview5::Buffer) {
+pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
@@ -730,6 +805,11 @@ impl Tab {
             self,
             move || highlight::hang(&tab.buffer, &tab.view)
         ));
+    }
+
+    /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in.
+    pub fn set_line_numbers(&self, on: bool) {
+        self.numbers.set_visible(on);
     }
 
     /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
@@ -1100,6 +1180,16 @@ mod tests {
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+    }
+
+    /// The gutter is as wide as the longest number it will ever print, and never zero wide.
+    #[test]
+    fn gutter_width_follows_the_line_count() {
+        assert_eq!(digits(0), 1);
+        assert_eq!(digits(1), 1);
+        assert_eq!(digits(9), 1);
+        assert_eq!(digits(10), 2);
+        assert_eq!(digits(1000), 4);
     }
 
     #[test]

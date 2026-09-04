@@ -19,6 +19,7 @@ macro_rules! example {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
 minimap = false
+line_numbers = false
 theme = "solarized"
 
 [vaults."/home/me/Notes"]
@@ -56,6 +57,9 @@ pub struct Config {
     pub spellcheck: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
+    /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
+    /// what an ATX heading's markers hang in.
+    pub line_numbers: bool,
     pub theme: Theme,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
@@ -68,6 +72,7 @@ impl Default for Config {
             editor_font: None,
             spellcheck: true,
             minimap: false,
+            line_numbers: false,
             theme: Theme::System,
             vaults: BTreeMap::new(),
         }
@@ -276,6 +281,7 @@ mod tests {
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
         assert!(!c.minimap);
+        assert!(!c.line_numbers);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
