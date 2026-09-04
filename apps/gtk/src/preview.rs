@@ -103,6 +103,9 @@ struct Inner {
     loaded: Cell<bool>,
     /// A line asked for while the page was still loading.
     pending: Cell<Option<u32>>,
+    /// What the find bar is looking for, kept because every re-render reloads the page and
+    /// WebKit's find dies with it.
+    query: RefCell<Option<String>>,
 }
 
 impl Inner {
@@ -114,6 +117,23 @@ impl Inner {
             gio::Cancellable::NONE,
             |_| (),
         );
+    }
+
+    /// Run the stored find query against the page that is up now. Searching a page that has not
+    /// finished loading silently finds nothing — measured under Xvfb: the same query returns 0
+    /// matches issued a second after `load_html` and 3 issued five seconds later — so every route
+    /// to a search goes through here and the load handler calls it again.
+    fn refind(&self) {
+        let query = self.query.borrow();
+        let (Some(finder), Some(text)) = (
+            self.view.find_controller(),
+            query.as_deref().filter(|t| !t.is_empty()),
+        ) else {
+            return;
+        };
+        // Counting first is the order WebKit's own MiniBrowser uses; `search` reports no total.
+        finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+        finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
     }
 
     /// Add or drop the mermaid script. It is 3.4 MB of JavaScript to parse, so a note without a
@@ -198,6 +218,7 @@ impl Preview {
             mermaid: RefCell::new(None),
             loaded: Cell::new(false),
             pending: Cell::new(None),
+            query: RefCell::new(None),
         });
 
         inner.view.connect_load_changed(glib::clone!(
@@ -209,6 +230,7 @@ impl Preview {
                     if let Some(line) = inner.pending.take() {
                         inner.scroll(line);
                     }
+                    inner.refind();
                 }
             }
         ));
@@ -321,17 +343,16 @@ impl Preview {
     // instead of the buffer. WebKit does the searching; the find bar only decides which of the
     // two it is talking to.
 
-    /// Highlight and jump to the first match of `text`; an empty query clears the search.
+    /// Highlight and jump to the first match of `text`; an empty query clears the search. The
+    /// query is remembered, so it survives the re-render an edit triggers.
     pub fn find(&self, text: &str) {
-        let Some(finder) = self.inner.view.find_controller() else {
-            return;
-        };
+        *self.inner.query.borrow_mut() = Some(text.to_string());
         if text.is_empty() {
-            return finder.search_finish();
+            return self.find_clear();
         }
-        finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
-        // `search` alone reports no total; the count arrives on `counted-matches`.
-        finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+        if self.inner.loaded.get() {
+            self.inner.refind();
+        }
     }
 
     pub fn find_next(&self) {
@@ -347,6 +368,7 @@ impl Preview {
     }
 
     pub fn find_clear(&self) {
+        *self.inner.query.borrow_mut() = None;
         if let Some(finder) = self.inner.view.find_controller() {
             finder.search_finish();
         }
