@@ -5,7 +5,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{completion, highlight};
+use crate::{completion, highlight, multicaret};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{self, Link};
 use adw::prelude::*;
@@ -64,6 +64,9 @@ pub struct Tab {
     path: RefCell<PathBuf>,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
+    /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
+    scroller: gtk::ScrolledWindow,
+    map: sourceview5::Map,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
     pub search: gtk::SearchBar,
@@ -97,7 +100,7 @@ pub struct Tab {
 /// Open `rel` from `root` in a new tab of `tabs`.
 ///
 /// `notes` and `tags` feed the `[[wikilink]]` and `#tag` completions; they are the only way this
-/// module ever reaches the vault. `spellcheck` and `font` are the current preferences.
+/// module ever reaches the vault. `spellcheck`, `font` and `zoom` are the current preferences.
 #[allow(clippy::too_many_arguments)]
 pub fn open(
     root: &Path,
@@ -107,6 +110,7 @@ pub fn open(
     tags: impl Fn(&str) -> Vec<String> + 'static,
     spellcheck: bool,
     font: Option<&str>,
+    zoom: f64,
 ) -> std::io::Result<Rc<Tab>> {
     let path = root.join(rel);
     let (text, etag) = fs::read_note(&path)?;
@@ -117,7 +121,9 @@ pub fn open(
     buffer.set_highlight_matching_brackets(false);
     sync_scheme(&buffer);
 
-    let view = sourceview5::View::new();
+    // A subclass, so `Shift+Alt+Up`/`Down` can leave extra carets in the buffer. Everything else
+    // in this file treats it as the plain view it is.
+    let view: sourceview5::View = multicaret::View::new().upcast();
     view.set_buffer(Some(&buffer));
     view.set_monospace(false);
     view.add_css_class("accent-doc");
@@ -149,6 +155,16 @@ pub fn open(
         .child(&clamp)
         .build();
 
+    // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
+    // tab that is built before the config is read still starts in a defined state.
+    let map = sourceview5::Map::new();
+    map.set_view(&view);
+    map.set_vexpand(true);
+    map.set_visible(false);
+    let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    document.append(&scroller);
+    document.append(&map);
+
     let banner = adw::Banner::new("");
     let bar = find_bar();
     let settings = sourceview5::SearchSettings::builder()
@@ -160,7 +176,7 @@ pub fn open(
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
     column.append(&bar.search);
-    column.append(&scroller);
+    column.append(&document);
     let page = tabs.append(&column);
     page.set_title(title_of(rel));
 
@@ -169,6 +185,8 @@ pub fn open(
         path: RefCell::new(path),
         view: view.clone(),
         buffer: buffer.clone(),
+        scroller: scroller.clone(),
+        map: map.clone(),
         page,
         banner: banner.clone(),
         search: bar.search.clone(),
@@ -194,7 +212,7 @@ pub fn open(
         on_cursor: RefCell::new(None),
         on_follow: RefCell::new(None),
     });
-    tab.set_font(font);
+    tab.set_font(font, zoom);
     tab.set_spellcheck(spellcheck);
 
     highlight::apply(&buffer);
@@ -205,7 +223,10 @@ pub fn open(
     view.connect_map(glib::clone!(
         #[strong]
         buffer,
-        move |view| highlight::restyle(&buffer, view)
+        move |view| {
+            highlight::restyle(&buffer, view);
+            highlight::hang(&buffer, view);
+        }
     ));
 
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
@@ -479,8 +500,25 @@ fn next_view_name() -> String {
     })
 }
 
-/// Family and point size of a font description, with GNOME's defaults where it is silent.
-fn font_css(name: &str, selector: &str) -> String {
+/// The GNOME document font, which is what `main::install_document_font` puts on every editor.
+fn system_font() -> String {
+    adw::StyleManager::default()
+        .document_font_name()
+        .to_string()
+}
+
+/// The text a duplicated line is inserted as. A line that already ends in a newline can be
+/// repeated as it stands; the last line of a file has none, so the copy brings its own.
+fn duplicated(line: &str) -> String {
+    match line.ends_with('\n') {
+        true => line.to_string(),
+        false => format!("\n{line}"),
+    }
+}
+
+/// Family and point size of a font description, with GNOME's defaults where it is silent, scaled
+/// by `zoom`. Rounded to two decimals so stepping the zoom does not write `12.100000000000001pt`.
+fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let desc = pango::FontDescription::from_string(name);
     let family = desc
         .family()
@@ -490,6 +528,7 @@ fn font_css(name: &str, selector: &str) -> String {
         pt if pt > 0.0 => pt,
         _ => 11.0,
     };
+    let size = (size * zoom * 100.0).round() / 100.0;
     format!("{selector} {{ font-family: \"{family}\"; font-size: {size}pt; }}")
 }
 
@@ -551,6 +590,7 @@ impl Tab {
     pub fn restyle(&self) {
         sync_scheme(&self.buffer);
         highlight::restyle(&self.buffer, &self.view);
+        highlight::hang(&self.buffer, &self.view);
     }
 
     /// Raise the banner for `alert`, which decides both what it says and what its button does.
@@ -618,25 +658,118 @@ impl Tab {
         adapter.set_enabled(on);
     }
 
-    /// `None` follows the GNOME document font that `main` installs for every editor.
-    pub fn set_font(&self, font: Option<&str>) {
+    /// `font` of `None` follows the GNOME document font that `main` installs for every editor;
+    /// `zoom` scales whichever of the two applies, and only this tab's document.
+    pub fn set_font(self: &Rc<Self>, font: Option<&str>, zoom: f64) {
         let Some(display) = gdk::Display::default() else {
             return;
         };
         if let Some(old) = self.font.borrow_mut().take() {
             gtk::style_context_remove_provider_for_display(&display, &old);
         }
-        let Some(font) = font.filter(|f| !f.is_empty()) else {
-            return;
+        // At the default zoom and with no font of its own a tab needs no provider at all: the
+        // display-wide document font rule already says exactly the right thing. Zooming has to
+        // name a font anyway, because CSS has no way to scale a size it cannot see.
+        let name = match font.filter(|f| !f.is_empty()) {
+            Some(font) => Some(font.to_string()),
+            None if zoom != 1.0 => Some(system_font()),
+            None => None,
         };
-        let provider = gtk::CssProvider::new();
-        provider.load_from_string(&font_css(font, &format!("#{}", self.view.widget_name())));
-        gtk::style_context_add_provider_for_display(
-            &display,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-        *self.font.borrow_mut() = Some(provider);
+        if let Some(name) = name {
+            let provider = gtk::CssProvider::new();
+            provider.load_from_string(&font_css(
+                &name,
+                &format!("#{}", self.view.widget_name()),
+                zoom,
+            ));
+            gtk::style_context_add_provider_for_display(
+                &display,
+                &provider,
+                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+            );
+            *self.font.borrow_mut() = Some(provider);
+        }
+        self.rehang();
+    }
+
+    /// Re-measure the hanging heading markers from the next idle. A CSS font change only reaches
+    /// the view's pango context once the frame clock has validated the style, and gtk4-rs 0.11
+    /// exposes no `css_changed` vfunc to hang this off.
+    pub fn rehang(self: &Rc<Self>) {
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || highlight::hang(&tab.buffer, &tab.view)
+        ));
+    }
+
+    /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
+    /// VS Code's code map does and what keeps the document column from losing width twice.
+    pub fn set_minimap(&self, on: bool) {
+        self.map.set_visible(on);
+        let vertical = match on {
+            true => gtk::PolicyType::External,
+            false => gtk::PolicyType::Automatic,
+        };
+        self.scroller
+            .set_policy(gtk::PolicyType::Automatic, vertical);
+    }
+
+    // --- line operations -----------------------------------------------------------------
+
+    /// The caret's line, from its start to the start of the next one, so the trailing newline is
+    /// part of it except on a last line that has none.
+    fn line_bounds(&self) -> (gtk::TextIter, gtk::TextIter) {
+        let mut start = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        start.set_line_offset(0);
+        let mut end = start;
+        // On the last line this lands on the end of the buffer and reports failure, which is
+        // exactly where the line ends, so the answer is the same either way.
+        end.forward_line();
+        (start, end)
+    }
+
+    pub fn duplicate_line(&self) {
+        let (start, mut end) = self.line_bounds();
+        let line = self.buffer.text(&start, &end, true);
+        self.buffer.begin_user_action();
+        self.buffer.insert(&mut end, &duplicated(&line));
+        self.buffer.end_user_action();
+    }
+
+    pub fn delete_line(&self) {
+        let (mut start, mut end) = self.line_bounds();
+        // A last line with no newline of its own takes the one separating it from the line
+        // above, or deleting it would leave the blank line it used to sit on.
+        if !self.buffer.text(&start, &end, true).ends_with('\n') {
+            start.backward_char();
+        }
+        self.buffer.begin_user_action();
+        self.buffer.delete(&mut start, &mut end);
+        self.buffer.end_user_action();
+    }
+
+    /// Scroll the viewport by `n` lines, leaving the caret where it is. The adjustment's own
+    /// `step_increment` is a tenth of a page in GtkTextView rather than a line, so the height
+    /// comes from the first visible line instead.
+    pub fn scroll_lines(&self, n: i32) {
+        let visible = self.view.visible_rect();
+        let height = self
+            .view
+            .iter_at_location(visible.x(), visible.y())
+            .map(|iter| self.view.iter_location(&iter).height())
+            .filter(|height| *height > 0);
+        let Some(height) = height else { return };
+        let adjustment = self.scroller.vadjustment();
+        adjustment.set_value(adjustment.value() + f64::from(n * height));
+    }
+
+    /// VS Code's Add Cursor Above / Below. Multi-caret lives on the view subclass; the tab keeps
+    /// the plain `sourceview5::View` type so nothing else has to know about it.
+    pub fn add_caret(&self, below: bool) {
+        if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
+            view.add_caret(below);
+        }
     }
 
     // --- links ---------------------------------------------------------------------------
@@ -906,5 +1039,38 @@ impl Drop for Tab {
         {
             gtk::style_context_remove_provider_for_display(&display, &provider);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_css_scales_the_point_size_by_the_zoom() {
+        let css = font_css("Cantarell 11", "#doc", 1.0);
+        assert!(css.contains("font-family: \"Cantarell\""), "{css}");
+        assert!(css.contains("font-size: 11pt"), "{css}");
+        assert!(
+            font_css("Cantarell 11", "#doc", 1.5).contains("font-size: 16.5pt"),
+            "a zoom multiplies the size"
+        );
+        assert!(
+            font_css("Cantarell 11", "#doc", 1.1).contains("font-size: 12.1pt"),
+            "and is rounded, not written out in full binary"
+        );
+    }
+
+    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included.
+    #[test]
+    fn font_css_fills_in_a_missing_size() {
+        assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+    }
+
+    #[test]
+    fn a_duplicated_line_brings_its_own_newline_only_when_it_has_none() {
+        assert_eq!(duplicated("note\n"), "note\n");
+        assert_eq!(duplicated("last line"), "\nlast line");
+        assert_eq!(duplicated(""), "\n");
     }
 }

@@ -232,6 +232,12 @@ impl Preview {
             inner.view.set_background_color(&rgba);
         }
     }
+
+    /// The document zoom, shared with the editor. WebKit keeps it across loads and `apply_style`
+    /// never touches it, so a stylesheet rebuild cannot undo it.
+    pub fn set_zoom(&self, zoom: f64) {
+        self.inner.view.set_zoom_level(zoom);
+    }
 }
 
 // ------------------------------------------------------------------------------- network policy

@@ -33,8 +33,8 @@ pub enum Kind {
 /// `line` is the current line from its start up to the cursor, and `cursor` is a byte offset into
 /// it, so nothing here ever looks at the rest of the buffer.
 ///
-/// `None` means there is nothing to complete: no trigger on this line, a `#` in column 0 (a
-/// markdown heading), a wikilink that is already closed, or a tag the user has typed past.
+/// `None` means there is nothing to complete: no trigger on this line, a `#` run that opens the
+/// line (an ATX heading), a wikilink that is already closed, or a tag the user has typed past.
 fn scan(kind: Kind, line: &str, cursor: usize) -> Option<(usize, &str)> {
     if !line.is_char_boundary(cursor) {
         return None;
@@ -49,8 +49,8 @@ fn scan(kind: Kind, line: &str, cursor: usize) -> Option<(usize, &str)> {
         }
         Kind::Tag => {
             let start = head.rfind('#')?;
-            // Column 0 is a markdown heading, not a tag.
-            if start == 0 {
+            // A `#` run that opens the line, indented or not, is an ATX heading marker.
+            if head[..start].trim_end_matches('#').trim().is_empty() {
                 return None;
             }
             let prefix = &head[start + 1..];
@@ -154,6 +154,15 @@ mod provider_imp {
                 return store;
             };
             let Some((_, prefix)) = scan(self.kind.get(), &line, line.len()) else {
+                // ponytail: GtkSourceView hides the popup once every provider's model is empty,
+                // but one opened on a trigger the cursor has since left occasionally stays up
+                // until the window is reloaded, so ask for the hide as well. Remove it once the
+                // built-in `notify::empty` path proves sufficient on its own. It has to wait for
+                // an idle: `populate` and `refilter` run while the caller still holds `context`,
+                // and hiding it from under them would drop that context mid-iteration.
+                if let Some(completion) = context.completion() {
+                    glib::idle_add_local_once(move || completion.hide());
+                }
                 return store;
             };
             if let Some(candidates) = self.candidates.borrow().as_ref() {
@@ -166,26 +175,16 @@ mod provider_imp {
     }
 
     impl CompletionProviderImpl for Provider {
-        fn is_trigger(&self, iter: &gtk::TextIter, c: char) -> bool {
-            // `iter` is the insert cursor, one character *past* `c`, so `c` sits at column
-            // `column - 1`. Both triggers are line-local, so the column decides them.
-            let column = iter.line_offset();
-            match self.kind.get() {
-                // `[` opens a wikilink only when the character before it is also `[`, so there
-                // have to be two columns behind the cursor. The column test has to come first:
-                // `backward_chars` clamps at the buffer start and still reports success, so on a
-                // buffer holding a single `[` it would happily land back on that same `[`.
-                Kind::WikiLink => {
-                    if c != '[' || column < 2 {
-                        return false;
-                    }
-                    let mut at = *iter;
-                    at.backward_chars(2);
-                    at.char() == '['
-                }
-                // `#` in column 0 is a markdown heading; anywhere else it opens a tag.
-                Kind::Tag => c == '#' && column >= 2,
-            }
+        fn is_trigger(&self, iter: &gtk::TextIter, _c: char) -> bool {
+            // One source of truth with `populate`: a trigger is whatever `scan` recognises with
+            // nothing typed after it yet. `iter` is the insert cursor, so the line up to it is
+            // exactly the text `scan` reads, and the character just typed is already part of it.
+            // Deciding this from the cursor column instead is how `## Heading` used to open a
+            // popup listing every tag in the vault.
+            let mut start = *iter;
+            start.set_line_offset(0);
+            let line = iter.buffer().text(&start, iter, true);
+            matches!(scan(self.kind.get(), &line, line.len()), Some((_, "")))
         }
 
         fn populate(&self, context: &CompletionContext) -> Result<gio::ListModel, glib::Error> {
@@ -273,6 +272,9 @@ pub fn install(
 ) {
     let completion = view.completion();
     completion.set_page_size(PAGE_SIZE);
+    // Neither provider has an icon to show, and the empty icon cell with its padding is most of
+    // what makes the popup look cramped.
+    completion.set_show_icons(false);
     completion.add_provider(&provider(Kind::WikiLink, notes));
     completion.add_provider(&provider(Kind::Tag, tags));
 }
@@ -318,6 +320,21 @@ mod tests {
     fn scan_ignores_a_heading() {
         let line = "# Heading";
         assert_eq!(scan(Kind::Tag, line, line.len()), None);
+    }
+
+    #[test]
+    fn scan_ignores_an_indented_heading() {
+        for line in ["##", "  #", "\t### "] {
+            assert_eq!(scan(Kind::Tag, line, line.len()), None, "{line:?}");
+        }
+    }
+
+    /// A `#` with nothing typed after it yet is the trigger case: this is what `is_trigger`
+    /// asks `scan` about, and it has to say yes there and only there.
+    #[test]
+    fn scan_accepts_a_tag_that_has_only_been_opened() {
+        assert_eq!(scan(Kind::Tag, "a #", 3), Some((2, "")));
+        assert_eq!(scan(Kind::Tag, "a #x", 4), Some((2, "x")));
     }
 
     #[test]
