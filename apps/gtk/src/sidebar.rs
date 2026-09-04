@@ -677,7 +677,12 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
             .ellipsize(pango::EllipsizeMode::End)
             .build();
         snippet.add_css_class("dim-label");
+        // `.navigation-sidebar` gives its rows horizontal padding only, so a two-line row sits on
+        // the top and bottom edges of its own selection pill. 6 is the scale's inside-a-group step
+        // (DESIGN.md, Spacing).
         let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        row.set_margin_top(6);
+        row.set_margin_bottom(6);
         row.append(&title);
         row.append(&snippet);
         item.downcast_ref::<gtk::ListItem>()
