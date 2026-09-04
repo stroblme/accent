@@ -434,10 +434,13 @@ impl Search {
     /// Run what the box currently asks for, or note that the running query has to be redone.
     fn start(self: &Rc<Self>) {
         let key = self.key();
+        // The spinner tracks `busy` in every branch: a query still on a worker thread keeps it
+        // up, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
             self.entry.remove_css_class("error");
             self.results.remove_all();
             self.body.set_visible_child_name("prompt");
+            self.spinner.set_visible(self.busy.get());
             self.set_total(0);
             return;
         }
@@ -449,6 +452,7 @@ impl Search {
                 tracing::debug!("invalid search pattern {:?}: {e}", key.text);
                 self.entry.add_css_class("error");
                 self.body.set_visible_child_name("invalid");
+                self.spinner.set_visible(self.busy.get());
                 self.set_total(0);
                 return;
             }
