@@ -321,8 +321,13 @@ fn reset_group(
             save.clone(),
             on_change.clone(),
         );
-        let (dialog, parent) = (dialog.clone(), parent.clone());
+        // Weak: this closure hangs off a row inside the dialog, and a strong handle back to it is
+        // the cycle that would keep every preferences dialog ever opened alive.
+        let (dialog, parent) = (dialog.downgrade(), parent.clone());
         move |_| {
+            let Some(dialog) = dialog.upgrade() else {
+                return;
+            };
             let confirm = adw::AlertDialog::builder()
                 .heading("Restore Default Preferences?")
                 .body(
@@ -341,8 +346,11 @@ fn reset_group(
                     save.clone(),
                     on_change.clone(),
                 );
-                let (dialog, parent) = (dialog.clone(), parent.clone());
+                let (dialog, parent) = (dialog.downgrade(), parent.clone());
                 move |_, _| {
+                    let Some(dialog) = dialog.upgrade() else {
+                        return;
+                    };
                     {
                         let mut cfg = config.borrow_mut();
                         let keep = std::mem::take(&mut cfg.recent_vaults);
