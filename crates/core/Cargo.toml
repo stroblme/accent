@@ -22,6 +22,9 @@ same-file = "1"
 tempfile = "3"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
 pulldown-latex = "0.8"
+# regex-automata and regex-syntax are already compiled in for `ignore`/`globset`, so the front end
+# is the only new code this pulls: it is what gives search its Regular Expression mode.
+regex = "1"
 nucleo-matcher = "0.3"
 blake3 = "1"
 toml = "1"

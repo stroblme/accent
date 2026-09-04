@@ -18,7 +18,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 |---|---|
 | Window shell | `AdwApplicationWindow` > `GtkPaned`, one `AdwToolbarView` per side, each with its own `AdwHeaderBar` |
 | Header bars | two, so the sidebar reaches the top of the window and the tab bar spans only the editor column. Sidebar header: the start window controls, and otherwise empty. Main header: the sidebar toggle (always visible, so a collapsed sidebar can be brought back without the keyboard), `AdwWindowTitle` with vault name and note path, view-mode toggle group, indexing status label, primary menu, end window controls. The main header takes over the start window controls when the sidebar is hidden |
-| Sidebar | `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of four equal panes: Files, Search, Tags, Backlinks. The switcher is the title widget of the sidebar's header bar, so the pane icons sit on the same line as the sidebar toggle and the mode group, and the tree's first row lines up with the tabs. Width is dragged on the `GtkPaned` handle, floor 200 |
+| Sidebar | `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of four equal panes: Files, Search, Tags, Backlinks. The switcher is the title widget of the sidebar's header bar, so the pane icons sit on the same line as the sidebar toggle and the mode group, and the tree's first row lines up with the tabs. Width is dragged on the `GtkPaned` handle, floor 200. Search carries the entry, a `.linked` row of Match Case / Match Whole Word / Regular Expression toggles and a revealer holding the replace field; the three toggles are text buttons (`Aa`, `Word`, `.*`) because Adwaita has no glyph for any of them. Tags splits its column on a second vertical `GtkPaned`, tag list above, the files carrying the selected tag in the lower third |
 | Editor | `sourceview5::View` inside an `AdwClamp` inside a `GtkScrolledWindow` |
 | Preview | read-only WebKitGTK 6 view, same clamp width, stylesheet generated from `AdwStyleManager` |
 | View modes | Editor / Split / Preview; Split is a `GtkPaned` of the two above |
@@ -31,7 +31,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
 | Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks. `.compact` inside the sidebar, where the full size dwarfs a 200 to 420 px column |
 | Feedback | `AdwToast` / `AdwBanner` / `AdwAlertDialog`, see States |
-| Loading | the header bar status label (`.dim-label`); never a modal, never a blocked window |
+| Loading | the header bar status label (`.dim-label`); never a modal, never a blocked window. A background query the user is waiting on gets a 16 px `AdwSpinner` beside the control that started it, as the sidebar's search entry has |
 
 ## Typography
 
@@ -80,7 +80,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Group | Bindings |
 |---|---|
 | Files | Save `Ctrl+S`, New note `Ctrl+N`, New folder `Ctrl+Shift+N`, Close tab `Ctrl+W`, Quit `Ctrl+Q` |
-| Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
+| Palette and find | Commands `Ctrl+P` (also `Ctrl+Shift+P`), Open note `Ctrl+E`, Find `Ctrl+F`, Replace `Ctrl+H`, Replace in notes `Ctrl+Shift+H`, Find next / previous `Ctrl+G` / `Ctrl+Shift+G` |
 | Editing | Duplicate line `Ctrl+D`, Delete line `Ctrl+L`, Scroll viewport `Ctrl+Up` / `Ctrl+Down`, Add caret above / below `Shift+Alt+Up` / `Shift+Alt+Down` |
 | Zoom | Zoom in `Ctrl++` (also `Ctrl+=` and the keypad), Zoom out `Ctrl+-`, Reset `Ctrl+0`. The document only: the chrome keeps the system interface font, and the preview's WebView is zoomed with the editor so presentation mode follows |
 | Panes | Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, Backlinks `Ctrl+Shift+B` |
@@ -105,7 +105,7 @@ There is no shortcuts window. `AdwShortcutsDialog` needs libadwaita 1.8 and we b
 
 Symbolic icons from the Adwaita theme only: no bundled glyphs, no emoji (<https://developer.gnome.org/hig/guidelines/ui-icons.html>). All of the following were confirmed present in `/usr/share/icons/Adwaita/symbolic/` on the development machine (adwaita-icon-theme 50):
 
-`sidebar-show-symbolic`, `open-menu-symbolic`, `document-new-symbolic`, `folder-new-symbolic`, `document-save-symbolic`, `document-edit-symbolic`, `document-open-recent-symbolic`, `document-revert-symbolic`, `edit-find-symbolic`, `edit-find-replace-symbolic`, `system-search-symbolic`, `edit-clear-symbolic`, `view-dual-symbolic`, `view-reveal-symbolic`, `view-fullscreen-symbolic`, `view-refresh-symbolic`, `user-bookmarks-symbolic`, `mail-reply-sender-symbolic`, `x-office-calendar-symbolic`, `user-trash-symbolic`, `folder-symbolic`, `text-x-generic-symbolic`, `x-office-document-symbolic`, `window-close-symbolic`, `preferences-system-symbolic`, `dialog-warning-symbolic`, `object-select-symbolic`, `go-previous-symbolic`, `go-next-symbolic`, `list-add-symbolic`.
+`sidebar-show-symbolic`, `open-menu-symbolic`, `document-new-symbolic`, `folder-new-symbolic`, `document-save-symbolic`, `document-edit-symbolic`, `document-open-recent-symbolic`, `document-revert-symbolic`, `edit-find-symbolic`, `edit-find-replace-symbolic`, `system-search-symbolic`, `edit-clear-symbolic`, `view-dual-symbolic`, `view-reveal-symbolic`, `view-fullscreen-symbolic`, `view-refresh-symbolic`, `user-bookmarks-symbolic`, `mail-reply-sender-symbolic`, `x-office-calendar-symbolic`, `user-trash-symbolic`, `folder-symbolic`, `text-x-generic-symbolic`, `x-office-document-symbolic`, `window-close-symbolic`, `preferences-system-symbolic`, `dialog-warning-symbolic`, `object-select-symbolic`, `go-previous-symbolic`, `go-next-symbolic`, `list-add-symbolic`, `pan-down-symbolic`.
 
 This theme has no `tag-symbolic`, so the Tags pane uses `user-bookmarks-symbolic`. Backlinks uses `mail-reply-sender-symbolic`, an arrow turning back, for "what points here": the theme's only link-named glyph, `insert-link-symbolic`, is a text-insertion mark and sits 2 units high on its own canvas, which is visible as an off-centre icon in a switcher. If a glyph is missing: take the closest existing Adwaita name first, and only if nothing fits ship one in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme. Never ship a coloured icon.
 
