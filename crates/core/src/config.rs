@@ -21,6 +21,10 @@ spellcheck = true
 minimap = false
 theme = "solarized"
 
+[shortcuts]
+"win.find-next" = ["F3"]
+"win.about" = []
+
 [vaults."/home/me/Notes"]
 daily_dir = "Daily"
 daily_pattern = "%Y-%m-%d"
@@ -57,6 +61,10 @@ pub struct Config {
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
     pub theme: Theme,
+    /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
+    /// is stored, so the built-in table stays the source of truth for everything else; an empty
+    /// list means the action is deliberately unbound.
+    pub shortcuts: BTreeMap<String, Vec<String>>,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -69,6 +77,7 @@ impl Default for Config {
             spellcheck: true,
             minimap: false,
             theme: Theme::System,
+            shortcuts: BTreeMap::new(),
             vaults: BTreeMap::new(),
         }
     }
@@ -114,6 +123,12 @@ pub struct Session {
     pub pane: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
+    /// Notes opened in this vault, most recent first. Filesystem mtime is what the index can
+    /// offer, and it says when a note last changed, not when it was last read; the palette wants
+    /// the second, so the window records it.
+    pub recent_notes: Vec<String>,
+    /// Full action names of the commands run from the palette or a menu, most recent first.
+    pub recent_commands: Vec<String>,
 }
 
 impl Default for Session {
@@ -126,6 +141,8 @@ impl Default for Session {
             view: "editor".to_string(),
             pane: "files".to_string(),
             zoom: 1.0,
+            recent_notes: Vec::new(),
+            recent_commands: Vec::new(),
         }
     }
 }
@@ -156,15 +173,8 @@ impl Config {
         self.write(&config_path())
     }
 
-    // ponytail: a plain write, no temp-and-rename dance. This is a 1 KB file that only accent
-    // writes and a torn one falls back to the defaults; copy what `fs::write_note` does the day
-    // two windows write it at once.
     pub fn write(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::write(path, toml::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))
+        replace(path, toml::to_string_pretty(self)?.as_bytes())
     }
 
     /// The stored entry for `root`, or the defaults.
@@ -198,13 +208,51 @@ impl Session {
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
-        let path = state_path(root);
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        std::fs::write(&path, serde_json::to_vec_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))
+        replace(&state_path(root), &serde_json::to_vec_pretty(self)?)
     }
+}
+
+/// Move `value` to the front of a recently-used list, deduplicated and capped at `cap`.
+pub fn touch(list: &mut Vec<String>, value: &str, cap: usize) {
+    list.retain(|v| v != value);
+    list.insert(0, value.to_string());
+    list.truncate(cap);
+}
+
+/// Follow a rename through a list of vault-relative paths, so a renamed note keeps its place
+/// instead of leaving a dead entry behind. `from` may be a folder, in which case everything under
+/// it moves with it.
+pub fn rename_in(list: &mut [String], from: &str, to: &str) {
+    let prefix = format!("{from}/");
+    for rel in list {
+        if rel == from {
+            *rel = to.to_string();
+        } else if let Some(rest) = rel.strip_prefix(&prefix) {
+            *rel = format!("{to}/{rest}");
+        }
+    }
+}
+
+/// Write `bytes` where `path` is, atomically: a torn config or state file is read back as the
+/// defaults, which is the difference between losing one edit and losing every preference. Same
+/// temp-in-the-same-directory-then-rename shape as [`crate::fs::write_note`], minus the etag gate
+/// and the ownership dance a vault file needs.
+fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let tmp = path.with_file_name(format!(
+        "{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let write = || -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    };
+    write().with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
 }
 
 /// `$XDG_<var>` when set and absolute, else `$HOME/<fallback>`, else the temp dir.
@@ -284,6 +332,10 @@ mod tests {
         assert_eq!(v.daily_template.as_deref(), Some("Templates/Daily.md"));
         assert_eq!(v.templates_dir, "Templates");
         assert_eq!(v.new_note_dir, "Inbox");
+        // An override is a list, so an action can keep several chords, and an empty list is how
+        // the user says "no shortcut at all" rather than "fall back to the default".
+        assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
+        assert!(c.shortcuts["win.about"].is_empty());
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
@@ -291,6 +343,40 @@ mod tests {
         assert_eq!(again.recent_vaults, c.recent_vaults);
         assert_eq!(again.theme, Theme::Solarized);
         assert_eq!(again.vaults["/home/me/Notes"].new_note_dir, "Inbox");
+        assert_eq!(again.shortcuts, c.shortcuts);
+    }
+
+    #[test]
+    fn touch_moves_to_the_front_and_caps() {
+        let mut list = Vec::new();
+        for i in 0..12 {
+            touch(&mut list, &format!("n{i}.md"), 10);
+        }
+        touch(&mut list, "n5.md", 10);
+        assert_eq!(list.len(), 10);
+        assert_eq!(list[0], "n5.md");
+        assert_eq!(list[1], "n11.md");
+        assert_eq!(list.iter().filter(|n| *n == "n5.md").count(), 1);
+    }
+
+    #[test]
+    fn rename_in_follows_a_note_and_a_folder() {
+        let mut list = vec![
+            "Inbox/idea.md".to_string(),
+            "Areas/Work/plan.md".to_string(),
+            "Areas/Workshop.md".to_string(),
+        ];
+        rename_in(&mut list, "Areas/Work", "Areas/Job");
+        rename_in(&mut list, "Inbox/idea.md", "Inbox/thought.md");
+        assert_eq!(
+            list,
+            [
+                "Inbox/thought.md",
+                "Areas/Job/plan.md",
+                // A sibling that merely starts with the old name is not part of the folder.
+                "Areas/Workshop.md"
+            ]
+        );
     }
 
     #[test]
@@ -378,6 +464,8 @@ mod tests {
             view: "preview".to_string(),
             pane: "search".to_string(),
             zoom: 1.2,
+            recent_notes: vec!["Daily/2026-09-03.md".to_string()],
+            recent_commands: vec!["win.save".to_string()],
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -394,6 +482,8 @@ mod tests {
             assert_eq!(back.view, "preview");
             assert_eq!(back.pane, "search");
             assert_eq!(back.zoom, 1.2);
+            assert_eq!(back.recent_notes, s.recent_notes);
+            assert_eq!(back.recent_commands, s.recent_commands);
         });
     }
 

@@ -25,7 +25,7 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
-| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
+| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme and a destructive `AdwButtonRow` for Restore Defaults |
 | Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
 | Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
 | Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
@@ -90,6 +90,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 | Tabs | `Ctrl+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9` |
 
 Never bind: `Super`+anything (the shell owns it), `Alt+Tab`, `Alt+F4`, `Alt+F7`, `Alt+F8`, `Ctrl+Alt+*` (workspace switching), `F1` (help), `Ctrl+Shift+U` (IBus unicode entry), `Ctrl+Space` (input-method switch), and the GtkSourceView built-ins (`Ctrl+Z`/`Ctrl+Y`, `Ctrl+A`, `Ctrl+X`/`C`/`V`, `Ctrl+K`, `Alt+Up`/`Alt+Down`, `Ctrl+Home`/`Ctrl+End`).
+
+The table is the set of defaults, not a fixed fact. The accelerator beside a command in the palette is a button: clicking it asks for a new chord, Backspace unbinds the command and Restore Default puts the table's chord back. Overrides are stored in the `[shortcuts]` table of `~/.config/accent/config.toml`, keyed by full action name (`"win.save" = ["<Control>s"]`), and only what the user changed is written, so the table above keeps deciding everything else; an empty list means deliberately unbound, and an unbound action still lists in the palette, so nothing becomes unreachable. A chord already in use is refused by naming the command that holds it, and a clash introduced by hand-editing the file is marked on both rows. The never-bind list is shown in the rebind dialog rather than enforced: the desktop and the widget keep those chords whatever we store.
 
 Four of the Editing chords are already spoken for by the widget: GtkTextView binds `Ctrl+Up`/`Ctrl+Down` to paragraph movement and GtkSourceView binds `Shift+Alt+Up`/`Shift+Alt+Down` to `move-viewport`. Both are class shortcuts, which run at the focused view before the window's application accelerators, so `install_actions` claims those four in a capture-phase `GtkShortcutController` on the window that forwards them to the same actions. Taking a widget binding needs that much deliberation; it is not the default way to add a shortcut.
 
