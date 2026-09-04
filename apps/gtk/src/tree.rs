@@ -3,6 +3,7 @@
 
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
+use accent_core::markdown::is_image;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -19,6 +20,9 @@ fn encode(kind: FileKind, rel: &str) -> String {
         FileKind::Dir => 'd',
         FileKind::Markdown => 'm',
         FileKind::Pdf => 'p',
+        // The walk has no image kind, but the tree needs one: an image gets its own icon and
+        // opens in a picture tab rather than being turned away as an unknown file.
+        _ if is_image(rel) => 'i',
         _ => 'o',
     };
     format!("{c}{rel}")
@@ -96,6 +100,7 @@ fn icon_name(kind: char) -> &'static str {
         'd' => "folder-symbolic",
         'm' => "text-x-generic-symbolic",
         'p' => "x-office-document-symbolic",
+        'i' => "image-x-generic-symbolic",
         _ => "application-x-addon-symbolic",
     }
 }
@@ -191,9 +196,6 @@ impl Tree {
 
     /// Expand everything above `rel`, then select it and scroll it into view. False when the path
     /// is not in the tree at all, so a caller can say so rather than silently doing nothing.
-    // Nothing calls it yet: the "Reveal in Sidebar" action, which also has to switch the sidebar
-    // to the Files pane and un-hide it, lands with the tab context menu.
-    #[allow(dead_code)]
     pub fn reveal(&self, rel: &str) -> bool {
         for dir in ancestors(rel) {
             match find_row(&self.model, dir) {

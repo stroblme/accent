@@ -31,7 +31,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fat
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate flatpak cargo-sources help
+        clippy doc run smoke vault validate icons flatpak cargo-sources help
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -86,7 +86,10 @@ smoke: gtk vault
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
 	@pgrep -f "Xvfb :$(DISPLAY_NUM)" >/dev/null || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
 	@sleep 2
-	$(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
+	@# A private session bus per run: accent is a single-instance GApplication, so without one a
+	@# second invocation forwards its arguments to whatever instance is already up and exits 0,
+	@# which makes this check pass while proving nothing.
+	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
 ## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
 install: all
@@ -121,6 +124,10 @@ uninstall:
 validate:
 	desktop-file-validate data/$(APP_ID).desktop
 	appstreamcli validate --no-net data/$(APP_ID).metainfo.xml
+
+## icons: regenerate the installed icons from data/icons/logo.svg (needs inkscape)
+icons:
+	python3 build-aux/derive-icons.py
 
 ## cargo-sources: regenerate the Flatpak vendored-source list (needed whenever Cargo.lock changes)
 cargo-sources:

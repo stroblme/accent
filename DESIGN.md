@@ -25,9 +25,11 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 | Tabs | `AdwTabView` + `AdwTabBar` inside the editor column only, bar hidden while a single tab is open |
 | Palette | one `AdwDialog` with a `GtkSearchEntry` and a `GtkListView`; a leading `>` switches file mode to command mode (VS Code convention) |
 | Start screen | `AdwStatusPage` with app icon, Open Vault button and a recent-vaults list, shown when launched without a vault path |
-| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow` |
+| Preferences | `AdwPreferencesDialog` with `AdwPreferencesPage` / `AdwPreferencesGroup` / `AdwSwitchRow`, plus an `AdwComboRow` for the theme |
+| Tooltips | the full vault path with `$HOME` as `~` (`fileops::display_path`), on tree rows through `query-tooltip` and on tabs through `AdwTabPage:tooltip` |
 | Conflict | side-by-side line diff in an `AdwDialog`, built as a reusable widget so Phase 4 can show git diffs in it |
-| Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks |
+| Context menus | `GtkPopoverMenu` from a `gio::Menu`, parented to a layout-managed widget, grouped into sections: what creates or opens, what copies a path or leaves the app, then Move to Trash alone. Tree rows and tabs share the shape and the handlers |
+| Empty states | `AdwStatusPage`: no vault, no note open, no search results, no backlinks. `.compact` inside the sidebar, where the full size dwarfs a 200 to 420 px column |
 | Feedback | `AdwToast` / `AdwBanner` / `AdwAlertDialog`, see States |
 | Loading | the header bar status label (`.dim-label`); never a modal, never a blocked window |
 
@@ -38,6 +40,8 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 - Prose uses the GNOME **document** font from `AdwStyleManager::document_font_name()`, applied to `textview.accent-doc` in `main.rs::install_document_font` and re-applied when the setting changes. Notes are prose, not code. libadwaita 1.7 also exposes `--document-font-family` / `--document-font-size` as CSS variables, which is the upgrade path away from the hand-built provider.
 - Monospace appears only inside the `code`, `codeblock`, `math`, `html` and `frontmatter` text tags.
 - Heading scale in `highlight.rs`, relative to the document font: h1 1.6, h2 1.4, h3 1.2, h4 1.1; h5 and h6 are bold at 1.0. `strong` and list markers are weight 700, `em` is italic.
+- An ATX heading's `#` markers hang in the left gutter so its text lands on the body column, as in Apostrophe. `highlight.rs::hang` measures each level's markers in the view's own font at that level's scale and weight, then splits the width between the tag's `left-margin` and a negative `indent`; Pango reads that as a hanging indent, so wrapped heading lines stay on the body column too. A setext heading has no markers to hang. The markers of h5 and h6 are wider than the 48 px gutter and clamp at the window edge.
+- Markup is styled as it is typed, not after a pause, for notes below 16 KB. Above that a full pass outlasts a frame, so it waits for the 150 ms debounce; the cost is dominated by re-tagging the buffer rather than by parsing it.
 - Line length is set by width, not by counting characters. The editor wraps its view in an `AdwClamp`, `maximum-size` 800 and `tightening-threshold` 600, and the preview caps its column at `56ch` (measured at 71 characters in Adwaita Sans, 62 in Cantarell). Measure rather than assume: `ch` is the width of a zero and much wider than an average letter.
 - **The editor is deliberately wider than the readable ideal.** 60 to 72 characters is where typography research puts comfortable prose, and the clamp was 580 to match it. The user asked for a document column of at least half the viewport, which puts the editor at roughly 96 characters. The width won because it is what the person writing in it wanted; the dial is `maximum-size` in `editor.rs` if that ever reads as too long.
 - Header capitalisation for buttons, menu items, tab titles and tooltips; sentence capitalisation for messages and descriptions. Ellipsis (…) only when the label needs further input before acting. No OK / Yes / No buttons: label the affirmative button with its verb, for example Save or Discard.
@@ -49,9 +53,11 @@ Phase 1 widget choices. <https://developer.gnome.org/hig/patterns/containers/hea
 - The only three colour sources in code are `StyleManager::accent_color_rgba()`, `Widget::color()` (the resolved theme foreground) and `StyleManager::is_dark()`.
 - GTK CSS uses `var(--accent-bg-color)`, `var(--view-bg-color)`, `var(--window-fg-color)` and friends. Never `@named_colors`, never a literal hex.
 - Editor tag colours, all derived, in `highlight.rs::restyle`: `link`, `wikilink`, `tag` and `image` take the accent at full alpha; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4; `quote` and `taskdone` the foreground at alpha 0.6; `code` and `codeblock` get a foreground background at alpha 0.07. 23 tags in total; no other colour is set anywhere.
-- The preview stylesheet derives everything from three values: foreground, background, accent. WebKitGTK cannot see GTK's CSS variables, so the light/dark background pair is written out as `#ffffff` / `#1d1d20` (libadwaita's `--view-bg-color`). That pair is the only hex allowed in the codebase; anything else is a bug the pre-flight grep catches.
+- The preview stylesheet derives everything from three values: foreground, background, accent. WebKitGTK cannot see GTK's CSS variables, so it is handed the background as a literal, from `theme::view_bg`.
+- **`theme.rs` is the only file allowed to write a hex literal**, and anything outside it is a bug the pre-flight grep catches. It holds libadwaita's own `--view-bg-color` pair (`#ffffff` / `#1d1d20`) for the preview, and the Solarized palette: `#fdf6e3` / `#eee8d5` / `#657b83` light, `#002b36` / `#073642` / `#839496` dark.
 - One flat background. The sidebar, both header bars, the tab bar and the document all paint `var(--view-bg-color)` through the `accent-flat` class, so the window reads as one surface rather than banded panels. The 1 px paned separator is the only division.
-- Light/dark parity is by construction: nothing is picked per theme, so there is no second palette to keep in sync. Same for the accent, which the user can change at any moment.
+- Four themes: System, Light, Dark and Solarized, chosen in preferences. The first three are `AdwStyleManager` colour schemes and paint nothing of ours. Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` variables on `:root` from an app-priority provider, so every widget follows without being touched, and it keeps following the system between its light and dark halves. It deliberately leaves accent, shade and border variables alone, so the one-accent rule holds in all four.
+- Light/dark parity is by construction: outside `theme.rs` nothing is picked per theme, so there is no second palette to keep in sync. Same for the accent, which the user can change at any moment.
 
 ## Spacing
 
@@ -103,9 +109,10 @@ This theme has no `tag-symbolic`, so the Tags pane uses `user-bookmarks-symbolic
 
 ## States
 
-- Empty: `AdwStatusPage` with a symbolic icon, a header-capitalised title, one sentence of body text and at most one button (<https://developer.gnome.org/hig/patterns/feedback/placeholders.html>).
+- Empty: `AdwStatusPage` with a symbolic icon, a header-capitalised title, one sentence of body text and at most one button (<https://developer.gnome.org/hig/patterns/feedback/placeholders.html>). In the sidebar add `.compact`, or the icon alone takes 128 px of a 200 px column.
+- A context menu never scrolls. GTK re-presents a popover only when its parent is allocated, and a widget with a custom `size_allocate` such as `GtkListView` never does, so a menu hung off one freezes at its first-frame size and `GtkPopoverMenu`'s inner scrolled window turns the difference into a scrollbar. Parent it to a plain box instead, and translate the pointer position into that box's coordinates.
 - Loading: the header status label, as `start_reconcile` already does ("Indexing… 1200/42700 files"). Indexing and saving never block the window, so no spinner covers content and no progress bar owns the window.
-- Toast for a thing that happened and is over ("Saved", "Moved to Trash" with an Undo button). Banner for a state that persists and needs a decision ("This note changed on disk", "Conflict copy found"). `AdwAlertDialog` only when the choice can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
+- Toast for a thing that happened and is over ("Saved", "Moved to Trash" with an Undo button). Banner for a state that persists and needs a decision ("This note changed on disk", "A sync conflict copy of this note exists"). A conflict raises the banner on the tab showing the note it concerns, never a toast per conflict copy in the vault: on a synced vault that was a wall of them at startup. Conflicts on notes nobody has open are counted on the end of the "Indexed N files" toast instead. `AdwAlertDialog` only when the choice can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
 
 ## Motion
 
@@ -148,7 +155,7 @@ Ten mechanical checks before shipping a UI change. None of them needs judgement.
 4. Headless smoke run (ROADMAP §6): `Xvfb :99 & DISPLAY=:99 G_DEBUG=fatal-criticals target/release/accent testvault`
 5. Dark: `gsettings set org.gnome.desktop.interface color-scheme prefer-dark`, look, then set it back to `default`
 6. Accent: `gsettings set org.gnome.desktop.interface accent-color teal`, look, then set it back to `blue`
-7. No stray colours: `grep -rnE '#[0-9a-fA-F]{3,8}' apps/gtk/src` returns only the preview background pair
+7. No stray colours: `grep -rnE '#[0-9a-fA-F]{3,8}' apps/gtk/src | grep -v theme.rs` returns nothing
 8. Reduced motion: `gsettings set org.gnome.desktop.interface enable-animations false`, check nothing became unreachable, then set it back to `true`
 9. Keyboard-only pass with the pointer unplugged: reach every action in the accelerator table, and get the auto-hidden chrome back without a mouse
 10. `GDK_SCALE=2 target/release/accent testvault` for scaling, plus an IME check (ibus, type CJK into a note and confirm the preedit lands in the right place)

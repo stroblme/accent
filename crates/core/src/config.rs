@@ -19,6 +19,7 @@ macro_rules! example {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
 minimap = false
+theme = "solarized"
 
 [vaults."/home/me/Notes"]
 daily_dir = "Daily"
@@ -28,6 +29,18 @@ templates_dir = "Templates"
 new_note_dir = "Inbox"
 "#
     };
+}
+
+/// Which colours the window paints itself in. System, light and dark are libadwaita's own;
+/// Solarized is a palette of ours that still follows the system's light and dark state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    #[default]
+    System,
+    Light,
+    Dark,
+    Solarized,
 }
 
 /// The global config file.
@@ -43,6 +56,7 @@ pub struct Config {
     pub spellcheck: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
+    pub theme: Theme,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -54,6 +68,7 @@ impl Default for Config {
             editor_font: None,
             spellcheck: true,
             minimap: false,
+            theme: Theme::System,
             vaults: BTreeMap::new(),
         }
     }
@@ -261,6 +276,7 @@ mod tests {
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
         assert!(!c.minimap);
+        assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.daily_dir, "Daily");
@@ -273,6 +289,7 @@ mod tests {
         c.write(&back).unwrap();
         let again = Config::read(&back).unwrap();
         assert_eq!(again.recent_vaults, c.recent_vaults);
+        assert_eq!(again.theme, Theme::Solarized);
         assert_eq!(again.vaults["/home/me/Notes"].new_note_dir, "Inbox");
     }
 

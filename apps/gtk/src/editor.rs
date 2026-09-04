@@ -7,7 +7,7 @@
 
 use crate::{completion, highlight, multicaret};
 use accent_core::fs::{self, Etag};
-use accent_core::markdown::{self, Link};
+use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, glib, pango};
 use sourceview5::prelude::*;
@@ -16,12 +16,22 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-/// Re-analysing on every keystroke would be wasteful; ~150 ms after the last one is invisible.
+/// How long a long note waits after the last keystroke before it is re-analysed.
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// Notes at or below this many characters are re-styled on the keystroke instead, so markup is
+/// styled as it is typed the way Apostrophe does it, rather than snapping into place once the
+/// typist pauses. Measured cost of a full pass, tag churn included, which dominates the parsing:
+/// 0.7 ms at 2 KB, 2.5 ms at 8 KB, 10 ms at 32 KB, 21 ms at 64 KB. This size stays inside a frame
+/// and still covers the notes people actually write (median 3.5 KB in the test vault). A longer
+/// note keeps the debounce, because a pass that outlasts a frame is felt as input lag.
+const INSTANT: i32 = 16 * 1024;
 /// DESIGN.md, Motion: save 1 s after the last edit.
 const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
+/// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
+/// interface fonts, and `Reset` in preferences comes back here.
+const DEFAULT_FAMILY: &str = "Adwaita Mono";
 
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
@@ -32,7 +42,7 @@ type LinkHook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>, &Link)>>>;
 /// pressed, so the button always does what its label says: deriving it from the file system meant
 /// a Reload that could arrive as a Save, and a Save that quietly reloaded.
 ///
-/// Both states only ever appear on a tab with unsaved edits: a clean tab is reloaded silently.
+/// The first two only ever appear on a tab with unsaved edits: a clean tab is reloaded silently.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Alert {
     /// Someone else wrote the file while this buffer had edits. The button opens the diff, which
@@ -40,6 +50,9 @@ pub enum Alert {
     Compare,
     /// The file is gone and this buffer is the only copy left. The button writes it back.
     Restore,
+    /// Syncthing left a `*.sync-conflict-*` copy of this note beside it. The button opens the
+    /// same side-by-side resolver the tree offers, on the copy the vault reports.
+    Conflict,
 }
 
 impl Alert {
@@ -47,6 +60,7 @@ impl Alert {
         match self {
             Alert::Compare => "This note changed on disk",
             Alert::Restore => "This note was deleted on disk",
+            Alert::Conflict => "A sync conflict copy of this note exists",
         }
     }
 
@@ -54,6 +68,7 @@ impl Alert {
         match self {
             Alert::Compare => "Compare",
             Alert::Restore => "Save",
+            Alert::Conflict => "Resolve",
         }
     }
 }
@@ -179,6 +194,8 @@ pub fn open(
     column.append(&document);
     let page = tabs.append(&column);
     page.set_title(title_of(rel));
+    // The title is only the file name, so where the note really lives is a hover away.
+    page.set_tooltip(&crate::fileops::display_path(root, rel));
 
     let tab = Rc::new(Tab {
         rel: RefCell::new(rel.to_string()),
@@ -200,7 +217,7 @@ pub fn open(
         replace_row: bar.replace_row,
         matches: bar.matches,
         spell: RefCell::new(None),
-        links: RefCell::new(markdown::analyze(&text).links),
+        links: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         loading: Cell::new(false),
         debounce: RefCell::new(None),
@@ -215,7 +232,7 @@ pub fn open(
     tab.set_font(font, zoom);
     tab.set_spellcheck(spellcheck);
 
-    highlight::apply(&buffer);
+    *tab.links.borrow_mut() = highlight::apply(&buffer).links;
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
     // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
     // (a background tab is only mapped when it is first selected).
@@ -467,13 +484,9 @@ fn wire_find(
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
-/// the window it has to be told about dark mode explicitly.
+/// the window it has to be told about the theme explicitly.
 fn sync_scheme(buffer: &sourceview5::Buffer) {
-    let id = if adw::StyleManager::default().is_dark() {
-        "Adwaita-dark"
-    } else {
-        "Adwaita"
-    };
+    let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
 }
@@ -500,11 +513,17 @@ fn next_view_name() -> String {
     })
 }
 
-/// The GNOME document font, which is what `main::install_document_font` puts on every editor.
-fn system_font() -> String {
-    adw::StyleManager::default()
-        .document_font_name()
-        .to_string()
+/// The editor's default font: Adwaita Mono at the size of the GNOME document font, and what
+/// `main::install_document_font` puts on every editor until a preference overrides it.
+///
+/// The family is ours and the size still follows the system. DESIGN.md used to take the document
+/// font whole on the grounds that notes are prose, but a vault is prose with code fences, tables
+/// and wikilinks in it, and none of those line up in a proportional face.
+pub fn default_font() -> String {
+    let mut desc =
+        pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
+    desc.set_family(DEFAULT_FAMILY);
+    desc.to_str().to_string()
 }
 
 /// The text a duplicated line is inserted as. A line that already ends in a newline can be
@@ -548,6 +567,8 @@ impl Tab {
         *self.rel.borrow_mut() = new_rel.to_string();
         *self.path.borrow_mut() = root.join(new_rel);
         self.page.set_title(&self.tab_title());
+        self.page
+            .set_tooltip(&crate::fileops::display_path(root, new_rel));
     }
 
     pub fn text(&self) -> String {
@@ -560,8 +581,7 @@ impl Tab {
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
-        *self.links.borrow_mut() = markdown::analyze(text).links;
-        highlight::apply(&self.buffer);
+        *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
     }
 
     pub fn mark_clean(&self, etag: Etag) {
@@ -583,7 +603,7 @@ impl Tab {
         self.view
             .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.5);
         self.mark_clean(etag);
-        self.hide_banner();
+        self.clear_disk_alert();
         Ok(())
     }
 
@@ -611,13 +631,22 @@ impl Tab {
         self.banner.set_revealed(false);
     }
 
+    /// Take down a banner about the file on disk, and only that. A save or a reload answers
+    /// "changed on disk" and "deleted on disk"; it says nothing about a conflict copy sitting
+    /// next to the note, whose banner has to survive the first autosave.
+    pub fn clear_disk_alert(&self) {
+        if matches!(self.alert.get(), Some(Alert::Compare | Alert::Restore)) {
+            self.hide_banner();
+        }
+    }
+
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing
     /// downstream tries to save it on the way out.
     pub fn discard(&self) {
         self.modified.set(false);
         self.disk_changed.set(false);
         self.page.set_title(&self.tab_title());
-        self.hide_banner();
+        self.clear_disk_alert();
     }
 
     /// 1-based, the way an editor counts lines and the preview's `data-line` markers do.
@@ -672,7 +701,7 @@ impl Tab {
         // name a font anyway, because CSS has no way to scale a size it cannot see.
         let name = match font.filter(|f| !f.is_empty()) {
             Some(font) => Some(font.to_string()),
-            None if zoom != 1.0 => Some(system_font()),
+            None if zoom != 1.0 => Some(default_font()),
             None => None,
         };
         if let Some(name) = name {
@@ -954,25 +983,31 @@ impl Tab {
         if let Some(id) = self.debounce.borrow_mut().take() {
             id.remove();
         }
-        let id = glib::timeout_add_local_once(
-            DEBOUNCE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    *tab.debounce.borrow_mut() = None;
-                    // ponytail: the note is parsed twice per debounce, once here for the links
-                    // that Ctrl+click and Ctrl+Return follow and once inside `highlight::apply`
-                    // for the spans. Have `apply` return the `Analysis` when `highlight.rs` is
-                    // next touched, and this call goes away.
-                    *tab.links.borrow_mut() = markdown::analyze(&tab.text()).links;
-                    highlight::apply(&tab.buffer);
-                    tab.emit(&tab.on_edited);
-                }
-            ),
-        );
-        *self.debounce.borrow_mut() = Some(id);
+        if self.buffer.char_count() <= INSTANT {
+            self.reanalyse();
+        } else {
+            let id = glib::timeout_add_local_once(
+                DEBOUNCE,
+                glib::clone!(
+                    #[weak(rename_to = tab)]
+                    self,
+                    move || {
+                        *tab.debounce.borrow_mut() = None;
+                        tab.reanalyse();
+                    }
+                ),
+            );
+            *self.debounce.borrow_mut() = Some(id);
+        }
         self.schedule_autosave();
+    }
+
+    /// Re-read the buffer once and refresh everything derived from it: the styling tags, and the
+    /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
+    /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
+    fn reanalyse(self: &Rc<Self>) {
+        *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
+        self.emit(&self.on_edited);
     }
 
     fn schedule_autosave(self: &Rc<Self>) {

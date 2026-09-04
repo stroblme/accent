@@ -8,16 +8,12 @@
 //! three sources `highlight.rs` uses — foreground, background, accent — and injected as a user
 //! stylesheet. Editor and preview therefore agree by construction, in every theme and accent.
 
+use crate::theme;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use webkit6::prelude::*;
-
-/// libadwaita's `--view-bg-color`. DESIGN.md: the one hex pair the codebase is allowed, because
-/// WebKit cannot resolve `var(--view-bg-color)` itself.
-const LIGHT_BG: &str = "#ffffff";
-const DARK_BG: &str = "#1d1d20";
 
 /// Prose column width, in `ch`. DESIGN.md asks for 60 to 72 characters, and `ch` is the advance
 /// of "0", which is wider than the average letter: measured on this pane, 56ch is 71 characters of
@@ -268,7 +264,9 @@ impl Preview {
 
     fn apply_style(inner: &Inner) {
         let style = adw::StyleManager::default();
-        let bg = if style.is_dark() { DARK_BG } else { LIGHT_BG };
+        // WebKit cannot resolve `var(--view-bg-color)`, so `theme` hands out the literal the
+        // rest of the window resolves to under the current theme (DESIGN.md, Colour).
+        let bg = theme::view_bg(style.is_dark());
         let font = pango::FontDescription::from_string(&style.document_font_name());
         let family = font
             .family()
@@ -567,7 +565,7 @@ mod tests {
 
     #[test]
     fn theme_css_paints_links_with_the_accent() {
-        let css = theme_css(FG, DARK_BG, ACCENT, "Cantarell", 11.0);
+        let css = theme_css(FG, theme::view_bg(true), ACCENT, "Cantarell", 11.0);
         assert!(
             css.contains("a { color: rgba(255, 0, 0, 1.00); text-decoration: underline; }"),
             "{css}"
@@ -577,7 +575,7 @@ mod tests {
 
     #[test]
     fn theme_css_writes_no_hex_but_the_background() {
-        for bg in [LIGHT_BG, DARK_BG] {
+        for bg in [theme::view_bg(false), theme::view_bg(true)] {
             let css = theme_css(FG, bg, ACCENT, "Cantarell", 11.0);
             assert_eq!(hex_literals(&css), vec![bg], "stray hex with {bg}");
         }
@@ -585,13 +583,14 @@ mod tests {
 
     #[test]
     fn theme_css_follows_its_inputs() {
-        let base = theme_css(FG, LIGHT_BG, ACCENT, "Cantarell", 11.0);
+        let (light, dark) = (theme::view_bg(false), theme::view_bg(true));
+        let base = theme_css(FG, light, ACCENT, "Cantarell", 11.0);
         let teal = gdk::RGBA::new(0.0, 0.5, 0.5, 1.0);
-        assert_ne!(base, theme_css(FG, DARK_BG, ACCENT, "Cantarell", 11.0));
-        assert_ne!(base, theme_css(FG, LIGHT_BG, teal, "Cantarell", 11.0));
-        assert_ne!(base, theme_css(FG, LIGHT_BG, ACCENT, "Inter", 11.0));
-        assert_ne!(base, theme_css(FG, LIGHT_BG, ACCENT, "Cantarell", 13.0));
-        assert!(theme_css(FG, LIGHT_BG, ACCENT, "Inter", 13.0).contains("\"Inter\""));
+        assert_ne!(base, theme_css(FG, dark, ACCENT, "Cantarell", 11.0));
+        assert_ne!(base, theme_css(FG, light, teal, "Cantarell", 11.0));
+        assert_ne!(base, theme_css(FG, light, ACCENT, "Inter", 11.0));
+        assert_ne!(base, theme_css(FG, light, ACCENT, "Cantarell", 13.0));
+        assert!(theme_css(FG, light, ACCENT, "Inter", 13.0).contains("\"Inter\""));
     }
 
     #[test]
