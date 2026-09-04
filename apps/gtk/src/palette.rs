@@ -17,6 +17,7 @@ use gtk::{gdk, gio, pango};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -33,7 +34,9 @@ pub enum Item {
     Command {
         action: String,
         label: String,
-        accel: Option<String>,
+        /// Every accelerator bound to it, first one shown. The whole list, because rebinding
+        /// replaces it and a clash has to be found across all of them, not just the first.
+        accels: Vec<String>,
         /// Position in the window's recently-run list, if it is in it at all. Lower is newer.
         recent: Option<usize>,
     },
@@ -59,7 +62,13 @@ pub struct Sources {
     pub load_notes: Box<dyn Fn() -> Vec<String>>,
     pub commands: Vec<Item>,
     pub load_tags: Box<dyn Fn() -> Vec<String>>,
+    /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
+    /// what is in force afterwards, so the row can be redrawn without asking again.
+    pub on_rebind: Box<Rebind>,
 }
+
+/// Bind `action` to `accels`, or to its default when they are `None`; yields what is in force.
+pub type Rebind = dyn Fn(&str, Option<Vec<String>>) -> Vec<String>;
 
 /// Which of the three lists the palette is showing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,12 +179,68 @@ fn accel_label(accel: &str) -> Option<String> {
     Some(gtk::accelerator_get_label(key, mods).into())
 }
 
-/// Row template: name, dimmed directory, dimmed accelerator. The directory label expands, so the
-/// accelerator sits at the far end even when there is no directory to show.
+/// Every accelerator that more than one command claims. Computed from the rows themselves, so a
+/// clash a hand-edited `[shortcuts]` table introduced surfaces the same way one made in the
+/// rebind dialog does.
+fn conflicts(items: &[Rc<Item>]) -> HashSet<String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut twice = HashSet::new();
+    for item in items {
+        let Item::Command { accels, .. } = &**item else {
+            continue;
+        };
+        for accel in accels {
+            if !seen.insert(accel) {
+                twice.insert(accel.clone());
+            }
+        }
+    }
+    twice
+}
+
+/// The accelerator, as a button that opens the rebind dialog: DESIGN.md leaves command mode as the
+/// app's only shortcuts reference, so this is also where a shortcut is changed.
+fn accel_button(
+    action: &str,
+    accels: &[String],
+    conflicts: &HashSet<String>,
+    rebind: &Rc<dyn Fn(&str)>,
+) -> gtk::Button {
+    let shown = accels.first().and_then(|a| accel_label(a));
+    let clashes = accels.iter().any(|a| conflicts.contains(a));
+    let button = gtk::Button::builder()
+        // An unbound command still lists; the button is what says it can be given a shortcut.
+        .label(shown.as_deref().unwrap_or("Set…"))
+        .tooltip_text(match clashes {
+            true => "Change Shortcut (bound twice)",
+            false => "Change Shortcut",
+        })
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class("caption");
+    button.add_css_class(if clashes { "error" } else { "dim-label" });
+    button.connect_clicked({
+        let (rebind, action) = (rebind.clone(), action.to_string());
+        move |_| rebind(&action)
+    });
+    button
+}
+
+/// Row template: name, dimmed directory, and the slot the accelerator button goes in. The
+/// directory label expands, so the accelerator sits at the far end even when there is no
+/// directory to show.
 ///
 /// No margins: `.navigation-sidebar` gives the row its 36 px height and its padding, the same way
 /// the sidebar's file rows get theirs.
-fn row_factory() -> gtk::SignalListItemFactory {
+///
+/// The button is built in `bind`, not in `setup`: it carries the action name of the row it is on,
+/// and a widget recycled across rows cannot. Only command rows get one and there are forty
+/// commands, so nothing worth saving is allocated here.
+fn row_factory(
+    rebind: Rc<dyn Fn(&str)>,
+    conflicts: Rc<RefCell<HashSet<String>>>,
+) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let row = gtk::Box::builder()
@@ -192,18 +257,15 @@ fn row_factory() -> gtk::SignalListItemFactory {
             .ellipsize(pango::EllipsizeMode::Middle)
             .css_classes(["dim-label"])
             .build();
-        let accel = gtk::Label::builder()
-            .xalign(1.0)
-            .css_classes(["dim-label"])
-            .build();
+        let slot = gtk::Box::builder().valign(gtk::Align::Center).build();
         row.append(&name);
         row.append(&dir);
-        row.append(&accel);
+        row.append(&slot);
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&row));
     });
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let (Some(row), Some(boxed)) = (
             item.child().and_downcast::<gtk::Box>(),
@@ -211,38 +273,120 @@ fn row_factory() -> gtk::SignalListItemFactory {
         ) else {
             return;
         };
-        let (Some(name), Some(dir), Some(accel)) = (
+        let (Some(name), Some(dir), Some(slot)) = (
             row.first_child().and_downcast::<gtk::Label>(),
             row.first_child()
                 .and_then(|w| w.next_sibling())
                 .and_downcast::<gtk::Label>(),
-            row.last_child().and_downcast::<gtk::Label>(),
+            row.last_child().and_downcast::<gtk::Box>(),
         ) else {
             return;
         };
+        while let Some(child) = slot.first_child() {
+            slot.remove(&child);
+        }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         match &*entry {
             Item::Note(rel) => {
                 let (base, parent) = split_note(rel);
                 name.set_text(base);
                 dir.set_text(parent);
-                accel.set_text("");
             }
             Item::Command {
-                label, accel: acc, ..
+                action,
+                label,
+                accels,
+                ..
             } => {
                 name.set_text(label);
                 dir.set_text("");
-                accel.set_text(&acc.as_deref().and_then(accel_label).unwrap_or_default());
+                slot.append(&accel_button(action, accels, &conflicts.borrow(), &rebind));
             }
             Item::Tag(tag) => {
                 name.set_text(tag);
                 dir.set_text("");
-                accel.set_text("");
             }
         }
     });
     factory
+}
+
+/// What the never-bind list of DESIGN.md's Keyboard section comes down to for someone standing in
+/// front of the dialog. Documented rather than enforced: the desktop and the editor will simply
+/// keep the chord, and saying so is more useful than a rule that guesses at the user's setup.
+const RESERVED: &str = "Super, Alt+Tab, Ctrl+Alt and F1 belong to the desktop, and Ctrl+Z, Ctrl+A \
+                        and Ctrl+X/C/V to the editor.";
+
+/// Ask for one chord for `label`. `taken` is every accelerator already in use with the command
+/// holding it, so a clash is refused by name instead of quietly shadowing the other command.
+///
+/// `on_done` is called with the accelerators to store: one chord, an empty list for "no shortcut",
+/// or `None` to go back to the built-in default. Cancelling calls nothing.
+fn capture_shortcut(
+    parent: &gtk::Widget,
+    label: &str,
+    taken: Vec<(String, String)>,
+    on_done: impl Fn(Option<Vec<String>>) + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(format!("Shortcut for {label}"))
+        .body(format!(
+            "Press the new shortcut. Backspace clears it.\n\n{RESERVED}"
+        ))
+        .close_response("cancel")
+        .build();
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("default", "Restore Default");
+
+    let on_done = Rc::new(on_done);
+    dialog.connect_response(None, {
+        let on_done = on_done.clone();
+        move |_, response| {
+            if response == "default" {
+                on_done(None);
+            }
+        }
+    });
+
+    // Capture phase: the responses are buttons, and one of them would otherwise answer Space or
+    // Return before the chord ever reaches this.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed({
+        let dialog = dialog.downgrade();
+        move |_, key, _, state| {
+            let Some(dialog) = dialog.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            let mods = state & gtk::accelerator_get_default_mod_mask();
+            // Escape leaves; the dialog's own close response handles it.
+            if key == gdk::Key::Escape && mods.is_empty() {
+                return glib::Propagation::Proceed;
+            }
+            if key == gdk::Key::BackSpace && mods.is_empty() {
+                on_done(Some(Vec::new()));
+                dialog.close();
+                return glib::Propagation::Stop;
+            }
+            // Swallows the modifier presses on the way to the chord, so Ctrl alone shows nothing.
+            if !gtk::accelerator_valid(key, mods) {
+                return glib::Propagation::Stop;
+            }
+            let accel = gtk::accelerator_name(key, mods).to_string();
+            if let Some((_, owner)) = taken.iter().find(|(a, _)| *a == accel) {
+                let shown = accel_label(&accel).unwrap_or_else(|| accel.clone());
+                dialog.set_body(&format!(
+                    "{shown} is already used by {owner}. Press another shortcut.\n\n{RESERVED}"
+                ));
+                return glib::Propagation::Stop;
+            }
+            on_done(Some(vec![accel]));
+            dialog.close();
+            glib::Propagation::Stop
+        }
+    });
+    dialog.add_controller(keys);
+    dialog.present(Some(parent));
 }
 
 /// Opens in `mode` with an empty entry: the mode is chrome (title and placeholder), never a
@@ -258,13 +402,22 @@ pub fn present(
         load_notes,
         commands,
         load_tags,
+        on_rebind,
     } = sources;
     let recent = Rc::new(recent);
-    let commands: Rc<Vec<Rc<Item>>> = Rc::new(commands.into_iter().map(Rc::new).collect());
-    let command_text: Rc<Vec<String>> =
-        Rc::new(commands.iter().map(|c| c.text().to_string()).collect());
+    // Behind a cell because a rebind rewrites one row's accelerators without closing the dialog.
+    let commands: Rc<RefCell<Vec<Rc<Item>>>> =
+        Rc::new(RefCell::new(commands.into_iter().map(Rc::new).collect()));
+    let command_text: Rc<Vec<String>> = Rc::new(
+        commands
+            .borrow()
+            .iter()
+            .map(|c| c.text().to_string())
+            .collect(),
+    );
     let command_recent: Rc<Vec<Option<usize>>> = Rc::new(
         commands
+            .borrow()
             .iter()
             .map(|c| match &**c {
                 Item::Command { recent, .. } => *recent,
@@ -272,6 +425,7 @@ pub fn present(
             })
             .collect(),
     );
+    let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
     // Filled on first use, then reused for the life of the dialog.
     let notes: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
     let tags: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
@@ -279,7 +433,9 @@ pub fn present(
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
-    let list = gtk::ListView::new(Some(selection.clone()), Some(row_factory()));
+    // The factory is set further down: its rows open the rebind dialog, which needs the dialog
+    // this function has not built yet.
+    let list = gtk::ListView::new(Some(selection.clone()), None::<gtk::SignalListItemFactory>);
     list.set_single_click_activate(true);
     // The class the sidebar's file rows use: inset rounded pills, 6 px apart from the list edge.
     list.add_css_class("navigation-sidebar");
@@ -373,7 +529,7 @@ pub fn present(
                     m.config = Config::DEFAULT;
                     rank(&command_text, &command_recent, query, &mut m)
                         .into_iter()
-                        .map(|i| commands[i].clone())
+                        .map(|i| commands.borrow()[i].clone())
                         .collect()
                 }
                 Mode::Tags => {
@@ -402,6 +558,66 @@ pub fn present(
             );
         }
     });
+
+    // Clicking an accelerator asks for the new chord, applies it and redraws the list in place.
+    // The selection is put back afterwards, so rebinding several commands in a row keeps its place.
+    let rebind: Rc<dyn Fn(&str)> = Rc::new({
+        let (commands, clashes, refresh) = (commands.clone(), clashes.clone(), refresh.clone());
+        let (entry, selection) = (entry.clone(), selection.clone());
+        let dialog = dialog.downgrade();
+        let on_rebind = Rc::new(on_rebind);
+        move |action: &str| {
+            let Some(dialog) = dialog.upgrade() else {
+                return;
+            };
+            let Some(index) = commands.borrow().iter().position(|c| match &**c {
+                Item::Command { action: a, .. } => a == action,
+                _ => false,
+            }) else {
+                return;
+            };
+            let label = commands.borrow()[index].text().to_string();
+            let taken: Vec<(String, String)> = commands
+                .borrow()
+                .iter()
+                .filter_map(|c| match &**c {
+                    Item::Command { action: a, .. } if a == action => None,
+                    Item::Command { label, accels, .. } => {
+                        Some(accels.iter().map(|a| (a.clone(), label.clone())))
+                    }
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            capture_shortcut(dialog.upcast_ref::<gtk::Widget>(), &label, taken, {
+                let (commands, clashes, refresh) =
+                    (commands.clone(), clashes.clone(), refresh.clone());
+                let (entry, selection, on_rebind) =
+                    (entry.clone(), selection.clone(), on_rebind.clone());
+                let action = action.to_string();
+                move |chosen| {
+                    let accels = on_rebind(&action, chosen);
+                    let (label, recent) = match &*commands.borrow()[index] {
+                        Item::Command { label, recent, .. } => (label.clone(), *recent),
+                        _ => return,
+                    };
+                    commands.borrow_mut()[index] = Rc::new(Item::Command {
+                        action: action.clone(),
+                        label,
+                        accels,
+                        recent,
+                    });
+                    *clashes.borrow_mut() = conflicts(&commands.borrow());
+                    let selected = selection.selected();
+                    refresh(&entry.text());
+                    if selected < selection.n_items() {
+                        selection.set_selected(selected);
+                    }
+                }
+            });
+        }
+    });
+    list.set_factory(Some(&row_factory(rebind, clashes.clone())));
 
     refresh("");
 
@@ -455,7 +671,11 @@ pub fn present(
                 };
                 let inside = root.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|hit| {
                     let dialog = dialog.upcast_ref::<gtk::Widget>();
-                    &hit == dialog || hit.is_ancestor(dialog)
+                    &hit == dialog
+                        || hit.is_ancestor(dialog)
+                        // The rebind prompt is a dialog of its own, stacked on this one: a click
+                        // in it is not a click outside the palette.
+                        || hit.ancestor(adw::Dialog::static_type()).is_some()
                 });
                 if !inside {
                     dialog.close();
@@ -628,5 +848,29 @@ mod tests {
         );
         // Recency never rescues a non-match.
         assert!(rank(&corpus, &[Some(0), Some(1)], "zzzz", &mut m).is_empty());
+    }
+
+    fn command(action: &str, accels: &[&str]) -> Rc<Item> {
+        Rc::new(Item::Command {
+            action: action.to_string(),
+            label: action.to_string(),
+            accels: accels.iter().map(|a| a.to_string()).collect(),
+            recent: None,
+        })
+    }
+
+    #[test]
+    fn conflicts_finds_accelerators_bound_twice() {
+        let items = vec![
+            command("win.save", &["<Control>s"]),
+            command("win.find", &["<Control>f", "<Control>s"]),
+            command("win.about", &[]),
+            Rc::new(Item::Note("a.md".to_string())),
+        ];
+        let twice = conflicts(&items);
+        assert_eq!(twice.len(), 1);
+        assert!(twice.contains("<Control>s"));
+        // A chord only one command claims is not a conflict, and neither is being unbound.
+        assert!(!twice.contains("<Control>f"));
     }
 }

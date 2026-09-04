@@ -338,6 +338,9 @@ struct App {
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
     recent_notes: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
+    /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
+    /// rebind has to rebuild it: see [`fill_captured`].
+    captured: gtk::ShortcutController,
 }
 
 impl App {
@@ -1358,6 +1361,7 @@ impl App {
             }
         }
         let used = self.recent_commands.borrow();
+        let config = self.config.borrow();
         let sources = palette::Sources {
             recent,
             load_notes: Box::new({
@@ -1366,10 +1370,10 @@ impl App {
             }),
             commands: ACTIONS
                 .iter()
-                .map(|(action, label, accels)| palette::Item::Command {
+                .map(|(action, label, _)| palette::Item::Command {
                     action: action.to_string(),
                     label: label.to_string(),
-                    accel: accels.first().map(|a| a.to_string()),
+                    accels: accels_for(&config, action),
                     recent: used.iter().position(|a| a == action),
                 })
                 .collect(),
@@ -1384,7 +1388,18 @@ impl App {
                         .collect()
                 }
             }),
+            // Weak, like the pick callback below: this closure outlives the call and a strong
+            // handle here would keep the window alive through the dialog.
+            on_rebind: Box::new({
+                let app = Rc::downgrade(self);
+                move |action: &str, accels: Option<Vec<String>>| match app.upgrade() {
+                    Some(app) => app.rebind(action, accels),
+                    None => Vec::new(),
+                }
+            }),
         };
+        drop(config);
+        drop(used);
         palette::present(
             &self.window,
             initial,
@@ -1406,6 +1421,39 @@ impl App {
                 }
             ),
         );
+    }
+
+    /// Push the accelerators in force into the application and rebuild the four captured chords.
+    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
+    /// them a config change touched.
+    fn apply_accels(&self) {
+        let Some(gtk_app) = self.window.application() else {
+            return;
+        };
+        let config = self.config.borrow();
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+        fill_captured(&self.captured, &config);
+    }
+
+    /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
+    /// override, so the action goes back to what [`ACTIONS`] says. Returns what is in force after.
+    fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
+        {
+            let mut config = self.config.borrow_mut();
+            match accels {
+                Some(accels) => config.shortcuts.insert(action.to_string(), accels),
+                None => config.shortcuts.remove(action),
+            };
+            if let Err(e) = config.save() {
+                tracing::warn!("saving config: {e:#}");
+            }
+        }
+        self.apply_accels();
+        accels_for(&self.config.borrow(), action)
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -1753,6 +1801,7 @@ fn build_window(
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
+        captured: gtk::ShortcutController::new(),
     });
     let _ = app.ops.set(build_ops(&app));
 
@@ -2163,8 +2212,54 @@ fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
     }
 }
 
+/// What `action` is bound to right now: the user's override from the config if there is one, the
+/// built-in table otherwise. An override that is an empty list leaves the action unbound, which is
+/// a binding too — it still lists in the palette, just without a chord.
+fn accels_for(config: &Config, action: &str) -> Vec<String> {
+    if let Some(accels) = config.shortcuts.get(action) {
+        return accels.clone();
+    }
+    ACTIONS
+        .iter()
+        .find(|(name, _, _)| *name == action)
+        .map(|(_, _, accels)| accels.iter().map(|a| a.to_string()).collect())
+        .unwrap_or_default()
+}
+
+// GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds Shift+Alt+Up/Down
+// to move-viewport. Both are class shortcuts, which run in the bubble phase at the focused view
+// and so get the key before the window's application accelerators ever see it. Claiming these four
+// actions in the capture phase at the window is the way past that; whichever chords they carry.
+const CAPTURED: &[&str] = &[
+    "win.scroll-up",
+    "win.scroll-down",
+    "win.caret-above",
+    "win.caret-below",
+];
+
+/// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
+/// moves a chord away from one of the four does not leave the old one claimed.
+fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
+    let old: Vec<gtk::Shortcut> = (0..controller.n_items())
+        .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())
+        .collect();
+    for shortcut in old {
+        controller.remove_shortcut(&shortcut);
+    }
+    for action in CAPTURED {
+        for accel in accels_for(config, action) {
+            if let Some(trigger) = gtk::ShortcutTrigger::parse_string(&accel) {
+                controller.add_shortcut(gtk::Shortcut::new(
+                    Some(trigger),
+                    Some(gtk::NamedAction::new(action)),
+                ));
+            }
+        }
+    }
+}
+
 fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
-    for (full, _, accels) in ACTIONS {
+    for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
             let action = gio::SimpleAction::new(name, None);
             action.connect_activate(glib::clone!(
@@ -2179,30 +2274,12 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
             ));
             app.window.add_action(&action);
         }
-        gtk_app.set_accels_for_action(full, accels);
     }
 
-    // GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds
-    // Shift+Alt+Up/Down to move-viewport. Both are class shortcuts, which run in the bubble phase
-    // at the focused view and so get the key before the window's application accelerators ever
-    // see it. Claiming those four chords in the capture phase at the window is the way past that.
-    const CAPTURED: &[(&str, &str)] = &[
-        ("<Control>Up", "win.scroll-up"),
-        ("<Control>Down", "win.scroll-down"),
-        ("<Shift><Alt>Up", "win.caret-above"),
-        ("<Shift><Alt>Down", "win.caret-below"),
-    ];
-    let captured = gtk::ShortcutController::new();
-    captured.set_propagation_phase(gtk::PropagationPhase::Capture);
-    for (chord, action) in CAPTURED {
-        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(chord) {
-            captured.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            ));
-        }
-    }
-    app.window.add_controller(captured);
+    app.captured
+        .set_propagation_phase(gtk::PropagationPhase::Capture);
+    app.window.add_controller(app.captured.clone());
+    app.apply_accels();
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -2505,5 +2582,35 @@ mod tests {
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn accels_for_prefers_the_override() {
+        let mut config = Config::default();
+        assert_eq!(accels_for(&config, "win.save"), ["<Control>s"]);
+        assert!(accels_for(&config, "win.about").is_empty());
+        assert!(accels_for(&config, "win.nonexistent").is_empty());
+
+        config.shortcuts.insert(
+            "win.save".to_string(),
+            vec!["<Control><Shift>s".to_string()],
+        );
+        // An override replaces the whole list rather than adding to it.
+        assert_eq!(accels_for(&config, "win.save"), ["<Control><Shift>s"]);
+        // An empty override is "unbound", not "fall back to the default".
+        config.shortcuts.insert("win.find".to_string(), Vec::new());
+        assert!(accels_for(&config, "win.find").is_empty());
+    }
+
+    /// Every action the capture controller claims has to be in the table it reads its chords from,
+    /// or a rebind would silently drop it.
+    #[test]
+    fn captured_actions_are_in_the_action_table() {
+        for action in CAPTURED {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| name == action),
+                "{action} is captured but not in ACTIONS"
+            );
+        }
     }
 }
