@@ -35,6 +35,9 @@ const APP_ID: &str = "io.github.stroblme.Accent";
 
 /// What the palette lists before the user types anything.
 const RECENT_NOTES: usize = 50;
+/// Commands kept in the session's recently-used list. There are only about forty of them, so a
+/// shorter list is still every command the user actually reaches for.
+const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
 /// Rows in a `[[wikilink]]` or `#tag` completion popup.
@@ -331,6 +334,13 @@ struct App {
     tree_painted: Cell<i64>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
+    /// Notes this window showed and commands it ran, most recent first. The palette leads with
+    /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
+    recent_notes: RefCell<Vec<String>>,
+    recent_commands: RefCell<Vec<String>>,
+    /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
+    /// rebind has to rebuild it: see [`fill_captured`].
+    captured: gtk::ShortcutController,
 }
 
 impl App {
@@ -527,6 +537,7 @@ impl App {
             return;
         };
         let rel = tab.rel();
+        self.note_used(&rel);
         self.title.set_subtitle(&rel);
         if let Some(sidebar) = self.sidebar.get() {
             let mut sources: Vec<String> = Vec::new();
@@ -844,6 +855,7 @@ impl App {
                         tab.retarget(self.vault.root(), &format!("{to}/{rest}"));
                     }
                 }
+                accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
@@ -1340,18 +1352,29 @@ impl App {
     }
 
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
+        // Two answers to "recent": what this window opened, and what changed on disk. The first
+        // is what the user means, so it leads and the index's mtime list fills the page below it.
+        let mut recent = self.recent_notes.borrow().clone();
+        for rel in self.vault.recent_notes(RECENT_NOTES).unwrap_or_default() {
+            if !recent.contains(&rel) {
+                recent.push(rel);
+            }
+        }
+        let used = self.recent_commands.borrow();
+        let config = self.config.borrow();
         let sources = palette::Sources {
-            recent: self.vault.recent_notes(RECENT_NOTES).unwrap_or_default(),
+            recent,
             load_notes: Box::new({
                 let vault = self.vault.clone();
                 move || vault.note_paths().unwrap_or_default()
             }),
             commands: ACTIONS
                 .iter()
-                .map(|(action, label, accels)| palette::Item::Command {
+                .map(|(action, label, _)| palette::Item::Command {
                     action: action.to_string(),
                     label: label.to_string(),
-                    accel: accels.first().map(|a| a.to_string()),
+                    accels: accels_for(&config, action),
+                    recent: used.iter().position(|a| a == action),
                 })
                 .collect(),
             load_tags: Box::new({
@@ -1365,7 +1388,18 @@ impl App {
                         .collect()
                 }
             }),
+            // Weak, like the pick callback below: this closure outlives the call and a strong
+            // handle here would keep the window alive through the dialog.
+            on_rebind: Box::new({
+                let app = Rc::downgrade(self);
+                move |action: &str, accels: Option<Vec<String>>| match app.upgrade() {
+                    Some(app) => app.rebind(action, accels),
+                    None => Vec::new(),
+                }
+            }),
         };
+        drop(config);
+        drop(used);
         palette::present(
             &self.window,
             initial,
@@ -1389,30 +1423,82 @@ impl App {
         );
     }
 
+    /// Push the accelerators in force into the application and rebuild the four captured chords.
+    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
+    /// them a config change touched.
+    fn apply_accels(&self) {
+        let Some(gtk_app) = self.window.application() else {
+            return;
+        };
+        let config = self.config.borrow();
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+        fill_captured(&self.captured, &config);
+    }
+
+    /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
+    /// override, so the action goes back to what [`ACTIONS`] says. Returns what is in force after.
+    fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
+        {
+            let mut config = self.config.borrow_mut();
+            match accels {
+                Some(accels) => config.shortcuts.insert(action.to_string(), accels),
+                None => config.shortcuts.remove(action),
+            };
+            if let Err(e) = config.save() {
+                tracing::warn!("saving config: {e:#}");
+            }
+        }
+        self.apply_accels();
+        accels_for(&self.config.borrow(), action)
+    }
+
+    /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
+    /// or a re-read from disk can have changed.
+    fn apply_config(self: &Rc<Self>, config: &Config) {
+        self.vault.set_config(config.vault(self.vault.root()));
+        // Switching to or away from Solarized does not change the system's dark state, so the
+        // notify handler that usually restyles never fires here.
+        theme::apply(config.theme);
+        self.apply_accels();
+        for tab in self.open_tabs() {
+            tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            tab.set_spellcheck(config.spellcheck);
+            tab.set_minimap(config.minimap);
+            tab.restyle();
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.restyle();
+        }
+    }
+
     fn preferences(self: &Rc<Self>) {
-        let root = self.vault.root().to_path_buf();
+        // The config is read once at startup and every row here writes the whole struct back, so
+        // an edit made in the file while accent runs would be undone by the next switch touched.
+        // Re-reading as the dialog opens keeps the file the source of truth; a file that no
+        // longer parses is left alone, exactly as at startup.
+        match Config::read(&accent_core::config::config_path()) {
+            Ok(fresh) => {
+                *self.config.borrow_mut() = fresh;
+                let config = self.config.borrow().clone();
+                self.apply_config(&config);
+            }
+            Err(e) if accent_core::config::config_path().exists() => {
+                tracing::warn!("re-reading the config: {e:#}")
+            }
+            Err(_) => {}
+        }
         settings::present(
             &self.window,
             self.config.clone(),
-            root.clone(),
+            self.vault.root().to_path_buf(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |config: &Config| {
-                    app.vault.set_config(config.vault(&root));
-                    // Switching to or away from Solarized does not change the system's dark
-                    // state, so the notify handler that usually restyles never fires here.
-                    theme::apply(config.theme);
-                    for tab in app.open_tabs() {
-                        tab.set_font(config.editor_font.as_deref(), app.zoom.get());
-                        tab.set_spellcheck(config.spellcheck);
-                        tab.set_minimap(config.minimap);
-                        tab.restyle();
-                    }
-                    if let Some(preview) = app.preview.borrow().as_ref() {
-                        preview.restyle();
-                    }
-                }
+                move |config: &Config| app.apply_config(config)
             ),
         );
     }
@@ -1431,6 +1517,26 @@ impl App {
     }
 
     // --- session -------------------------------------------------------------------------
+
+    /// Remember that this note was just looked at. Called from `sync_active`, so it covers
+    /// opening a note, switching to its tab and coming back to the window.
+    fn note_used(self: &Rc<Self>, rel: &str) {
+        if self.recent_notes.borrow().first().is_some_and(|r| r == rel) {
+            return;
+        }
+        accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        self.save_session_soon();
+    }
+
+    /// Remember a command by full action name, whichever surface fired it.
+    fn command_used(self: &Rc<Self>, action: &str) {
+        accent_core::config::touch(
+            &mut self.recent_commands.borrow_mut(),
+            action,
+            RECENT_COMMANDS,
+        );
+        self.save_session_soon();
+    }
 
     fn save_session_soon(self: &Rc<Self>) {
         if self.session.borrow().is_some() {
@@ -1467,6 +1573,8 @@ impl App {
                 .map(|s| s.pane())
                 .unwrap_or_else(|| Session::default().pane),
             zoom: self.zoom.get(),
+            recent_notes: self.recent_notes.borrow().clone(),
+            recent_commands: self.recent_commands.borrow().clone(),
         };
         if let Err(e) = self.vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
@@ -1494,6 +1602,20 @@ impl App {
         self.split
             .set_position(sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
+        // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
+        // of them, and the order they happened to restore in says nothing about how they were
+        // used. Touching the stored list back to front puts it in front of those, and a note the
+        // restore opened that the stored list does not know about still keeps its place at the end.
+        for rel in session.recent_notes.iter().rev() {
+            accent_core::config::touch(&mut self.recent_notes.borrow_mut(), rel, RECENT_NOTES);
+        }
+        for action in session.recent_commands.iter().rev() {
+            accent_core::config::touch(
+                &mut self.recent_commands.borrow_mut(),
+                action,
+                RECENT_COMMANDS,
+            );
+        }
     }
 }
 
@@ -1706,6 +1828,9 @@ fn build_window(
         tree_painted: Cell::new(0),
         render: RefCell::new(None),
         session: RefCell::new(None),
+        recent_notes: RefCell::new(Vec::new()),
+        recent_commands: RefCell::new(Vec::new()),
+        captured: gtk::ShortcutController::new(),
     });
     let _ = app.ops.set(build_ops(&app));
 
@@ -2116,8 +2241,54 @@ fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
     }
 }
 
+/// What `action` is bound to right now: the user's override from the config if there is one, the
+/// built-in table otherwise. An override that is an empty list leaves the action unbound, which is
+/// a binding too — it still lists in the palette, just without a chord.
+fn accels_for(config: &Config, action: &str) -> Vec<String> {
+    if let Some(accels) = config.shortcuts.get(action) {
+        return accels.clone();
+    }
+    ACTIONS
+        .iter()
+        .find(|(name, _, _)| *name == action)
+        .map(|(_, _, accels)| accels.iter().map(|a| a.to_string()).collect())
+        .unwrap_or_default()
+}
+
+// GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds Shift+Alt+Up/Down
+// to move-viewport. Both are class shortcuts, which run in the bubble phase at the focused view
+// and so get the key before the window's application accelerators ever see it. Claiming these four
+// actions in the capture phase at the window is the way past that; whichever chords they carry.
+const CAPTURED: &[&str] = &[
+    "win.scroll-up",
+    "win.scroll-down",
+    "win.caret-above",
+    "win.caret-below",
+];
+
+/// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
+/// moves a chord away from one of the four does not leave the old one claimed.
+fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
+    let old: Vec<gtk::Shortcut> = (0..controller.n_items())
+        .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())
+        .collect();
+    for shortcut in old {
+        controller.remove_shortcut(&shortcut);
+    }
+    for action in CAPTURED {
+        for accel in accels_for(config, action) {
+            if let Some(trigger) = gtk::ShortcutTrigger::parse_string(&accel) {
+                controller.add_shortcut(gtk::Shortcut::new(
+                    Some(trigger),
+                    Some(gtk::NamedAction::new(action)),
+                ));
+            }
+        }
+    }
+}
+
 fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
-    for (full, _, accels) in ACTIONS {
+    for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
             let action = gio::SimpleAction::new(name, None);
             action.connect_activate(glib::clone!(
@@ -2126,35 +2297,18 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
                 move |_, _| {
                     // Any action fired is attention leaving the text (DESIGN.md).
                     app.show_chrome();
+                    app.command_used(full);
                     app.run_action(name);
                 }
             ));
             app.window.add_action(&action);
         }
-        gtk_app.set_accels_for_action(full, accels);
     }
 
-    // GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds
-    // Shift+Alt+Up/Down to move-viewport. Both are class shortcuts, which run in the bubble phase
-    // at the focused view and so get the key before the window's application accelerators ever
-    // see it. Claiming those four chords in the capture phase at the window is the way past that.
-    const CAPTURED: &[(&str, &str)] = &[
-        ("<Control>Up", "win.scroll-up"),
-        ("<Control>Down", "win.scroll-down"),
-        ("<Shift><Alt>Up", "win.caret-above"),
-        ("<Shift><Alt>Down", "win.caret-below"),
-    ];
-    let captured = gtk::ShortcutController::new();
-    captured.set_propagation_phase(gtk::PropagationPhase::Capture);
-    for (chord, action) in CAPTURED {
-        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(chord) {
-            captured.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            ));
-        }
-    }
-    app.window.add_controller(captured);
+    app.captured
+        .set_propagation_phase(gtk::PropagationPhase::Capture);
+    app.window.add_controller(app.captured.clone());
+    app.apply_accels();
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -2457,5 +2611,35 @@ mod tests {
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn accels_for_prefers_the_override() {
+        let mut config = Config::default();
+        assert_eq!(accels_for(&config, "win.save"), ["<Control>s"]);
+        assert!(accels_for(&config, "win.about").is_empty());
+        assert!(accels_for(&config, "win.nonexistent").is_empty());
+
+        config.shortcuts.insert(
+            "win.save".to_string(),
+            vec!["<Control><Shift>s".to_string()],
+        );
+        // An override replaces the whole list rather than adding to it.
+        assert_eq!(accels_for(&config, "win.save"), ["<Control><Shift>s"]);
+        // An empty override is "unbound", not "fall back to the default".
+        config.shortcuts.insert("win.find".to_string(), Vec::new());
+        assert!(accels_for(&config, "win.find").is_empty());
+    }
+
+    /// Every action the capture controller claims has to be in the table it reads its chords from,
+    /// or a rebind would silently drop it.
+    #[test]
+    fn captured_actions_are_in_the_action_table() {
+        for action in CAPTURED {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| name == action),
+                "{action} is captured but not in ACTIONS"
+            );
+        }
     }
 }

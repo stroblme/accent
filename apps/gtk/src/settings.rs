@@ -32,10 +32,22 @@ pub fn present(
     root: PathBuf,
     on_change: impl Fn(&Config) + 'static,
 ) {
+    page(parent.as_ref(), config, root, Rc::new(on_change));
+}
+
+/// The dialog itself, split off so Restore Defaults can build it a second time. Every row reads
+/// its value once, at construction, so a reset that changes all of them is a new page rather than
+/// a handle kept on each row.
+fn page(
+    parent: &gtk::Widget,
+    config: Rc<RefCell<Config>>,
+    root: PathBuf,
+    on_change: Rc<dyn Fn(&Config)>,
+) {
     // The config is cloned out of the cell before saving, so `on_change` is free to borrow it
     // again without meeting an outstanding borrow of ours.
     let save: Rc<dyn Fn()> = Rc::new({
-        let config = config.clone();
+        let (config, on_change) = (config.clone(), on_change.clone());
         move || {
             let snapshot = config.borrow().clone();
             if let Err(e) = snapshot.save() {
@@ -45,14 +57,18 @@ pub fn present(
         }
     });
 
+    let dialog = adw::PreferencesDialog::builder()
+        .title("Preferences")
+        .build();
+
     let page = adw::PreferencesPage::new();
     page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
     page.add(&vault_group(&config, &root, &save));
+    page.add(&reset_group(
+        &dialog, parent, &config, &root, &save, &on_change,
+    ));
 
-    let dialog = adw::PreferencesDialog::builder()
-        .title("Preferences")
-        .build();
     dialog.add(&page);
     dialog.present(Some(parent));
 }
@@ -280,6 +296,78 @@ fn vault_group(
         |cfg, text| cfg.new_note_dir = folder(text),
     ));
 
+    group
+}
+
+// ---------------------------------------------------------------------------- restore defaults
+
+/// The one row that changes settings it does not show, so it asks first and the question names
+/// what survives. DESIGN.md, States: an alert dialog is for a choice that can lose data.
+fn reset_group(
+    dialog: &adw::PreferencesDialog,
+    parent: &gtk::Widget,
+    config: &Rc<RefCell<Config>>,
+    root: &Path,
+    save: &Rc<dyn Fn()>,
+    on_change: &Rc<dyn Fn(&Config)>,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    let row = adw::ButtonRow::builder().title("Restore Defaults").build();
+    row.add_css_class("destructive-action");
+    row.connect_activated({
+        let (config, root, save, on_change) = (
+            config.clone(),
+            root.to_path_buf(),
+            save.clone(),
+            on_change.clone(),
+        );
+        // Weak: this closure hangs off a row inside the dialog, and a strong handle back to it is
+        // the cycle that would keep every preferences dialog ever opened alive.
+        let (dialog, parent) = (dialog.downgrade(), parent.clone());
+        move |_| {
+            let Some(dialog) = dialog.upgrade() else {
+                return;
+            };
+            let confirm = adw::AlertDialog::builder()
+                .heading("Restore Default Preferences?")
+                .body(
+                    "Theme, fonts, editor options, every vault's folders and any shortcuts you \
+                     changed go back to their defaults. Your recent vaults are kept.",
+                )
+                .close_response("cancel")
+                .build();
+            confirm.add_response("cancel", "Cancel");
+            confirm.add_response("restore", "Restore");
+            confirm.set_response_appearance("restore", adw::ResponseAppearance::Destructive);
+            confirm.connect_response(Some("restore"), {
+                let (config, root, save, on_change) = (
+                    config.clone(),
+                    root.clone(),
+                    save.clone(),
+                    on_change.clone(),
+                );
+                let (dialog, parent) = (dialog.downgrade(), parent.clone());
+                move |_, _| {
+                    let Some(dialog) = dialog.upgrade() else {
+                        return;
+                    };
+                    {
+                        let mut cfg = config.borrow_mut();
+                        let keep = std::mem::take(&mut cfg.recent_vaults);
+                        *cfg = Config {
+                            recent_vaults: keep,
+                            ..Config::default()
+                        };
+                    }
+                    save();
+                    dialog.close();
+                    page(&parent, config.clone(), root.clone(), on_change.clone());
+                }
+            });
+            confirm.present(Some(&dialog));
+        }
+    });
+    group.add(&row);
     group
 }
 
