@@ -5,9 +5,10 @@
 //! integration step only has to hand it four closures.
 //!
 //! Search runs off the main loop. [`Data::search`] is called on a worker thread, so a full-vault
-//! query never costs a keystroke; a spinner beside the entry says one is running and the previous
-//! results stay on screen until the new ones arrive. Exactly one query is in flight at a time:
-//! when it lands and the box has moved on since, the current one is started instead of painted.
+//! query never costs a keystroke; a bar pulsing above the results says one is running and the
+//! previous results stay on screen until the new ones arrive. Exactly one query is in flight at a
+//! time: when it lands and the box has moved on since, the current one is started instead of
+//! painted.
 
 use accent_core::index::{Match, SearchHit};
 use accent_core::search::{self, Options, Regex};
@@ -22,6 +23,9 @@ use std::time::{Duration, Instant};
 /// Same value as the palette and the switcher (DESIGN.md, Motion): long enough to swallow a burst
 /// of keystrokes, short enough to feel immediate.
 const DEBOUNCE: Duration = Duration::from_millis(50);
+/// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
+/// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
+const PULSE: Duration = Duration::from_millis(80);
 /// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
 /// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
 /// reads as "paste a link here" rather than "what links here", and it is the only icon of the four
@@ -413,12 +417,25 @@ struct Search {
     replace_row: gtk::Revealer,
     replace_entry: gtk::Entry,
     apply: gtk::Button,
-    spinner: adw::Spinner,
+    progress: gtk::ProgressBar,
+    /// The timer pulsing [`Search::progress`], shared with the timer's own closure so it can
+    /// clear the slot when it stops itself.
+    pulse: Rc<Cell<Option<glib::SourceId>>>,
     body: gtk::Stack,
     results: gio::ListStore,
     /// A query is on a worker thread. Only one runs at a time; the rest of the box is read again
     /// when it lands.
     busy: Cell<bool>,
+}
+
+impl Drop for Search {
+    /// A pane that goes away takes its pulse timer with it, as `editor.rs` does with its
+    /// debounces.
+    fn drop(&mut self) {
+        if let Some(id) = self.pulse.take() {
+            id.remove();
+        }
+    }
 }
 
 impl Search {
@@ -444,16 +461,42 @@ impl Search {
             .then(|| self.replace_entry.text().to_string())
     }
 
+    /// Show or hide the progress bar, and run its pulse timer only while it is showing.
+    ///
+    /// Opacity rather than visibility: the bar keeps its height either way, so results do not jump
+    /// down a few pixels the moment a query starts.
+    fn set_busy(&self, busy: bool) {
+        self.progress.set_opacity(if busy { 1.0 } else { 0.0 });
+        if let Some(id) = self.pulse.take() {
+            id.remove();
+        }
+        if !busy {
+            return;
+        }
+        let (bar, slot) = (self.progress.clone(), self.pulse.clone());
+        self.pulse.set(Some(glib::timeout_add_local(PULSE, move || {
+            // `Search` is kept alive by the handlers it connected to its own widgets, so `Drop`
+            // is not guaranteed to run. An unrooted bar means the window closed under a query;
+            // that is the timer's cue to stop on its own.
+            if bar.root().is_none() {
+                slot.set(None);
+                return glib::ControlFlow::Break;
+            }
+            bar.pulse();
+            glib::ControlFlow::Continue
+        })));
+    }
+
     /// Run what the box currently asks for, or note that the running query has to be redone.
     fn start(self: &Rc<Self>) {
         let key = self.key();
-        // The spinner tracks `busy` in every branch: a query still on a worker thread keeps it
-        // up, and the one that lands after the box was cleared takes it down through here.
+        // The bar tracks `busy` in every branch: a query still on a worker thread keeps it
+        // pulsing, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
             self.entry.remove_css_class("error");
             self.results.remove_all();
             self.body.set_visible_child_name("prompt");
-            self.spinner.set_visible(self.busy.get());
+            self.set_busy(self.busy.get());
             self.set_total(0);
             return;
         }
@@ -465,7 +508,7 @@ impl Search {
                 tracing::debug!("invalid search pattern {:?}: {e}", key.text);
                 self.entry.add_css_class("error");
                 self.body.set_visible_child_name("invalid");
-                self.spinner.set_visible(self.busy.get());
+                self.set_busy(self.busy.get());
                 self.set_total(0);
                 return;
             }
@@ -475,7 +518,7 @@ impl Search {
             return;
         }
         self.busy.set(true);
-        self.spinner.set_visible(true);
+        self.set_busy(true);
         self.apply.set_sensitive(false);
 
         let search = self.clone();
@@ -485,7 +528,7 @@ impl Search {
             let answer = gio::spawn_blocking(move || run(query)).await;
             search.busy.set(false);
             let Ok(answer) = answer else {
-                search.spinner.set_visible(false);
+                search.set_busy(false);
                 return tracing::warn!("the search worker panicked");
             };
             tracing::debug!(
@@ -498,7 +541,7 @@ impl Search {
             // question is asked instead. Old results stay on screen until one of them is current.
             if search.key() == key {
                 search.show(&key, answer);
-                search.spinner.set_visible(false);
+                search.set_busy(false);
             } else {
                 search.start();
             }
@@ -634,7 +677,12 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
             .ellipsize(pango::EllipsizeMode::End)
             .build();
         snippet.add_css_class("dim-label");
+        // `.navigation-sidebar` gives its rows horizontal padding only, so a two-line row sits on
+        // the top and bottom edges of its own selection pill. 6 is the scale's inside-a-group step
+        // (DESIGN.md, Spacing).
         let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        row.set_margin_top(6);
+        row.set_margin_bottom(6);
         row.append(&title);
         row.append(&snippet);
         item.downcast_ref::<gtk::ListItem>()
@@ -711,16 +759,18 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         .placeholder_text("Search notes…")
         .hexpand(true)
         .build();
-    // Not an `AdwSpinner` in the entry's own icon area: `GtkSearchEntry` owns both of its icons,
-    // and a 16 px spinner beside it is what DESIGN.md's Loading rule asks for anyway.
-    let spinner = adw::Spinner::builder()
-        .width_request(16)
-        .height_request(16)
-        .valign(gtk::Align::Center)
-        .visible(false)
-        .build();
+    // A bar spanning the width right above the results, not a spinner beside the entry: the wait
+    // belongs to the list that is about to change, and the entry needs the whole sidebar width.
+    // It is faded rather than hidden, so the results never shift when a query starts.
+    let progress = gtk::ProgressBar::builder().opacity(0.0).build();
+
+    // `edit-find-replace-symbolic`, not a chevron: it names what the button reveals rather than
+    // which way a panel opens, and the chevron was invisible for the user who reported this. An
+    // icon theme may replace any Adwaita name with artwork of its own, and WhiteSur's
+    // `pan-down-symbolic` is written with single-quoted attributes, which GTK4's symbolic
+    // recolouring does not parse: the button drew nothing at all (DESIGN.md, Iconography).
     let replace_toggle = gtk::ToggleButton::builder()
-        .icon_name("pan-down-symbolic")
+        .icon_name("edit-find-replace-symbolic")
         .tooltip_text("Toggle Replace")
         .valign(gtk::Align::Center)
         .build();
@@ -741,12 +791,19 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         button.add_css_class("flat");
         button
     });
-    let toggle_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    toggle_row.add_css_class("linked");
-    toggle_row.set_halign(gtk::Align::Start);
+    let options = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    options.add_css_class("linked");
+    options.set_halign(gtk::Align::Start);
+    options.set_hexpand(true);
     for button in &toggles {
-        toggle_row.append(button);
+        options.append(button);
     }
+    // The replace toggle shares the row but not the `.linked` group: the three toggles change what
+    // the query means, this one reveals another control, and a fourth button welded to them would
+    // read as a fourth query option.
+    let toggle_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    toggle_row.append(&options);
+    toggle_row.append(&replace_toggle);
 
     let replace_entry = gtk::Entry::builder()
         .placeholder_text("Replace…")
@@ -772,7 +829,8 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         replace_row: replace_row.clone(),
         replace_entry: replace_entry.clone(),
         apply: apply.clone(),
-        spinner: spinner.clone(),
+        progress: progress.clone(),
+        pulse: Rc::new(Cell::new(None)),
         body: body.clone(),
         results,
         busy: Cell::new(false),
@@ -836,22 +894,18 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         move |_| search.replace_all()
     });
 
-    let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    entry_row.append(&entry);
-    entry_row.append(&spinner);
-    entry_row.append(&replace_toggle);
-
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
     controls.set_margin_top(6);
     controls.set_margin_bottom(6);
     controls.set_margin_start(6);
     controls.set_margin_end(6);
-    controls.append(&entry_row);
+    controls.append(&entry);
     controls.append(&toggle_row);
     controls.append(&replace_row);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&controls);
+    column.append(&progress);
     column.append(&body);
     SearchPane {
         widget: column.upcast(),
