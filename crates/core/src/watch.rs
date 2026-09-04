@@ -3,6 +3,14 @@
 //! Two Syncthing realities shape this: a pulled file appears as `.syncthing.X.tmp` and is then
 //! renamed into place (so the temp name must never reach the index), and a losing edit lands as
 //! `X.sync-conflict-….md` (so the UI wants to know the moment one shows up).
+//!
+//! The watch set is exactly the directory list the walk kept — one non-recursive watch each,
+//! never a recursive watch on the root. Two kernel limits make that matter: `max_user_watches`
+//! (135 768 on the author's machine) is charged per directory, and `max_queued_events` (16 384)
+//! is filled by our own walk, because inotify reports an open on every watched directory. A vault
+//! with more watched directories than the queue holds therefore overflows it on each reconcile,
+//! and an overflow asks for another reconcile — measured as a permanent loop on a 16 536-directory
+//! vault. Whatever the walk skips must be skipped here too, or neither limit improves.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -52,23 +60,29 @@ enum Backend {
 }
 
 impl Watcher {
-    /// Watch `root` and each of `extra_dirs` recursively.
+    /// Watch `root` and each of `dirs`, one non-recursive watch per directory.
     ///
-    /// `extra_dirs` are symlinked directories the caller resolved during the walk: inotify does
-    /// not follow symlinks, so a linked-in folder needs its own watch.
+    /// `dirs` is what the walk kept, as vault paths (a directory reached through a symlink is
+    /// watched through that same path — `inotify_add_watch` resolves the link, so the events come
+    /// back under the name the vault knows). One watch per directory rather than a recursive
+    /// watch on the root is what makes the skipped trees actually free: a recursive watch walks
+    /// the disk itself and would re-add every `.venv` directory the walk refused. inotify charges
+    /// per directory, so the watch set is exactly the walk's directory count.
     ///
-    /// `dir_count` is how many directories the caller's walk found. If that is close to the
-    /// kernel's inotify budget the watcher falls back to polling instead of silently missing
-    /// changes (inotify fails per-directory once the budget is gone).
+    /// If that count is close to the kernel's inotify budget the watcher falls back to polling
+    /// instead of silently missing changes (inotify fails per-directory once the budget is gone).
+    ///
+    /// A directory created after this call is not watched until the next walk rebuilds the
+    /// watcher; the caller is responsible for triggering one.
     ///
     /// `on_event` runs on the debouncer's own thread, so it must not block: hand the event to a
     /// channel or the UI's main context and return.
     pub fn new(
         root: &Path,
-        extra_dirs: &[PathBuf],
-        dir_count: usize,
+        dirs: &[PathBuf],
         on_event: impl Fn(VaultEvent) + Send + 'static,
     ) -> anyhow::Result<Watcher> {
+        let dir_count = dirs.len() + 1;
         let handler = move |result: DebounceEventResult| match result {
             Ok(events) => {
                 for event in events {
@@ -93,7 +107,8 @@ impl Watcher {
                 dir_count,
                 budget = inotify_budget(),
                 "vault uses more than 80% of the inotify watch budget; falling back to 2s polling. \
-                 Raise it with: sudo sysctl -w fs.inotify.max_user_watches=524288"
+                 Exclude folders with .accentignore, or raise the budget with: \
+                 sudo sysctl -w fs.inotify.max_user_watches=524288"
             );
             let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
             let mut d = new_debouncer_opt::<_, notify::PollWatcher, RecommendedCache>(
@@ -103,11 +118,11 @@ impl Watcher {
                 RecommendedCache::new(),
                 config,
             )?;
-            watch_all(&mut d, root, extra_dirs)?;
+            watch_all(&mut d, root, dirs)?;
             Backend::Poll(d)
         } else {
             let mut d = new_debouncer(debounce, None, handler)?;
-            watch_all(&mut d, root, extra_dirs)?;
+            watch_all(&mut d, root, dirs)?;
             Backend::Native(d)
         };
 
@@ -118,11 +133,15 @@ impl Watcher {
 fn watch_all<T: notify::Watcher, C: FileIdCache>(
     d: &mut Debouncer<T, C>,
     root: &Path,
-    extra_dirs: &[PathBuf],
+    dirs: &[PathBuf],
 ) -> notify::Result<()> {
-    d.watch(root, RecursiveMode::Recursive)?;
-    for dir in extra_dirs {
-        d.watch(dir, RecursiveMode::Recursive)?;
+    d.watch(root, RecursiveMode::NonRecursive)?;
+    for dir in dirs {
+        // A directory the walk saw can be gone by the time we get here — a synced vault moves
+        // under us — and one unwatchable folder is no reason to leave the whole vault unwatched.
+        if let Err(e) = d.watch(dir, RecursiveMode::NonRecursive) {
+            tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+        }
     }
     Ok(())
 }
@@ -234,8 +253,12 @@ mod tests {
     }
 
     fn start(root: &Path) -> (Watcher, Receiver<VaultEvent>) {
+        start_with(root, &[])
+    }
+
+    fn start_with(root: &Path, dirs: &[PathBuf]) -> (Watcher, Receiver<VaultEvent>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Watcher::new(root, &[], 0, move |e| {
+        let w = Watcher::new(root, dirs, move |e| {
             let _ = tx.send(e);
         })
         .unwrap();
@@ -332,6 +355,24 @@ mod tests {
             note.exists(),
             "the note the watcher reported on is still there"
         );
+    }
+
+    /// The watch set is a list, not a tree: a directory the walk skipped gets no watch, so its
+    /// churn never reaches the queue. Without this the walk's skips buy nothing at the kernel.
+    #[test]
+    fn only_the_listed_directories_are_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("Notes")).unwrap();
+        std::fs::create_dir(root.join(".venv")).unwrap();
+        let (_w, rx) = start_with(&root, &[root.join("Notes")]);
+
+        std::fs::write(root.join(".venv/site.py"), "skipped").unwrap();
+        std::fs::write(root.join("Notes/Note.md"), "watched").unwrap();
+
+        let events = drain(&rx, Duration::from_secs(5));
+        assert!(touches(&events, "Note.md"), "{events:?}");
+        assert!(!touches(&events, "site.py"), "{events:?}");
     }
 
     #[test]

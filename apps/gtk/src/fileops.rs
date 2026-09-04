@@ -10,6 +10,7 @@
 //! good); buttons and titles use header capitalisation, and only "Move to…" takes an ellipsis
 //! because it is the one item that needs more input before it can act.
 
+use crate::panes::Side;
 use accent_api::{RenamePlan, Vault};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -34,6 +35,8 @@ pub struct Ops {
     pub toast: Box<dyn Fn(&str)>,
     /// Open a note in a tab.
     pub open: Box<dyn Fn(&str)>,
+    /// Open a note in a pane of its own, on the given side of the active pane.
+    pub split: Box<dyn Fn(&str, Side)>,
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
@@ -445,6 +448,15 @@ pub fn context_menu(
         menu.append_item(&item("New Folder", "new-folder", rel));
     } else {
         menu.append_item(&item("Open", "open", rel));
+        // Opening beside what is already there, in the section that opens things.
+        for (label, action) in [
+            ("Split Left", "split-left"),
+            ("Split Right", "split-right"),
+            ("Split Up", "split-up"),
+            ("Split Down", "split-down"),
+        ] {
+            menu.append_item(&item(label, action, rel));
+        }
     }
     menu.append_item(&item("Rename", "rename", rel));
     menu.append_item(&item("Move to…", "move", rel));
@@ -495,6 +507,19 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         group.add_action(&action);
     };
     add("open", Box::new(|ops, rel| (ops.open)(rel)));
+    add(
+        "split-left",
+        Box::new(|ops, rel| (ops.split)(rel, Side::Left)),
+    );
+    add(
+        "split-right",
+        Box::new(|ops, rel| (ops.split)(rel, Side::Right)),
+    );
+    add("split-up", Box::new(|ops, rel| (ops.split)(rel, Side::Up)));
+    add(
+        "split-down",
+        Box::new(|ops, rel| (ops.split)(rel, Side::Down)),
+    );
     add("new-note", Box::new(new_note));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));

@@ -181,6 +181,23 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     row.add_suffix(&reset);
     group.add(&row);
 
+    // A share rather than a pixel count: the same setting has to read the same on a laptop and on
+    // a wide monitor, and the editor is not the window (the sidebar and the preview take theirs).
+    // The minimum is 30 % because below that the editor's own floor takes over and the number
+    // would stop meaning anything.
+    let width = adw::SpinRow::with_range(30.0, 100.0, 5.0);
+    width.set_title("Column Width");
+    width.set_subtitle("Percentage of the editor the document column fills");
+    width.set_value(f64::from(config.borrow().column_width));
+    width.connect_value_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().column_width = r.value().round() as u32;
+            save();
+        }
+    });
+    group.add(&width);
+
     let spell = adw::SwitchRow::builder()
         .title("Spell Checking")
         .subtitle("Underline misspelled words as you type")
@@ -197,7 +214,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let numbers = adw::SwitchRow::builder()
         .title("Line Numbers")
-        .subtitle("Number every line except the headings, whose markers use the same gutter")
+        .subtitle("Number every line in a gutter of its own, left of the page")
         .active(config.borrow().line_numbers)
         .build();
     numbers.connect_active_notify({

@@ -18,7 +18,9 @@ DATADIR   ?= $(PREFIX)/share
 
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
-TARGET_DIR := target/$(PROFILE)
+# Honours CARGO_TARGET_DIR, which parallel worktrees must each set to a directory of their
+# own (ROADMAP §6): without this `smoke` and `install` look for a binary cargo never wrote there.
+TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(PROFILE)
 
 # The vault used by every test and benchmark. Never point these at a real vault.
 VAULT     ?= testvault

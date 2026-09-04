@@ -6,7 +6,7 @@ use accent_core::fs::is_sync_conflict;
 use accent_core::markdown::is_image;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -258,11 +258,14 @@ fn children_model(
     store
 }
 
-/// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row.
+/// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row,
+/// `on_drag` with `true` while a row is being dragged out of the tree and `false` when it is over,
+/// so the panes can put their drop zones up for the duration.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
     on_activate: impl Fn(char, &str) + 'static,
+    on_drag: impl Fn(bool) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
@@ -276,6 +279,9 @@ pub fn build(
     // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
     // window is open, and the label is only ever a prefix of a tooltip.
     let root_label = crate::fileops::display_path(vault.root(), "");
+    // Shared, because `setup` runs once per recycled row widget and both ends of every drag
+    // report through the same closure.
+    let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
@@ -302,6 +308,23 @@ pub fn build(
             tooltip.set_text(Some(&format!("{root_label}/{rel}")));
             true
         });
+        // A row can be dragged into a pane, which opens the note there, or onto a pane's edge,
+        // which splits it. The path travels as a plain string: it is what every drop handler
+        // wants, and it survives the row being recycled under the drag. Directories are not
+        // draggable, having no single note to open.
+        let source = gtk::DragSource::builder()
+            .actions(gdk::DragAction::COPY)
+            .build();
+        source.connect_prepare(|source, _, _| {
+            let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
+            let (kind, rel) = expander.list_row()?.item().as_ref().and_then(decode)?;
+            (kind != 'd').then(|| gdk::ContentProvider::for_value(&rel.to_value()))
+        });
+        let begin = dragging.clone();
+        source.connect_drag_begin(move |_, _| begin(true));
+        let end = dragging.clone();
+        source.connect_drag_end(move |_, _, _| end(false));
+        expander.add_controller(source);
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&expander));

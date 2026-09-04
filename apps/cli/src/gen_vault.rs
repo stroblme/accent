@@ -235,7 +235,7 @@ pub struct Summary {
     pub bytes: u64,
     /// Files written in the `<out>-external` tree (most are `.gitignore`d away at scan time).
     pub external_files: usize,
-    /// Files in the real in-vault `.venv` (indexable: only `.accentignore` could hide them).
+    /// Files in the real in-vault `.venv` (skipped by its `pyvenv.cfg` marker).
     pub venv_files: usize,
     pub ms: u128,
 }
@@ -843,8 +843,9 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     g.write(
         ".accentignore",
         b"# accent honours only this file inside the vault (never .gitignore).\n\
-          # Uncommenting the next line drops the real in-vault .venv from the index:\n\
-          # .venv/\n",
+          # The in-vault .venv needs no line here: its pyvenv.cfg marker keeps it out.\n\
+          # Uncomment to drop something the marker rules do not cover:\n\
+          # Archive/\n",
     )?;
     g.write(
         "Notes-PHD/thesis/.gitignore",
@@ -893,7 +894,8 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
           ## Notes\n\n{{cursor}}\n",
     )?;
 
-    // ---- a real .venv inside the vault: only .accentignore could hide it, and it is commented out
+    // ---- a real .venv inside the vault, PEP 405 marker and all: no ignore file mentions it, and
+    // the walk skips it by that marker alone.
     for i in 0..venv_in {
         let pkg = format!("pkg{:02}", i % 40);
         let dir = format!("Submissions/proj-b/examples/.venv/lib/python3.13/site-packages/{pkg}");
@@ -902,6 +904,10 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
         let body = g.py_module(&m);
         g.write(&format!("{dir}/{m}.py"), &body)?;
     }
+    g.write(
+        "Submissions/proj-b/examples/.venv/pyvenv.cfg",
+        b"home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.13.1\n",
+    )?;
 
     // ---- the external repo the vault symlinks into
     let ext_notes = 8;
@@ -1069,8 +1075,8 @@ pub fn print_summary(out: &Path, s: &Summary) {
     );
     println!("elapsed       {} ms", s.ms);
     println!(
-        "note          .accentignore has `# .venv/` commented out, so the {} files under\n\
-         \x20             Submissions/proj-b/examples/.venv/ are indexed; uncommenting it drops them.",
+        "note          the {} files under Submissions/proj-b/examples/.venv/ are skipped by that\n\
+         \x20             directory's pyvenv.cfg marker; --index-dependency-trees brings them back.",
         s.venv_files
     );
 }
@@ -1167,14 +1173,25 @@ mod tests {
             "the file symlink must yield an alias"
         );
 
-        // Exactly two symlinks are rejected: the in-vault shortcut and the loop.
+        // Exactly two symlinks are rejected: the in-vault shortcut and the loop. The third skip
+        // is the in-vault `.venv`, which the walk drops on its `pyvenv.cfg` marker.
         let mut reasons: Vec<_> = r.skipped.iter().map(|s| s.reason).collect();
         reasons.sort_by_key(|r| format!("{r:?}"));
         assert_eq!(
             reasons,
-            vec![SkipReason::SymlinkLoop, SkipReason::TargetInsideVault],
+            vec![
+                SkipReason::DependencyTree,
+                SkipReason::SymlinkLoop,
+                SkipReason::TargetInsideVault
+            ],
             "{:?}",
             r.skipped
+        );
+        assert!(
+            !r.files
+                .iter()
+                .any(|f| f.rel_path.contains("examples/.venv")),
+            "the in-vault venv is indexed"
         );
 
         // The external repo is followed, but its .venv/target are gitignored away.

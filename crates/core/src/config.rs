@@ -20,6 +20,7 @@ macro_rules! example {
 spellcheck = true
 minimap = false
 line_numbers = false
+column_width = 50
 theme = "solarized"
 
 [shortcuts]
@@ -64,6 +65,10 @@ pub struct Config {
     /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
     /// what an ATX heading's markers hang in.
     pub line_numbers: bool,
+    /// How much of the editor's width the document column may fill, as a percentage. 50 is what
+    /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
+    /// window keeps a readable line.
+    pub column_width: u32,
     pub theme: Theme,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
@@ -81,6 +86,7 @@ impl Default for Config {
             spellcheck: true,
             minimap: false,
             line_numbers: false,
+            column_width: 50,
             theme: Theme::System,
             shortcuts: BTreeMap::new(),
             vaults: BTreeMap::new(),
@@ -330,6 +336,7 @@ mod tests {
         assert!(c.spellcheck);
         assert!(!c.minimap);
         assert!(!c.line_numbers);
+        assert_eq!(c.column_width, 50);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];

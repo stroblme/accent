@@ -37,6 +37,10 @@ struct Common {
     /// external code repos do not drag .venv / target / node_modules into the index).
     #[arg(long)]
     no_target_gitignore: bool,
+    /// Index dependency and build trees too. Off by default: a directory carrying CACHEDIR.TAG
+    /// or pyvenv.cfg is somebody's cache, not notes. This is the way back in.
+    #[arg(long)]
+    index_dependency_trees: bool,
 }
 
 impl Common {
@@ -49,6 +53,7 @@ impl Common {
         ScanOptions {
             vault_gitignore: self.vault_gitignore,
             target_gitignore: !self.no_target_gitignore,
+            skip_dependency_trees: !self.index_dependency_trees,
             ..ScanOptions::default()
         }
     }
