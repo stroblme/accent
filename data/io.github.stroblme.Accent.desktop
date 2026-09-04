@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Accent
+Comment=Markdown and PDF knowledge editor
+Exec=accent %F
+Icon=io.github.stroblme.Accent
+Terminal=false
+Categories=Office;Utility;TextEditor;GTK;GNOME;
+Keywords=markdown;notes;vault;wiki;pdf;
+MimeType=text/markdown;inode/directory;
+StartupNotify=true

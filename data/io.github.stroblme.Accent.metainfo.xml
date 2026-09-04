@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.stroblme.Accent</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Accent</name>
+  <summary>Markdown and PDF knowledge editor</summary>
+
+  <developer id="io.github.stroblme">
+    <name>Melvin Strobl</name>
+  </developer>
+
+  <description>
+    <p>
+      Accent edits markdown and views PDFs over a vault of plain files, with wikilinks, tags,
+      backlinks and full-text search.
+    </p>
+    <p>
+      The index is a disposable cache rather than the source of truth, so startup stays under a
+      second on vaults holding tens of thousands of notes.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.stroblme.Accent.desktop</launchable>
+
+  <url type="homepage">https://github.com/stroblme/accent</url>
+  <url type="bugtracker">https://github.com/stroblme/accent/issues</url>
+  <url type="vcs-browser">https://github.com/stroblme/accent</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/stroblme/accent/main/data/screenshots/editor.png</image>
+      <caption>Editing a note next to the vault tree</caption>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1"/>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#d6d1b9</color>
+    <color type="primary" scheme_preference="dark">#38373c</color>
+  </branding>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-03"/>
+  </releases>
+</component>

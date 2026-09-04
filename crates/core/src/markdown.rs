@@ -638,14 +638,37 @@ fn open_href(target: &str, anchor: Option<&str>) -> String {
     h
 }
 
+/// Blocks that carry a source-line marker. Everything the editor can put a cursor in starts at
+/// one of these, which is all the preview needs to scroll along.
+fn is_block_start(ev: &Event) -> bool {
+    matches!(
+        ev,
+        Event::Start(
+            Cm::Paragraph
+                | Cm::Heading { .. }
+                | Cm::Item
+                | Cm::BlockQuote(_)
+                | Cm::CodeBlock(_)
+                | Cm::Table(_)
+                | Cm::HtmlBlock
+        )
+    )
+}
+
 /// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
+///
+/// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
+/// the editor's cursor is on.
 pub fn to_html(text: &str) -> String {
     let mut evts: Vec<Event> = Vec::new();
     let mut link_wiki: Vec<bool> = Vec::new();
     let mut image_wiki: Vec<bool> = Vec::new();
     let mut skip = 0usize;
+    // Block starts arrive in source order, so one forward pass over the newlines suffices.
+    let mut counted = 0usize;
+    let mut line = 1usize;
 
-    for ev in Parser::new_ext(text, options()) {
+    for (ev, r) in Parser::new_ext(text, options()).into_offset_iter() {
         if skip > 0 {
             match ev {
                 Event::Start(Cm::Image { .. }) => skip += 1,
@@ -654,6 +677,14 @@ pub fn to_html(text: &str) -> String {
             }
             continue;
         }
+        let marker = is_block_start(&ev).then(|| {
+            line += text[counted..r.start]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count();
+            counted = r.start;
+            Event::Html(format!("<span data-line=\"{line}\"></span>").into())
+        });
         match ev {
             Event::Start(Cm::Link {
                 link_type: LinkType::WikiLink { .. },
@@ -708,11 +739,121 @@ pub fn to_html(text: &str) -> String {
             }
             _ => evts.push(ev),
         }
+        evts.extend(marker);
     }
 
     let mut out = String::new();
     pulldown_cmark::html::push_html(&mut out, evts.into_iter());
     out
+}
+
+// ------------------------------------------------------------------ link keys
+
+/// `"a/b/c.md"` -> `"a/b/c"`; a name without a real extension is returned unchanged.
+pub fn strip_ext(s: &str) -> String {
+    match s.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.contains('/') => stem.to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// Normalise a link target the way Obsidian compares them: trimmed, `./` dropped, `\` as `/`,
+/// case-folded. Both sides of link resolution go through this, so it is the one place that
+/// decides what "the same target" means.
+pub fn link_key(target: &str) -> String {
+    target
+        .trim()
+        .trim_start_matches("./")
+        .replace('\\', "/")
+        .to_lowercase()
+}
+
+/// Every key a file answers to: full path, path without extension, basename, basename without
+/// extension. Duplicates are kept out so callers can insert blindly.
+pub fn path_keys(rel: &str) -> Vec<String> {
+    let base = rel.rsplit('/').next().unwrap_or(rel).to_string();
+    let mut keys = Vec::with_capacity(4);
+    for k in [
+        rel.to_string(),
+        strip_ext(rel),
+        base.clone(),
+        strip_ext(&base),
+    ] {
+        let k = link_key(&k);
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
+/// Rewrite every wikilink in `text` that could name `old_rel` so it points at `new_rel`, or
+/// `None` when the note refers to it nowhere.
+///
+/// Every form of the name is in scope here, including the bare basename, which two notes in
+/// different directories can share. Callers that know which of them really resolve to `old_rel`
+/// (the index does) should use [`rewrite_targets`] instead.
+pub fn rewrite_links(text: &str, old_rel: &str, new_rel: &str) -> Option<String> {
+    rewrite_targets(text, &path_keys(old_rel), new_rel)
+}
+
+/// Rewrite every wikilink in `text` whose target is one of `targets` so it points at `new_rel`,
+/// or `None` when the note holds none of them. Used when a note is renamed or moved.
+///
+/// `targets` are compared with [`link_key`], so they may be written any way a link may be.
+/// Which spellings belong to the renamed note is the caller's decision: this is pure text.
+///
+/// ponytail: only `[[wiki]]` and `![[embeds]]` are rewritten. A markdown `[x](a.md)` link is
+/// relative to the note holding it and percent-encoded, so it needs path arithmetic this does
+/// not do; add it when a vault that writes markdown links shows up.
+pub fn rewrite_targets(text: &str, targets: &[String], new_rel: &str) -> Option<String> {
+    let keys: Vec<String> = targets.iter().map(|t| link_key(t)).collect();
+    let mut out: Option<String> = None;
+
+    // Wikilinks cannot nest, so `analyze` yields the matches in source order and applying them
+    // back to front keeps the earlier offsets valid.
+    for link in analyze(text).links.iter().rev() {
+        let open = match link.kind {
+            LinkKind::Wiki => 2,
+            LinkKind::Embed => 3,
+            _ => continue,
+        };
+        if !keys.contains(&link_key(&link.target)) {
+            continue;
+        }
+        let at = link.range.start + open..link.range.start + open + link.target.len();
+        // A parser surprise must never corrupt a note: only touch bytes that are the target.
+        if text.get(at.clone()) != Some(link.target.as_str()) {
+            continue;
+        }
+        out.get_or_insert_with(|| text.to_string())
+            .replace_range(at, &as_written(&link.target, new_rel));
+    }
+    out
+}
+
+/// Spell `new_rel` the way `old_target` was spelled: a bare name stays bare, a path stays a
+/// path, and an extension is only written back if the author wrote one.
+fn as_written(old_target: &str, new_rel: &str) -> String {
+    let full = if old_target.contains('/') {
+        new_rel
+    } else {
+        new_rel.rsplit('/').next().unwrap_or(new_rel)
+    };
+    // Only the renamed file's own extension counts as one: `[[Rev 1.2 notes]]` is a name with a
+    // dot in it, and inventing an extension the author never wrote is a corrupted link.
+    match (ext(new_rel), ext(old_target)) {
+        (Some(new), Some(old)) if old.eq_ignore_ascii_case(new) => full.to_string(),
+        _ => strip_ext(full),
+    }
+}
+
+/// The extension of the file `rel` names, if it has one.
+fn ext(rel: &str) -> Option<&str> {
+    let base = rel.rsplit('/').next().unwrap_or(rel);
+    base.rsplit_once('.')
+        .filter(|(stem, _)| !stem.is_empty())
+        .map(|(_, ext)| ext)
 }
 
 #[cfg(test)]
@@ -995,24 +1136,24 @@ mod tests {
 
     #[test]
     fn html_rewrites_wikilinks() {
-        let h = to_html("[[Note#Head|alias]]");
+        let h = bare("[[Note#Head|alias]]");
         assert_eq!(
             h.trim(),
             "<p><a href=\"accent://open/Note#Head\" class=\"wikilink\">alias</a></p>"
         );
 
-        let h = to_html("[[Other Note]]");
+        let h = bare("[[Other Note]]");
         assert!(
             h.contains("<a href=\"accent://open/Other%20Note\" class=\"wikilink\">Other Note</a>"),
             "{h}"
         );
 
-        let h = to_html("![[img.png]]");
+        let h = bare("![[img.png]]");
         assert!(h.contains("<img src=\"accent://file/img.png\">"), "{h}");
         assert!(!h.contains("alt="), "embed alt text is dropped: {h}");
 
         // non-image embeds fall back to a link
-        let h = to_html("![[paper.pdf#page=3&selection=4,0,4,11]]");
+        let h = bare("![[paper.pdf#page=3&selection=4,0,4,11]]");
         assert!(
             h.contains(
                 "<a href=\"accent://open/paper.pdf#page=3&amp;selection=4,0,4,11\" class=\"embed\">"
@@ -1021,7 +1162,7 @@ mod tests {
         );
 
         // ordinary markdown is untouched
-        let h = to_html("# Hi\n\n[x](y.md)\n");
+        let h = bare("# Hi\n\n[x](y.md)\n");
         assert!(h.contains("<h1>Hi</h1>"), "{h}");
         assert!(h.contains("<a href=\"y.md\">x</a>"), "{h}");
     }
@@ -1101,6 +1242,123 @@ mod tests {
             took.as_millis() < 200,
             "analyze({} bytes) took {took:?}",
             doc.len()
+        );
+    }
+    #[test]
+    fn link_key_normalises_target_spelling() {
+        assert_eq!(link_key("  ./Notes\\Deep Work.md "), "notes/deep work.md");
+        assert_eq!(link_key("Deep Work"), "deep work");
+    }
+
+    #[test]
+    fn path_keys_cover_path_and_basename_forms() {
+        assert_eq!(
+            path_keys("Notes-PHD/Deep Work.md"),
+            [
+                "notes-phd/deep work.md",
+                "notes-phd/deep work",
+                "deep work.md",
+                "deep work"
+            ]
+        );
+        // A root-level file yields only two distinct keys.
+        assert_eq!(path_keys("Index.md"), ["index.md", "index"]);
+    }
+
+    /// The preview markers are tested on their own; strip them so the older assertions stay
+    /// about the HTML the renderer produces.
+    fn bare(text: &str) -> String {
+        let mut out = to_html(text);
+        while let Some(i) = out.find("<span data-line=\"") {
+            let j = out[i..].find("></span>").unwrap() + i + "></span>".len();
+            out.replace_range(i..j, "");
+        }
+        out
+    }
+
+    #[test]
+    fn rewrite_links_handles_every_wikilink_shape() {
+        let src = concat!(
+            "[[Old]] and [[Old|alias]] and [[Old#Heading]]\n\n",
+            "![[Old]]\n\n",
+            "[[Dir/Old]] and [[dir/old.md]]\n\n",
+            "```\n[[Old]]\n```\n"
+        );
+        let want = concat!(
+            "[[New]] and [[New|alias]] and [[New#Heading]]\n\n",
+            "![[New]]\n\n",
+            "[[Notes/New]] and [[Notes/New.md]]\n\n",
+            "```\n[[Old]]\n```\n"
+        );
+        assert_eq!(
+            rewrite_links(src, "Dir/Old.md", "Notes/New.md").unwrap(),
+            want
+        );
+    }
+
+    #[test]
+    fn rewrite_links_returns_none_when_nothing_matches() {
+        assert_eq!(rewrite_links("[[Other]]", "Old.md", "New.md"), None);
+        // Markdown links are not rewritten.
+        assert_eq!(rewrite_links("[x](Old.md)", "Old.md", "New.md"), None);
+    }
+
+    #[test]
+    fn rewrite_targets_only_touches_the_targets_it_was_given() {
+        // `[[Old]]` belongs to a different note; renaming `Dir/Old.md` must not hijack it.
+        let src = "deep: [[Dir/Old]]\nshallow: [[Old]]\n";
+        assert_eq!(
+            rewrite_targets(
+                src,
+                &["Dir/Old.md".to_string(), "Dir/Old".to_string()],
+                "Dir/Renamed.md"
+            )
+            .unwrap(),
+            "deep: [[Dir/Renamed]]\nshallow: [[Old]]\n"
+        );
+    }
+
+    /// A dot in a name is not an extension: `[[Rev 1.2 notes]]` must not gain a `.md`.
+    #[test]
+    fn rewrite_links_only_writes_back_a_real_extension() {
+        assert_eq!(
+            rewrite_links(
+                "[[Rev 1.2 notes]]\n",
+                "Rev 1.2 notes.md",
+                "Rev 1.3 notes.md"
+            )
+            .unwrap(),
+            "[[Rev 1.3 notes]]\n"
+        );
+    }
+
+    #[test]
+    fn rewrite_links_preserves_alias_and_anchor() {
+        assert_eq!(
+            rewrite_links("see [[Old#Deep Work|this one]].", "Old.md", "Dir/New.md").unwrap(),
+            "see [[New#Deep Work|this one]]."
+        );
+    }
+
+    #[test]
+    fn html_marks_block_source_lines() {
+        let src = "# Title\n\nFirst para.\n\nSecond para.\n\n- item\n\n```rs\ncode\n```\n";
+        let h = to_html(src);
+        let lines: Vec<&str> = h
+            .match_indices("<span data-line=\"")
+            .map(|(i, m)| {
+                let rest = &h[i + m.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        assert_eq!(lines, ["1", "3", "5", "7", "9"], "{h}");
+        assert!(
+            h.contains("<h1><span data-line=\"1\"></span>Title</h1>"),
+            "{h}"
+        );
+        assert!(
+            h.contains("<p><span data-line=\"5\"></span>Second para.</p>"),
+            "{h}"
         );
     }
 }
