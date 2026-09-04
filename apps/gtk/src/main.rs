@@ -14,6 +14,7 @@ mod highlight;
 mod multicaret;
 mod palette;
 mod paned;
+mod panes;
 mod preview;
 mod settings;
 mod sidebar;
@@ -28,6 +29,7 @@ use accent_core::markdown::{self, Link, LinkKind};
 use adw::prelude::*;
 use editor::{Alert, Tab};
 use gtk::{gdk, gio, glib, pango};
+use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -66,6 +68,12 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    // Split Right takes VS Code's chord; the other three are menu and palette only, because
+    // three more accelerators for the same idea is three more chords nobody has to spare.
+    ("win.split-right", "Split Right", &["<Control>backslash"]),
+    ("win.split-left", "Split Left", &[]),
+    ("win.split-up", "Split Up", &[]),
+    ("win.split-down", "Split Down", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
@@ -383,7 +391,11 @@ struct App {
     vault: Arc<Vault>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
-    tabs: adw::TabView,
+    /// Every open pane, in the order they were created. The arrangement itself lives in the
+    /// widget tree under `root`; this is only what has to be iterated over.
+    panes: RefCell<Vec<Rc<Pane>>>,
+    /// The pane a note opens into and the one the find bar and the preview follow.
+    active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
@@ -405,15 +417,14 @@ struct App {
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
     sidebar_column: adw::ToolbarView,
     sidebar_header: adw::HeaderBar,
-    /// The editor column: presentation mode hides its header bar and tab bar together by
-    /// unrevealing its top bars.
+    /// The editor column: presentation mode unreveals its top bars, which is the header. The tab
+    /// bars belong to the panes and go with `content`.
     toolbar: adw::ToolbarView,
     header: adw::HeaderBar,
-    tabbar: adw::TabBar,
     modes: gtk::ToggleButton,
     menu: gtk::MenuButton,
     paned: gtk::Paned,
-    /// Swaps the tab view for a placeholder while no note is open (DESIGN.md, States).
+    /// Swaps the pane tree for a placeholder while no note is open (DESIGN.md, States).
     content: gtk::Stack,
     mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
@@ -455,8 +466,196 @@ impl App {
             .expect("file operations are set up in build_window")
     }
 
+    /// The pane a note opens into: the last one whose tab was selected or whose editor had focus.
+    fn pane(&self) -> Rc<Pane> {
+        self.active_pane.borrow().clone()
+    }
+
+    /// The active pane's tab view. Every `self.tabs` of the single-pane window went through here.
+    fn tabs(&self) -> adw::TabView {
+        self.pane().tabs.clone()
+    }
+
+    fn pane_of(&self, page: &adw::TabPage) -> Option<Rc<Pane>> {
+        self.panes.borrow().iter().find(|p| p.has(page)).cloned()
+    }
+
+    /// Bring a page to the front of whichever pane holds it, and make that pane the active one.
+    /// A note that is already open is never opened twice, so this is what "open" does for it.
+    fn reveal_page(&self, page: &adw::TabPage) {
+        if let Some(pane) = self.pane_of(page) {
+            pane.tabs.set_selected_page(page);
+            *self.active_pane.borrow_mut() = pane;
+        }
+    }
+
+    /// Close a page in the pane that holds it, whichever that is.
+    fn close_page(&self, page: &adw::TabPage) {
+        if let Some(pane) = self.pane_of(page) {
+            pane.tabs.close_page(page);
+        }
+    }
+
+    // --- panes ---------------------------------------------------------------------------
+
+    /// A new, empty pane beside `at`. The caller has to put something in it: an empty pane closes
+    /// itself as soon as a page leaves it, but one that never held a page has nothing to react to.
+    fn split_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side) -> Rc<Pane> {
+        let pane = Pane::new(&tab_menu());
+        wire_pane(self, &pane);
+        self.panes.borrow_mut().push(pane.clone());
+        panes::split(at, &pane, side);
+        self.sync_panes();
+        self.set_active_pane(&pane);
+        pane
+    }
+
+    /// Move `page` into a new pane beside `at`. Splitting a pane's only note off it would empty
+    /// the pane, which closes it again, so that one is refused rather than done and undone.
+    fn split_page(self: &Rc<Self>, at: &Rc<Pane>, side: Side, page: &adw::TabPage) {
+        // Not one of ours: libadwaita raises `is-transferring-page` on every tab view in the
+        // process, so a tab dragged in another window reaches this window's drop sheets too, and
+        // there would be no view to move it out of.
+        let Some(from) = self.pane_of(page) else {
+            return;
+        };
+        if Rc::ptr_eq(&from, at) && at.tabs.n_pages() <= 1 {
+            return self.toast("This pane has only one note.");
+        }
+        let pane = self.split_beside(at, side);
+        from.tabs.transfer_page(page, &pane.tabs, 0);
+    }
+
+    /// The tab context menu's Split Right and friends: the page that was right-clicked, split off
+    /// its own pane.
+    fn split_active(self: &Rc<Self>, side: Side) {
+        let Some(page) = self
+            .menu_page
+            .borrow()
+            .clone()
+            .or_else(|| self.tabs().selected_page())
+        else {
+            return;
+        };
+        let at = self.pane_of(&page).unwrap_or_else(|| self.pane());
+        self.split_page(&at, side, &page);
+    }
+
+    /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
+    /// this always splits: the note may not be open at all, so there is something new to show.
+    fn open_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side, rel: &str) {
+        let pane = self.split_beside(at, side);
+        match self.tab_for(rel).map(|tab| tab.page.clone()) {
+            Some(page) => {
+                if let Some(from) = self.pane_of(&page) {
+                    from.tabs.transfer_page(&page, &pane.tabs, 0);
+                }
+            }
+            None => self.open_note(rel),
+        }
+        // Nothing arrived: the path was unopenable, or it was the only note in the pane it came
+        // from, which has closed itself and left this one holding the same note it already had.
+        if pane.tabs.n_pages() == 0 {
+            self.close_pane(&pane);
+        }
+    }
+
+    /// Take a pane out of the window. The last one stays whatever happens: a window with no pane
+    /// has nowhere to open a note into.
+    fn close_pane(self: &Rc<Self>, pane: &Rc<Pane>) {
+        if self.panes.borrow().len() <= 1 {
+            return;
+        }
+        panes::detach(pane);
+        self.panes.borrow_mut().retain(|p| !Rc::ptr_eq(p, pane));
+        if Rc::ptr_eq(&self.pane(), pane)
+            && let Some(next) = self.panes.borrow().first().cloned()
+        {
+            *self.active_pane.borrow_mut() = next;
+        }
+        self.sync_panes();
+        self.sync_active();
+    }
+
+    /// Make `pane` the one notes open into, reporting whether that was a change. Syncing the
+    /// title, the backlinks and the preview is the caller's, because the commonest caller is a
+    /// page selection that has to sync whether the pane changed or not.
+    fn set_active_pane(&self, pane: &Rc<Pane>) -> bool {
+        if Rc::ptr_eq(&self.active_pane.borrow(), pane) {
+            return false;
+        }
+        *self.active_pane.borrow_mut() = pane.clone();
+        true
+    }
+
+    /// What changes when a pane appears or goes: whether the tab bars may hide themselves, and
+    /// whether there is any note left to show at all.
+    fn sync_panes(&self) {
+        let panes = self.panes.borrow();
+        // A single pane's bar disappears with its second tab, as it always did. Several panes have
+        // to keep theirs: the bar is what says which notes are in which pane.
+        let alone = panes.len() == 1;
+        let pages: i32 = panes.iter().map(|p| p.tabs.n_pages()).sum();
+        for pane in panes.iter() {
+            pane.bar.set_autohide(alone);
+        }
+        let name = if pages == 0 { "empty" } else { "tabs" };
+        self.content.set_visible_child_name(name);
+    }
+
+    /// Put the drop sheets in or out of the picture in every pane at once: a drag that started
+    /// over one pane has to be droppable on all of them.
+    fn set_drop_active(&self, on: bool) {
+        for pane in self.panes.borrow().iter() {
+            pane.set_drop_active(on);
+        }
+    }
+
+    /// A tab or a vault path let go over `pane`. `true` when it was taken.
+    fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
+        if let Ok(page) = value.get::<adw::TabPage>() {
+            // A tab from another window has no pane of ours to leave, and moving it here would
+            // put a note of another vault under this window's tab machinery. Refused; the tab
+            // bars still take it natively, which is libadwaita's own behaviour and its own risk.
+            let Some(from) = self.pane_of(&page) else {
+                return false;
+            };
+            return match zone {
+                Zone::Split(side) => {
+                    self.split_page(pane, side, &page);
+                    true
+                }
+                // Already here, so the drop is taken and nothing moves. Accepted rather than
+                // refused, because libadwaita's own bar does the same for a tab dropped back
+                // where it started, and a refusal animates the tab flying home for no reason.
+                Zone::Here if Rc::ptr_eq(&from, pane) => true,
+                Zone::Here => {
+                    from.tabs
+                        .transfer_page(&page, &pane.tabs, pane.tabs.n_pages());
+                    pane.tabs.set_selected_page(&page);
+                    // Said outright rather than left to the selection notify, which does not
+                    // fire when the transfer already left this page selected.
+                    self.set_active_pane(pane);
+                    self.sync_active();
+                    true
+                }
+            };
+        }
+        let Ok(rel) = value.get::<String>() else {
+            return false;
+        };
+        match zone {
+            Zone::Split(side) => self.open_beside(pane, side, &rel),
+            Zone::Here => {
+                self.set_active_pane(pane);
+                self.open_note(&rel);
+            }
+        }
+        true
+    }
+
     fn active(&self) -> Option<Rc<Tab>> {
-        let page = self.tabs.selected_page()?;
+        let page = self.tabs().selected_page()?;
         self.open.borrow().iter().find(|t| t.page == page).cloned()
     }
 
@@ -486,8 +685,7 @@ impl App {
             };
         };
         if let Some(tab) = self.tab_for(&rel) {
-            self.tabs.set_selected_page(&tab.page);
-            return;
+            return self.reveal_page(&tab.page);
         }
         let (spellcheck, font, minimap, line_numbers) = {
             let config = self.config.borrow();
@@ -501,7 +699,7 @@ impl App {
         let opened = editor::open(
             self.vault.root(),
             &rel,
-            &self.tabs,
+            &self.tabs(),
             {
                 let vault = self.vault.clone();
                 move |prefix| {
@@ -590,7 +788,7 @@ impl App {
             .find(|(r, _)| *r == rel)
             .map(|(_, page)| page.clone());
         if let Some(page) = open {
-            return self.tabs.set_selected_page(&page);
+            return self.reveal_page(&page);
         }
         let picture = gtk::Picture::for_filename(self.vault.root().join(&rel));
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
@@ -600,12 +798,12 @@ impl App {
             .vexpand(true)
             .child(&picture)
             .build();
-        let page = self.tabs.append(&scroller);
+        let page = self.tabs().append(&scroller);
         page.set_title(rel.rsplit('/').next().unwrap_or(&rel));
         page.set_tooltip(&fileops::display_path(self.vault.root(), &rel));
         page.set_icon(Some(&gio::ThemedIcon::new("image-x-generic-symbolic")));
         self.images.borrow_mut().push((rel, page.clone()));
-        self.tabs.set_selected_page(&page);
+        self.tabs().set_selected_page(&page);
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
@@ -668,7 +866,7 @@ impl App {
 
         let page = tab.page.clone();
         self.open.borrow_mut().push(tab);
-        self.tabs.set_selected_page(&page);
+        self.tabs().set_selected_page(&page);
         self.sync_active();
         self.save_session_soon();
     }
@@ -993,7 +1191,7 @@ impl App {
                     tab.disk_changed.set(true);
                     tab.show_alert(Alert::Restore);
                 } else {
-                    self.tabs.close_page(&tab.page);
+                    self.close_page(&tab.page);
                 }
             }
             Event::FileRenamed { from, to } => {
@@ -1273,8 +1471,9 @@ impl App {
         self.chrome_hidden.set(true);
         self.sidebar_header.add_css_class("chrome-hidden");
         self.header.add_css_class("chrome-hidden");
-        self.tabbar.add_css_class("chrome-hidden");
-        self.zoom_pill.add_css_class("chrome-hidden");
+        for pane in self.panes.borrow().iter() {
+            pane.bar.add_css_class("chrome-hidden");
+        }
         // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
         // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
         if let Some(sidebar) = self.sidebar.get() {
@@ -1290,8 +1489,9 @@ impl App {
         }
         self.sidebar_header.remove_css_class("chrome-hidden");
         self.header.remove_css_class("chrome-hidden");
-        self.tabbar.remove_css_class("chrome-hidden");
-        self.zoom_pill.remove_css_class("chrome-hidden");
+        for pane in self.panes.borrow().iter() {
+            pane.bar.remove_css_class("chrome-hidden");
+        }
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.widget().remove_css_class("chrome-dimmed");
         }
@@ -1326,10 +1526,14 @@ impl App {
                 fileops::new_folder(self.ops(), &self.selected_dir().unwrap_or_default())
             }
             "close-tab" => {
-                if let Some(page) = self.tabs.selected_page() {
-                    self.tabs.close_page(&page);
+                if let Some(page) = self.tabs().selected_page() {
+                    self.tabs().close_page(&page);
                 }
             }
+            "split-left" => self.split_active(Side::Left),
+            "split-right" => self.split_active(Side::Right),
+            "split-up" => self.split_active(Side::Up),
+            "split-down" => self.split_active(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "find" => self.find.open(find::Mode::Find),
@@ -1775,11 +1979,14 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
+        // ponytail: every note comes back into one pane, because the session does not record the
+        // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
+        // being what someone who left four panes open expects.
         for rel in &session.open {
             self.open_note(rel);
         }
         if let Some(tab) = session.active.as_deref().and_then(|rel| self.tab_for(rel)) {
-            self.tabs.set_selected_page(&tab.page);
+            self.tabs().set_selected_page(&tab.page);
         }
         // A state file written before panes were saved leaves the name empty; that keeps
         // whichever pane the sidebar was built showing.
@@ -1856,8 +2063,7 @@ fn build_window(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.display().to_string());
     let title = adw::WindowTitle::new(&vault_name, "");
-    let tabs = adw::TabView::new();
-    tabs.set_menu_model(Some(&tab_menu()));
+    let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
     let status = gtk::Label::builder().label("Indexing…").build();
     status.add_css_class("dim-label");
@@ -1868,8 +2074,11 @@ fn build_window(
         .title("No Note Open")
         .description("Pick one in the sidebar, or press Ctrl+P to search.")
         .build();
+    // The panes hang off a bin, so a split can swap the whole arrangement for a `GtkPaned` the
+    // same way it swaps one branch of it (`panes::split`).
+    let panes_root = adw::Bin::builder().child(first.widget()).build();
     let content = gtk::Stack::new();
-    content.add_named(&tabs, Some("tabs"));
+    content.add_named(&panes_root, Some("tabs"));
     content.add_named(&placeholder, Some("empty"));
     content.set_visible_child_name("empty");
 
@@ -1888,30 +2097,25 @@ fn build_window(
     // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
     // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
     // on screen.
+    // The zoom readout rides in the header beside the view-mode button rather than floating over
+    // the document: an `.osd` pill is the styling for something laid over content, and this is
+    // chrome. It needs no fade class of its own, because the header it sits in already carries
+    // one and takes its children with it.
     let zoom_label = gtk::Label::new(Some("100 %"));
     zoom_label.add_css_class("numeric");
+    zoom_label.add_css_class("dim-label");
     let zoom_reset = gtk::Button::builder()
-        .label("Reset")
+        .icon_name("zoom-original-symbolic")
+        .tooltip_text("Reset Zoom")
         .action_name("win.zoom-reset")
+        .valign(gtk::Align::Center)
         .build();
     zoom_reset.add_css_class("flat");
-    let zoom_pill = gtk::Box::builder()
-        .spacing(6)
-        .halign(gtk::Align::End)
-        .valign(gtk::Align::Start)
-        .margin_top(12)
-        .margin_end(12)
-        .visible(false)
-        .build();
+    let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
     zoom_pill.append(&zoom_label);
     zoom_pill.append(&zoom_reset);
-    zoom_pill.add_css_class("osd");
-    zoom_pill.add_css_class("accent-pill");
-    zoom_pill.add_css_class("chrome-fade");
 
-    let document = gtk::Overlay::builder().child(&paned).build();
-    document.add_overlay(&zoom_pill);
-    toasts.set_child(Some(&document));
+    toasts.set_child(Some(&paned));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -1963,6 +2167,7 @@ fn build_window(
     header.pack_end(&menu);
     header.pack_end(&status);
     header.pack_end(&modes);
+    header.pack_end(&zoom_pill);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -1973,11 +2178,10 @@ fn build_window(
     headers.add_widget(&sidebar_header);
     headers.add_widget(&header);
 
-    let tabbar = adw::TabBar::builder().view(&tabs).autohide(true).build();
-    // All three carry the fade class, so the chrome still hides as one (DESIGN.md).
+    // The panes' tab bars carry the fade class too, so the chrome still hides as one
+    // (DESIGN.md); `Pane::new` adds it to each of them.
     sidebar_header.add_css_class("chrome-fade");
     header.add_css_class("chrome-fade");
-    tabbar.add_css_class("chrome-fade");
 
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
@@ -1986,9 +2190,10 @@ fn build_window(
     editor_column.append(find.widget());
     editor_column.append(&toasts);
 
+    // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
+    // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&tabbar);
     toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
@@ -2022,7 +2227,8 @@ fn build_window(
         vault: vault.clone(),
         config: shell.config.clone(),
         window: window.clone(),
-        tabs: tabs.clone(),
+        panes: RefCell::new(vec![first.clone()]),
+        active_pane: RefCell::new(first.clone()),
         title,
         toasts,
         find,
@@ -2038,7 +2244,6 @@ fn build_window(
         sidebar_header,
         toolbar,
         header,
-        tabbar,
         modes: modes.clone(),
         menu,
         paned,
@@ -2066,15 +2271,7 @@ fn build_window(
     tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
     build_sidebar(&app, &rows);
 
-    // One signal keeps the placeholder honest, whoever opened or closed the tab.
-    tabs.connect_n_pages_notify(glib::clone!(
-        #[weak(rename_to = content)]
-        content,
-        move |tabs| {
-            let name = if tabs.n_pages() == 0 { "empty" } else { "tabs" };
-            content.set_visible_child_name(name);
-        }
-    ));
+    wire_pane(&app, &first);
 
     install_actions(gtk_app, &app);
     wire_window(&app, &modes);
@@ -2112,6 +2309,13 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
                 _ if markdown::is_image(rel) => app.open_image(rel),
                 _ => app.toast("Only markdown notes and images open in this phase"),
             }
+        ),
+        // A drag out of the tree is the only notice the panes get that their drop zones should
+        // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
+        glib::clone!(
+            #[weak]
+            app,
+            move |on| app.set_drop_active(on)
         ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
@@ -2181,6 +2385,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
 fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
     let open = Rc::downgrade(app);
+    let split = Rc::downgrade(app);
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
@@ -2196,6 +2401,12 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
         open: Box::new(move |rel| {
             if let Some(app) = open.upgrade() {
                 app.open_note(rel);
+            }
+        }),
+        split: Box::new(move |rel, side| {
+            if let Some(app) = split.upgrade() {
+                let at = app.pane();
+                app.open_beside(&at, side, rel);
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
@@ -2222,33 +2433,18 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
                 // The file is in the trash: there is nothing left to save the buffer into, so the
                 // tab goes without the close asking to write it back out again.
                 tab.discard();
-                app.tabs.close_page(&tab.page);
+                app.close_page(&tab.page);
             }
         }),
     })
 }
 
-fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
-    // While presenting there is no editor on screen, so find and go to line address the rendered
-    // preview instead. Two closures rather than a back-reference, so `find.rs` never sees `App`.
-    app.find.wire(find::Wiring {
-        presenting: Box::new(glib::clone!(
-            #[weak]
-            app,
-            #[upgrade_or]
-            false,
-            move || app.presenting.get().is_some()
-        )),
-        preview: Box::new(glib::clone!(
-            #[weak]
-            app,
-            move |op| app.preview_find(op)
-        )),
-    });
-
+/// Everything one pane's tab view has to answer for. Called for the pane the window is built with
+/// and for every pane a split adds, so a new pane behaves exactly like the first one.
+fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
-    app.tabs.connect_close_page(glib::clone!(
+    pane.tabs.connect_close_page(glib::clone!(
         #[weak]
         app,
         #[upgrade_or]
@@ -2278,19 +2474,158 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
     // `setup-menu` fires with the page just before the popup and with `None` from an idle after
     // it hides. A model button activates its action before the popdown, so the page is still here
     // when the action runs, and afterwards `menu_rel` falls back to the active tab.
-    app.tabs.connect_setup_menu(glib::clone!(
+    pane.tabs.connect_setup_menu(glib::clone!(
         #[weak]
         app,
         move |_, page| *app.menu_page.borrow_mut() = page.cloned()
     ));
-    app.tabs.connect_selected_page_notify(glib::clone!(
+    pane.tabs.connect_selected_page_notify(glib::clone!(
         #[weak]
         app,
+        #[weak]
+        pane,
         move |_| {
+            app.set_active_pane(&pane);
             app.sync_active();
             app.save_session_soon();
         }
     ));
+    // The placeholder is a property of the window, not of one pane: it shows only when no pane
+    // has anything left to show, which with panes that close themselves means the last one.
+    pane.tabs.connect_n_pages_notify(glib::clone!(
+        #[weak]
+        app,
+        move |_| app.sync_panes()
+    ));
+    // A pane that has just lost its last page has nothing left to be. Closing it from an idle
+    // rather than here, because this also fires in the middle of `transfer_page`, which is still
+    // holding the page when the source view reports it gone.
+    pane.tabs.connect_page_detached(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |tabs, _, _| {
+            if tabs.n_pages() > 0 {
+                return;
+            }
+            let app = Rc::downgrade(&app);
+            glib::idle_add_local_once(move || {
+                let Some(app) = app.upgrade() else { return };
+                if pane.tabs.n_pages() == 0 {
+                    app.close_pane(&pane);
+                }
+            });
+        }
+    ));
+    // libadwaita sets this on *every* tab view when a tab drag starts anywhere, which is the only
+    // notice we get that a drag is in flight and the drop sheets should go up.
+    pane.tabs.connect_is_transferring_page_notify(glib::clone!(
+        #[weak]
+        app,
+        move |tabs| app.set_drop_active(tabs.is_transferring_page())
+    ));
+    // Clicking into a pane's editor makes it the one a note opens into, the same as picking one
+    // of its tabs would.
+    let focus = gtk::EventControllerFocus::new();
+    focus.connect_enter(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_| {
+            if app.set_active_pane(&pane) {
+                app.sync_active();
+            }
+        }
+    ));
+    pane.widget().add_controller(focus);
+    wire_pane_drops(app, pane);
+}
+
+/// The drop zones on one pane: the pointer picks an edge or the middle, and letting go there
+/// either splits the pane or drops into it.
+fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
+    pane.drop.connect_motion(glib::clone!(
+        #[weak]
+        pane,
+        #[upgrade_or]
+        gdk::DragAction::empty(),
+        move |target, x, y| {
+            let (w, h) = pane.size();
+            pane.show_zone(Some(panes::zone(x, y, w, h)));
+            // A tab moves, a path from the tree is only read; offer whichever the drag allows.
+            let offered = target
+                .current_drop()
+                .map(|drop| drop.actions())
+                .unwrap_or_else(gdk::DragAction::empty);
+            match offered.contains(gdk::DragAction::MOVE) {
+                true => gdk::DragAction::MOVE,
+                false => gdk::DragAction::COPY,
+            }
+        }
+    ));
+    pane.drop.connect_leave(glib::clone!(
+        #[weak]
+        pane,
+        move |_| pane.show_zone(None)
+    ));
+    // A tree row let go on the bar itself opens in that pane, which is the shortest way to say
+    // "over there" and the one libadwaita already draws an insertion point for.
+    pane.bar
+        .setup_extra_drop_target(gdk::DragAction::COPY, &[String::static_type()]);
+    pane.bar.connect_extra_drag_drop(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        #[upgrade_or]
+        false,
+        move |_, _, value| {
+            let Ok(rel) = value.get::<String>() else {
+                return false;
+            };
+            app.set_active_pane(&pane);
+            app.open_note(&rel);
+            true
+        }
+    ));
+    pane.drop.connect_drop(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        #[upgrade_or]
+        false,
+        move |_, value, x, y| {
+            let (w, h) = pane.size();
+            let zone = panes::zone(x, y, w, h);
+            // Belt and braces: the drag is over whatever the source has to say about it, and a
+            // sheet left up would swallow every click meant for the editor under it.
+            app.set_drop_active(false);
+            app.dropped(&pane, zone, value)
+        }
+    ));
+}
+
+fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
+    // While presenting there is no editor on screen, so find and go to line address the rendered
+    // preview instead. Two closures rather than a back-reference, so `find.rs` never sees `App`.
+    app.find.wire(find::Wiring {
+        presenting: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[upgrade_or]
+            false,
+            move || app.presenting.get().is_some()
+        )),
+        preview: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |op| app.preview_find(op)
+        )),
+    });
+
     modes.connect_toggled(glib::clone!(
         #[weak]
         app,
@@ -2617,11 +2952,15 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
 }
 
 fn label_of(action: &'static str) -> &'static str {
+    label_of_owned(action).unwrap_or(action)
+}
+
+/// The same lookup for a name built at run time, where there is no static string to fall back to.
+fn label_of_owned(action: &str) -> Option<&'static str> {
     ACTIONS
         .iter()
         .find(|(name, _, _)| *name == action)
         .map(|(_, label, _)| *label)
-        .unwrap_or(action)
 }
 
 fn menu_button() -> gtk::MenuButton {
@@ -2648,9 +2987,16 @@ fn menu_button() -> gtk::MenuButton {
 }
 
 /// The tab's own context menu: what can be done with the file behind a tab without touching it.
-/// Reveal sits in a section of its own because it moves the sidebar rather than the clipboard.
+/// Splitting leads, because it opens rather than copies; Reveal sits in a section of its own
+/// because it moves the sidebar rather than the clipboard.
 fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
+    let split = gio::Menu::new();
+    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+        let action = format!("win.split-{}", side.action());
+        split.append(label_of_owned(&action), Some(&action));
+    }
+    menu.append_section(None, &split);
     for action in [
         "win.copy-relative-path",
         "win.copy-absolute-path",
@@ -2898,7 +3244,7 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
-             .accent-pill {{ padding: 6px; border-radius: 12px; }} \
+             .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
