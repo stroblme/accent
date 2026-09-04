@@ -9,14 +9,21 @@ use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::Path;
 use std::time::Instant;
 
+use crate::search::Regex;
+
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 const BATCH: usize = 500;
+/// Bytes of a matched line [`Index::grep`] keeps before and after the match. A note can hold a
+/// single line megabytes long (an embedded data URI), and a sidebar row must not carry all of it.
+const CLIP_BEFORE: usize = 40;
+const CLIP_AFTER: usize = 200;
 
 const SCHEMA: &str = r#"
 CREATE TABLE files(
@@ -48,8 +55,15 @@ CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT N
 
 -- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
 -- bm25 weights below read in the same order: body first, title second.
+--
+-- `prefix` is what makes the sidebar usable: every query ends in a prefix term (see `fts_query`),
+-- and without a prefix index FTS5 answers `t*` by expanding it over the term index once per row
+-- the snippet is cut for. Measured on the 3.6k-note testvault, a one-character query took 5.1 s
+-- without it and 41 ms with it; the index file grew from 106 to 134 MiB, which a disposable cache
+-- can afford.
 CREATE VIRTUAL TABLE notes_fts USING fts5(
-    body, title, content='notes', content_rowid='file_id', tokenize="unicode61 remove_diacritics 2"
+    body, title, content='notes', content_rowid='file_id',
+    tokenize="unicode61 remove_diacritics 2", prefix='1 2 3'
 );
 CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
     INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
@@ -152,6 +166,21 @@ pub struct SearchHit {
     pub rel_path: String,
     pub title: Option<String>,
     pub snippet: String,
+}
+
+/// One hit of [`Index::grep`], which lists a row per match rather than a row per note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Match {
+    pub rel_path: String,
+    pub title: Option<String>,
+    /// 1-based, the way an editor counts lines.
+    pub line: u32,
+    /// The line the match sits on, clipped to what a sidebar row can show.
+    pub line_text: String,
+    /// Byte range of the match inside `line_text`.
+    pub range: Range<usize>,
+    /// Byte offset of the match in the note, so activating the row can place the caret on it.
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -821,26 +850,119 @@ impl Index {
     /// puts that note first for 47 of 60 sampled notes, against 2 of 60 with the title
     /// unweighted. Raising it to 20 buys one more note and costs a lot: three quarters of an
     /// ordinary body search's top ten then come from a title word rather than the body.
+    /// The snippet is cut here rather than by FTS5's `snippet()`, and the ranking runs in a
+    /// subquery so only the rows that survive it are quoted at all. Both are about the same
+    /// measurement: on the 3.6k-note `testvault/` a one-character query took 2.4 s and a
+    /// two-character one 0.5 s, and `snippet()` was every millisecond of it. It re-derives the
+    /// match positions from the term index, which for a prefix term means merging the doclist of
+    /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
+    /// same window with `instr` over the body the index already stores costs a tenth of that.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
         let q = fts_query(query);
         if q.is_empty() {
             return Ok(Vec::new());
         }
         let mut st = self.conn.prepare_cached(
-            "SELECT f.rel_path, f.title, snippet(notes_fts, 0, '«', '»', '…', 12)
+            "SELECT f.rel_path, f.title,
+                    substr(notes_fts.body, max(1, instr(lower(notes_fts.body), ?4) - 40), 240)
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
-             WHERE notes_fts MATCH ?1
-             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
-             LIMIT ?3",
+             WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
+                 SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
+                  WHERE notes_fts MATCH ?1
+                  ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
+                  LIMIT ?3)
+             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
         )?;
-        let rows = st.query_map(params![q, query.trim(), limit as i64], |r| {
-            Ok(SearchHit {
-                rel_path: r.get(0)?,
-                title: r.get(1)?,
-                snippet: r.get(2)?,
-            })
-        })?;
+        let terms = terms(query);
+        // The most specific term makes the most useful window, and SQLite's `lower` is ASCII, so
+        // the needle is folded the same way or `instr` would never find it.
+        let window = terms
+            .iter()
+            .max_by_key(|t| t.len())
+            .cloned()
+            .unwrap_or_default();
+        let rows = st.query_map(
+            params![q, query.trim(), limit as i64, window.to_ascii_lowercase()],
+            |r| {
+                let body: String = r.get(2)?;
+                Ok(SearchHit {
+                    rel_path: r.get(0)?,
+                    title: r.get(1)?,
+                    snippet: mark_terms(&body, &terms),
+                })
+            },
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every hit of `re` in a note body, in `rel_path` order: at most `limit` of them, plus the
+    /// total the scan saw, so a truncated list can still say how much a Replace All would touch.
+    ///
+    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which notes
+    /// are about this", regexes answer "where exactly does this text occur". The bodies are
+    /// already in the index, so no note is read from disk, and the statement streams them one row
+    /// at a time rather than materialising the whole vault's text.
+    pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+        let mut st = self.conn.prepare_cached(GREP_SQL)?;
+        let mut rows = st.query([])?;
+        let (mut out, mut total) = (Vec::new(), 0usize);
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(2)?;
+            let mut hits = re.find_iter(&body).peekable();
+            if hits.peek().is_none() {
+                continue;
+            }
+            let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
+            // `find_iter` walks forward, so the line number follows it instead of being counted
+            // from the start of the note for every hit.
+            let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
+            for m in hits {
+                total += 1;
+                if out.len() >= limit {
+                    continue;
+                }
+                while cursor < m.start() {
+                    if body.as_bytes()[cursor] == b'\n' {
+                        line += 1;
+                        line_start = cursor + 1;
+                    }
+                    cursor += 1;
+                }
+                let rest = &body[line_start..];
+                let line_text = rest
+                    .split('\n')
+                    .next()
+                    .unwrap_or(rest)
+                    .trim_end_matches('\r');
+                let start = m.start() - line_start;
+                let end = (m.end() - line_start).min(line_text.len());
+                let (line_text, range) = clip(line_text, start..end);
+                out.push(Match {
+                    rel_path: rel_path.clone(),
+                    title: title.clone(),
+                    line,
+                    line_text,
+                    range,
+                    offset: m.start(),
+                });
+            }
+        }
+        Ok((out, total))
+    }
+
+    /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
+    /// replace has to visit every file, not only the ones the sidebar had room to list.
+    pub fn grep_paths(&self, re: &Regex) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(GREP_SQL)?;
+        let mut rows = st.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(2)?;
+            if re.is_match(&body) {
+                out.push(row.get(0)?);
+            }
+        }
+        Ok(out)
     }
 
     pub fn backlinks(&self, rel_path: &str) -> Result<Vec<Backlink>> {
@@ -914,6 +1036,77 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         size: r.get(4)?,
         mtime_ns: r.get(5)?,
     })
+}
+
+/// Every note's path, title and text, for the two regex scans. Ordered so both agree on which
+/// matches a capped list drops.
+const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
+     FROM notes n JOIN files f ON f.id = n.file_id
+     ORDER BY f.rel_path";
+
+/// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
+/// An elided end is marked with an ellipsis, so a clipped line does not read as the whole line.
+fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
+    let mut start = range.start.saturating_sub(CLIP_BEFORE);
+    while start > 0 && !line.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = range.end.saturating_add(CLIP_AFTER).min(line.len());
+    while end < line.len() && !line.is_char_boundary(end) {
+        end += 1;
+    }
+    let lead = match start {
+        0 => "",
+        _ => "…",
+    };
+    let tail = match end < line.len() {
+        true => "…",
+        false => "",
+    };
+    let text = format!("{lead}{}{tail}", &line[start..end]);
+    // `start` is never past the match, so the shift back onto the clipped text cannot underflow.
+    let at = |i: usize| i - start + lead.len();
+    (text, at(range.start)..at(range.end))
+}
+
+/// The query's words: the units [`fts_query`] turns into FTS terms, and the ones a snippet marks.
+fn terms(query: &str) -> Vec<&str> {
+    query.split_whitespace().collect()
+}
+
+/// Wrap every occurrence of a query term in the guillemets the UI turns into bold, the way FTS5's
+/// own `snippet()` did. The input is the 240-character window SQLite already cut, so this is a
+/// pass over a row of text rather than over a note.
+///
+/// ponytail: matching is ASCII-case-insensitive rather than the `unicode61 remove_diacritics 2`
+/// tokenizer that ranked the note, and the window carries no leading ellipsis because knowing
+/// where it starts would cost a second `lower(body)` per row. A hit found only through diacritic
+/// folding is therefore quoted without being marked. The snippet is a preview; ranking is exact.
+fn mark_terms(window: &str, terms: &[&str]) -> String {
+    let lower = window.to_ascii_lowercase();
+    let needles: Vec<String> = terms
+        .iter()
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_lowercase())
+        .collect();
+    let mut out = String::with_capacity(window.len() + 8 * needles.len());
+    let mut i = 0;
+    while i < window.len() {
+        match needles.iter().find(|n| lower[i..].starts_with(n.as_str())) {
+            Some(n) => {
+                out.push('«');
+                out.push_str(&window[i..i + n.len()]);
+                out.push('»');
+                i += n.len();
+            }
+            None => {
+                let c = window[i..].chars().next().expect("i is a char boundary");
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
 }
 
 /// Turn a user query into safe FTS5 syntax: every token quoted, the last one a prefix match.
@@ -1068,6 +1261,63 @@ mod tests {
         // Garbage in must not be a SQL/FTS syntax error.
         assert!(ix.search("\"unbalanced AND *", 10).unwrap().is_empty());
         assert!(ix.search("", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snippet_marks_every_query_term_it_can_see() {
+        let words = terms("Ferris the crab");
+        assert_eq!(
+            mark_terms("A FERRIS and a crab, plus THE rest", &words),
+            "A «FERRIS» and a «crab», plus «THE» rest"
+        );
+        // A term the window does not hold is simply not marked, and an empty query marks nothing.
+        assert_eq!(mark_terms("nothing here", &words), "nothing here");
+        assert_eq!(mark_terms("äöü ferris", &words[..1]), "äöü «ferris»");
+        assert_eq!(mark_terms("as is", &terms("")), "as is");
+    }
+
+    #[test]
+    fn grep_lists_one_row_per_match_with_its_line() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        fs::write(
+            vault.path().join("a.md"),
+            "# Alpha\nferris and ferris\nlater ferris\n",
+        )
+        .unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
+        let (hits, total) = ix.grep(&re, 10).unwrap();
+        assert_eq!(total, 4, "three in a.md, one in sub/Beta.md: {hits:?}");
+        assert_eq!(hits.len(), 4);
+        assert_eq!(hits[0].rel_path, "a.md");
+        assert_eq!((hits[0].line, hits[1].line, hits[2].line), (2, 2, 3));
+        assert_eq!(&hits[0].line_text[hits[0].range.clone()], "ferris");
+        assert_eq!(&hits[1].line_text[hits[1].range.clone()], "ferris");
+        // The offset addresses the note, not the line, so opening it can place the caret.
+        let body = fs::read_to_string(vault.path().join("a.md")).unwrap();
+        assert_eq!(&body[hits[2].offset..hits[2].offset + 6], "ferris");
+
+        // The cap truncates the list but not the count a Replace All is measured against.
+        let (few, total) = ix.grep(&re, 2).unwrap();
+        assert_eq!((few.len(), total), (2, 4));
+        assert_eq!(ix.grep_paths(&re).unwrap(), ["a.md", "sub/Beta.md"]);
+    }
+
+    #[test]
+    fn clip_keeps_the_match_visible_in_a_long_line() {
+        let line = format!("{}MATCH{}", "ä".repeat(500), "b".repeat(500));
+        let at = line.find("MATCH").unwrap();
+        let (text, range) = clip(&line, at..at + 5);
+        assert_eq!(&text[range], "MATCH");
+        assert!(text.starts_with('…') && text.ends_with('…'), "{text}");
+        assert!(text.len() < 300, "{}", text.len());
+
+        // A short line is passed through untouched.
+        let (text, range) = clip("a MATCH b", 2..7);
+        assert_eq!((text.as_str(), &text[range]), ("a MATCH b", "MATCH"));
     }
 
     /// Two notes for the ranking tests: the query is `target.md`'s title, and also a phrase

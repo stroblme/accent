@@ -1,7 +1,7 @@
 //! accent-api: the UI-facing façade. Plain serde data types only; no GTK, no Android types.
 //! Desktop links this directly; Android gets uniffi bindings of this crate; the CLI renders it as JSON-RPC over stdio.
 //!
-//! [`Vault`] owns the lifecycle of one open vault: two SQLite connections, the filesystem
+//! [`Vault`] owns the lifecycle of one open vault: three SQLite connections, the filesystem
 //! watcher, and the batching that turns a Syncthing pull of 500 files into a single [`Event`].
 //! The caller reads on its own connection and never waits for the worker, which is what keeps a
 //! UI thread free while the vault is being indexed.
@@ -25,8 +25,9 @@ pub use accent_core::config::{Config, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
 pub use accent_core::fs::{Etag, SaveError};
 pub use accent_core::index::{
-    Backlink, FileRow, HeadingRow, Progress, ReconcileStats, SearchHit, Stats,
+    Backlink, FileRow, HeadingRow, Match, Progress, ReconcileStats, SearchHit, Stats,
 };
+pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 
 // ---------------------------------------------------------------- public data
@@ -63,6 +64,15 @@ pub struct RenamePlan {
     pub rewrites: Vec<String>,
 }
 
+/// What a global replace wrote, in the shape [`RenameReport`] has: what worked is counted, what
+/// failed is named, and a note the replace could not write never fails the whole call.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReplaceReport {
+    pub rewritten: Vec<String>,
+    pub matches: usize,
+    pub failed: Vec<(String, String)>,
+}
+
 /// What it actually did.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenameReport {
@@ -76,6 +86,10 @@ pub struct Vault {
     /// The caller's connection. The mutex is not about contention (WAL readers never block):
     /// it is what makes `Vault` `Send + Sync`, which uniffi will need in Phase 3.
     index: Mutex<Index>,
+    /// A reader of its own for the sidebar's search, which runs on a worker thread. A regex scan
+    /// of every note holds its connection for as long as it takes, and the main thread's
+    /// `list_dir` and `backlinks` must never queue behind one on the same mutex.
+    search: Mutex<Index>,
     cfg: Mutex<VaultConfig>,
     tx: Sender<Msg>,
     worker: Option<JoinHandle<()>>,
@@ -98,6 +112,7 @@ impl Vault {
         // The reader opens first because it is the connection that may drop and recreate the
         // schema; the worker's must never see the database half-built.
         let index = Index::open(db)?;
+        let search = Index::open(db)?;
         let writer = Index::open(db)?;
 
         let (tx, rx) = channel::<Msg>();
@@ -121,6 +136,7 @@ impl Vault {
             Vault {
                 root,
                 index: Mutex::new(index),
+                search: Mutex::new(search),
                 cfg: Mutex::new(cfg),
                 tx,
                 worker: Some(handle),
@@ -176,6 +192,10 @@ impl Vault {
 
     fn index(&self) -> MutexGuard<'_, Index> {
         self.locked(&self.index)
+    }
+
+    fn searcher(&self) -> MutexGuard<'_, Index> {
+        self.locked(&self.search)
     }
 
     /// A panic in one query must not take the whole vault down with it, so a poisoned lock is
@@ -354,6 +374,68 @@ impl Vault {
         Ok(true)
     }
 
+    /// Replace every match of `re` in every note that has one.
+    ///
+    /// `literal` takes `$1` in `replacement` as two characters rather than a capture group, which
+    /// is what the sidebar's non-regex modes mean. Same shape as [`rename`](Self::rename): a note
+    /// that could not be written is reported rather than fatal, because a vault where most of the
+    /// replacements landed is a real outcome the user has to be told about.
+    ///
+    /// ponytail: the rewrite runs on the calling thread, like every other write here. It reads,
+    /// substitutes and fsyncs one note at a time, so a replace across thousands of notes will
+    /// stall the caller; move it to the worker with a progress event if that ever bites.
+    pub fn replace_all(
+        &self,
+        re: &Regex,
+        replacement: &str,
+        literal: bool,
+    ) -> Result<ReplaceReport> {
+        let mut report = ReplaceReport::default();
+        // Collected before the first write: the guard must not still be held while notes are
+        // rewritten, and the worker reindexes them as they land.
+        for rel in self.searcher().grep_paths(re)? {
+            match self.replace_one(&rel, re, replacement, literal) {
+                Ok(0) => {}
+                Ok(n) => {
+                    report.rewritten.push(rel);
+                    report.matches += n;
+                }
+                Err(e) => {
+                    tracing::warn!("replacing in {rel}: {e:#}");
+                    report.failed.push((rel, format!("{e:#}")));
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// How many matches this note lost. The count comes from the file rather than from the index,
+    /// which may be a watcher debounce behind what is on disk.
+    fn replace_one(
+        &self,
+        rel: &str,
+        re: &Regex,
+        replacement: &str,
+        literal: bool,
+    ) -> Result<usize> {
+        let path = self.path(rel)?;
+        let (text, etag) = fs::read_note(&path)?;
+        let matches = re.find_iter(&text).count();
+        if matches == 0 {
+            return Ok(0);
+        }
+        let rewritten = match literal {
+            true => re.replace_all(&text, search::NoExpand(replacement)),
+            false => re.replace_all(&text, replacement),
+        };
+        fs::write_note(&path, &rewritten, Some(etag))?;
+        self.post(Msg::Update {
+            rel: rel.to_string(),
+            own: true,
+        });
+        Ok(matches)
+    }
+
     /// Keep theirs: the conflict copy's bytes replace the original.
     ///
     /// This is a force-write, not a gated one — the caller has already seen the diff and chosen.
@@ -437,8 +519,14 @@ impl Vault {
         self.index().list_files(rel)
     }
 
+    /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.index().search(query, limit)
+        self.searcher().search(query, limit)
+    }
+
+    /// Exact search: one row per match of `re`, capped at `limit`, plus the total match count.
+    pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+        self.searcher().grep(re, limit)
     }
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
@@ -1160,6 +1248,49 @@ mod tests {
                 .any(|b| b.src_rel_path == "a.md"),
             BUDGET
         ));
+    }
+
+    #[test]
+    fn replace_all_rewrites_every_match_and_reindexes() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "colour and colour\n");
+        f.write("sub/b.md", "Colour\n");
+        f.write("c.md", "nothing here\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let re = search::pattern("colour", Options::default()).unwrap();
+        assert_eq!(f.vault.grep(&re, 10).unwrap().1, 3);
+
+        let report = f.vault.replace_all(&re, "color", true).unwrap();
+        assert_eq!(report.rewritten, ["a.md", "sub/b.md"]);
+        assert_eq!(report.matches, 3);
+        assert!(report.failed.is_empty());
+        assert_eq!(f.read("a.md"), "color and color\n");
+        assert_eq!(f.read("sub/b.md"), "color\n", "case-insensitive by default");
+        assert_eq!(f.read("c.md"), "nothing here\n");
+
+        assert!(
+            poll_until(|| f.vault.grep(&re, 10).unwrap().1 == 0, BUDGET),
+            "the rewrites must reach the index without a rescan"
+        );
+    }
+
+    /// Only regex mode expands `$1`; a literal replacement is written as typed.
+    #[test]
+    fn replace_expands_groups_only_outside_literal_mode() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "hello world\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let opts = Options {
+            regex: true,
+            ..Options::default()
+        };
+        let re = search::pattern(r"hello (\w+)", opts).unwrap();
+        f.vault.replace_all(&re, "bye $1", false).unwrap();
+        assert_eq!(f.read("a.md"), "bye world\n");
     }
 
     #[test]
