@@ -1307,12 +1307,6 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        // A window with no vault has only this pane, so the whole column comes and goes with
-        // whether there is an outline to put in it. One open text file has none.
-        if self.vault.is_none() {
-            let wanted = self.active_doc().is_some_and(|doc| doc.pdf().is_some());
-            self.sidebar_column.set_visible(wanted);
-        }
         let Some(doc) = self.active_doc() else {
             return sidebar.set_outline(None);
         };
@@ -2374,6 +2368,11 @@ impl App {
     }
 
     fn show_pane(&self, name: &str) {
+        // A window with no vault has only the outline, and asking for a pane it does not have
+        // must not open an empty column.
+        if !self.sidebar.get().is_some_and(|s| s.has_pane(name)) {
+            return;
+        }
         self.sidebar_column.set_visible(true);
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.show_pane(name);
@@ -3038,8 +3037,8 @@ fn build_window(
             tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
             build_sidebar(&app, &rows, vault);
         }
-        // Outline only, and hidden until something with an outline is open: a window showing one
-        // text file has nothing to put in it, and an empty column is a column wasted.
+        // Outline only, and collapsed: a window opened on one file is that file, and the
+        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+L.
         None => {
             build_outline_sidebar(&app);
             app.sidebar_column.set_visible(false);

@@ -233,6 +233,12 @@ impl Sidebar {
             .set_visible_child_name(if refs.is_empty() { "empty" } else { "list" });
     }
 
+    /// Whether this sidebar has the named pane at all. A window with no vault has only the
+    /// outline, so the chords for the others must not open a column that cannot answer them.
+    pub fn has_pane(&self, name: &str) -> bool {
+        self.stack.child_by_name(name).is_some()
+    }
+
     /// Replace what the Outline pane shows; `None` puts the empty state back.
     pub fn set_outline(&self, content: Option<&gtk::Widget>) {
         match content {
