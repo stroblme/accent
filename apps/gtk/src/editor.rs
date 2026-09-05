@@ -674,14 +674,19 @@ fn duplicated(line: &str) -> String {
     }
 }
 
-/// Family and point size of a font description, with GNOME's defaults where it is silent, scaled
+/// Family and point size of a font description, with our own defaults where it is silent, scaled
 /// by `zoom`. Rounded to two decimals so stepping the zoom does not write `12.100000000000001pt`.
-fn font_css(name: &str, selector: &str, zoom: f64) -> String {
+///
+/// The one place either is decided. `main::install_document_font` writes the display-wide rule
+/// through this too, at zoom 1.0: the extraction used to be written out a second time there with a
+/// different fallback family, so a description with no family of its own would have produced two
+/// different faces.
+pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let desc = pango::FontDescription::from_string(name);
     let family = desc
         .family()
         .map(|f| f.to_string())
-        .unwrap_or_else(|| "Cantarell".to_string());
+        .unwrap_or_else(|| DEFAULT_FAMILY.to_string());
     let size = match desc.size() as f64 / pango::SCALE as f64 {
         pt if pt > 0.0 => pt,
         _ => 11.0,
@@ -1548,10 +1553,14 @@ mod tests {
         );
     }
 
-    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included.
+    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included, and one
+    /// with no family at all to the family the editor is written in. The display-wide rule goes
+    /// through the same function, so a second fallback here would be a second face there.
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+        let css = font_css("11", "#doc", 1.0);
+        assert!(css.contains("font-family: \"Adwaita Mono\""), "{css}");
     }
 
     /// The gutter is as wide as the longest number it will ever print, and never zero wide.

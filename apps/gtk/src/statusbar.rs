@@ -41,6 +41,12 @@ impl Bar {
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
         // and Fit Width for a PDF. Flat and label-only, so it reads as the rest of the bar rather
         // than as a button parked in it.
+        //
+        // `accent-zoom` is what keeps the bar one height. A button's minimum is 24 px plus 5 px of
+        // padding either side, and a box is as tall as its tallest child whatever its alignment,
+        // so a readout appearing pushed the bar from 29 px to 46 px. The class pins the button to
+        // the caption's own line height; it stays a button, so it keeps its focus, its role and
+        // its tooltip.
         let zoom_label = label(true);
         let zoom = gtk::Button::builder()
             .child(&zoom_label)
@@ -50,6 +56,7 @@ impl Bar {
             .visible(false)
             .build();
         zoom.add_css_class("flat");
+        zoom.add_css_class("accent-zoom");
 
         row.append(&progress);
         row.append(&branch);

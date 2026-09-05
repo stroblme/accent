@@ -7,8 +7,9 @@
 //!
 //! A focused shell owns the keyboard, so the window's accelerators would otherwise be unreachable
 //! from inside it and half of them would be eaten by the shell. The rule is that every `Ctrl+Shift`
-//! chord in the action table, plus the ones that move between tabs, is claimed here and forwarded
-//! to the window; everything else belongs to the shell, `Ctrl+C` and `Ctrl+K` included.
+//! chord in the action table, plus the ones that move between tabs and the three zoom chords, is
+//! claimed here and forwarded to the window; everything else belongs to the shell, `Ctrl+C` and
+//! `Ctrl+K` included.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -45,6 +46,26 @@ impl Term {
 
     pub fn refont(&self) {
         self.view.set_font(Some(&monospace()));
+    }
+
+    /// How far this shell is zoomed. A terminal carries its own: it is a grid of columns, not a
+    /// page of prose, so it does not follow the document font the way the editor and the preview
+    /// do. VTE scales the font it was given, and `paint` only ever sets the description, so a
+    /// scale survives a restyle and a font change.
+    pub fn zoom(&self) -> f64 {
+        self.view.font_scale()
+    }
+
+    /// VTE clamps a scale to [0.25, 4.0], which contains the window's own [0.5, 3.0], so the two
+    /// agree about what a zoom can be.
+    pub fn set_zoom(&self, zoom: f64) {
+        self.view.set_font_scale(crate::clamp_zoom(zoom));
+    }
+
+    /// What the status bar says about it, or nothing at all when the shell is at its own size.
+    pub fn zoom_label(&self) -> Option<String> {
+        let zoom = self.zoom();
+        (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
     }
 }
 

@@ -38,7 +38,7 @@ use accent_core::markdown::{Link, LinkKind};
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
-use gtk::{gdk, gio, glib, pango};
+use gtk::{gdk, gio, glib};
 use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -1407,28 +1407,15 @@ impl App {
         // have to work out which tab the pointer is over and would race the PDF's own, while this
         // one only ever sees a text tab. Bubble phase, ahead of the scrolled window's controller,
         // which is the order `pdfview` relies on for the same reason.
-        let accum = Cell::new(0.0);
-        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
-        wheel.connect_scroll(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |controller, _, dy| {
-                if !controller
-                    .current_event_state()
-                    .contains(gdk::ModifierType::CONTROL_MASK)
-                {
-                    return glib::Propagation::Proceed;
-                }
-                let steps = wheel_steps(&accum, dy);
-                for _ in 0..steps.abs() {
-                    app.set_zoom(stepped_zoom(app.zoom.get(), steps > 0));
-                }
-                glib::Propagation::Stop
-            }
-        ));
-        tab.view.add_controller(wheel);
+        zoom_on_wheel(
+            &tab.view,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+            ),
+        );
 
         tab.connect_autosave(glib::clone!(
             #[weak(rename_to = app)]
@@ -2235,6 +2222,18 @@ impl App {
         );
         self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
+        // The preview follows the document zoom, so the wheel over it has to reach the same
+        // setting the wheel over the editor does. Capture phase: WebKit answers a Ctrl+scroll
+        // itself, with a zoom of its own that nothing else in the window knows about.
+        zoom_on_wheel(
+            preview.widget(),
+            gtk::PropagationPhase::Capture,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+            ),
+        );
         preview.connect_found(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -2470,19 +2469,7 @@ impl App {
                     tab.add_caret(true);
                 }
             }
-            // A PDF zooms its pages; everything else zooms the document font. Same three
-            // chords, because they mean the same thing to the person pressing them.
-            "zoom-in" | "zoom-out" | "zoom-reset" if self.active_pdf().is_some() => {
-                let Some(pdf) = self.active_pdf() else { return };
-                match name {
-                    "zoom-in" => pdf.zoom_step(false),
-                    "zoom-out" => pdf.zoom_step(true),
-                    _ => pdf.set_zoom(PdfZoom::FitWidth),
-                }
-            }
-            "zoom-in" => self.set_zoom(stepped_zoom(self.zoom.get(), false)),
-            "zoom-out" => self.set_zoom(stepped_zoom(self.zoom.get(), true)),
-            "zoom-reset" => self.set_zoom(1.0),
+            "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
             "pdf-back" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.back();
@@ -2575,6 +2562,36 @@ impl App {
         }
     }
 
+    /// One of the three zoom chords, dispatched to whatever the active tab is.
+    ///
+    /// A PDF fits its pages, a shell scales its own font and a document scales the display-wide
+    /// one; the other three tab kinds draw at a size nobody chose, so the chords do nothing there.
+    /// It is matched in the same shape as [`App::sync_status`] and [`App::refresh_zoom`] on
+    /// purpose: what the chords reach and what the readout says have to be the same list, or the
+    /// bar says 120 % over something drawn at its own size.
+    fn zoom_action(self: &Rc<Self>, name: &str) {
+        // Reset is 100 % for anything counted in percentages, and Fit Width for a PDF, which is
+        // what a page was fitted to before anyone zoomed it.
+        let stepped = |from: f64| match name {
+            "zoom-in" => stepped_zoom(from, false),
+            "zoom-out" => stepped_zoom(from, true),
+            _ => 1.0,
+        };
+        match self.active_doc() {
+            Some(Doc::Pdf(pdf)) => match name {
+                "zoom-in" => pdf.zoom_step(false),
+                "zoom-out" => pdf.zoom_step(true),
+                _ => pdf.set_zoom(PdfZoom::FitWidth),
+            },
+            Some(Doc::Terminal(term)) => {
+                term.set_zoom(stepped(term.zoom()));
+                self.refresh_zoom();
+            }
+            Some(Doc::Text(_)) => self.set_zoom(stepped(self.zoom.get())),
+            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
+        }
+    }
+
     /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the
     /// system, and this is the reading size of one note. Presentation mode is the same WebView,
     /// so it is zoomed along with the preview.
@@ -2646,6 +2663,22 @@ impl App {
         };
         let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
         fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
+        // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
+        // scale of its own, which would move the terminal without the readout ever hearing of it.
+        zoom_on_wheel(
+            &term.view,
+            gtk::PropagationPhase::Capture,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[weak]
+                term,
+                move |out| {
+                    term.set_zoom(stepped_zoom(term.zoom(), out));
+                    app.refresh_zoom();
+                }
+            ),
+        );
         terminal::on_exit(
             &term,
             glib::clone!(
@@ -2732,17 +2765,26 @@ impl App {
         }
     }
 
-    /// The zoom readout in the status bar: the document zoom for a text tab, and the PDF's own
-    /// for a PDF, which fits to the window rather than counting percentages.
+    /// The zoom readout in the status bar: the document zoom for a text tab, the shell's own for a
+    /// terminal, and the PDF's own for a PDF, which fits to the window rather than counting
+    /// percentages.
     ///
     /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
-    /// saying nothing is going on. A PDF always shows one: fitting is a zoom too, and it is what
-    /// clicking the readout goes back to.
+    /// saying nothing is going on; the same for a shell at its own size. A PDF always shows one:
+    /// fitting is a zoom too, and it is what clicking the readout goes back to. An image, a status
+    /// page and a diff show nothing at all, because no zoom reaches them — the readout used to
+    /// fall through to the window's document zoom and say "120 %" over a picture drawn at its own
+    /// size. It matches the same six variants [`App::zoom_action`] does, so the readout and the
+    /// chords cannot disagree.
     fn refresh_zoom(&self) {
-        let zoom = self.zoom.get();
-        let label = match self.active_pdf() {
-            Some(pdf) => pdf.zoom_label(),
-            None => (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32)),
+        let label = match self.active_doc() {
+            Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
+            Some(Doc::Terminal(term)) => term.zoom_label(),
+            Some(Doc::Text(_)) => {
+                let zoom = self.zoom.get();
+                (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
+            }
+            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -3226,6 +3268,40 @@ fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     let total = accum.get() + dy;
     accum.set(total.fract());
     total.trunc() as i32
+}
+
+/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true)` is one step out,
+/// `step(false)` one step in. One notch is one step, the same amount the chords move.
+///
+/// Each controller owns its own accumulator, because a smooth-scroll device sends one notch as
+/// several fractional deltas and two widgets sharing the remainder would zoom each other. Without
+/// Control the event is passed on untouched, so a plain scroll still scrolls whatever it scrolled.
+///
+/// The phase is the caller's. A text view wants `Bubble`, ahead of the scrolled window around it;
+/// WebKit and VTE answer a Ctrl+scroll themselves, with a zoom of their own that neither the
+/// readout nor the session would know about, so those two have to be beaten to it in `Capture`.
+fn zoom_on_wheel(
+    widget: &impl IsA<gtk::Widget>,
+    phase: gtk::PropagationPhase,
+    step: impl Fn(bool) + 'static,
+) {
+    let accum = Cell::new(0.0);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.set_propagation_phase(phase);
+    wheel.connect_scroll(move |controller, _, dy| {
+        if !controller
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            return glib::Propagation::Proceed;
+        }
+        let steps = wheel_steps(&accum, dy);
+        for _ in 0..steps.abs() {
+            step(steps > 0);
+        }
+        glib::Propagation::Stop
+    });
+    widget.add_controller(wheel);
 }
 
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
@@ -3952,15 +4028,31 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         )),
     });
 
+    // The bottom bar of an `AdwToolbarView` is a `GtkWindowHandle`, so a secondary press anywhere
+    // in it asks the shell for the window menu — Restore / Minimize / Maximize / Close under a
+    // footer that is one line of the document's own facts. Claim the press and do nothing with it.
+    // Only button 3: dragging the window by the bar is button 1 and is left alone.
+    let quiet = gtk::GestureClick::new();
+    quiet.set_button(gdk::BUTTON_SECONDARY);
+    quiet.connect_pressed(|gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    app.statusbar.widget().add_controller(quiet);
+
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
     // popover has a plain widget to hang off.
+    //
+    // The claim comes before anything else and happens whatever the tab is. `GtkButton`'s own
+    // gesture is primary-only, so without it the press bubbled past the readout into the window
+    // handle above and the shell's window menu took the pointer over our popover.
     let fit = gtk::GestureClick::new();
     fit.set_button(gdk::BUTTON_SECONDARY);
     fit.connect_pressed(glib::clone!(
         #[weak]
         app,
-        move |_, _, _, _| {
+        move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
             if app.active_pdf().is_none() {
                 return;
             }
@@ -3971,8 +4063,16 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             let popover = gtk::PopoverMenu::from_model(Some(&menu));
             popover.set_parent(app.statusbar.zoom());
             popover.set_has_arrow(false);
-            // A popover parented by hand stays parented until it is unparented by hand.
-            popover.connect_closed(|p| p.unparent());
+            // A popover parented by hand stays parented until it is unparented by hand — but not
+            // while it is closing. `closed` is emitted from inside the item's own `clicked`, and
+            // an unparented widget has no path to the window's action muxer, so unparenting there
+            // dropped the action the click had just asked for: the menu appeared, Fit Page did
+            // nothing, and the page stayed fitted to the width. The idle runs once the click is
+            // over.
+            popover.connect_closed(|p| {
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
             popover.popup();
         }
     ));
@@ -4310,11 +4410,13 @@ const CAPTURED: &[&str] = &[
 ];
 
 /// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus opening a shell and closing one.
+/// which no shell claims, plus opening a shell, closing one and the three zoom chords.
 ///
 /// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
 /// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
-/// Backspace` still do that, which is why this is the chord to give up.
+/// Backspace` still do that, which is why this is the chord to give up. The zoom chords are the
+/// same trade: a terminal has a zoom of its own now, so `Ctrl+plus` / `Ctrl+minus` / `Ctrl+0` have
+/// to reach it, and readline loses them.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
 /// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
@@ -4328,8 +4430,14 @@ fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
                 .map(move |accel| (*action, accel))
         })
         .filter(|(action, accel)| {
-            matches!(*action, "win.terminal" | "win.close-tab")
-                || (accel.contains("<Control>") && accel.contains("<Shift>"))
+            matches!(
+                *action,
+                "win.terminal"
+                    | "win.close-tab"
+                    | "win.zoom-in"
+                    | "win.zoom-out"
+                    | "win.zoom-reset"
+            ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
         })
         .collect()
 }
@@ -4652,23 +4760,23 @@ fn bench_expand(app: &Rc<App>, rel: &str) {
 
 // --------------------------------------------------------------------------------- appearance
 
-/// The editor uses GNOME's *document* font, not the monospace one: notes are prose.
+/// The display-wide rule every editor starts from: Adwaita Mono at the size of GNOME's *document*
+/// font, which is [`editor::default_font`]. A vault is prose with code fences, tables and
+/// wikilinks in it, and none of those line up in a proportional face, so the family is ours and
+/// only the size follows the system.
+///
+/// It goes through [`editor::font_css`], the same function a tab's own zoom rule is written with,
+/// so the family and the size are decided in one place and a zoomed note cannot end up in a
+/// different face from an unzoomed one.
 fn install_document_font() {
     let Some(display) = gdk::Display::default() else {
         return;
     };
-    let desc = pango::FontDescription::from_string(&editor::default_font());
-    let family = desc
-        .family()
-        .map(|f| f.to_string())
-        .unwrap_or_else(|| "Monospace".to_string());
-    let size = match desc.size() as f64 / pango::SCALE as f64 {
-        s if s > 0.0 => s,
-        _ => 11.0,
-    };
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(&format!(
-        "textview.accent-doc {{ font-family: \"{family}\"; font-size: {size}pt; }}"
+    provider.load_from_string(&editor::font_css(
+        &editor::default_font(),
+        "textview.accent-doc",
+        1.0,
     ));
     // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
     // once per window as well as on every font change, so adding would grow the display's
@@ -4699,6 +4807,11 @@ thread_local! {
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
 /// contents in the same band whatever the interface font makes of their height.
+/// `.accent-zoom` does the same job for the status bar: Adwaita gives a button a 24 px minimum and
+/// 5 px of padding either side, a box is as tall as its tallest child however that child is
+/// aligned, and so the zoom readout appearing lifted the bar from 29 px to 46 px. Dropping the
+/// minimum and the vertical padding puts the button on the caption's own line height, and it stays
+/// a button rather than becoming a label, so the reset click, the focus ring and the tooltip stay.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -4737,6 +4850,7 @@ fn install_chrome_css() {
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
+             .accent-zoom {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
@@ -4891,6 +5005,13 @@ mod tests {
         assert!(has("win.terminal", "<Control>j"));
         assert!(has("win.close-tab", "<Control>w"));
         assert!(has("win.new-folder", "<Control><Shift>n"));
+        // And the zoom chords, because a terminal has a zoom of its own to reach. Every spelling
+        // of them, or Ctrl+= would zoom the shell while Ctrl+plus went to readline.
+        assert!(has("win.zoom-in", "<Control>plus"));
+        assert!(has("win.zoom-in", "<Control>equal"));
+        assert!(has("win.zoom-in", "<Control>KP_Add"));
+        assert!(has("win.zoom-out", "<Control>minus"));
+        assert!(has("win.zoom-reset", "<Control>0"));
         // Left to the shell: plain Ctrl, and anything without Control at all.
         assert!(!has("win.save", "<Control>s"));
         assert!(!has("win.find-previous", "<Shift>F3"));
