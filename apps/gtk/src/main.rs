@@ -4154,7 +4154,7 @@ fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
         ["win.new-note", "win.new-folder", "win.save"].as_slice(),
-        ["win.find", "win.view-mode", "win.present"].as_slice(),
+        ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
         ["win.preferences", "win.about"].as_slice(),
         // What leaves the vault, in the order of how much it takes with it.
         ["app.open-vault", "app.close-vault", "app.quit"].as_slice(),
