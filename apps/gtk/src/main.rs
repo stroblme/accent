@@ -553,9 +553,6 @@ struct App {
     mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
     zoom: Cell<f64>,
-    /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
-    zoom_pill: gtk::Box,
-    zoom_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -974,7 +971,10 @@ impl App {
         pdf.connect_zoom(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.refresh_zoom()
+            move |_| {
+                app.refresh_zoom();
+                app.save_session_soon();
+            }
         ));
         pdf.connect_page(glib::clone!(
             #[weak(rename_to = app)]
@@ -1221,6 +1221,34 @@ impl App {
 
     /// Wire a freshly opened tab into the window.
     fn adopt(self: &Rc<Self>, tab: Rc<Tab>) {
+        // Ctrl+scroll zooms the document, as it zooms a PDF page, through the same step and the
+        // same readout. On the view rather than on the window: a window-level controller would
+        // have to work out which tab the pointer is over and would race the PDF's own, while this
+        // one only ever sees a text tab. Bubble phase, ahead of the scrolled window's controller,
+        // which is the order `pdfview` relies on for the same reason.
+        let accum = Cell::new(0.0);
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        wheel.connect_scroll(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |controller, _, dy| {
+                if !controller
+                    .current_event_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                let steps = wheel_steps(&accum, dy);
+                for _ in 0..steps.abs() {
+                    app.set_zoom(stepped_zoom(app.zoom.get(), steps > 0));
+                }
+                glib::Propagation::Stop
+            }
+        ));
+        tab.view.add_controller(wheel);
+
         tab.connect_autosave(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1912,15 +1940,28 @@ impl App {
     }
 
     /// Which of the editor column and the preview are on screen. Split shows both; presenting
-    /// shows the preview alone, whatever mode the user will come back to.
+    /// shows the preview alone, whatever mode the user will come back to — unless the tab renders
+    /// itself, in which case it is the thing being presented and the preview stays away.
     fn apply_layout(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
-        if self.shows_preview() {
+        // A PDF, an image, a diff, a terminal: anything that is not a note in a buffer. There is
+        // nothing for the preview to render, so hiding the document column would present a blank
+        // window.
+        let own_view = presenting && self.active().is_none();
+        if self.shows_preview() && !own_view {
             self.ensure_preview();
         }
-        self.content.set_visible(!presenting);
+        self.content.set_visible(!presenting || own_view);
         if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.widget().set_visible(self.shows_preview());
+            preview
+                .widget()
+                .set_visible(self.shows_preview() && !own_view);
+        }
+        // The tab bars go with the rest of the chrome, since the column they live in stays. The
+        // restore is unconditional: `AdwTabBar` reveals and hides itself, and leaving it hidden
+        // here would take that decision away from it for good.
+        for pane in self.panes.borrow().iter() {
+            pane.bar.set_visible(!own_view);
         }
         if self.mode.get() == Mode::Split && !presenting {
             self.even_split();
@@ -1963,13 +2004,14 @@ impl App {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
     }
 
-    /// F5: the note alone and rendered, with the sidebar, the tab bar and both header bars gone.
-    /// A state of the window rather than a [`Mode`], because it is a way of looking at the current
-    /// note instead of a layout to work in, and it is deliberately not part of the session: a
-    /// window restored chromeless would be hard to get out of.
+    /// F5: the document alone, with the sidebar, the tab bars and both header bars gone. A state
+    /// of the window rather than a [`Mode`], because it is a way of looking at the current tab
+    /// instead of a layout to work in, and it is deliberately not part of the session: a window
+    /// restored chromeless would be hard to get out of.
     ///
-    /// ponytail: markdown only. A PDF tab keeps showing its own view here; route it through the
-    /// same preview switch once the PDF viewer lands.
+    /// A note is presented through the preview, rendered. A tab that draws its own document — a
+    /// PDF, an image, a diff, a terminal — is presented as it is: `apply_layout` keeps the
+    /// document column and takes the tab bars instead.
     fn set_presenting(self: &Rc<Self>, on: bool) {
         // A PDF presents itself: one whole page, and the zoom it had back afterwards.
         if let Some(pdf) = self.active_pdf() {
@@ -2242,8 +2284,8 @@ impl App {
                     _ => pdf.set_zoom(PdfZoom::FitWidth),
                 }
             }
-            "zoom-in" => self.set_zoom(self.zoom.get() + ZOOM_STEP),
-            "zoom-out" => self.set_zoom(self.zoom.get() - ZOOM_STEP),
+            "zoom-in" => self.set_zoom(stepped_zoom(self.zoom.get(), false)),
+            "zoom-out" => self.set_zoom(stepped_zoom(self.zoom.get(), true)),
             "zoom-reset" => self.set_zoom(1.0),
             "pdf-back" => {
                 if let Some(pdf) = self.active_pdf() {
@@ -2494,24 +2536,19 @@ impl App {
         }
     }
 
-    /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
-    /// PDF, which fits to the window rather than counting percentages.
+    /// The zoom readout in the status bar: the document zoom for a text tab, and the PDF's own
+    /// for a PDF, which fits to the window rather than counting percentages.
     ///
-    /// 100 % and Fit Width are the states that need no readout, so the pill disappears rather
-    /// than leaving a badge saying nothing is going on.
+    /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
+    /// saying nothing is going on. A PDF always shows one: fitting is a zoom too, and it is what
+    /// clicking the readout goes back to.
     fn refresh_zoom(&self) {
         let zoom = self.zoom.get();
         let label = match self.active_pdf() {
             Some(pdf) => pdf.zoom_label(),
             None => (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32)),
         };
-        match label {
-            Some(text) => {
-                self.zoom_label.set_label(&text);
-                self.zoom_pill.set_visible(true);
-            }
-            None => self.zoom_pill.set_visible(false),
-        }
+        self.statusbar.set_zoom(label.as_deref());
     }
 
     /// The minimap is a global preference with no accelerator, so the palette and the preferences
@@ -2969,6 +3006,30 @@ fn clamp_zoom(zoom: f64) -> f64 {
     ((zoom * 10.0).round() / 10.0).clamp(0.5, 3.0)
 }
 
+/// One step in or out from `zoom`: the next multiple of [`ZOOM_STEP`], so a PDF fitted to the
+/// window at 137 % lands on 140 % rather than 147 %. Shared with `pdfview`, so a chord, a wheel
+/// notch and a pinch mean the same amount of zoom whichever kind of tab is in front.
+///
+/// The epsilon is what keeps an exact multiple from stepping to itself once the division has
+/// drifted; the rounding is what keeps the result out of 1.4000000000000001.
+fn stepped_zoom(zoom: f64, out: bool) -> f64 {
+    let steps = zoom / ZOOM_STEP;
+    let next = match out {
+        true => (steps - 1e-6).ceil() - 1.0,
+        false => (steps + 1e-6).floor() + 1.0,
+    };
+    (next * ZOOM_STEP * 100.0).round() / 100.0
+}
+
+/// How many whole steps `dy` completes, given the fraction earlier deltas left over. A
+/// smooth-scroll device sends one wheel notch as several fractional deltas, and one notch is one
+/// step wherever the wheel zooms.
+fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
+    let total = accum.get() + dy;
+    accum.set(total.fract());
+    total.trunc() as i32
+}
+
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
 /// be: a hidden column's zero position, or the fraction an older session file may still hold.
 fn sidebar_width(stored: i32) -> i32 {
@@ -3052,30 +3113,6 @@ fn build_window(
         .shrink_end_child(false)
         .build();
 
-    // Zoom had no visual feedback at all: the note simply grew. The readout floats over the
-    // document in an overlay rather than sitting in a bar, so it costs the column no width and
-    // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
-    // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
-    // on screen.
-    // The zoom readout rides in the header beside the view-mode button rather than floating over
-    // the document: an `.osd` pill is the styling for something laid over content, and this is
-    // chrome. It needs no fade class of its own, because the header it sits in already carries
-    // one and takes its children with it.
-    let zoom_label = gtk::Label::new(Some("100 %"));
-    zoom_label.add_css_class("numeric");
-    zoom_label.add_css_class("dim-label");
-    let zoom_reset = gtk::Button::builder()
-        .icon_name("zoom-original-symbolic")
-        .tooltip_text("Reset Zoom")
-        .action_name("win.zoom-reset")
-        .valign(gtk::Align::Center)
-        .build();
-    zoom_reset.add_css_class("flat");
-
-    let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
-    zoom_pill.append(&zoom_label);
-    zoom_pill.append(&zoom_reset);
-
     toasts.set_child(Some(&paned));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
@@ -3127,7 +3164,6 @@ fn build_window(
     let menu = menu_button();
     header.pack_end(&menu);
     header.pack_end(&modes);
-    header.pack_end(&zoom_pill);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -3215,8 +3251,6 @@ fn build_window(
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
-        zoom_pill,
-        zoom_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -3688,6 +3722,32 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             move || app.active_pdf().map(|pdf| pdf.page_count())
         )),
     });
+
+    // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
+    // the palette. Parented on the status bar's own button rather than in a header bar, so the
+    // popover has a plain widget to hang off.
+    let fit = gtk::GestureClick::new();
+    fit.set_button(gdk::BUTTON_SECONDARY);
+    fit.connect_pressed(glib::clone!(
+        #[weak]
+        app,
+        move |_, _, _, _| {
+            if app.active_pdf().is_none() {
+                return;
+            }
+            let menu = gio::Menu::new();
+            for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
+                menu.append(Some(label_of(action)), Some(action));
+            }
+            let popover = gtk::PopoverMenu::from_model(Some(&menu));
+            popover.set_parent(app.statusbar.zoom());
+            popover.set_has_arrow(false);
+            // A popover parented by hand stays parented until it is unparented by hand.
+            popover.connect_closed(|p| p.unparent());
+            popover.popup();
+        }
+    ));
+    app.statusbar.zoom().add_controller(fit);
 
     modes.connect_toggled(glib::clone!(
         #[weak]
@@ -4467,11 +4527,35 @@ mod tests {
 
     #[test]
     fn zoom_steps_in_tenths_and_stops_at_the_ends() {
-        assert_eq!(clamp_zoom(1.0 + ZOOM_STEP), 1.1);
-        assert_eq!(clamp_zoom(1.0 - ZOOM_STEP), 0.9);
+        assert_eq!(clamp_zoom(stepped_zoom(1.0, false)), 1.1);
+        assert_eq!(clamp_zoom(stepped_zoom(1.0, true)), 0.9);
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn stepped_zoom_moves_to_the_next_tenth() {
+        assert_eq!(stepped_zoom(1.0, false), 1.1);
+        assert_eq!(stepped_zoom(1.0, true), 0.9);
+        // Off a tenth, which is where a PDF fitted to the window sits: the next tenth, not a
+        // tenth further.
+        assert_eq!(stepped_zoom(1.37, false), 1.4);
+        assert_eq!(stepped_zoom(1.37, true), 1.3);
+        assert_eq!(stepped_zoom(1.1, false), 1.2);
+    }
+
+    #[test]
+    fn a_wheel_notch_is_one_step() {
+        let accum = Cell::new(0.0);
+        assert_eq!(
+            wheel_steps(&accum, 0.5),
+            0,
+            "half a notch is not a step yet"
+        );
+        assert_eq!(wheel_steps(&accum, 0.5), 1, "the other half completes it");
+        assert_eq!(wheel_steps(&accum, 1.0), 1);
+        assert_eq!(wheel_steps(&accum, -2.0), -2);
     }
 
     #[test]

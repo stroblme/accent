@@ -32,16 +32,15 @@ const PT_TO_PX: f32 = 96.0 / 72.0;
 
 const MIN_SCALE: f64 = 0.1;
 const MAX_SCALE: f64 = 8.0;
-/// One zoom step. Multiplicative, so stepping in and out returns to where it started.
-const STEP: f64 = 1.2;
 
 /// How the page is sized to the window. Defined in core, because the session remembers it.
 pub use accent_core::config::PdfZoom;
 
-/// The header readout for a zoom, or `None` while the mode speaks for itself.
+/// The status bar's readout for a zoom. A PDF always has one, so there is always something to
+/// click to get back to Fit Width.
 pub fn zoom_label(zoom: PdfZoom) -> Option<String> {
     match zoom {
-        PdfZoom::FitWidth => None,
+        PdfZoom::FitWidth => Some("Fit Width".to_string()),
         PdfZoom::FitPage => Some("Fit Page".to_string()),
         PdfZoom::Scale(z) => Some(format!("{} %", (z * 100.0).round() as i32)),
     }
@@ -249,15 +248,12 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
     }
 }
 
-/// One zoom step in or out from `from`, as a fixed scale.
+/// One zoom step in or out from `from`, as a fixed scale. The arithmetic is the document's, so
+/// a page steps in the same tenths a note does however far a fit mode left it from one.
 pub fn stepped(from: f32, out: bool) -> PdfZoom {
-    let current = f64::from(from) / f64::from(PT_TO_PX);
-    let next = match out {
-        true => current / STEP,
-        false => current * STEP,
-    };
-    // Rounded as well as clamped, so stepping never drifts into 1.4400000000000002.
-    PdfZoom::Scale((next * 100.0).round() / 100.0)
+    PdfZoom::Scale(
+        crate::stepped_zoom(f64::from(from) / f64::from(PT_TO_PX), out).clamp(MIN_SCALE, MAX_SCALE),
+    )
 }
 
 /// A scale clamped to what is worth rendering: below the floor nothing is legible, above the
@@ -326,6 +322,7 @@ impl PdfView {
         self.imp().zoom.set(zoom);
         self.relayout();
         self.scroll_to(anchor);
+        self.zoomed();
     }
 
     /// Zoom one step, keeping whatever is under `at` (a widget coordinate) where it is.
@@ -355,6 +352,20 @@ impl PdfView {
         }
         if let Some(vadj) = vadj {
             vadj.set_value(f64::from(fy * layout.height) - y);
+        }
+        self.zoomed();
+    }
+
+    /// Called whenever the zoom changed, however it changed: a chord, the wheel or a pinch.
+    /// [`PdfView::set_zoom`] and [`PdfView::zoom_around`] are the only writers there are.
+    pub fn connect_zoom(&self, f: impl Fn() + 'static) {
+        *self.imp().on_zoom.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn zoomed(&self) {
+        let handler = self.imp().on_zoom.borrow();
+        if let Some(f) = handler.as_ref() {
+            f();
         }
     }
 
@@ -627,6 +638,7 @@ mod imp {
     type Wants = Box<dyn Fn(&super::PdfView, f32, bool, Vec<Want>)>;
     type Coords = Box<dyn Fn(&super::PdfView, f64, f64)>;
     type Page = Box<dyn Fn(usize)>;
+    type Zoomed = Box<dyn Fn()>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
     type OnSelect = Box<dyn Fn(&super::PdfView, usize, (f32, f32), (f32, f32))>;
 
@@ -661,6 +673,8 @@ mod imp {
         pub asked: RefCell<Vec<Want>>,
         pub page: Cell<usize>,
         pub pointer: Cell<(f64, f64)>,
+        /// The fraction of a wheel notch a smooth-scroll device has sent so far.
+        pub scroll_accum: Cell<f64>,
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
@@ -668,6 +682,7 @@ mod imp {
         pub on_pressed: RefCell<Option<Coords>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
+        pub on_zoom: RefCell<Option<Zoomed>>,
     }
 
     // `gtk::ScrollablePolicy` has no `Default`, so the struct spells its own out.
@@ -692,6 +707,7 @@ mod imp {
                 asked: RefCell::new(Vec::new()),
                 page: Cell::new(0),
                 pointer: Cell::new((0.0, 0.0)),
+                scroll_accum: Cell::new(0.0),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
@@ -699,6 +715,7 @@ mod imp {
                 on_pressed: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
+                on_zoom: RefCell::new(None),
             }
         }
     }
@@ -772,13 +789,19 @@ mod imp {
                 #[upgrade_or]
                 glib::Propagation::Proceed,
                 move |controller, _, dy| {
-                    if !controller
-                        .current_event_state()
-                        .contains(gdk::ModifierType::CONTROL_MASK)
+                    // The strip is a view of the same document, so its own controller would zoom
+                    // the thumbnails instead of the page being read.
+                    if obj.imp().thumbnails.get()
+                        || !controller
+                            .current_event_state()
+                            .contains(gdk::ModifierType::CONTROL_MASK)
                     {
                         return glib::Propagation::Proceed;
                     }
-                    obj.zoom_step(dy > 0.0, Some(obj.imp().pointer.get()));
+                    let steps = crate::wheel_steps(&obj.imp().scroll_accum, dy);
+                    for _ in 0..steps.abs() {
+                        obj.zoom_step(steps > 0, Some(obj.imp().pointer.get()));
+                    }
                     glib::Propagation::Stop
                 }
             ));
@@ -1103,16 +1126,20 @@ mod tests {
     }
 
     #[test]
-    fn zoom_steps_are_reversible_and_clamped() {
+    fn zoom_steps_in_tenths_and_clamps() {
+        let scale = |z| {
+            let PdfZoom::Scale(z) = z else {
+                panic!("a step is always a fixed scale")
+            };
+            z
+        };
         let at = fit_scale(&letter(1), PdfZoom::Scale(1.0), 100.0, 100.0);
-        let PdfZoom::Scale(inned) = stepped(at, false) else {
-            panic!("a step is always a fixed scale")
-        };
-        assert_eq!(inned, 1.2);
-        let PdfZoom::Scale(back) = stepped(at * 1.2, true) else {
-            panic!("a step is always a fixed scale")
-        };
-        assert_eq!(back, 1.0);
+        assert_eq!(scale(stepped(at, false)), 1.1);
+        assert_eq!(scale(stepped(at, true)), 0.9);
+        // A page fitted to the window sits off a tenth: the next one, not a tenth further.
+        let fitted = fit_scale(&letter(1), PdfZoom::Scale(1.37), 100.0, 100.0);
+        assert_eq!(scale(stepped(fitted, false)), 1.4);
+        assert_eq!(scale(stepped(fitted, true)), 1.3);
         assert_eq!(clamp_scale(1000.0), 8.0 * PT_TO_PX);
         assert_eq!(clamp_scale(0.0), 0.1 * PT_TO_PX);
     }

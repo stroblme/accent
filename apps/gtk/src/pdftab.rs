@@ -174,6 +174,12 @@ pub fn open(
     tab.view.set_zoom(place.zoom);
     tab.restyle();
     tab.wire(&view);
+    // Only the reading view: the strip is fitted to its own width and never changes zoom.
+    view.connect_zoom(glib::clone!(
+        #[weak]
+        tab,
+        move || tab.emit(&tab.on_zoom)
+    ));
     tab.wire(&thumbs);
     tab.wire_keys();
 
@@ -231,15 +237,13 @@ impl PdfTab {
 
     pub fn set_zoom(self: &Rc<Self>, zoom: PdfZoom) {
         self.view.set_zoom(zoom);
-        self.emit(&self.on_zoom);
     }
 
     pub fn zoom_step(self: &Rc<Self>, out: bool) {
         self.view.zoom_step(out, None);
-        self.emit(&self.on_zoom);
     }
 
-    /// The header readout, or `None` while the zoom is one of the fitting modes.
+    /// The status bar's readout: what the pages are fitted to, or the percentage they are at.
     pub fn zoom_label(&self) -> Option<String> {
         pdfview::zoom_label(self.view.zoom())
     }
