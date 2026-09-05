@@ -1,5 +1,6 @@
-//! Markdown styling: core `Span`s (byte ranges) -> `gtk::TextTag`s on the editor buffer.
+//! Editor styling: core `Span`s and CSV `Cell`s (byte ranges) -> `gtk::TextTag`s on the buffer.
 
+use accent_core::csv;
 use accent_core::markdown::{self, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
@@ -256,6 +257,66 @@ pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     }
 }
 
+/// How many hues the columns cycle through before repeating.
+pub const CSV_COLUMNS: usize = 6;
+
+/// The CSV column tags, deliberately outside [`TAG_NAMES`]: the two sets never overlap, so
+/// neither one's remove pass can reach the other's tags.
+const CSV_TAG_NAMES: [&str; CSV_COLUMNS] = ["csv0", "csv1", "csv2", "csv3", "csv4", "csv5"];
+
+/// Install the column tags in `buffer`'s tag table (idempotent). Colours come from
+/// [`restyle_csv`], as the markdown tags' do from [`restyle`].
+pub fn install_csv_tags(buffer: &sourceview5::Buffer) {
+    let table = buffer.tag_table();
+    if table.lookup(CSV_TAG_NAMES[0]).is_some() {
+        return;
+    }
+    for name in CSV_TAG_NAMES {
+        table.add(&gtk::TextTag::new(Some(name)));
+    }
+}
+
+/// Tag every cell with its column's tag, replacing whatever was there. A file that ends without a
+/// row terminator still has its last cell tagged, and an empty buffer yields no cells at all, so
+/// both are the same loop over nothing special.
+pub fn apply_csv(buffer: &sourceview5::Buffer) {
+    let (start, end) = buffer.bounds();
+    let text = buffer.text(&start, &end, true);
+    for name in CSV_TAG_NAMES {
+        buffer.remove_tag_by_name(name, &start, &end);
+    }
+    let offsets = Offsets::new(&text);
+    for cell in csv::columns(&text) {
+        let s = buffer.iter_at_offset(offsets.char_of(cell.range.start));
+        let e = buffer.iter_at_offset(offsets.char_of(cell.range.end));
+        buffer.apply_tag_by_name(CSV_TAG_NAMES[cell.column % CSV_COLUMNS], &s, &e);
+    }
+}
+
+/// Give the column tags their colours, derived from the current accent. Call it where [`restyle`]
+/// is called: the palette follows the system accent and the columns have no other colour source.
+pub fn restyle_csv(buffer: &sourceview5::Buffer) {
+    let table = buffer.tag_table();
+    let accent = adw::StyleManager::default().accent_color_rgba();
+    let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
+    for (column, name) in CSV_TAG_NAMES.iter().enumerate() {
+        let Some(tag) = table.lookup(name) else {
+            continue;
+        };
+        let (h, s, v) = rotate(hsv, column);
+        let (r, g, b) = gtk::hsv_to_rgb(h, s, v);
+        tag.set_foreground_rgba(Some(&gdk::RGBA::new(r, g, b, accent.alpha())));
+    }
+}
+
+/// The accent's hue moved `column` sixths of a turn around the wheel, saturation and value
+/// untouched. Column 0 is the accent itself, which is what makes the six read as one family
+/// rather than as a second palette.
+fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
+    let (h, s, v) = hsv;
+    ((h + column as f32 / CSV_COLUMNS as f32).fract(), s, v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +411,36 @@ mod tests {
         for span in &a.spans {
             let (s, e) = (o.char_of(span.range.start), o.char_of(span.range.end));
             assert!(s <= e && e <= chars, "{span:?} -> {s}..{e} of {chars}");
+        }
+    }
+
+    /// The six column hues: distinct, a sixth of the wheel apart, wrapping once past 1.0, with the
+    /// accent's saturation and value carried through untouched. `rotate` is the whole colour rule
+    /// that does not need GTK, and GTK cannot be initialised in a test here.
+    #[test]
+    fn csv_hues_step_evenly_around_the_wheel() {
+        let accent = (0.75, 0.4, 0.9);
+        let hues: Vec<f32> = (0..CSV_COLUMNS)
+            .map(|column| {
+                let (h, s, v) = rotate(accent, column);
+                assert_eq!(
+                    (s, v),
+                    (accent.1, accent.2),
+                    "column {column} changed s or v"
+                );
+                assert!((0.0..1.0).contains(&h), "hue {h} left the wheel");
+                h
+            })
+            .collect();
+        assert_eq!(hues[0], accent.0, "column 0 is the accent itself");
+        assert!(hues[2] < hues[1], "the third column has wrapped past 1.0");
+        let mut distinct = hues.clone();
+        distinct.sort_by(f32::total_cmp);
+        distinct.dedup();
+        assert_eq!(distinct.len(), CSV_COLUMNS);
+        for pair in hues.windows(2) {
+            let step = (pair[1] - pair[0]).rem_euclid(1.0);
+            assert!((step - 1.0 / CSV_COLUMNS as f32).abs() < 1e-6, "{pair:?}");
         }
     }
 }

@@ -123,6 +123,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
+    ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
@@ -951,7 +952,12 @@ impl App {
         tab.connect_edited(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |tab| app.queue_render(tab)
+            move |tab| {
+                app.queue_render(tab);
+                if app.is_active(tab) {
+                    app.sync_outline();
+                }
+            }
         ));
         tab.connect_banner(glib::clone!(
             #[weak(rename_to = app)]
@@ -1022,9 +1028,51 @@ impl App {
             }
             None => self.encoding_label.set_visible(false),
         }
+        self.sync_outline();
         if let Some(tab) = note {
             self.render(&tab);
         }
+    }
+
+    /// Fill the Outline pane from the active tab: a note's headings, or a sentence saying why
+    /// there are none.
+    fn sync_outline(self: &Rc<Self>) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let Some(doc) = self.active_doc() else {
+            return sidebar.set_outline(None);
+        };
+        let Some(tab) = doc.tab() else {
+            return sidebar.set_outline(None);
+        };
+        if !tab.flavour().is_note() {
+            // ponytail: an outline of code is a symbol list, which is the language server's job.
+            return sidebar.set_outline(Some(&sidebar::outline_note(
+                "No Outline",
+                "Symbols arrive with language server support.",
+            )));
+        }
+        let headings: Vec<(u8, String, usize)> = tab
+            .headings()
+            .into_iter()
+            .map(|h| (h.level, h.text, h.range.start))
+            .collect();
+        if headings.is_empty() {
+            return sidebar.set_outline(Some(&sidebar::outline_note(
+                "No Headings",
+                "This note has no headings yet.",
+            )));
+        }
+        let key = doc.key();
+        sidebar.set_outline(Some(&sidebar::outline_list(
+            &headings,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |at| app.open_note_at(&key, Some(at))
+            ),
+        )));
     }
 
     // --- saving --------------------------------------------------------------------------
@@ -1763,6 +1811,7 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
+            "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => {

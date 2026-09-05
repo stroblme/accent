@@ -11,7 +11,7 @@
 
 use crate::{comment, completion, highlight, multicaret, typing};
 use accent_core::fs::{self, Etag};
-use accent_core::markdown::Link;
+use accent_core::markdown::{Heading, Link};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use sourceview5::prelude::*;
@@ -171,6 +171,9 @@ pub struct Tab {
     context: sourceview5::SearchContext,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
+    /// The note's headings, for the Outline pane. Produced by the same analysis as the links, so
+    /// keeping them costs nothing over throwing them away.
+    headings: RefCell<Vec<Heading>>,
     font: RefCell<Option<gtk::CssProvider>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
@@ -217,8 +220,10 @@ pub fn open(
     };
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_language(language.as_ref());
-    if flavour.is_note() {
-        highlight::install_tags(&buffer);
+    match flavour {
+        Flavour::Note => highlight::install_tags(&buffer),
+        Flavour::Csv => highlight::install_csv_tags(&buffer),
+        Flavour::Code => {}
     }
     buffer.set_text(&text.text);
     // Bracket matching is noise in prose and the point in code.
@@ -327,6 +332,7 @@ pub fn open(
         context,
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         loading: Cell::new(false),
         debounce: RefCell::new(None),
@@ -362,6 +368,14 @@ pub fn open(
     // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
     // (a background tab is only mapped when it is first selected). Code takes its colours from
     // the style scheme, which needs none of this.
+    if flavour == Flavour::Csv {
+        highlight::restyle_csv(&buffer);
+        view.connect_map(glib::clone!(
+            #[strong]
+            buffer,
+            move |_| highlight::restyle_csv(&buffer)
+        ));
+    }
     if flavour.is_note() {
         highlight::restyle(&buffer, &view);
         view.connect_map(glib::clone!(
@@ -641,6 +655,11 @@ impl Tab {
         self.flavour
     }
 
+    /// The note's headings, most recent analysis, for the Outline pane.
+    pub fn headings(&self) -> Vec<Heading> {
+        self.headings.borrow().clone()
+    }
+
     /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and
     /// the line endings it arrived with. A note is written exactly as typed — two trailing spaces
     /// are a hard line break in markdown.
@@ -723,9 +742,14 @@ impl Tab {
     pub fn restyle(&self) {
         // The scheme is what recolours code, and it is also what a note's own tags sit on.
         sync_scheme(&self.buffer);
-        if self.flavour.is_note() {
-            highlight::restyle(&self.buffer, &self.view);
-            highlight::hang(&self.buffer, &self.view);
+        match self.flavour {
+            Flavour::Note => {
+                highlight::restyle(&self.buffer, &self.view);
+                highlight::hang(&self.buffer, &self.view);
+            }
+            // The column hues are rotated from the accent, which the theme can change under us.
+            Flavour::Csv => highlight::restyle_csv(&self.buffer),
+            Flavour::Code => {}
         }
     }
 
@@ -1268,8 +1292,15 @@ impl Tab {
     /// Re-derive whatever this tab's text implies. A note gets its styling spans and its link
     /// table; code gets nothing, because the style scheme colours it from the language.
     fn analyse(&self) {
-        if self.flavour.is_note() {
-            *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
+        match self.flavour {
+            Flavour::Note => {
+                let analysis = highlight::apply(&self.buffer);
+                *self.links.borrow_mut() = analysis.links;
+                *self.headings.borrow_mut() = analysis.headings;
+            }
+            Flavour::Csv => highlight::apply_csv(&self.buffer),
+            // Code is coloured by its language through the style scheme, with nothing to derive.
+            Flavour::Code => {}
         }
     }
 
