@@ -9,7 +9,9 @@ name = "accent"
 path = "src/main.rs"
 
 [dependencies]
-accent-core.workspace = true
+# The library is dlopen()ed at runtime and its absence degrades to a status page, so this
+# does not make libpdfium a build requirement (see accent_core::pdf::available).
+accent-core = { workspace = true, features = ["pdf"] }
 accent-api.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
