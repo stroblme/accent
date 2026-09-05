@@ -8,7 +8,7 @@ use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -119,9 +119,27 @@ pub struct Tree {
     vault: Arc<Vault>,
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
+    /// What git ignores, shared with the row factory so binding a row is still two setters and a
+    /// set lookup rather than a question for the index.
+    ignored: Rc<RefCell<HashSet<String>>>,
 }
 
 impl Tree {
+    /// Tell the tree what git ignores, and redraw the rows on screen.
+    ///
+    /// The factory is reset rather than the model spliced: a splice recreates every
+    /// `GtkTreeListRow` and collapses the directories the reader had opened, while re-binding
+    /// only touches the handful of rows actually visible.
+    pub fn set_ignored(&self, ignored: HashSet<String>) {
+        if *self.ignored.borrow() == ignored {
+            return;
+        }
+        *self.ignored.borrow_mut() = ignored;
+        let factory = self.view.factory();
+        self.view.set_factory(None::<&gtk::ListItemFactory>);
+        self.view.set_factory(factory.as_ref());
+    }
+
     pub fn view(&self) -> &gtk::ListView {
         &self.view
     }
@@ -217,6 +235,18 @@ impl Tree {
 }
 
 /// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
+/// Whether git ignores `rel`. The set holds paths as git reports them, so a wholly ignored
+/// directory is one entry with a trailing slash and everything under it is ignored with it;
+/// a partly ignored directory has its files listed one by one instead.
+pub fn is_ignored(set: &HashSet<String>, rel: &str) -> bool {
+    if set.is_empty() {
+        return false;
+    }
+    set.contains(rel)
+        || set.contains(&format!("{rel}/"))
+        || ancestors(rel).any(|dir| set.contains(&format!("{dir}/")))
+}
+
 fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
     rel.match_indices('/').map(|(at, _)| &rel[..at])
 }
@@ -268,6 +298,7 @@ pub fn build(
     on_drag: impl Fn(bool) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
+    let ignored: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache) = (vault.clone(), cache.clone());
         move |obj| {
@@ -283,6 +314,7 @@ pub fn build(
     // report through the same closure.
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);
     let factory = gtk::SignalListItemFactory::new();
+    let bind_ignored = ignored.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
         let label = gtk::Label::builder()
@@ -330,7 +362,7 @@ pub fn build(
             .set_child(Some(&expander));
     });
     // Widget lookups and two setters only: no database access on the bind path.
-    factory.connect_bind(|_, item| {
+    factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else {
             return;
@@ -356,6 +388,15 @@ pub fn build(
             .and_downcast::<gtk::Label>()
             .expect("label");
         label.set_text(rel.rsplit('/').next().unwrap_or(&rel));
+        // Both branches, always: row widgets are recycled, so a row that stops being ignored has
+        // to have the class taken off it again.
+        let dim = is_ignored(&bind_ignored.borrow(), &rel);
+        for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
+            match dim {
+                true => widget.add_css_class("dim-label"),
+                false => widget.remove_css_class("dim-label"),
+            }
+        }
     });
 
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -404,6 +445,7 @@ pub fn build(
         vault,
         root: root.clone(),
         cache,
+        ignored,
     }
 }
 
@@ -422,6 +464,20 @@ mod tests {
         // A note at the vault root has nothing above it to expand.
         assert_eq!(dirs("c.md"), [] as [&str; 0]);
         assert_eq!(dirs(""), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn is_ignored_covers_a_file_a_directory_and_what_is_under_it() {
+        let set: HashSet<String> = ["build/".to_string(), "notes/a.log".to_string()]
+            .into_iter()
+            .collect();
+        assert!(is_ignored(&set, "notes/a.log"));
+        assert!(is_ignored(&set, "build"));
+        assert!(is_ignored(&set, "build/deep/thing.o"));
+        assert!(!is_ignored(&set, "notes/b.log"));
+        // A directory whose name merely starts the same is a different directory.
+        assert!(!is_ignored(&set, "builder/x"));
+        assert!(!is_ignored(&HashSet::new(), "build/x"));
     }
 
     #[test]

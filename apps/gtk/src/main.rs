@@ -2367,6 +2367,21 @@ impl App {
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_words(words);
+        self.sync_branch();
+    }
+
+    /// The branch of the repository the active document sits in, which for a nested repository is
+    /// not the vault's own. A comparison tab is no file, so it keeps whatever was showing.
+    fn sync_branch(&self) {
+        let Some(git) = self.git.get() else {
+            return;
+        };
+        let key = self
+            .active_doc()
+            .filter(|d| !d.is_transient())
+            .map(|d| d.key());
+        self.statusbar
+            .set_branch(git.branch_label(key.as_deref()).as_deref());
     }
 
     /// A git refresh landed. The single place the window reacts to one, so everything that has to
@@ -2377,6 +2392,10 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
+        if let Some(tree) = self.tree.get() {
+            tree.set_ignored(git.ignored());
+        }
+        self.sync_branch();
         // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
         // merely noticed an edit is telling us about the very buffer the marks came from.
         if git.head_changed() {

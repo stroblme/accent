@@ -2,8 +2,8 @@
 //!
 //! It says what is happening (indexing, opening), what the file is and how long it is. All of
 //! that used to be spread across the header bar, where it competed with the vault name and the
-//! note path; a document's own facts belong under it, not beside its title. The git phase adds
-//! the branch of the repository the document sits in.
+//! note path; a document's own facts belong under it, not beside its title. The branch is the
+//! repository the document sits in, which is not always the vault's own.
 //!
 //! Nothing here fades with the chrome: the bar is one line of text the reader glances at, and a
 //! word count that disappears while you type is a word count nobody can use.
@@ -15,6 +15,7 @@ use gtk::prelude::*;
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
+    branch: gtk::Label,
     kind: gtk::Label,
     words: gtk::Label,
 }
@@ -29,10 +30,12 @@ impl Bar {
         row.set_margin_bottom(6);
 
         let progress = label(false);
+        let branch = label(false);
         let kind = label(false);
         let words = label(true);
 
         row.append(&progress);
+        row.append(&branch);
         // The file's own facts sit at the far end, away from what the window is busy with.
         kind.set_hexpand(true);
         kind.set_halign(gtk::Align::End);
@@ -42,6 +45,7 @@ impl Bar {
         Bar {
             row,
             progress,
+            branch,
             kind,
             words,
         }
@@ -54,6 +58,11 @@ impl Bar {
     /// What the window is busy with: "Indexing… 1200/42700 files", "Opening the document…".
     pub fn set_progress(&self, text: Option<&str>) {
         set(&self.progress, text);
+    }
+
+    /// The branch of the repository holding the active document, "main ↑1 ↓2".
+    pub fn set_branch(&self, branch: Option<&str>) {
+        set(&self.branch, branch);
     }
 
     /// What the file is: "Markdown", "PDF", or "Rust · UTF-8 · LF" for code.
