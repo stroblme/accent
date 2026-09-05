@@ -2278,7 +2278,13 @@ impl App {
                 find::PreviewOp::Next => pdf.step_match(true),
                 find::PreviewOp::Previous => pdf.step_match(false),
                 find::PreviewOp::Clear => pdf.find(""),
-                find::PreviewOp::Line(page) => pdf.goto_page((page as usize).saturating_sub(1)),
+                // Only the Return moves a PDF. A live preview under a half-typed page number
+                // renders pages nobody asked to read, and it has already left the page Back is
+                // supposed to return to, so the committed jump would have nothing to remember.
+                find::PreviewOp::Line { line, commit: true } => {
+                    pdf.goto_page((line as usize).saturating_sub(1))
+                }
+                find::PreviewOp::Line { commit: false, .. } => {}
             }
             return;
         }
@@ -2291,7 +2297,7 @@ impl App {
             find::PreviewOp::Next => preview.find_next(),
             find::PreviewOp::Previous => preview.find_previous(),
             find::PreviewOp::Clear => preview.find_clear(),
-            find::PreviewOp::Line(line) => preview.scroll_to_line(line),
+            find::PreviewOp::Line { line, .. } => preview.scroll_to_line(line),
         }
     }
 
@@ -3972,6 +3978,39 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         move |_| app.save_session_soon()
     ));
 
+    // The mouse's back and forward buttons. GTK's own gestures stop at button 3, and a
+    // `GtkGestureClick` beside a widget that claims the sequence never sees the press at all
+    // (paned.rs says why), so one capture-phase legacy controller on the window is where these
+    // can be seen. It goes through the GAction rather than calling the reader directly, which is
+    // what gives a mouse click the chrome reveal and the palette bookkeeping a chord gets.
+    let nav = gtk::EventControllerLegacy::new();
+    nav.set_propagation_phase(gtk::PropagationPhase::Capture);
+    nav.connect_event(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, event| {
+            let pressed = match event.event_type() {
+                gdk::EventType::ButtonPress => true,
+                gdk::EventType::ButtonRelease => false,
+                _ => return glib::Propagation::Proceed,
+            };
+            let button = event
+                .downcast_ref::<gdk::ButtonEvent>()
+                .map(|event| event.button());
+            let Some(action) = button.and_then(nav_action) else {
+                return glib::Propagation::Proceed;
+            };
+            if pressed {
+                let _ = WidgetExt::activate_action(&app.window, action, None);
+            }
+            // The release goes with the press, or whatever is under the pointer sees half a click.
+            glib::Propagation::Stop
+        }
+    ));
+    app.window.add_controller(nav);
+
     // Every divider in the window: double-click resets it, and it thickens while dragged.
     paned::watch(
         app.window.upcast_ref(),
@@ -4365,6 +4404,17 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
         }
     ));
     gtk_app.add_action(&quit);
+}
+
+/// Which action a mouse button asks for, for the two GTK has no name for. GDK names only the
+/// first three buttons; 8 and 9 are the side pair every mouse that has one ships, and browsers
+/// have meant back and forward by them for twenty years.
+fn nav_action(button: u32) -> Option<&'static str> {
+    match button {
+        8 => Some("win.pdf-back"),
+        9 => Some("win.pdf-forward"),
+        _ => None,
+    }
 }
 
 fn label_of(action: &'static str) -> &'static str {
@@ -4787,6 +4837,24 @@ mod tests {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| name == action),
                 "{action} is captured but not in ACTIONS"
+            );
+        }
+    }
+
+    /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
+    /// the window actually has.
+    #[test]
+    fn the_side_buttons_name_actions_that_exist() {
+        assert_eq!(nav_action(8), Some("win.pdf-back"));
+        assert_eq!(nav_action(9), Some("win.pdf-forward"));
+        // The three GTK does name are everyone else's: click, paste, context menu.
+        for button in [1, 2, 3] {
+            assert_eq!(nav_action(button), None);
+        }
+        for action in [8, 9].into_iter().filter_map(nav_action) {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| *name == action),
+                "{action} is on a mouse button but not in ACTIONS"
             );
         }
     }

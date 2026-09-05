@@ -410,7 +410,13 @@ impl PdfView {
                 let bytes = image.data.len();
                 self.insert_tile(key, texture(image), bytes);
             }
-            Reply::Lowres { page, dark, image } => self.insert_lowres(page, dark, texture(image)),
+            Reply::Lowres { page, dark, image } => {
+                self.insert_lowres(page, dark, texture(image));
+                let handler = self.imp().on_lowres.borrow();
+                if let Some(f) = handler.as_ref() {
+                    f(page);
+                }
+            }
             other => {
                 let handler = self.imp().on_reply.borrow();
                 if let Some(f) = handler.as_ref() {
@@ -440,6 +446,17 @@ impl PdfView {
     /// Called on pointer motion, so the tab can show a hand over a link.
     pub fn connect_motion(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
         *self.imp().on_motion.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with a page number when its low-resolution stand-in lands in the cache. The link
+    /// preview waits on this: the page it wants a band of has usually never been drawn.
+    pub fn connect_lowres(&self, f: impl Fn(u32) + 'static) {
+        *self.imp().on_lowres.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// One page's size in points, as the document reported it.
+    pub fn page_size(&self, page: usize) -> Option<(f32, f32)> {
+        self.imp().sizes.borrow().get(page).copied()
     }
 
     /// Called with the page under the middle of the viewport whenever it changes.
@@ -641,6 +658,7 @@ mod imp {
     type Zoomed = Box<dyn Fn()>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
     type OnSelect = Box<dyn Fn(&super::PdfView, usize, (f32, f32), (f32, f32))>;
+    type Lowres = Box<dyn Fn(u32)>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -683,6 +701,7 @@ mod imp {
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
         pub on_zoom: RefCell<Option<Zoomed>>,
+        pub on_lowres: RefCell<Option<Lowres>>,
     }
 
     // `gtk::ScrollablePolicy` has no `Default`, so the struct spells its own out.
@@ -716,6 +735,7 @@ mod imp {
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
                 on_zoom: RefCell::new(None),
+                on_lowres: RefCell::new(None),
             }
         }
     }

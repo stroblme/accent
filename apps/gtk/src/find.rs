@@ -23,7 +23,13 @@ pub enum PreviewOp {
     Next,
     Previous,
     Clear,
-    Line(u32),
+    /// A line or a page to show. `commit` is the Return that ends the entry rather than the live
+    /// preview under a half-typed number, which matters to a PDF: only a committed jump is worth
+    /// remembering, or Back walks the digits back one at a time.
+    Line {
+        line: u32,
+        commit: bool,
+    },
 }
 
 /// What the bar needs from the window. Two closures, so `find.rs` never names `App`.
@@ -382,7 +388,10 @@ impl Bar {
             return;
         };
         match self.presenting() {
-            true => self.to_preview(PreviewOp::Line(line.max(1) as u32)),
+            true => self.to_preview(PreviewOp::Line {
+                line: line.max(1) as u32,
+                commit: false,
+            }),
             false => {
                 if let Some(tab) = self.tab() {
                     tab.show_line(line);
@@ -396,7 +405,10 @@ impl Bar {
             return;
         };
         match self.presenting() {
-            true => self.to_preview(PreviewOp::Line(line.max(1) as u32)),
+            true => self.to_preview(PreviewOp::Line {
+                line: line.max(1) as u32,
+                commit: true,
+            }),
             false => {
                 if let Some(tab) = self.tab() {
                     tab.goto_line(line, column);
