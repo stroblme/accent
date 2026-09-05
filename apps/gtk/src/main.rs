@@ -12,6 +12,7 @@ mod doc;
 mod editor;
 mod fileops;
 mod find;
+mod git;
 mod highlight;
 mod multicaret;
 mod palette;
@@ -128,6 +129,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
+    ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // The PDF reader. Back and forward take the chords a browser uses for the same idea;
     // the rest live in the palette, where they are found by name rather than by chord.
@@ -510,6 +512,8 @@ struct App {
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     sidebar: OnceCell<sidebar::Sidebar>,
+    /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
+    git: OnceCell<Rc<git::Panel>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
@@ -1431,6 +1435,11 @@ impl App {
         };
         tab.mark_clean(etag);
         tab.clear_disk_alert();
+        // Our own writes go through the vault, which tells the watcher they were ours, so no
+        // event comes back to say the working tree moved. The pane is told here instead.
+        if let Some(git) = self.git.get() {
+            git.schedule_refresh();
+        }
         Ok(())
     }
 
@@ -1630,6 +1639,19 @@ impl App {
     // --- vault events --------------------------------------------------------------------
 
     fn on_event(self: &Rc<Self>, event: Event) {
+        // Anything that touched a file may have changed what git says about it. The pane
+        // debounces, so a burst of watcher events still costs one `git status`.
+        if matches!(
+            event,
+            Event::Reconciled(_)
+                | Event::DirsChanged(_)
+                | Event::FileChanged(_)
+                | Event::FileRemoved(_)
+                | Event::FileRenamed { .. }
+        ) && let Some(git) = self.git.get()
+        {
+            git.schedule_refresh();
+        }
         match event {
             Event::Progress(p) => {
                 self.statusbar.set_progress(Some(&match p.total {
@@ -2263,6 +2285,7 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
+            "pane-git" => self.show_pane("git"),
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -2342,6 +2365,16 @@ impl App {
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_words(words);
+    }
+
+    /// A git refresh landed. The single place the window reacts to one, so everything that has to
+    /// follow the repository is added here rather than wired into the pane.
+    fn on_git_changed(&self) {
+        let (Some(sidebar), Some(git)) = (self.sidebar.get(), self.git.get()) else {
+            return;
+        };
+        // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
+        sidebar.set_git_visible(git.has_repos());
     }
 
     fn sync_opening(self: &Rc<Self>) {
@@ -3053,6 +3086,7 @@ fn build_window(
         docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
+        git: OnceCell::new(),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
         split,
@@ -3201,7 +3235,56 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }),
         };
-    adopt_sidebar(app, Some((files, data)));
+    let git = build_git(app, vault);
+    adopt_sidebar(
+        app,
+        Some((files, data, git.widget().clone(), git.divider().clone())),
+    );
+    let _ = app.git.set(git);
+    if let Some(git) = app.git.get() {
+        git.schedule_refresh();
+    }
+}
+
+/// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
+/// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
+fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
+    let (toast, open, diff, trash, changed) = (
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+    );
+    git::Panel::new(git::Hooks {
+        vault: vault.clone(),
+        window: app.window.clone(),
+        toast: Box::new(move |text| {
+            if let Some(app) = toast.upgrade() {
+                app.toast(text);
+            }
+        }),
+        open: Box::new(move |key| {
+            if let Some(app) = open.upgrade() {
+                app.open_path(key);
+            }
+        }),
+        open_diff: Box::new(move |key, title, body| {
+            if let Some(app) = diff.upgrade() {
+                app.open_diff(key, title, body);
+            }
+        }),
+        trash: Box::new(move |key| {
+            if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
+                fileops::trash(&ops, key);
+            }
+        }),
+        changed: Box::new(move || {
+            if let Some(app) = changed.upgrade() {
+                app.on_git_changed();
+            }
+        }),
+    })
 }
 
 /// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
@@ -3211,7 +3294,10 @@ fn build_outline_sidebar(app: &Rc<App>) {
     adopt_sidebar(app, None);
 }
 
-fn adopt_sidebar(app: &Rc<App>, vault: Option<(gtk::Widget, sidebar::Data)>) {
+fn adopt_sidebar(
+    app: &Rc<App>,
+    vault: Option<(gtk::Widget, sidebar::Data, gtk::Widget, gtk::Paned)>,
+) {
     let pane = sidebar::Sidebar::new(
         vault,
         glib::clone!(
@@ -4128,6 +4214,9 @@ fn install_chrome_css() {
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
+             .git-actions {{ opacity: 0; }} \
+             row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
+             .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
