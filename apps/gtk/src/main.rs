@@ -23,6 +23,7 @@ mod preview;
 mod settings;
 mod sidebar;
 mod start;
+mod statusbar;
 mod theme;
 mod tree;
 mod typing;
@@ -56,9 +57,6 @@ const SEARCH_LIMIT: usize = 100;
 const COMPLETIONS: usize = 20;
 /// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
 const RENDER: Duration = Duration::from_millis(300);
-/// How often the header's progress bar steps while a PDF is being opened. The sidebar's search
-/// bar pulses at the same rate, and for the same reason: GTK4 has no indeterminate mode.
-const PULSE: Duration = Duration::from_millis(80);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
@@ -504,10 +502,8 @@ struct App {
     toasts: adw::ToastOverlay,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
-    /// Indexing progress, a thin bar under the main header. It replaces the status label that
-    /// used to sit in the header band, which the vault name and note path were already competing
-    /// with.
-    status: gtk::ProgressBar,
+    /// The bar along the bottom of the editor column: progress, branch, file type, word count.
+    statusbar: statusbar::Bar,
     /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
     /// so its key is not a stable one.
     docs: RefCell<Vec<Doc>>,
@@ -538,9 +534,6 @@ struct App {
     /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
     zoom_pill: gtk::Box,
     zoom_label: gtk::Label,
-    /// How the active file is encoded and how its lines end, for a code tab. It rides in the
-    /// header, so the chrome fade already takes it with everything else.
-    encoding_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -553,8 +546,6 @@ struct App {
     menu_page: RefCell<Option<adw::TabPage>>,
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
-    /// Pulses the header's progress bar while a PDF is being opened, the same bar indexing uses.
-    opening: RefCell<Option<glib::SourceId>>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
@@ -1276,16 +1267,7 @@ impl App {
             }
             sidebar.set_backlinks(&sources);
         }
-        // Only code says how it is encoded: a note is UTF-8 with LF endings or it would not be
-        // a note, and a readout that never changes is chrome for nothing.
-        let code = doc.tab().filter(|t| !t.flavour().is_note());
-        match code {
-            Some(tab) => {
-                self.encoding_label.set_label(&tab.encoding_label());
-                self.encoding_label.set_visible(true);
-            }
-            None => self.encoding_label.set_visible(false),
-        }
+        self.sync_status();
         self.sync_outline();
         self.sync_opening();
         self.refresh_zoom();
@@ -1613,15 +1595,10 @@ impl App {
     fn on_event(self: &Rc<Self>, event: Event) {
         match event {
             Event::Progress(p) => {
-                self.status.set_visible(true);
-                self.status
-                    .set_tooltip_text(Some(&format!("Indexing… {}/{} files", p.done, p.total)));
-                match p.total {
-                    0 => self.status.pulse(),
-                    total => self
-                        .status
-                        .set_fraction((p.done as f64 / total as f64).clamp(0.0, 1.0)),
-                }
+                self.statusbar.set_progress(Some(&match p.total {
+                    0 => "Indexing…".to_string(),
+                    total => format!("Indexing… {}/{total} files", p.done),
+                }));
                 // The indexer commits rows in batches and the walk hands it files depth-first,
                 // so the root level is queryable long before the reconcile ends. Without this the
                 // tree of a cold vault stays empty for the whole two seconds. Throttled, and
@@ -1643,7 +1620,7 @@ impl App {
                     unchanged = stats.unchanged,
                     "reconcile done"
                 );
-                self.status.set_visible(false);
+                self.statusbar.set_progress(None);
                 self.reconciled.set(true);
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
@@ -1906,12 +1883,14 @@ impl App {
                 }));
                 self.sidebar_column.set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
+                self.toolbar.set_reveal_bottom_bars(false);
                 self.apply_layout();
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
                 self.sidebar_column.set_visible(before.sidebar);
                 self.toolbar.set_reveal_top_bars(true);
+                self.toolbar.set_reveal_bottom_bars(true);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
                 self.set_mode(before.mode);
             }
@@ -2278,41 +2257,48 @@ impl App {
     /// The same thin bar indexing uses, for the same reason: something is being read and the
     /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
     /// that exists only while an open is in flight.
+    /// The file's own facts in the status bar: what it is, and for a note how long it is.
+    fn sync_status(&self) {
+        let (kind, words) = match self.active_doc() {
+            Some(Doc::Text(tab)) => match tab.flavour() {
+                editor::Flavour::Note => (
+                    Some("Markdown".to_string()),
+                    Some(statusbar::word_count(&tab.text())),
+                ),
+                editor::Flavour::Code => (
+                    Some(statusbar::code_label(
+                        tab.language().as_deref(),
+                        &tab.encoding_label(),
+                    )),
+                    None,
+                ),
+                editor::Flavour::Csv => (
+                    Some(statusbar::code_label(Some("CSV"), &tab.encoding_label())),
+                    None,
+                ),
+            },
+            Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
+            Some(Doc::Image(_)) => (Some("Image".to_string()), None),
+            Some(Doc::Status(_)) | None => (None, None),
+        };
+        self.statusbar.set_kind(kind.as_deref());
+        self.statusbar.set_words(words);
+    }
+
     fn sync_opening(self: &Rc<Self>) {
         let opening = self
             .active_doc()
             .and_then(|doc| doc.pdf().cloned())
             .is_some_and(|pdf| pdf.opening());
-        if !opening {
-            if let Some(id) = self.opening.borrow_mut().take() {
-                id.remove();
-            }
-            // Indexing owns the bar too, and is the slower of the two: leave it alone if it is
-            // still going, and let `Reconciled` take it down.
-            if self.vault.is_none() || self.reconciled.get() {
-                self.status.set_visible(false);
-            }
+        if opening {
+            self.statusbar.set_progress(Some("Opening the document…"));
             return;
         }
-        if self.opening.borrow().is_some() {
-            return;
+        // Indexing owns the same slot and is the slower of the two: leave its text alone if it is
+        // still going, and let `Reconciled` clear it.
+        if self.vault.is_none() || self.reconciled.get() {
+            self.statusbar.set_progress(None);
         }
-        self.status.set_visible(true);
-        self.status.set_tooltip_text(Some("Opening the document…"));
-        let id = glib::timeout_add_local(
-            PULSE,
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                #[upgrade_or]
-                glib::ControlFlow::Break,
-                move || {
-                    app.status.pulse();
-                    glib::ControlFlow::Continue
-                }
-            ),
-        );
-        *self.opening.borrow_mut() = Some(id);
     }
 
     /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
@@ -2667,6 +2653,8 @@ impl App {
                 }
                 places
             },
+            // WP3 replaces this with the panel's own height once the terminal exists.
+            terminal_height: 0,
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -2818,7 +2806,7 @@ fn build_window(
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
     // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
     // would slide it away instead if that ever reads as a jump.
-    let status = gtk::ProgressBar::builder().visible(false).build();
+    let statusbar = statusbar::Bar::new();
 
     // An empty vault window should say so rather than showing a blank rectangle.
     let placeholder = adw::StatusPage::builder()
@@ -2863,10 +2851,6 @@ fn build_window(
         .valign(gtk::Align::Center)
         .build();
     zoom_reset.add_css_class("flat");
-    let encoding_label = gtk::Label::new(None);
-    encoding_label.add_css_class("numeric");
-    encoding_label.add_css_class("dim-label");
-    encoding_label.set_visible(false);
 
     let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
     zoom_pill.append(&zoom_label);
@@ -2924,7 +2908,6 @@ fn build_window(
     header.pack_end(&menu);
     header.pack_end(&modes);
     header.pack_end(&zoom_pill);
-    header.pack_end(&encoding_label);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -2951,7 +2934,9 @@ fn build_window(
     // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&status);
+    // A bottom bar rather than a row inside the content: presentation mode takes it away with the
+    // header for one line, and the find bar and the terminal panel stack above it.
+    toolbar.add_bottom_bar(statusbar.widget());
     toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
@@ -2991,7 +2976,7 @@ fn build_window(
         title,
         toasts,
         find,
-        status,
+        statusbar,
         docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
@@ -3010,13 +2995,11 @@ fn build_window(
         zoom: Cell::new(1.0),
         zoom_pill,
         zoom_label,
-        encoding_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
-        opening: RefCell::new(None),
         render: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),

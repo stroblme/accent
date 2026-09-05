@@ -659,6 +659,12 @@ impl Tab {
         self.flavour
     }
 
+    /// The GtkSourceView language this tab was given, by its display name ("Rust", "Makefile").
+    /// `None` for a file no language claimed, which the status bar calls plain text.
+    pub fn language(&self) -> Option<String> {
+        self.buffer.language().map(|l| l.name().to_string())
+    }
+
     /// Watch the file behind this tab and call `f` when someone else writes it.
     ///
     /// Only for a tab outside every vault: inside one, the vault's own watcher reports the change
