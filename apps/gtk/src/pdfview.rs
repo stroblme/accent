@@ -194,6 +194,8 @@ pub enum Reply {
         image: accent_core::pdf::RgbaImage,
     },
     Links(usize, Vec<accent_core::pdf::Link>),
+    /// One page's glyphs and their boxes, for selecting text on it.
+    Text(usize, Vec<accent_core::pdf::Glyph>),
     Outline(Vec<accent_core::pdf::Outline>),
     /// One page's matches for the query identified by `query`; a later one abandons it.
     Found {
@@ -201,8 +203,11 @@ pub enum Reply {
         page: usize,
         hits: Vec<Vec<accent_core::pdf::Rect>>,
     },
-    /// The file was re-read: these are its page sizes now.
+    /// The file was read: these are its page sizes. The first one arrives when the document is
+    /// opened, which is why a tab can be on screen before anything is known about it.
     Reloaded(Vec<(f32, f32)>),
+    /// The document could not be opened at all, with the reason to show in its place.
+    Failed(String),
 }
 
 /// Lay the pages out in one column at `scale`, centred in `viewport_w`.
@@ -443,6 +448,17 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The boxes of the selected glyphs, in page points, on one page.
+    pub fn set_selection(&self, selection: Option<(usize, Vec<accent_core::pdf::Rect>)>) {
+        *self.imp().selection.borrow_mut() = selection;
+        self.queue_draw();
+    }
+
+    /// Called with the page points a drag started and ended on, when both are on one page.
+    pub fn connect_select(&self, f: impl Fn(&PdfView, usize, (f32, f32), (f32, f32)) + 'static) {
+        *self.imp().on_select.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Where the reader is now.
     pub fn anchor(&self) -> Anchor {
         let layout = self.imp().layout.borrow();
@@ -537,6 +553,24 @@ impl PdfView {
         ))
     }
 
+    /// Report the page points a drag covers, when both ends are on the same page.
+    ///
+    /// ponytail: one page at a time. Selecting across a page break needs the glyphs of every
+    /// page between the two, which is a second lookup and a second set of rectangles; the day
+    /// that is asked for, this is where it goes.
+    fn select_between(&self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        let (Some(from), Some(to)) = (self.page_point(x0, y0), self.page_point(x1, y1)) else {
+            return;
+        };
+        if from.0 != to.0 {
+            return;
+        }
+        let handler = self.imp().on_select.borrow();
+        if let Some(f) = handler.as_ref() {
+            f(self, from.0, (from.1, from.2), (to.1, to.2));
+        }
+    }
+
     fn content_at(&self, x: f64, y: f64) -> (f32, f32) {
         let (ox, oy) = self.scroll_offset();
         ((x + ox) as f32, (y + oy) as f32)
@@ -594,6 +628,7 @@ mod imp {
     type Coords = Box<dyn Fn(&super::PdfView, f64, f64)>;
     type Page = Box<dyn Fn(usize)>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
+    type OnSelect = Box<dyn Fn(&super::PdfView, usize, (f32, f32), (f32, f32))>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -617,6 +652,10 @@ mod imp {
         pub dark: Cell<bool>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
+        /// The selected glyphs' boxes, and which page they are on.
+        pub selection: RefCell<Option<(usize, Vec<accent_core::pdf::Rect>)>>,
+        /// Where a drag began, in widget coordinates, while one is in progress.
+        pub drag_from: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -624,6 +663,7 @@ mod imp {
         pub pointer: Cell<(f64, f64)>,
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
+        pub on_select: RefCell<Option<OnSelect>>,
         pub on_goto: RefCell<Option<Page>>,
         pub on_pressed: RefCell<Option<Coords>>,
         pub on_motion: RefCell<Option<Coords>>,
@@ -646,12 +686,15 @@ mod imp {
                 dark: Cell::new(false),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
+                selection: RefCell::new(None),
+                drag_from: Cell::new(None),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 page: Cell::new(0),
                 pointer: Cell::new((0.0, 0.0)),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
+                on_select: RefCell::new(None),
                 on_goto: RefCell::new(None),
                 on_pressed: RefCell::new(None),
                 on_motion: RefCell::new(None),
@@ -768,6 +811,36 @@ mod imp {
             ));
             obj.add_controller(motion);
 
+            // Dragging over the page selects the text under it. Claimed on the first motion
+            // rather than on the press, so a plain click still reaches the link handler below.
+            let drag = gtk::GestureDrag::new();
+            drag.connect_drag_begin(glib::clone!(
+                #[weak]
+                obj,
+                move |_, x, y| obj.imp().drag_from.set(Some((x, y)))
+            ));
+            drag.connect_drag_update(glib::clone!(
+                #[weak]
+                obj,
+                move |gesture, dx, dy| {
+                    let Some((x, y)) = obj.imp().drag_from.get() else {
+                        return;
+                    };
+                    // A few pixels of travel is a click with a shaky hand, not a selection.
+                    if dx.abs() < 3.0 && dy.abs() < 3.0 {
+                        return;
+                    }
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    obj.select_between(x, y, x + dx, y + dy);
+                }
+            ));
+            drag.connect_drag_end(glib::clone!(
+                #[weak]
+                obj,
+                move |_, _, _| obj.imp().drag_from.set(None)
+            ));
+            obj.add_controller(drag);
+
             let click = gtk::GestureClick::builder().button(0).build();
             click.connect_pressed(glib::clone!(
                 #[weak]
@@ -829,6 +902,7 @@ mod imp {
             let mut wanted: Vec<Want> = Vec::new();
             let cache = obj.cache();
             let marks = self.marks.borrow();
+            let selection = self.selection.borrow();
             for (index, rect) in layout.pages.iter().enumerate() {
                 // One viewport of prefetch above and below, so scrolling meets ready tiles.
                 let visible =
@@ -907,6 +981,20 @@ mod imp {
                     );
                 }
 
+                if let Some((_, boxes)) = selection.as_ref().filter(|(at, _)| *at == index) {
+                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
+                    for glyph in boxes {
+                        snapshot.append_color(
+                            &colour,
+                            &graphene::Rect::new(
+                                rect.x + glyph.left * layout.scale,
+                                rect.y + glyph.top * layout.scale,
+                                glyph.width() * layout.scale,
+                                glyph.height() * layout.scale,
+                            ),
+                        );
+                    }
+                }
                 if let Some(page_marks) = marks.get(&index) {
                     for (n, mark) in page_marks.iter().enumerate() {
                         let alpha = match self.current_mark.get() == Some((index, n)) {
@@ -928,6 +1016,7 @@ mod imp {
                 }
             }
             drop(marks);
+            drop(selection);
             snapshot.restore();
 
             // Asked for once per change, not once per frame: a scroll that reveals nothing new

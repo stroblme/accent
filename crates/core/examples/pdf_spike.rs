@@ -41,7 +41,7 @@ fn main() -> Result<()> {
 
     // --- render, light + dark ------------------------------------------------------------
     let t = Instant::now();
-    let light = doc.render_page(page, SCALE, Theme::Light)?;
+    let light = doc.render_page(page, SCALE, Theme::Plain)?;
     let light_ms = ms(t);
     println!(
         "render x{SCALE} : {light_ms:>7.1} ms  ({} x {} px)",
@@ -55,9 +55,15 @@ fn main() -> Result<()> {
         height: light.height,
         data: light.data.clone(),
     };
+    // libadwaita's dark view colours, which is what the app asks for under a dark theme.
+    let (paper, ink) = ([0x1d, 0x1d, 0x20], [0xeb, 0xeb, 0xeb]);
     let t = Instant::now();
     for px in dark.data.chunks_exact_mut(4) {
-        px.copy_from_slice(&accent_core::pdf::dark_pixel([px[0], px[1], px[2], px[3]]));
+        px.copy_from_slice(&accent_core::pdf::recolour_pixel(
+            [px[0], px[1], px[2], px[3]],
+            paper,
+            ink,
+        ));
     }
     println!(
         "  dark pass: {:>7.1} ms  ({} px)",

@@ -74,15 +74,22 @@ pub struct Sidebar {
     root: gtk::Widget,
     switcher: gtk::Widget,
     stack: adw::ViewStack,
+    /// Everything that needs an index behind it. `None` in a window with no vault, where the
+    /// Outline pane is the only one there is.
+    panes: Option<VaultPanes>,
+    /// Whatever the Outline pane is showing. A `Bin` rather than a list of its own, because what
+    /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
+    /// thumbnails, or a sentence saying why there is nothing.
+    outline_bin: adw::Bin,
+}
+
+/// The four panes that read the vault's index.
+struct VaultPanes {
     search_entry: gtk::SearchEntry,
     replace_toggle: gtk::ToggleButton,
     replace_entry: gtk::Entry,
     backlinks: gtk::StringList,
     backlinks_stack: gtk::Stack,
-    /// Whatever the Outline pane is showing. A `Bin` rather than a list of its own, because what
-    /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
-    /// thumbnails, or a sentence saying why there is nothing.
-    outline_bin: adw::Bin,
     tags_dirty: Rc<Cell<bool>>,
     tags_divider: gtk::Paned,
     select_tag: Rc<dyn Fn(&str)>,
@@ -92,56 +99,66 @@ impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
     /// `on_open` is called with a vault-relative path when the user activates a result, a tagged
     /// file or a backlink, plus the byte offset of the match when the row is one.
+    /// `vault` carries the tree widget and the index closures behind Files, Search, Tags and
+    /// Backlinks; `None` builds a sidebar with only the Outline pane, which is what a window
+    /// opened on a single file has to show. `on_open` is called with a vault-relative path when
+    /// the user activates a result, a tagged file or a backlink, plus the byte offset of the
+    /// match when the row is one.
     pub fn new(
-        files: gtk::Widget,
-        data: Data,
+        vault: Option<(gtk::Widget, Data)>,
         on_open: impl Fn(&str, Option<usize>) + 'static,
     ) -> Sidebar {
-        let data = Rc::new(data);
         let on_open: OnOpen = Rc::new(on_open);
-
         let stack = adw::ViewStack::builder().vexpand(true).build();
-        stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
-        let search = search_pane(&data, &on_open);
-        stack.add_titled_with_icon(
-            &search.widget,
-            Some("search"),
-            "Search",
-            "system-search-symbolic",
-        );
+        // Every pane but the outline is a view of an index, so without one there is nothing for
+        // them to show and they are not built at all.
+        let panes = vault.map(|(files, data)| {
+            let data = Rc::new(data);
+            stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
-        let tags = tags_pane(&data, &on_open);
-        stack.add_titled_with_icon(
-            &tags.widget,
-            Some("tags"),
-            "Tags",
-            "user-bookmarks-symbolic",
-        );
+            let search = search_pane(&data, &on_open);
+            stack.add_titled_with_icon(
+                &search.widget,
+                Some("search"),
+                "Search",
+                "system-search-symbolic",
+            );
 
-        let backlinks = gtk::StringList::new(&[]);
-        let backlinks_stack = backlinks_body(&backlinks, on_open.clone());
-        stack.add_titled_with_icon(
-            &backlinks_stack,
-            Some("backlinks"),
-            "Backlinks",
-            BACKLINK_ICON,
-        );
+            let tags = tags_pane(&data, &on_open);
+            stack.add_titled_with_icon(
+                &tags.widget,
+                Some("tags"),
+                "Tags",
+                "user-bookmarks-symbolic",
+            );
+
+            let backlinks = gtk::StringList::new(&[]);
+            let backlinks_stack = backlinks_body(&backlinks, on_open.clone());
+            stack.add_titled_with_icon(
+                &backlinks_stack,
+                Some("backlinks"),
+                "Backlinks",
+                BACKLINK_ICON,
+            );
+
+            // Lazy fill: a background reindex only flips the flag, so it costs no query while
+            // the user is looking at Files or Search.
+            stack.connect_visible_child_notify({
+                let (dirty, refill) = (tags.dirty.clone(), tags.refill.clone());
+                move |stack| {
+                    if stack.visible_child_name().as_deref() == Some("tags") && dirty.replace(false)
+                    {
+                        refill();
+                    }
+                }
+            });
+            (search, tags, backlinks, backlinks_stack)
+        });
 
         let outline_bin = adw::Bin::builder().vexpand(true).build();
         outline_bin.set_child(Some(&outline_empty()));
         stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", OUTLINE_ICON);
-
-        // Lazy fill: a background reindex only flips the flag, so it costs no query while the user
-        // is looking at Files or Search.
-        stack.connect_visible_child_notify({
-            let (dirty, refill) = (tags.dirty.clone(), tags.refill.clone());
-            move |stack| {
-                if stack.visible_child_name().as_deref() == Some("tags") && dirty.replace(false) {
-                    refill();
-                }
-            }
-        });
 
         // Icons, because four labels do not fit a 200 px sidebar without truncating. The switcher
         // gives every toggle the page title as its tooltip, so icon-only stays discoverable. No
@@ -162,15 +179,17 @@ impl Sidebar {
             root: stack.clone().upcast(),
             switcher: switcher.upcast(),
             stack,
-            search_entry: search.entry,
-            replace_toggle: search.replace_toggle,
-            replace_entry: search.replace_entry,
-            backlinks,
-            backlinks_stack,
+            panes: panes.map(|(search, tags, backlinks, backlinks_stack)| VaultPanes {
+                search_entry: search.entry,
+                replace_toggle: search.replace_toggle,
+                replace_entry: search.replace_entry,
+                backlinks,
+                backlinks_stack,
+                tags_dirty: tags.dirty,
+                tags_divider: tags.divider,
+                select_tag: tags.select,
+            }),
             outline_bin,
-            tags_dirty: tags.dirty,
-            tags_divider: tags.divider,
-            select_tag: tags.select,
         }
     }
 
@@ -178,7 +197,10 @@ impl Sidebar {
     /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
     /// pane lives next to the pane rather than in the shell.
     pub fn reset_divider(&self, divider: &gtk::Paned) -> bool {
-        if divider != &self.tags_divider {
+        let Some(panes) = self.panes.as_ref() else {
+            return false;
+        };
+        if divider != &panes.tags_divider {
             return false;
         }
         divider.set_position(divider.height() * TAGS_SHARE.0 / TAGS_SHARE.1);
@@ -199,11 +221,22 @@ impl Sidebar {
 
     /// Replace the backlinks list (called when the active tab changes).
     pub fn set_backlinks(&self, notes: &[String]) {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
         let refs: Vec<&str> = notes.iter().map(String::as_str).collect();
-        self.backlinks
-            .splice(0, self.backlinks.n_items(), refs.as_slice());
-        self.backlinks_stack
+        panes
+            .backlinks
+            .splice(0, panes.backlinks.n_items(), refs.as_slice());
+        panes
+            .backlinks_stack
             .set_visible_child_name(if refs.is_empty() { "empty" } else { "list" });
+    }
+
+    /// Whether this sidebar has the named pane at all. A window with no vault has only the
+    /// outline, so the chords for the others must not open a column that cannot answer them.
+    pub fn has_pane(&self, name: &str) -> bool {
+        self.stack.child_by_name(name).is_some()
     }
 
     /// Replace what the Outline pane shows; `None` puts the empty state back.
@@ -216,25 +249,35 @@ impl Sidebar {
 
     /// The tag list is out of date; refill it the next time the Tags pane is shown.
     pub fn mark_tags_dirty(&self) {
-        self.tags_dirty.set(true);
+        if let Some(panes) = self.panes.as_ref() {
+            panes.tags_dirty.set(true);
+        }
     }
 
     /// Show a pane by name: "files", "search", "tags", "backlinks" or "outline", focusing its
     /// entry where there is one.
     pub fn show_pane(&self, name: &str) {
+        // A pane this sidebar does not have leaves it where it was, which for a window with no
+        // vault means the outline stays up whatever chord was pressed.
+        if self.stack.child_by_name(name).is_none() {
+            return;
+        }
         self.stack.set_visible_child_name(name);
-        if name == "search" {
-            self.search_entry.grab_focus();
+        if let (Some(panes), "search") = (self.panes.as_ref(), name) {
+            panes.search_entry.grab_focus();
         }
     }
 
     /// Ctrl+Shift+H: the Search pane with its replace row open, focused where there is still
     /// something to type.
     pub fn show_replace(&self) {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
         self.show_pane("search");
-        self.replace_toggle.set_active(true);
-        if !self.search_entry.text().is_empty() {
-            self.replace_entry.grab_focus();
+        panes.replace_toggle.set_active(true);
+        if !panes.search_entry.text().is_empty() {
+            panes.replace_entry.grab_focus();
         }
     }
 
@@ -242,8 +285,11 @@ impl Sidebar {
     pub fn show_tag(&self, tag: &str) {
         // Ordering matters: this refills the tag list if it is dirty, and the refill clears the
         // selection, so the tag has to be picked afterwards.
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
         self.show_pane("tags");
-        (self.select_tag)(tag);
+        (panes.select_tag)(tag);
     }
 
     /// The visible pane's name, for session state. A stack always has a visible child once it has
