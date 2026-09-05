@@ -843,6 +843,38 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every openable file's rel_path, notes first and then the rest by path.
+    ///
+    /// The switcher opens more than markdown now, so it needs this rather than
+    /// [`note_paths`](Self::note_paths), which stays markdown-only because wikilink completion may
+    /// only ever offer notes. Directories are not files to open and conflict copies are reached
+    /// through the resolve UI, so neither is listed.
+    pub fn file_paths(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files WHERE kind IN (?1, ?2, ?3)
+             ORDER BY kind <> ?1, rel_path COLLATE NOCASE",
+        )?;
+        let rows = st.query_map(
+            params![
+                FileKind::Markdown.as_i64(),
+                FileKind::Pdf.as_i64(),
+                FileKind::Other.as_i64(),
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The files the index knows a name for and nothing else: only markdown is read and hashed,
+    /// so these rows carry no body a query could look at. The façade greps them from disk.
+    pub fn other_paths(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
+        )?;
+        let rows = st.query_map([FileKind::Other.as_i64()], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The `limit` most recently modified notes: what the switcher lists before the user types.
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
@@ -931,46 +963,76 @@ impl Index {
         let (mut out, mut total) = (Vec::new(), 0usize);
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
-            let mut hits = re.find_iter(&body).peekable();
-            if hits.peek().is_none() {
+            // Tested before the other columns are fetched: most notes do not match, and their
+            // path and title would be allocated for nothing.
+            if !re.is_match(&body) {
                 continue;
             }
             let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
-            // `find_iter` walks forward, so the line number follows it instead of being counted
-            // from the start of the note for every hit.
-            let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
-            for m in hits {
-                total += 1;
-                if out.len() >= limit {
-                    continue;
-                }
-                while cursor < m.start() {
-                    if body.as_bytes()[cursor] == b'\n' {
-                        line += 1;
-                        line_start = cursor + 1;
-                    }
-                    cursor += 1;
-                }
-                let rest = &body[line_start..];
-                let line_text = rest
-                    .split('\n')
-                    .next()
-                    .unwrap_or(rest)
-                    .trim_end_matches('\r');
-                let start = m.start() - line_start;
-                let end = (m.end() - line_start).min(line_text.len());
-                let (line_text, range) = clip(line_text, start..end);
-                out.push(Match {
-                    rel_path: rel_path.clone(),
-                    title: title.clone(),
-                    line,
-                    line_text,
-                    range,
-                    offset: m.start(),
-                });
-            }
+            Self::matches_in(
+                &rel_path,
+                title.as_deref(),
+                &body,
+                re,
+                limit,
+                &mut out,
+                &mut total,
+            );
         }
         Ok((out, total))
+    }
+
+    /// Every hit of `re` in one body, appended to `out` and counted in `total`.
+    ///
+    /// Lifted out of [`grep`](Self::grep) so the façade can run the same matching over files the
+    /// index holds no body for — only markdown reaches the `notes` table — and hand the sidebar
+    /// rows it cannot tell apart from a note's. It touches neither the index nor the disk: the
+    /// caller supplies the text and says where it came from.
+    ///
+    /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
+    /// it, so a truncated list can still say how much a Replace All would touch.
+    pub fn matches_in(
+        rel: &str,
+        title: Option<&str>,
+        body: &str,
+        re: &Regex,
+        limit: usize,
+        out: &mut Vec<Match>,
+        total: &mut usize,
+    ) {
+        // `find_iter` walks forward, so the line number follows it instead of being counted
+        // from the start of the note for every hit.
+        let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
+        for m in re.find_iter(body) {
+            *total += 1;
+            if out.len() >= limit {
+                continue;
+            }
+            while cursor < m.start() {
+                if body.as_bytes()[cursor] == b'\n' {
+                    line += 1;
+                    line_start = cursor + 1;
+                }
+                cursor += 1;
+            }
+            let rest = &body[line_start..];
+            let line_text = rest
+                .split('\n')
+                .next()
+                .unwrap_or(rest)
+                .trim_end_matches('\r');
+            let start = m.start() - line_start;
+            let end = (m.end() - line_start).min(line_text.len());
+            let (line_text, range) = clip(line_text, start..end);
+            out.push(Match {
+                rel_path: rel.to_string(),
+                title: title.map(str::to_string),
+                line,
+                line_text,
+                range,
+                offset: m.start(),
+            });
+        }
     }
 
     /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
@@ -1878,5 +1940,21 @@ mod tests {
         assert_eq!(ix.note_paths().unwrap(), vec!["a.md", "sub/Beta.md"]);
         assert_eq!(ix.recent_notes(50).unwrap().len(), 2);
         assert_eq!(ix.recent_notes(1).unwrap().len(), 1, "limit is honoured");
+    }
+
+    #[test]
+    fn file_paths_lists_notes_first_then_the_other_kinds() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("tool.py"), "print('hi')\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // Notes first, then everything else by path. The `sub` directory and the conflict copy
+        // are in neither list.
+        assert_eq!(
+            ix.file_paths().unwrap(),
+            vec!["a.md", "sub/Beta.md", "c.pdf", "tool.py"]
+        );
+        assert_eq!(ix.other_paths().unwrap(), vec!["tool.py"]);
     }
 }
