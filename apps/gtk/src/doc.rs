@@ -13,6 +13,7 @@ use std::rc::Rc;
 use crate::editor::Tab;
 use crate::fileops;
 use crate::pdftab::PdfTab;
+use crate::terminal::Term;
 
 /// A tab with nothing to edit: an image, or a status page standing in for a file we decline to
 /// open. It keeps only what the tab machinery needs from every document.
@@ -44,6 +45,8 @@ pub enum Doc {
     Status(Rc<Viewer>),
     /// A comparison of two texts: a git diff, a note against what is on disk, a sync conflict.
     Diff(Rc<Viewer>),
+    /// A shell. A document like any other, so it splits and drags with the rest.
+    Terminal(Rc<Term>),
 }
 
 impl Doc {
@@ -53,14 +56,14 @@ impl Doc {
             Doc::Text(tab) => tab.rel(),
             Doc::Pdf(pdf) => pdf.key(),
             Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => v.key(),
+            Doc::Terminal(t) => t.key(),
         }
     }
 
-    /// Not a file. A diff is a view of two texts that happens to live in a tab, so it is never
-    /// written to the session, never a recent note, and a rename does not point it anywhere new:
-    /// it is opened again from the pane that produced it, not restored.
+    /// Not a file. A diff is a view of two texts and a terminal is a running shell; neither is
+    /// written to the session, is a recent note, or has anywhere to be pointed by a rename.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Doc::Diff(_))
+        matches!(self, Doc::Diff(_) | Doc::Terminal(_))
     }
 
     pub fn page(&self) -> &adw::TabPage {
@@ -68,12 +71,20 @@ impl Doc {
             Doc::Text(tab) => &tab.page,
             Doc::Pdf(pdf) => &pdf.page,
             Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => &v.page,
+            Doc::Terminal(t) => &t.page,
         }
     }
 
     pub fn tab(&self) -> Option<&Rc<Tab>> {
         match self {
             Doc::Text(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    pub fn terminal(&self) -> Option<&Rc<Term>> {
+        match self {
+            Doc::Terminal(term) => Some(term),
             _ => None,
         }
     }
@@ -97,8 +108,8 @@ impl Doc {
         match self {
             Doc::Text(tab) => tab.retarget(root, key),
             Doc::Pdf(pdf) => pdf.retarget(root, key),
-            // A diff is not a file, so a rename has nothing to point it at.
-            Doc::Diff(_) => {}
+            // Neither a diff nor a shell is a file, so a rename has nothing to point them at.
+            Doc::Diff(_) | Doc::Terminal(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
                 *v.key.borrow_mut() = key.to_string();
                 v.page.set_title(file_name(key));

@@ -1,9 +1,10 @@
 //! The bar along the bottom of the editor column.
 //!
-//! It says what is happening (indexing, opening), what the file is and how long it is. All of
+//! It says what is happening (indexing, opening), what the file is, how long it is and how far
+//! it is zoomed, the readout being the control that puts the zoom back. All of
 //! that used to be spread across the header bar, where it competed with the vault name and the
-//! note path; a document's own facts belong under it, not beside its title. The git phase adds
-//! the branch of the repository the document sits in.
+//! note path; a document's own facts belong under it, not beside its title. The branch is the
+//! repository the document sits in, which is not always the vault's own.
 //!
 //! Nothing here fades with the chrome: the bar is one line of text the reader glances at, and a
 //! word count that disappears while you type is a word count nobody can use.
@@ -15,8 +16,12 @@ use gtk::prelude::*;
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
+    branch: gtk::Label,
     kind: gtk::Label,
     words: gtk::Label,
+    /// The zoom readout, which is also the control that resets it.
+    zoom: gtk::Button,
+    zoom_label: gtk::Label,
 }
 
 impl Bar {
@@ -29,21 +34,40 @@ impl Bar {
         row.set_margin_bottom(6);
 
         let progress = label(false);
+        let branch = label(false);
         let kind = label(false);
         let words = label(true);
 
+        // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
+        // and Fit Width for a PDF. Flat and label-only, so it reads as the rest of the bar rather
+        // than as a button parked in it.
+        let zoom_label = label(true);
+        let zoom = gtk::Button::builder()
+            .child(&zoom_label)
+            .action_name("win.zoom-reset")
+            .tooltip_text("Reset Zoom")
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        zoom.add_css_class("flat");
+
         row.append(&progress);
+        row.append(&branch);
         // The file's own facts sit at the far end, away from what the window is busy with.
         kind.set_hexpand(true);
         kind.set_halign(gtk::Align::End);
         row.append(&kind);
         row.append(&words);
+        row.append(&zoom);
 
         Bar {
             row,
             progress,
+            branch,
             kind,
             words,
+            zoom,
+            zoom_label,
         }
     }
 
@@ -56,6 +80,11 @@ impl Bar {
         set(&self.progress, text);
     }
 
+    /// The branch of the repository holding the active document, "main ↑1 ↓2".
+    pub fn set_branch(&self, branch: Option<&str>) {
+        set(&self.branch, branch);
+    }
+
     /// What the file is: "Markdown", "PDF", or "Rust · UTF-8 · LF" for code.
     pub fn set_kind(&self, text: Option<&str>) {
         set(&self.kind, text);
@@ -63,6 +92,17 @@ impl Bar {
 
     pub fn set_words(&self, count: Option<usize>) {
         set(&self.words, count.map(words_label).as_deref());
+    }
+
+    /// The zoom, while it is worth saying: "110 %", or a PDF's "Fit Width" / "Fit Page".
+    pub fn set_zoom(&self, text: Option<&str>) {
+        set(&self.zoom_label, text);
+        self.zoom.set_visible(text.is_some());
+    }
+
+    /// The zoom control itself, which the window hangs its Fit Width / Fit Page menu off.
+    pub fn zoom(&self) -> &gtk::Widget {
+        self.zoom.upcast_ref()
     }
 }
 

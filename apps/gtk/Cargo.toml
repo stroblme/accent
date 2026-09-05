@@ -21,6 +21,7 @@ adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
 sourceview5 = { version = "0.11", features = ["v5_12"] }
 nucleo-matcher = "0.3"
 webkit6 = "0.6"
+vte4 = "0.10"
 libspelling = "0.5"
 # Only for "now" when expanding templates; core takes a NaiveDateTime.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }

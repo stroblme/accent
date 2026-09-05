@@ -39,3 +39,5 @@ cargo run --release -p accent -- testvault
 - **CLI / MCP**: `accent-cli` renders the same core as JSON-RPC over stdio; `accent-cli mcp` works with the app closed.
 - **Roadmap**: desktop MVP → PDF + MCP → Android → IDE features (terminal, git, LSP, remote SSH, DAP).
 - Licence: GPL-3.0-or-later.
+
+## License

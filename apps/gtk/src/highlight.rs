@@ -309,6 +309,17 @@ pub fn restyle_csv(buffer: &sourceview5::Buffer) {
     }
 }
 
+/// A git graph lane's colour, on the same wheel the CSV columns use (DESIGN.md, Colour): the
+/// accent's hue turned `column` sixths of a turn, so lane 0 is the accent and a seventh lane
+/// repeats the first hue instead of inventing a colour.
+pub fn lane_colour(column: usize) -> gdk::RGBA {
+    let accent = adw::StyleManager::default().accent_color_rgba();
+    let hsv = gtk::rgb_to_hsv(accent.red(), accent.green(), accent.blue());
+    let (h, s, v) = rotate(hsv, column % CSV_COLUMNS);
+    let (r, g, b) = gtk::hsv_to_rgb(h, s, v);
+    gdk::RGBA::new(r, g, b, accent.alpha())
+}
+
 /// The accent's hue moved `column` sixths of a turn around the wheel, saturation and value
 /// untouched. Column 0 is the accent itself, which is what makes the six read as one family
 /// rather than as a second palette.

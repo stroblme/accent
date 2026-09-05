@@ -40,7 +40,8 @@ jobs:
       # curl package conflicts with, hence --allowerasing.
       - run: >
           dnf install -y --allowerasing git gcc make tar curl gtk4-devel libadwaita-devel
-          gtksourceview5-devel webkitgtk6.0-devel libspelling-devel xorg-x11-server-Xvfb
+          gtksourceview5-devel webkitgtk6.0-devel libspelling-devel vte291-gtk4-devel
+          xorg-x11-server-Xvfb
           dejavu-sans-fonts
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable

@@ -32,6 +32,8 @@ const PULSE: Duration = Duration::from_millis(80);
 /// whose artwork is off centre, sitting a pixel low in its 16 px box.
 const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
 const OUTLINE_ICON: &str = "view-list-bullet-symbolic";
+/// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
+const GIT_ICON: &str = "network-transmit-receive-symbolic";
 
 /// How far each heading level is indented in the Outline pane, on the 6/12/18 spacing scale.
 const OUTLINE_INDENT: i32 = 12;
@@ -92,6 +94,10 @@ struct VaultPanes {
     backlinks_stack: gtk::Stack,
     tags_dirty: Rc<Cell<bool>>,
     tags_divider: gtk::Paned,
+    /// The Git pane's page, so it can be hidden: a vault under no version control has nothing to
+    /// put in it, and one more icon in the switcher is one more thing to explain.
+    git_page: adw::ViewStackPage,
+    git_divider: gtk::Paned,
     select_tag: Rc<dyn Fn(&str)>,
 }
 
@@ -105,7 +111,7 @@ impl Sidebar {
     /// the user activates a result, a tagged file or a backlink, plus the byte offset of the
     /// match when the row is one.
     pub fn new(
-        vault: Option<(gtk::Widget, Data)>,
+        vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
         on_open: impl Fn(&str, Option<usize>) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
@@ -113,7 +119,7 @@ impl Sidebar {
 
         // Every pane but the outline is a view of an index, so without one there is nothing for
         // them to show and they are not built at all.
-        let panes = vault.map(|(files, data)| {
+        let panes = vault.map(|(files, data, git, git_divider)| {
             let data = Rc::new(data);
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
@@ -142,6 +148,11 @@ impl Sidebar {
                 BACKLINK_ICON,
             );
 
+            stack.add_titled_with_icon(&git, Some("git"), "Git", GIT_ICON);
+            let git_page = stack.page(&git);
+            // Hidden until the pane says there is a repository, which is one refresh away.
+            git_page.set_visible(false);
+
             // Lazy fill: a background reindex only flips the flag, so it costs no query while
             // the user is looking at Files or Search.
             stack.connect_visible_child_notify({
@@ -153,7 +164,14 @@ impl Sidebar {
                     }
                 }
             });
-            (search, tags, backlinks, backlinks_stack)
+            (
+                search,
+                tags,
+                backlinks,
+                backlinks_stack,
+                git_page,
+                git_divider,
+            )
         });
 
         let outline_bin = adw::Bin::builder().vexpand(true).build();
@@ -179,16 +197,20 @@ impl Sidebar {
             root: stack.clone().upcast(),
             switcher: switcher.upcast(),
             stack,
-            panes: panes.map(|(search, tags, backlinks, backlinks_stack)| VaultPanes {
-                search_entry: search.entry,
-                replace_toggle: search.replace_toggle,
-                replace_entry: search.replace_entry,
-                backlinks,
-                backlinks_stack,
-                tags_dirty: tags.dirty,
-                tags_divider: tags.divider,
-                select_tag: tags.select,
-            }),
+            panes: panes.map(
+                |(search, tags, backlinks, backlinks_stack, git_page, git_divider)| VaultPanes {
+                    search_entry: search.entry,
+                    replace_toggle: search.replace_toggle,
+                    replace_entry: search.replace_entry,
+                    backlinks,
+                    backlinks_stack,
+                    tags_dirty: tags.dirty,
+                    tags_divider: tags.divider,
+                    git_page,
+                    git_divider,
+                    select_tag: tags.select,
+                },
+            ),
             outline_bin,
         }
     }
@@ -200,10 +222,14 @@ impl Sidebar {
         let Some(panes) = self.panes.as_ref() else {
             return false;
         };
-        if divider != &panes.tags_divider {
+        let share = if divider == &panes.tags_divider {
+            TAGS_SHARE
+        } else if divider == &panes.git_divider {
+            crate::git::GIT_SHARE
+        } else {
             return false;
-        }
-        divider.set_position(divider.height() * TAGS_SHARE.0 / TAGS_SHARE.1);
+        };
+        divider.set_position(divider.height() * share.0 / share.1);
         true
     }
 
@@ -233,10 +259,20 @@ impl Sidebar {
             .set_visible_child_name(if refs.is_empty() { "empty" } else { "list" });
     }
 
-    /// Whether this sidebar has the named pane at all. A window with no vault has only the
-    /// outline, so the chords for the others must not open a column that cannot answer them.
+    /// Whether this sidebar has the named pane at all, and is showing it. A window with no vault
+    /// has only the outline, and a vault with no repository has no Git pane, so the chords for
+    /// the others must not open a column that cannot answer them.
     pub fn has_pane(&self, name: &str) -> bool {
-        self.stack.child_by_name(name).is_some()
+        self.stack
+            .child_by_name(name)
+            .is_some_and(|child| self.stack.page(&child).is_visible())
+    }
+
+    /// Show or hide the Git pane. It starts hidden and the pane's first refresh decides.
+    pub fn set_git_visible(&self, on: bool) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.git_page.set_visible(on);
+        }
     }
 
     /// Replace what the Outline pane shows; `None` puts the empty state back.
@@ -259,7 +295,7 @@ impl Sidebar {
     pub fn show_pane(&self, name: &str) {
         // A pane this sidebar does not have leaves it where it was, which for a window with no
         // vault means the outline stays up whatever chord was pressed.
-        if self.stack.child_by_name(name).is_none() {
+        if !self.has_pane(name) {
             return;
         }
         self.stack.set_visible_child_name(name);
