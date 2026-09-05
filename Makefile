@@ -50,7 +50,7 @@ all: core gtk
 core:
 	$(CARGO) build $(CARGO_PROFILE_FLAG)
 
-## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling dev packages)
+## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
 	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent
 
