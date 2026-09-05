@@ -79,19 +79,14 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
-    ("win.terminal", "Toggle Terminal", &["<Control>j"]),
-    ("win.terminal-new", "New Terminal", &["<Control><Shift>j"]),
-    (
-        "win.terminal-close",
-        "Close Terminal",
-        &["<Control><Shift>w"],
-    ),
+    ("win.terminal", "New Terminal", &["<Control>j"]),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
+    ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
@@ -191,6 +186,7 @@ fn main() -> glib::ExitCode {
         config: Rc::new(RefCell::new(Config::load())),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
+        landing: RefCell::new(None),
     });
     shell.install_app_actions(&app);
     app.connect_command_line({
@@ -212,6 +208,22 @@ struct Shell {
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     start: glib::WeakRef<adw::ApplicationWindow>,
+    /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
+    /// somewhere to put it. See [`Landing`].
+    landing: RefCell<Option<Landing>>,
+}
+
+/// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
+///
+/// libadwaita detaches a dragged page from its view for the length of the drag, and neither
+/// `attach_page` nor the page's own view is public, so nothing can give a page a view back except
+/// the `create-window` handler, which libadwaita calls on the source view the moment a drop is
+/// declined. Our drop zones therefore record where the drop landed and decline it; the handler
+/// hands back the tab view named here and libadwaita does the attaching.
+struct Landing {
+    app: Rc<App>,
+    pane: Rc<Pane>,
+    zone: Zone,
 }
 
 impl Shell {
@@ -225,6 +237,17 @@ impl Shell {
             move |_, _| shell.choose_vault(&gtk_app)
         });
         gtk_app.add_action(&open);
+
+        // GNOME Shell offers New Window in the launcher's context menu only when it finds an
+        // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
+        // keys. Both of the first two are provided: this is the one DESIGN.md's Keyboard rule
+        // asks for, and the desktop file carries the other for a shell that reads it first.
+        let new_window = gio::SimpleAction::new("new-window", None);
+        new_window.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.start_screen(&gtk_app)
+        });
+        gtk_app.add_action(&new_window);
 
         let close = gio::SimpleAction::new("close-vault", None);
         close.connect_activate({
@@ -284,6 +307,22 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
+        // `accent --terminal` is accent as a terminal: a window with no vault holding one shell.
+        // A second one joins that window as another tab, the way a second loose file does.
+        if args.iter().any(|a| a == "--terminal" || a == "-t") {
+            if let Some(app) = self.loose_window(gtk_app) {
+                app.window.present();
+                app.open_terminal();
+            }
+            return glib::ExitCode::SUCCESS;
+        }
+        // `accent --new-window` is the launcher's New Window action, and a second process is how
+        // it arrives. The start screen rather than a vault: opening a vault that already has a
+        // window would only raise it, and no vault ever gets a second one.
+        if args.iter().any(|a| a == "--new-window") {
+            self.start_screen(gtk_app);
+            return glib::ExitCode::SUCCESS;
+        }
         let Some(arg) = args.get(1) else {
             // Launched with no folder: pick up the vault this window was last opened on, and only
             // fall back to the start screen when there is none or it has gone away.
@@ -362,6 +401,9 @@ impl Shell {
         self.start.set(Some(&window));
     }
 
+    /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
+    /// than opening a second one on the same index, session and watcher. New Window lands on the
+    /// start screen instead, where a vault without a window yet is picked.
     fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -372,9 +414,19 @@ impl Shell {
             window.present();
             return;
         }
-        let Some(app) = build_window(gtk_app, self, Some(root.clone()), note) else {
-            return;
-        };
+        self.add_window(gtk_app, Some(root), note);
+    }
+
+    /// Build a window on `root` — a vault, or `None` for the one with no vault — and take charge
+    /// of it. The only place a window joins `windows`, so the handler that takes it out again is
+    /// written once.
+    fn add_window(
+        self: &Rc<Self>,
+        gtk_app: &adw::Application,
+        root: Option<PathBuf>,
+        note: Option<String>,
+    ) -> Option<Rc<App>> {
+        let app = build_window(gtk_app, self, root.clone(), note)?;
         // A second `close-request` handler. `wire_window`'s is connected first and can still stop
         // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
         // handler does, so this one only ever sees a close that is really happening.
@@ -387,7 +439,132 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((Some(root), app));
+        self.windows.borrow_mut().push((root, app.clone()));
+        Some(app)
+    }
+
+    /// The window a page belongs to, and what it holds. libadwaita's tab drag hands a page to any
+    /// window in the process, so this is how the receiving one finds out where it came from.
+    fn owner_of(&self, page: &adw::TabPage) -> Option<(Rc<App>, Doc)> {
+        self.windows
+            .borrow()
+            .iter()
+            .find_map(|(_, app)| Some((app.clone(), app.doc_for_page(page)?)))
+    }
+
+    /// A page has landed in `into`'s tab view that `into` knows nothing about: either a tab
+    /// dragged out of another window, or one of its own a moment before it is registered.
+    ///
+    /// From an idle rather than here, because `page-attached` fires inside libadwaita's own drop
+    /// handling, which is still holding the page — and because a page this window has just built
+    /// is attached before it reaches `docs`, so the second look is what tells the two apart.
+    fn adopt_soon(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
+        let (shell, into, page) = (Rc::downgrade(self), Rc::downgrade(into), page.clone());
+        glib::idle_add_local_once(move || {
+            if let (Some(shell), Some(into)) = (shell.upgrade(), into.upgrade()) {
+                shell.adopt_page(&into, &page);
+            }
+        });
+    }
+
+    /// A dragged tab was let go over `pane`. Recorded rather than moved: see [`Landing`].
+    fn aim(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
+        *self.landing.borrow_mut() = Some(Landing {
+            app: app.clone(),
+            pane: pane.clone(),
+            zone,
+        });
+        // Spent by `create-window` in the same turn of the main loop; this is only so a drop that
+        // never reaches one cannot misdirect the next drag.
+        let shell = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(shell) = shell.upgrade() {
+                *shell.landing.borrow_mut() = None;
+            }
+        });
+    }
+
+    /// The tab view a page let go over one of our drop zones belongs in, or `None` when the drop
+    /// was nowhere of ours.
+    fn where_to_land(&self) -> Option<adw::TabView> {
+        // Left in place rather than taken: `landed` spends it, once the page is somewhere.
+        let (app, pane) = self
+            .landing
+            .borrow()
+            .as_ref()
+            .map(|l| (l.app.clone(), l.pane.clone()))?;
+        // The pane may have closed itself behind the drag, having held nothing else.
+        let at = match app.panes.borrow().iter().any(|p| Rc::ptr_eq(p, &pane)) {
+            true => pane,
+            false => app.pane(),
+        };
+        app.window.present();
+        Some(at.tabs.clone())
+    }
+
+    /// A page has been attached to `pane`, which is where a drag ends. Two things may be owed:
+    /// the split the drop asked for, and — for a page out of another window — the move into this
+    /// window's bookkeeping.
+    ///
+    /// The split waits for an idle because this runs inside libadwaita's drag handling, and
+    /// re-parenting the pane it is emitting from fails GTK's own assertion.
+    fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
+        let side = self
+            .landing
+            .borrow_mut()
+            .take()
+            .filter(|l| Rc::ptr_eq(&l.pane, pane))
+            .and_then(|l| match l.zone {
+                Zone::Split(side) => Some(side),
+                Zone::Here => None,
+            });
+        if let Some(side) = side {
+            let (app, pane, page) = (app.clone(), pane.clone(), page.clone());
+            glib::idle_add_local_once(move || app.split_page(&pane, side, &page));
+        }
+        // Before the adoption, which is queued behind it: the note is reopened in whichever pane
+        // the window is working in, and a split has just made that the new one.
+        if app.doc_for_page(page).is_none() {
+            self.adopt_soon(app, page);
+        }
+    }
+
+    /// Move a tab from the window it was dragged out of into the window it was dropped on.
+    ///
+    /// One vault never has two windows, so the note always comes from another vault: it is
+    /// adopted as an absolute-path tab, the files-outside-a-vault model (DESIGN.md, Window
+    /// without a vault). It edits and saves; it gets no index, backlinks or wikilinks here. The
+    /// buffer is written out first, because the receiving window opens the *file* — a drag is a
+    /// focus change, and a focus change always saves.
+    fn adopt_page(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
+        // Gone again, or one of `into`'s own that had not reached `docs` when it was attached.
+        if into.pane_of(page).is_none() || into.doc_for_page(page).is_some() {
+            return;
+        }
+        let Some((from, doc)) = self.owner_of(page) else {
+            return tracing::debug!("a tab in no window's bookkeeping; left where it is");
+        };
+        // A shell is a running process and a diff is a view of two texts: neither is a file the
+        // other window could open, so the drag goes back where it came from.
+        if doc.is_transient() {
+            return return_page(into, &from, page, "This tab cannot move between windows.");
+        }
+        let key = doc.key();
+        let path = match doc::is_loose_key(&key) {
+            true => PathBuf::from(&key),
+            false => from.root().join(&key),
+        };
+        if let Some(tab) = doc.tab().filter(|tab| tab.modified.get())
+            && let Err(e) = from.write_tab(tab, tab.etag.get())
+        {
+            // Refused rather than dropped: a drag must never be the thing that loses an edit.
+            return return_page(into, &from, page, &format!("Save failed: {e}"));
+        }
+        // Opened before the old page goes, so a pane that the drop has just split off never
+        // stands empty and closes itself out from under the note arriving in it.
+        into.open_path(&into.key_for(&path));
+        from.forget_page(page);
+        into.close_page(page);
     }
 
     fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
@@ -413,34 +590,40 @@ impl Shell {
             app.open_path(&rel);
             return;
         }
+        let Some(app) = self.loose_window(gtk_app) else {
+            return;
+        };
+        app.window.present();
+        app.open_path(&path.to_string_lossy());
+    }
+
+    /// The window with no vault, built if this is the first thing to want one. One per process, so
+    /// a second loose file — or a second shell — joins it as a tab.
+    fn loose_window(self: &Rc<Self>, gtk_app: &adw::Application) -> Option<Rc<App>> {
         let loose = self
             .windows
             .borrow()
             .iter()
             .find(|(root, _)| root.is_none())
             .map(|(_, app)| app.clone());
-        let app = match loose {
-            Some(app) => app,
-            None => {
-                let Some(app) = build_window(gtk_app, self, None, None) else {
-                    return;
-                };
-                app.window.connect_close_request({
-                    let shell = Rc::downgrade(self);
-                    move |window| {
-                        if let Some(shell) = shell.upgrade() {
-                            shell.forget(window);
-                        }
-                        glib::Propagation::Proceed
-                    }
-                });
-                self.windows.borrow_mut().push((None, app.clone()));
-                app
-            }
-        };
-        app.window.present();
-        app.open_path(&path.to_string_lossy());
+        if let Some(app) = loose {
+            return Some(app);
+        }
+        self.add_window(gtk_app, None, None)
     }
+}
+
+/// Hand a page back to the window it was dragged out of, and say there why.
+///
+/// The pane it left may have closed itself behind it, so it goes to whichever pane that window is
+/// working in rather than to the one it came from.
+fn return_page(into: &Rc<App>, from: &Rc<App>, page: &adw::TabPage, why: &str) {
+    let Some(here) = into.pane_of(page) else {
+        return;
+    };
+    here.tabs.transfer_page(page, &from.pane().tabs, 0);
+    from.window.present();
+    from.toast(why);
 }
 
 // ---------------------------------------------------------------------------------- view mode
@@ -492,7 +675,6 @@ impl Mode {
 struct Presenting {
     mode: Mode,
     sidebar: bool,
-    terminal: bool,
 }
 
 // ----------------------------------------------------------------------------------- app state
@@ -503,6 +685,9 @@ struct App {
     ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
     vault: Option<Arc<Vault>>,
+    /// The process's other windows, for the one thing a window cannot answer alone: a tab dragged
+    /// in from another one. Weak, because the shell owns this `App`.
+    shell: std::rc::Weak<Shell>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
     /// Every open pane, in the order they were created. The arrangement itself lives in the
@@ -528,9 +713,8 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
-    /// The document above, the terminal panel below; the panel is hidden until it is asked for.
-    dock: gtk::Paned,
-    terminal: Rc<terminal::Panel>,
+    /// Numbers the shells this window has opened, so each tab has a key of its own.
+    terminals: Cell<usize>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
@@ -548,9 +732,6 @@ struct App {
     mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
     zoom: Cell<f64>,
-    /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
-    zoom_pill: gtk::Box,
-    zoom_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -658,9 +839,9 @@ impl App {
     /// Move `page` into a new pane beside `at`. Splitting a pane's only note off it would empty
     /// the pane, which closes it again, so that one is refused rather than done and undone.
     fn split_page(self: &Rc<Self>, at: &Rc<Pane>, side: Side, page: &adw::TabPage) {
-        // Not one of ours: libadwaita raises `is-transferring-page` on every tab view in the
-        // process, so a tab dragged in another window reaches this window's drop sheets too, and
-        // there would be no view to move it out of.
+        // A page in no pane of ours: a drag still in flight, which libadwaita has detached from
+        // its view. `Shell::landed` waits for the attach before asking for a split, so this is
+        // only reachable from the menu and the palette, where there is nothing to split off.
         let Some(from) = self.pane_of(page) else {
             return;
         };
@@ -756,35 +937,18 @@ impl App {
         }
     }
 
-    /// A tab or a vault path let go over `pane`. `true` when it was taken.
+    /// A tab or a vault path let go over `pane`. `true` when it was taken — never for a tab,
+    /// which is declined on purpose so that `create-window` fires; see [`Landing`].
     fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
-        if let Ok(page) = value.get::<adw::TabPage>() {
-            // A tab from another window has no pane of ours to leave, and moving it here would
-            // put a note of another vault under this window's tab machinery. Refused; the tab
-            // bars still take it natively, which is libadwaita's own behaviour and its own risk.
-            let Some(from) = self.pane_of(&page) else {
-                return false;
-            };
-            return match zone {
-                Zone::Split(side) => {
-                    self.split_page(pane, side, &page);
-                    true
-                }
-                // Already here, so the drop is taken and nothing moves. Accepted rather than
-                // refused, because libadwaita's own bar does the same for a tab dropped back
-                // where it started, and a refusal animates the tab flying home for no reason.
-                Zone::Here if Rc::ptr_eq(&from, pane) => true,
-                Zone::Here => {
-                    from.tabs
-                        .transfer_page(&page, &pane.tabs, pane.tabs.n_pages());
-                    pane.tabs.set_selected_page(&page);
-                    // Said outright rather than left to the selection notify, which does not
-                    // fire when the transfer already left this page selected.
-                    self.set_active_pane(pane);
-                    self.sync_active();
-                    true
-                }
-            };
+        if value.get::<adw::TabPage>().is_ok() {
+            // Recorded, and deliberately declined: a dragged page has left its view, and
+            // declining is what summons the `create-window` that can give it one again. Whose
+            // tab it is does not matter here — `Shell::adopt_page` sorts that out from
+            // `page-attached` once libadwaita has attached it.
+            if let Some(shell) = self.shell.upgrade() {
+                shell.aim(self, pane, zone);
+            }
+            return false;
         }
         let Ok(rel) = value.get::<String>() else {
             return false;
@@ -820,6 +984,16 @@ impl App {
 
     fn doc_for(&self, key: &str) -> Option<Doc> {
         self.docs.borrow().iter().find(|d| d.key() == key).cloned()
+    }
+
+    /// The key `path` opens under in this window: vault-relative inside the vault, absolute
+    /// outside it, which is what a file from another window's vault always is.
+    fn key_for(&self, path: &Path) -> String {
+        self.vault()
+            .and_then(|vault| path.strip_prefix(vault.root()).ok())
+            .and_then(Path::to_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
     }
 
     fn tab_for(&self, rel: &str) -> Option<Rc<Tab>> {
@@ -969,7 +1143,10 @@ impl App {
         pdf.connect_zoom(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.refresh_zoom()
+            move |_| {
+                app.refresh_zoom();
+                app.save_session_soon();
+            }
         ));
         pdf.connect_page(glib::clone!(
             #[weak(rename_to = app)]
@@ -1216,6 +1393,34 @@ impl App {
 
     /// Wire a freshly opened tab into the window.
     fn adopt(self: &Rc<Self>, tab: Rc<Tab>) {
+        // Ctrl+scroll zooms the document, as it zooms a PDF page, through the same step and the
+        // same readout. On the view rather than on the window: a window-level controller would
+        // have to work out which tab the pointer is over and would race the PDF's own, while this
+        // one only ever sees a text tab. Bubble phase, ahead of the scrolled window's controller,
+        // which is the order `pdfview` relies on for the same reason.
+        let accum = Cell::new(0.0);
+        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        wheel.connect_scroll(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |controller, _, dy| {
+                if !controller
+                    .current_event_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                let steps = wheel_steps(&accum, dy);
+                for _ in 0..steps.abs() {
+                    app.set_zoom(stepped_zoom(app.zoom.get(), steps > 0));
+                }
+                glib::Propagation::Stop
+            }
+        ));
+        tab.view.add_controller(wheel);
+
         tab.connect_autosave(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1749,9 +1954,9 @@ impl App {
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
                     // rather than sending the reader back to page one.
                     Doc::Pdf(pdf) => pdf.refresh(),
-                    // A diff is a snapshot of two texts and is keyed by the comparison rather
-                    // than by a path, so a file changing under it reaches neither.
-                    Doc::Status(_) | Doc::Diff(_) => {}
+                    // Neither a diff nor a shell is keyed by a path, so a file changing under one
+                    // reaches none of these.
+                    Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}
                 }
             }
             Event::FileRemoved(rel) => {
@@ -1907,15 +2112,28 @@ impl App {
     }
 
     /// Which of the editor column and the preview are on screen. Split shows both; presenting
-    /// shows the preview alone, whatever mode the user will come back to.
+    /// shows the preview alone, whatever mode the user will come back to — unless the tab renders
+    /// itself, in which case it is the thing being presented and the preview stays away.
     fn apply_layout(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
-        if self.shows_preview() {
+        // A PDF, an image, a diff, a terminal: anything that is not a note in a buffer. There is
+        // nothing for the preview to render, so hiding the document column would present a blank
+        // window.
+        let own_view = presenting && self.active().is_none();
+        if self.shows_preview() && !own_view {
             self.ensure_preview();
         }
-        self.content.set_visible(!presenting);
+        self.content.set_visible(!presenting || own_view);
         if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.widget().set_visible(self.shows_preview());
+            preview
+                .widget()
+                .set_visible(self.shows_preview() && !own_view);
+        }
+        // The tab bars go with the rest of the chrome, since the column they live in stays. The
+        // restore is unconditional: `AdwTabBar` reveals and hides itself, and leaving it hidden
+        // here would take that decision away from it for good.
+        for pane in self.panes.borrow().iter() {
+            pane.bar.set_visible(!own_view);
         }
         if self.mode.get() == Mode::Split && !presenting {
             self.even_split();
@@ -1958,13 +2176,14 @@ impl App {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
     }
 
-    /// F5: the note alone and rendered, with the sidebar, the tab bar and both header bars gone.
-    /// A state of the window rather than a [`Mode`], because it is a way of looking at the current
-    /// note instead of a layout to work in, and it is deliberately not part of the session: a
-    /// window restored chromeless would be hard to get out of.
+    /// F5: the document alone, with the sidebar, the tab bars and both header bars gone. A state
+    /// of the window rather than a [`Mode`], because it is a way of looking at the current tab
+    /// instead of a layout to work in, and it is deliberately not part of the session: a window
+    /// restored chromeless would be hard to get out of.
     ///
-    /// ponytail: markdown only. A PDF tab keeps showing its own view here; route it through the
-    /// same preview switch once the PDF viewer lands.
+    /// A note is presented through the preview, rendered. A tab that draws its own document — a
+    /// PDF, an image, a diff, a terminal — is presented as it is: `apply_layout` keeps the
+    /// document column and takes the tab bars instead.
     fn set_presenting(self: &Rc<Self>, on: bool) {
         // A PDF presents itself: one whole page, and the zoom it had back afterwards.
         if let Some(pdf) = self.active_pdf() {
@@ -1975,10 +2194,8 @@ impl App {
                 self.presenting.set(Some(Presenting {
                     mode: self.mode.get(),
                     sidebar: self.sidebar_column.is_visible(),
-                    terminal: self.terminal.widget().is_visible(),
                 }));
                 self.sidebar_column.set_visible(false);
-                self.terminal.widget().set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
                 self.toolbar.set_reveal_bottom_bars(false);
                 self.apply_layout();
@@ -1986,7 +2203,6 @@ impl App {
             (false, Some(before)) => {
                 self.presenting.set(None);
                 self.sidebar_column.set_visible(before.sidebar);
-                self.terminal.widget().set_visible(before.terminal);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
@@ -2062,7 +2278,13 @@ impl App {
                 find::PreviewOp::Next => pdf.step_match(true),
                 find::PreviewOp::Previous => pdf.step_match(false),
                 find::PreviewOp::Clear => pdf.find(""),
-                find::PreviewOp::Line(page) => pdf.goto_page((page as usize).saturating_sub(1)),
+                // Only the Return moves a PDF. A live preview under a half-typed page number
+                // renders pages nobody asked to read, and it has already left the page Back is
+                // supposed to return to, so the committed jump would have nothing to remember.
+                find::PreviewOp::Line { line, commit: true } => {
+                    pdf.goto_page((line as usize).saturating_sub(1))
+                }
+                find::PreviewOp::Line { commit: false, .. } => {}
             }
             return;
         }
@@ -2075,7 +2297,7 @@ impl App {
             find::PreviewOp::Next => preview.find_next(),
             find::PreviewOp::Previous => preview.find_previous(),
             find::PreviewOp::Clear => preview.find_clear(),
-            find::PreviewOp::Line(line) => preview.scroll_to_line(line),
+            find::PreviewOp::Line { line, .. } => preview.scroll_to_line(line),
         }
     }
 
@@ -2173,15 +2395,7 @@ impl App {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
                 }
             }
-            "terminal" => self.set_terminal(!self.terminal.widget().is_visible()),
-            "terminal-new" => {
-                let first = self.terminal.is_empty();
-                self.set_terminal(true);
-                if !first {
-                    self.terminal.spawn();
-                }
-            }
-            "terminal-close" => self.terminal.close_current(),
+            "terminal" => self.open_terminal(),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -2248,8 +2462,8 @@ impl App {
                     _ => pdf.set_zoom(PdfZoom::FitWidth),
                 }
             }
-            "zoom-in" => self.set_zoom(self.zoom.get() + ZOOM_STEP),
-            "zoom-out" => self.set_zoom(self.zoom.get() - ZOOM_STEP),
+            "zoom-in" => self.set_zoom(stepped_zoom(self.zoom.get(), false)),
+            "zoom-out" => self.set_zoom(stepped_zoom(self.zoom.get(), true)),
             "zoom-reset" => self.set_zoom(1.0),
             "pdf-back" => {
                 if let Some(pdf) = self.active_pdf() {
@@ -2387,6 +2601,7 @@ impl App {
             },
             Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
+            Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
@@ -2394,36 +2609,45 @@ impl App {
         self.sync_branch();
     }
 
-    /// Show or hide the terminal panel. Showing it focuses a shell, creating one if there is
-    /// none; hiding it hands the keyboard back to the document, because `gtk_widget_hide` drops
-    /// the window's focus when it was inside what just went away.
-    fn set_terminal(self: &Rc<Self>, on: bool) {
-        let panel = self.terminal.clone();
-        panel.widget().set_visible(on);
-        if on {
-            self.dock
-                .set_position(terminal::divider(self.dock.height(), panel.height()));
-            match panel.is_empty() {
-                true => panel.spawn(),
-                false => panel.focus(),
+    fn restyle_terminals(&self) {
+        for doc in self.docs() {
+            if let Some(term) = doc.terminal() {
+                term.restyle();
             }
-        } else {
-            self.focus_document();
         }
-        self.save_session_soon();
     }
 
-    /// Put the keyboard back in whatever the active tab holds.
-    fn focus_document(&self) {
-        match self.active_doc() {
-            Some(Doc::Text(tab)) => {
-                tab.view.grab_focus();
-            }
-            Some(doc) => {
-                doc.page().child().grab_focus();
-            }
-            None => {}
-        }
+    /// A shell in a new tab of the active pane, at the vault root — the directory everything else
+    /// in the window is measured from. A window with no vault opens one at home.
+    fn open_terminal(self: &Rc<Self>) {
+        let n = self.terminals.get() + 1;
+        self.terminals.set(n);
+        let cwd = match self.vault() {
+            Some(vault) => vault.root().to_path_buf(),
+            None => glib::home_dir(),
+        };
+        let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
+        fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
+        terminal::on_exit(
+            &term,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |term| app.close_page(&term.page)
+            ),
+        );
+        let page = term.page.clone();
+        self.tabs().set_selected_page(&page);
+        // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
+        // unable to hear a keystroke, which is a terminal you have to click before you can type
+        // in. From an idle, because the page has only just been selected and the widget it holds
+        // is not on screen to take focus until the frame it was added in is done.
+        let view = term.view.clone();
+        glib::idle_add_local_once(move || {
+            view.grab_focus();
+        });
+        self.docs.borrow_mut().push(Doc::Terminal(term));
+        self.sync_active();
     }
 
     /// The branch of the repository the active document sits in, which for a nested repository is
@@ -2490,24 +2714,19 @@ impl App {
         }
     }
 
-    /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
-    /// PDF, which fits to the window rather than counting percentages.
+    /// The zoom readout in the status bar: the document zoom for a text tab, and the PDF's own
+    /// for a PDF, which fits to the window rather than counting percentages.
     ///
-    /// 100 % and Fit Width are the states that need no readout, so the pill disappears rather
-    /// than leaving a badge saying nothing is going on.
+    /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
+    /// saying nothing is going on. A PDF always shows one: fitting is a zoom too, and it is what
+    /// clicking the readout goes back to.
     fn refresh_zoom(&self) {
         let zoom = self.zoom.get();
         let label = match self.active_pdf() {
             Some(pdf) => pdf.zoom_label(),
             None => (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32)),
         };
-        match label {
-            Some(text) => {
-                self.zoom_label.set_label(&text);
-                self.zoom_pill.set_visible(true);
-            }
-            None => self.zoom_pill.set_visible(false),
-        }
+        self.statusbar.set_zoom(label.as_deref());
     }
 
     /// The minimap is a global preference with no accelerator, so the palette and the preferences
@@ -2702,7 +2921,12 @@ impl App {
             })
             .collect();
         fill_captured(&self.captured, &captured);
-        fill_shortcuts(&self.terminal.forwarded, &forwarded(&config));
+        let forwarded = forwarded(&config);
+        for doc in self.docs() {
+            if let Some(term) = doc.terminal() {
+                fill_shortcuts(&term.forwarded, &forwarded);
+            }
+        }
     }
 
     /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
@@ -2743,7 +2967,7 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
         }
-        self.terminal.restyle();
+        self.restyle_terminals();
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -2866,7 +3090,6 @@ impl App {
                 }
                 places
             },
-            terminal_height: self.terminal.height(),
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -2887,9 +3110,6 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
-        // The height only: the shells themselves are not restored, because a shell is where the
-        // user was rather than what they were reading.
-        self.terminal.set_height(session.terminal_height);
         // ponytail: every note comes back into one pane, because the session does not record the
         // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
         // being what someone who left four panes open expects.
@@ -2962,6 +3182,30 @@ fn human(bytes: u64) -> String {
 /// not drift into 0.7999999999999999 and a hand-edited state file cannot ask for 0.
 fn clamp_zoom(zoom: f64) -> f64 {
     ((zoom * 10.0).round() / 10.0).clamp(0.5, 3.0)
+}
+
+/// One step in or out from `zoom`: the next multiple of [`ZOOM_STEP`], so a PDF fitted to the
+/// window at 137 % lands on 140 % rather than 147 %. Shared with `pdfview`, so a chord, a wheel
+/// notch and a pinch mean the same amount of zoom whichever kind of tab is in front.
+///
+/// The epsilon is what keeps an exact multiple from stepping to itself once the division has
+/// drifted; the rounding is what keeps the result out of 1.4000000000000001.
+fn stepped_zoom(zoom: f64, out: bool) -> f64 {
+    let steps = zoom / ZOOM_STEP;
+    let next = match out {
+        true => (steps - 1e-6).ceil() - 1.0,
+        false => (steps + 1e-6).floor() + 1.0,
+    };
+    (next * ZOOM_STEP * 100.0).round() / 100.0
+}
+
+/// How many whole steps `dy` completes, given the fraction earlier deltas left over. A
+/// smooth-scroll device sends one wheel notch as several fractional deltas, and one notch is one
+/// step wherever the wheel zooms.
+fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
+    let total = accum.get() + dy;
+    accum.set(total.fract());
+    total.trunc() as i32
 }
 
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
@@ -3047,30 +3291,6 @@ fn build_window(
         .shrink_end_child(false)
         .build();
 
-    // Zoom had no visual feedback at all: the note simply grew. The readout floats over the
-    // document in an overlay rather than sitting in a bar, so it costs the column no width and
-    // appearing never moves a line of text. It carries `chrome-fade` like the header and tab
-    // bars, so typing fades it out with the rest of the chrome instead of leaving a fourth thing
-    // on screen.
-    // The zoom readout rides in the header beside the view-mode button rather than floating over
-    // the document: an `.osd` pill is the styling for something laid over content, and this is
-    // chrome. It needs no fade class of its own, because the header it sits in already carries
-    // one and takes its children with it.
-    let zoom_label = gtk::Label::new(Some("100 %"));
-    zoom_label.add_css_class("numeric");
-    zoom_label.add_css_class("dim-label");
-    let zoom_reset = gtk::Button::builder()
-        .icon_name("zoom-original-symbolic")
-        .tooltip_text("Reset Zoom")
-        .action_name("win.zoom-reset")
-        .valign(gtk::Align::Center)
-        .build();
-    zoom_reset.add_css_class("flat");
-
-    let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
-    zoom_pill.append(&zoom_label);
-    zoom_pill.append(&zoom_reset);
-
     toasts.set_child(Some(&paned));
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
@@ -3122,7 +3342,6 @@ fn build_window(
     let menu = menu_button();
     header.pack_end(&menu);
     header.pack_end(&modes);
-    header.pack_end(&zoom_pill);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -3141,27 +3360,9 @@ fn build_window(
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
     let find = find::Bar::new();
-    // A shell starts where everything else in the window is measured from. With no vault there is
-    // no such place, so it starts at home.
-    let terminal = terminal::Panel::new(match root {
-        Some(root) => root.to_path_buf(),
-        None => glib::home_dir(),
-    });
-    // Inside the editor column, so it spans editor and preview but never the sidebar, and under
-    // the toast overlay, so a toast does not land on the shell.
-    let dock = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .start_child(&toasts)
-        .end_child(terminal.widget())
-        .resize_start_child(true)
-        .resize_end_child(false)
-        .shrink_start_child(false)
-        .shrink_end_child(false)
-        .build();
-
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor_column.append(find.widget());
-    editor_column.append(&dock);
+    editor_column.append(&toasts);
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
     // `content` and presentation mode takes them away with it rather than unrevealing them.
@@ -3202,6 +3403,7 @@ fn build_window(
     let app = Rc::new(App {
         vault: vault.clone(),
         // (`vault` is an `Option` here: `None` is a window opened on a file, with no folder.)
+        shell: Rc::downgrade(shell),
         config: shell.config.clone(),
         window: window.clone(),
         panes: RefCell::new(vec![first.clone()]),
@@ -3216,8 +3418,7 @@ fn build_window(
         git: OnceCell::new(),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
-        dock,
-        terminal,
+        terminals: Cell::new(0),
         split,
         sidebar_column,
         sidebar_header,
@@ -3229,8 +3430,6 @@ fn build_window(
         content: content.clone(),
         mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
-        zoom_pill,
-        zoom_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -3265,7 +3464,6 @@ fn build_window(
     }
 
     wire_pane(&app, &first);
-    wire_terminal(&app);
 
     install_actions(gtk_app, &app);
     wire_window(&app, &modes);
@@ -3511,33 +3709,6 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
 
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
-/// The panel's own bookkeeping: remember where the divider was left, and take the panel away
-/// when its last shell exits.
-fn wire_terminal(app: &Rc<App>) {
-    app.dock.connect_position_notify(glib::clone!(
-        #[weak]
-        app,
-        move |dock| {
-            if app.terminal.widget().is_visible() {
-                app.terminal.set_height(dock.height() - dock.position());
-                app.save_session_soon();
-            }
-        }
-    ));
-    app.terminal.tabs.connect_page_detached(glib::clone!(
-        #[weak]
-        app,
-        move |tabs, _, _| {
-            if tabs.n_pages() > 0 {
-                return;
-            }
-            // From an idle: the page is still being torn down, and hiding the panel underneath it
-            // reparents what libadwaita is in the middle of removing.
-            glib::idle_add_local_once(move || app.set_terminal(false));
-        }
-    ));
-}
-
 fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
@@ -3593,6 +3764,36 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         #[weak]
         app,
         move |_| app.sync_panes()
+    ));
+    // A tab let go outside every tab bar. libadwaita reads that as "detach into a window of its
+    // own" and this is the only public way to give a dragged page a view again, so a drop on one
+    // of our pane zones — which `dropped` declines for exactly this reason — arrives here too.
+    pane.tabs.connect_create_window(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        None,
+        move |view| {
+            let aimed = app.shell.upgrade().and_then(|shell| shell.where_to_land());
+            // Let go on nothing of ours: back where it came from. A window per detached tab is a
+            // gesture one-window-per-vault has no answer for, and `None` is an error here.
+            Some(aimed.unwrap_or_else(|| view.clone()))
+        }
+    ));
+    // Where a drag ends: the split the drop asked for, and the move into this window's
+    // bookkeeping when the page came out of another one — libadwaita's tab bars take a foreign
+    // page natively, so a note of vault A would otherwise land under window B's `docs`, session
+    // and backlinks.
+    pane.tabs.connect_page_attached(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_, page, _| {
+            if let Some(shell) = app.shell.upgrade() {
+                shell.landed(&app, &pane, page);
+            }
+        }
     ));
     // A pane that has just lost its last page has nothing left to be. Closing it from an idle
     // rather than here, because this also fires in the middle of `transfer_page`, which is still
@@ -3731,6 +3932,32 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         )),
     });
 
+    // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
+    // the palette. Parented on the status bar's own button rather than in a header bar, so the
+    // popover has a plain widget to hang off.
+    let fit = gtk::GestureClick::new();
+    fit.set_button(gdk::BUTTON_SECONDARY);
+    fit.connect_pressed(glib::clone!(
+        #[weak]
+        app,
+        move |_, _, _, _| {
+            if app.active_pdf().is_none() {
+                return;
+            }
+            let menu = gio::Menu::new();
+            for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
+                menu.append(Some(label_of(action)), Some(action));
+            }
+            let popover = gtk::PopoverMenu::from_model(Some(&menu));
+            popover.set_parent(app.statusbar.zoom());
+            popover.set_has_arrow(false);
+            // A popover parented by hand stays parented until it is unparented by hand.
+            popover.connect_closed(|p| p.unparent());
+            popover.popup();
+        }
+    ));
+    app.statusbar.zoom().add_controller(fit);
+
     modes.connect_toggled(glib::clone!(
         #[weak]
         app,
@@ -3751,6 +3978,39 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         move |_| app.save_session_soon()
     ));
 
+    // The mouse's back and forward buttons. GTK's own gestures stop at button 3, and a
+    // `GtkGestureClick` beside a widget that claims the sequence never sees the press at all
+    // (paned.rs says why), so one capture-phase legacy controller on the window is where these
+    // can be seen. It goes through the GAction rather than calling the reader directly, which is
+    // what gives a mouse click the chrome reveal and the palette bookkeeping a chord gets.
+    let nav = gtk::EventControllerLegacy::new();
+    nav.set_propagation_phase(gtk::PropagationPhase::Capture);
+    nav.connect_event(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, event| {
+            let pressed = match event.event_type() {
+                gdk::EventType::ButtonPress => true,
+                gdk::EventType::ButtonRelease => false,
+                _ => return glib::Propagation::Proceed,
+            };
+            let button = event
+                .downcast_ref::<gdk::ButtonEvent>()
+                .map(|event| event.button());
+            let Some(action) = button.and_then(nav_action) else {
+                return glib::Propagation::Proceed;
+            };
+            if pressed {
+                let _ = WidgetExt::activate_action(&app.window, action, None);
+            }
+            // The release goes with the press, or whatever is under the pointer sees half a click.
+            glib::Propagation::Stop
+        }
+    ));
+    app.window.add_controller(nav);
+
     // Every divider in the window: double-click resets it, and it thickens while dragged.
     paned::watch(
         app.window.upcast_ref(),
@@ -3762,9 +4022,6 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     divider.set_position(Session::default().sidebar_width);
                 } else if divider == &app.paned {
                     app.centre_handle();
-                } else if divider == &app.dock {
-                    app.terminal.set_height(0);
-                    divider.set_position(terminal::divider(divider.height(), 0));
                 } else if !app
                     .sidebar
                     .get()
@@ -3881,7 +4138,7 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     if let Some(preview) = app.preview.borrow().as_ref() {
                         preview.restyle();
                     }
-                    app.terminal.restyle();
+                    app.restyle_terminals();
                 }
             ),
         );
@@ -3890,7 +4147,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
     style.connect_monospace_font_name_notify(glib::clone!(
         #[weak]
         app,
-        move |_| app.terminal.refont()
+        move |_| {
+            for doc in app.docs() {
+                if let Some(term) = doc.terminal() {
+                    term.refont();
+                }
+            }
+        }
     ));
     style.connect_document_font_name_notify(glib::clone!(
         #[weak]
@@ -4027,7 +4290,11 @@ const CAPTURED: &[&str] = &[
 ];
 
 /// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus the toggle itself so the panel can always be put away.
+/// which no shell claims, plus opening a shell and closing one.
+///
+/// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
+/// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
+/// Backspace` still do that, which is why this is the chord to give up.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
 /// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
@@ -4041,7 +4308,8 @@ fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
                 .map(move |accel| (*action, accel))
         })
         .filter(|(action, accel)| {
-            *action == "win.terminal" || (accel.contains("<Control>") && accel.contains("<Shift>"))
+            matches!(*action, "win.terminal" | "win.close-tab")
+                || (accel.contains("<Control>") && accel.contains("<Shift>"))
         })
         .collect()
 }
@@ -4138,6 +4406,17 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
     gtk_app.add_action(&quit);
 }
 
+/// Which action a mouse button asks for, for the two GTK has no name for. GDK names only the
+/// first three buttons; 8 and 9 are the side pair every mouse that has one ships, and browsers
+/// have meant back and forward by them for twenty years.
+fn nav_action(button: u32) -> Option<&'static str> {
+    match button {
+        8 => Some("win.pdf-back"),
+        9 => Some("win.pdf-forward"),
+        _ => None,
+    }
+}
+
 fn label_of(action: &'static str) -> &'static str {
     label_of_owned(action).unwrap_or(action)
 }
@@ -4154,7 +4433,7 @@ fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
         ["win.new-note", "win.new-folder", "win.save"].as_slice(),
-        ["win.find", "win.view-mode", "win.present"].as_slice(),
+        ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
         ["win.preferences", "win.about"].as_slice(),
         // What leaves the vault, in the order of how much it takes with it.
         ["app.open-vault", "app.close-vault", "app.quit"].as_slice(),
@@ -4501,11 +4780,35 @@ mod tests {
 
     #[test]
     fn zoom_steps_in_tenths_and_stops_at_the_ends() {
-        assert_eq!(clamp_zoom(1.0 + ZOOM_STEP), 1.1);
-        assert_eq!(clamp_zoom(1.0 - ZOOM_STEP), 0.9);
+        assert_eq!(clamp_zoom(stepped_zoom(1.0, false)), 1.1);
+        assert_eq!(clamp_zoom(stepped_zoom(1.0, true)), 0.9);
         assert_eq!(clamp_zoom(0.1), 0.5, "no zooming down to nothing");
         assert_eq!(clamp_zoom(9.0), 3.0, "nor up past legibility");
         assert_eq!(clamp_zoom(1.24), 1.2, "a hand-edited state file is rounded");
+    }
+
+    #[test]
+    fn stepped_zoom_moves_to_the_next_tenth() {
+        assert_eq!(stepped_zoom(1.0, false), 1.1);
+        assert_eq!(stepped_zoom(1.0, true), 0.9);
+        // Off a tenth, which is where a PDF fitted to the window sits: the next tenth, not a
+        // tenth further.
+        assert_eq!(stepped_zoom(1.37, false), 1.4);
+        assert_eq!(stepped_zoom(1.37, true), 1.3);
+        assert_eq!(stepped_zoom(1.1, false), 1.2);
+    }
+
+    #[test]
+    fn a_wheel_notch_is_one_step() {
+        let accum = Cell::new(0.0);
+        assert_eq!(
+            wheel_steps(&accum, 0.5),
+            0,
+            "half a notch is not a step yet"
+        );
+        assert_eq!(wheel_steps(&accum, 0.5), 1, "the other half completes it");
+        assert_eq!(wheel_steps(&accum, 1.0), 1);
+        assert_eq!(wheel_steps(&accum, -2.0), -2);
     }
 
     #[test]
@@ -4538,6 +4841,24 @@ mod tests {
         }
     }
 
+    /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
+    /// the window actually has.
+    #[test]
+    fn the_side_buttons_name_actions_that_exist() {
+        assert_eq!(nav_action(8), Some("win.pdf-back"));
+        assert_eq!(nav_action(9), Some("win.pdf-forward"));
+        // The three GTK does name are everyone else's: click, paste, context menu.
+        for button in [1, 2, 3] {
+            assert_eq!(nav_action(button), None);
+        }
+        for action in [8, 9].into_iter().filter_map(nav_action) {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| *name == action),
+                "{action} is on a mouse button but not in ACTIONS"
+            );
+        }
+    }
+
     /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
     /// action listed first. The table is the only place that can go wrong, and it is pure data.
     #[test]
@@ -4546,10 +4867,10 @@ mod tests {
         let forwarded = forwarded(&config);
         let has =
             |action: &str, accel: &str| forwarded.iter().any(|(a, k)| *a == action && k == accel);
-        // Claimed: the toggle, so the panel can always be put away, and every Ctrl+Shift chord.
+        // Claimed: opening and closing a shell, and every Ctrl+Shift chord in the table.
         assert!(has("win.terminal", "<Control>j"));
+        assert!(has("win.close-tab", "<Control>w"));
         assert!(has("win.new-folder", "<Control><Shift>n"));
-        assert!(has("win.terminal-close", "<Control><Shift>w"));
         // Left to the shell: plain Ctrl, and anything without Control at all.
         assert!(!has("win.save", "<Control>s"));
         assert!(!has("win.find-previous", "<Shift>F3"));

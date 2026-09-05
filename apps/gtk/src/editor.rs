@@ -247,11 +247,11 @@ pub fn open(
         _ => "accent-code",
     });
     view.set_widget_name(&next_view_name());
-    // Prose wraps because a line is a paragraph; code does not, because a line is a line.
-    view.set_wrap_mode(match flavour {
-        Flavour::Note => gtk::WrapMode::WordChar,
-        _ => gtk::WrapMode::None,
-    });
+    // Everything wraps. A note wraps because a line is a paragraph, and code wraps because the
+    // alternative is a document that scrolls sideways: the far end of a long line is then off the
+    // screen and out of the way of the eye, which is worse than a folded line. `Alt+Z` unwraps
+    // the odd generated file where the columns really do mean something.
+    view.set_wrap_mode(gtk::WrapMode::WordChar);
     view.set_show_line_numbers(false);
     if !flavour.is_note() {
         view.set_auto_indent(true);
@@ -1055,8 +1055,8 @@ impl Tab {
         }
     }
 
-    /// Wrap long lines, or stop. Prose starts wrapped and code does not; either can be told
-    /// otherwise for as long as the tab is open.
+    /// Wrap long lines, or stop. Every tab starts wrapped and can be told otherwise for as long
+    /// as it is open, which is the escape hatch for a file whose columns are the point.
     pub fn toggle_wrap(&self) {
         self.view.set_wrap_mode(match self.view.wrap_mode() {
             gtk::WrapMode::None => gtk::WrapMode::WordChar,

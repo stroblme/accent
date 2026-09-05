@@ -9,3 +9,8 @@ Categories=Office;Utility;TextEditor;GTK;GNOME;
 Keywords=markdown;notes;vault;wiki;pdf;
 MimeType=text/markdown;inode/directory;application/pdf;text/plain;
 StartupNotify=true
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=accent --new-window
