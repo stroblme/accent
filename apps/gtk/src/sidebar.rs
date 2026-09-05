@@ -44,8 +44,9 @@ type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
 pub enum Query {
     /// Ranked full text: what a plain query with no toggle means, and the fast path.
     Fts(String),
-    /// Exact matching over note bodies, one result row per match.
-    Grep(Regex),
+    /// Exact matching over bodies, one result row per match. `files` widens it past the notes
+    /// to every other text file in the vault, which are not in the index and are read from disk.
+    Grep { re: Regex, files: bool },
 }
 
 /// What a [`Query`] answered. The `usize` is the total match count, which the capped list cannot
@@ -435,8 +436,11 @@ fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 struct Key {
     text: String,
     options: Options,
-    /// Exact matching rather than ranked full text: any toggle on, or the replace row open.
+    /// Exact matching rather than ranked full text: any toggle on, the replace row open, or the
+    /// search widened past the notes, which have the only index there is.
     grep: bool,
+    /// Search files that are not notes as well.
+    files: bool,
 }
 
 /// The search pane's query loop and the widgets it drives, in one `Rc` so the future that waits
@@ -444,7 +448,7 @@ struct Key {
 struct Search {
     data: Rc<Data>,
     entry: gtk::SearchEntry,
-    toggles: [gtk::ToggleButton; 3],
+    toggles: [gtk::ToggleButton; 4],
     replace_row: gtk::Revealer,
     replace_entry: gtk::Entry,
     apply: gtk::Button,
@@ -476,12 +480,15 @@ impl Search {
             word: self.toggles[1].is_active(),
             regex: self.toggles[2].is_active(),
         };
+        let files = self.toggles[3].is_active();
         Key {
             text: self.entry.text().to_string(),
             options,
             // Replacing is an exact operation, so opening the replace row switches modes too:
-            // a ranked full-text hit is not a place in a file that can be rewritten.
-            grep: options.any() || self.replace_row.reveals_child(),
+            // a ranked full-text hit is not a place in a file that can be rewritten. Widening
+            // past the notes does the same, for the plainer reason that only notes are indexed.
+            grep: options.any() || files || self.replace_row.reveals_child(),
+            files,
         }
     }
 
@@ -618,7 +625,9 @@ impl Search {
     /// How many matches a Replace All would rewrite. The list is capped, the count is not.
     fn set_total(&self, total: usize) {
         self.apply.set_label(&format!("Replace All ({total})"));
-        self.apply.set_sensitive(total > 0);
+        // Replace rewrites notes only, so widening the search past them takes the button away
+        // rather than letting it rewrite a subset of what is on screen.
+        self.apply.set_sensitive(total > 0 && !self.key().files);
     }
 
     /// Rewrite the vault, then ask the same question again so the rows show what is there now.
@@ -635,7 +644,10 @@ impl Search {
 /// A [`Key`] as the worker thread needs it.
 fn compile(key: &Key) -> Result<Query, search::Error> {
     match key.grep {
-        true => Ok(Query::Grep(compile_regex(key)?)),
+        true => Ok(Query::Grep {
+            re: compile_regex(key)?,
+            files: key.files,
+        }),
         false => Ok(Query::Fts(key.text.clone())),
     }
 }
@@ -787,7 +799,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
     body.set_visible_child_name("prompt");
 
     let entry = gtk::SearchEntry::builder()
-        .placeholder_text("Search notes…")
+        .placeholder_text("Search…")
         .hexpand(true)
         .build();
     // A bar spanning the width right above the results, not a spinner beside the entry: the wait
@@ -813,6 +825,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         ("Aa", "Match Case"),
         ("Word", "Match Whole Word"),
         (".*", "Use Regular Expression"),
+        ("Files", "Search Files That Are Not Notes"),
     ]
     .map(|(label, tooltip)| {
         let button = gtk::ToggleButton::builder()

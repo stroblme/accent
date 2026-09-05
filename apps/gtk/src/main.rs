@@ -80,7 +80,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
-    ("win.palette-files", "Open Note…", &["<Control>e"]),
+    ("win.palette-files", "Go to File…", &["<Control>e"]),
     (
         "win.palette-commands",
         "Run a Command…",
@@ -1952,9 +1952,10 @@ impl App {
         let config = self.config.borrow();
         let sources = palette::Sources {
             recent,
-            load_notes: Box::new({
+            // Every file, not only the notes: a source file has to be reachable by name too.
+            load_files: Box::new({
                 let vault = self.vault.clone();
-                move || vault.note_paths().unwrap_or_default()
+                move || vault.file_paths().unwrap_or_default()
             }),
             commands: ACTIONS
                 .iter()
@@ -1996,7 +1997,7 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |item: &palette::Item| match item {
-                    palette::Item::Note(rel) => app.open_path(rel),
+                    palette::Item::File(rel) => app.open_path(rel),
                     palette::Item::Command { action, .. } => {
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }
@@ -2568,8 +2569,17 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
                     sidebar::Query::Fts(text) => {
                         sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
                     }
-                    sidebar::Query::Grep(re) => {
-                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                    sidebar::Query::Grep { re, files } => {
+                        let (mut hits, mut total) =
+                            vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                        // Notes first, because they are what the index can rank and count; the
+                        // rest is read from disk with whatever room is left in the list.
+                        if files {
+                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
+                            let (rest, more) = vault.grep_files(&re, room).unwrap_or_default();
+                            hits.extend(rest);
+                            total += more;
+                        }
                         sidebar::Answer::Grep(hits, total)
                     }
                 }
