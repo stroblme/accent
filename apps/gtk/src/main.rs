@@ -79,13 +79,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
-    ("win.terminal", "Toggle Terminal", &["<Control>j"]),
-    ("win.terminal-new", "New Terminal", &["<Control><Shift>j"]),
-    (
-        "win.terminal-close",
-        "Close Terminal",
-        &["<Control><Shift>w"],
-    ),
+    ("win.terminal", "New Terminal", &["<Control>j"]),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
@@ -284,6 +278,15 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
+        // `accent --terminal` is accent as a terminal: a window with no vault holding one shell.
+        // A second one joins that window as another tab, the way a second loose file does.
+        if args.iter().any(|a| a == "--terminal" || a == "-t") {
+            if let Some(app) = self.loose_window(gtk_app) {
+                app.window.present();
+                app.open_terminal();
+            }
+            return glib::ExitCode::SUCCESS;
+        }
         let Some(arg) = args.get(1) else {
             // Launched with no folder: pick up the vault this window was last opened on, and only
             // fall back to the start screen when there is none or it has gone away.
@@ -413,33 +416,37 @@ impl Shell {
             app.open_path(&rel);
             return;
         }
+        let Some(app) = self.loose_window(gtk_app) else {
+            return;
+        };
+        app.window.present();
+        app.open_path(&path.to_string_lossy());
+    }
+
+    /// The window with no vault, built if this is the first thing to want one. One per process, so
+    /// a second loose file — or a second shell — joins it as a tab.
+    fn loose_window(self: &Rc<Self>, gtk_app: &adw::Application) -> Option<Rc<App>> {
         let loose = self
             .windows
             .borrow()
             .iter()
             .find(|(root, _)| root.is_none())
             .map(|(_, app)| app.clone());
-        let app = match loose {
-            Some(app) => app,
-            None => {
-                let Some(app) = build_window(gtk_app, self, None, None) else {
-                    return;
-                };
-                app.window.connect_close_request({
-                    let shell = Rc::downgrade(self);
-                    move |window| {
-                        if let Some(shell) = shell.upgrade() {
-                            shell.forget(window);
-                        }
-                        glib::Propagation::Proceed
-                    }
-                });
-                self.windows.borrow_mut().push((None, app.clone()));
-                app
+        if let Some(app) = loose {
+            return Some(app);
+        }
+        let app = build_window(gtk_app, self, None, None)?;
+        app.window.connect_close_request({
+            let shell = Rc::downgrade(self);
+            move |window| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.forget(window);
+                }
+                glib::Propagation::Proceed
             }
-        };
-        app.window.present();
-        app.open_path(&path.to_string_lossy());
+        });
+        self.windows.borrow_mut().push((None, app.clone()));
+        Some(app)
     }
 }
 
@@ -492,7 +499,6 @@ impl Mode {
 struct Presenting {
     mode: Mode,
     sidebar: bool,
-    terminal: bool,
 }
 
 // ----------------------------------------------------------------------------------- app state
@@ -528,9 +534,8 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
-    /// The document above, the terminal panel below; the panel is hidden until it is asked for.
-    dock: gtk::Paned,
-    terminal: Rc<terminal::Panel>,
+    /// Numbers the shells this window has opened, so each tab has a key of its own.
+    terminals: Cell<usize>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
@@ -1749,9 +1754,9 @@ impl App {
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
                     // rather than sending the reader back to page one.
                     Doc::Pdf(pdf) => pdf.refresh(),
-                    // A diff is a snapshot of two texts and is keyed by the comparison rather
-                    // than by a path, so a file changing under it reaches neither.
-                    Doc::Status(_) | Doc::Diff(_) => {}
+                    // Neither a diff nor a shell is keyed by a path, so a file changing under one
+                    // reaches none of these.
+                    Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}
                 }
             }
             Event::FileRemoved(rel) => {
@@ -1975,10 +1980,8 @@ impl App {
                 self.presenting.set(Some(Presenting {
                     mode: self.mode.get(),
                     sidebar: self.sidebar_column.is_visible(),
-                    terminal: self.terminal.widget().is_visible(),
                 }));
                 self.sidebar_column.set_visible(false);
-                self.terminal.widget().set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
                 self.toolbar.set_reveal_bottom_bars(false);
                 self.apply_layout();
@@ -1986,7 +1989,6 @@ impl App {
             (false, Some(before)) => {
                 self.presenting.set(None);
                 self.sidebar_column.set_visible(before.sidebar);
-                self.terminal.widget().set_visible(before.terminal);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
@@ -2173,15 +2175,7 @@ impl App {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
                 }
             }
-            "terminal" => self.set_terminal(!self.terminal.widget().is_visible()),
-            "terminal-new" => {
-                let first = self.terminal.is_empty();
-                self.set_terminal(true);
-                if !first {
-                    self.terminal.spawn();
-                }
-            }
-            "terminal-close" => self.terminal.close_current(),
+            "terminal" => self.open_terminal(),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -2387,6 +2381,7 @@ impl App {
             },
             Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
+            Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
@@ -2394,36 +2389,38 @@ impl App {
         self.sync_branch();
     }
 
-    /// Show or hide the terminal panel. Showing it focuses a shell, creating one if there is
-    /// none; hiding it hands the keyboard back to the document, because `gtk_widget_hide` drops
-    /// the window's focus when it was inside what just went away.
-    fn set_terminal(self: &Rc<Self>, on: bool) {
-        let panel = self.terminal.clone();
-        panel.widget().set_visible(on);
-        if on {
-            self.dock
-                .set_position(terminal::divider(self.dock.height(), panel.height()));
-            match panel.is_empty() {
-                true => panel.spawn(),
-                false => panel.focus(),
+    fn restyle_terminals(&self) {
+        for doc in self.docs() {
+            if let Some(term) = doc.terminal() {
+                term.restyle();
             }
-        } else {
-            self.focus_document();
         }
-        self.save_session_soon();
     }
 
-    /// Put the keyboard back in whatever the active tab holds.
-    fn focus_document(&self) {
-        match self.active_doc() {
-            Some(Doc::Text(tab)) => {
-                tab.view.grab_focus();
-            }
-            Some(doc) => {
-                doc.page().child().grab_focus();
-            }
-            None => {}
-        }
+    /// A shell in a new tab of the active pane, at the vault root — the directory everything else
+    /// in the window is measured from. A window with no vault opens one at home.
+    fn open_terminal(self: &Rc<Self>) {
+        let n = self.terminals.get() + 1;
+        self.terminals.set(n);
+        let cwd = match self.vault() {
+            Some(vault) => vault.root().to_path_buf(),
+            None => glib::home_dir(),
+        };
+        let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
+        fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
+        terminal::on_exit(
+            &term,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |term| app.close_page(&term.page)
+            ),
+        );
+        let page = term.page.clone();
+        self.docs.borrow_mut().push(Doc::Terminal(term));
+        self.tabs().set_selected_page(&page);
+        self.sync_active();
+        page.child().grab_focus();
     }
 
     /// The branch of the repository the active document sits in, which for a nested repository is
@@ -2702,7 +2699,12 @@ impl App {
             })
             .collect();
         fill_captured(&self.captured, &captured);
-        fill_shortcuts(&self.terminal.forwarded, &forwarded(&config));
+        let forwarded = forwarded(&config);
+        for doc in self.docs() {
+            if let Some(term) = doc.terminal() {
+                fill_shortcuts(&term.forwarded, &forwarded);
+            }
+        }
     }
 
     /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
@@ -2743,7 +2745,7 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
         }
-        self.terminal.restyle();
+        self.restyle_terminals();
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -2866,7 +2868,6 @@ impl App {
                 }
                 places
             },
-            terminal_height: self.terminal.height(),
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -2887,9 +2888,6 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
-        // The height only: the shells themselves are not restored, because a shell is where the
-        // user was rather than what they were reading.
-        self.terminal.set_height(session.terminal_height);
         // ponytail: every note comes back into one pane, because the session does not record the
         // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
         // being what someone who left four panes open expects.
@@ -3141,27 +3139,9 @@ fn build_window(
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
     let find = find::Bar::new();
-    // A shell starts where everything else in the window is measured from. With no vault there is
-    // no such place, so it starts at home.
-    let terminal = terminal::Panel::new(match root {
-        Some(root) => root.to_path_buf(),
-        None => glib::home_dir(),
-    });
-    // Inside the editor column, so it spans editor and preview but never the sidebar, and under
-    // the toast overlay, so a toast does not land on the shell.
-    let dock = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .start_child(&toasts)
-        .end_child(terminal.widget())
-        .resize_start_child(true)
-        .resize_end_child(false)
-        .shrink_start_child(false)
-        .shrink_end_child(false)
-        .build();
-
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor_column.append(find.widget());
-    editor_column.append(&dock);
+    editor_column.append(&toasts);
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
     // `content` and presentation mode takes them away with it rather than unrevealing them.
@@ -3216,8 +3196,7 @@ fn build_window(
         git: OnceCell::new(),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
-        dock,
-        terminal,
+        terminals: Cell::new(0),
         split,
         sidebar_column,
         sidebar_header,
@@ -3265,7 +3244,6 @@ fn build_window(
     }
 
     wire_pane(&app, &first);
-    wire_terminal(&app);
 
     install_actions(gtk_app, &app);
     wire_window(&app, &modes);
@@ -3511,33 +3489,6 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
 
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
-/// The panel's own bookkeeping: remember where the divider was left, and take the panel away
-/// when its last shell exits.
-fn wire_terminal(app: &Rc<App>) {
-    app.dock.connect_position_notify(glib::clone!(
-        #[weak]
-        app,
-        move |dock| {
-            if app.terminal.widget().is_visible() {
-                app.terminal.set_height(dock.height() - dock.position());
-                app.save_session_soon();
-            }
-        }
-    ));
-    app.terminal.tabs.connect_page_detached(glib::clone!(
-        #[weak]
-        app,
-        move |tabs, _, _| {
-            if tabs.n_pages() > 0 {
-                return;
-            }
-            // From an idle: the page is still being torn down, and hiding the panel underneath it
-            // reparents what libadwaita is in the middle of removing.
-            glib::idle_add_local_once(move || app.set_terminal(false));
-        }
-    ));
-}
-
 fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
@@ -3762,9 +3713,6 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     divider.set_position(Session::default().sidebar_width);
                 } else if divider == &app.paned {
                     app.centre_handle();
-                } else if divider == &app.dock {
-                    app.terminal.set_height(0);
-                    divider.set_position(terminal::divider(divider.height(), 0));
                 } else if !app
                     .sidebar
                     .get()
@@ -3881,7 +3829,7 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     if let Some(preview) = app.preview.borrow().as_ref() {
                         preview.restyle();
                     }
-                    app.terminal.restyle();
+                    app.restyle_terminals();
                 }
             ),
         );
@@ -3890,7 +3838,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
     style.connect_monospace_font_name_notify(glib::clone!(
         #[weak]
         app,
-        move |_| app.terminal.refont()
+        move |_| {
+            for doc in app.docs() {
+                if let Some(term) = doc.terminal() {
+                    term.refont();
+                }
+            }
+        }
     ));
     style.connect_document_font_name_notify(glib::clone!(
         #[weak]
@@ -4027,7 +3981,11 @@ const CAPTURED: &[&str] = &[
 ];
 
 /// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus the toggle itself so the panel can always be put away.
+/// which no shell claims, plus opening a shell and closing one.
+///
+/// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
+/// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
+/// Backspace` still do that, which is why this is the chord to give up.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
 /// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
@@ -4041,7 +3999,8 @@ fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
                 .map(move |accel| (*action, accel))
         })
         .filter(|(action, accel)| {
-            *action == "win.terminal" || (accel.contains("<Control>") && accel.contains("<Shift>"))
+            matches!(*action, "win.terminal" | "win.close-tab")
+                || (accel.contains("<Control>") && accel.contains("<Shift>"))
         })
         .collect()
 }
@@ -4546,10 +4505,10 @@ mod tests {
         let forwarded = forwarded(&config);
         let has =
             |action: &str, accel: &str| forwarded.iter().any(|(a, k)| *a == action && k == accel);
-        // Claimed: the toggle, so the panel can always be put away, and every Ctrl+Shift chord.
+        // Claimed: opening and closing a shell, and every Ctrl+Shift chord in the table.
         assert!(has("win.terminal", "<Control>j"));
+        assert!(has("win.close-tab", "<Control>w"));
         assert!(has("win.new-folder", "<Control><Shift>n"));
-        assert!(has("win.terminal-close", "<Control><Shift>w"));
         // Left to the shell: plain Ctrl, and anything without Control at all.
         assert!(!has("win.save", "<Control>s"));
         assert!(!has("win.find-previous", "<Shift>F3"));
