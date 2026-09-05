@@ -102,7 +102,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
-    ("win.toggle-comment", "Toggle Comment", &["<Control>slash"]),
+    ("win.toggle-comment", "Toggle Comment", &["<Control>k"]),
     ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
     ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
@@ -210,7 +210,7 @@ impl Shell {
         let open = gio::SimpleAction::new("open-vault", None);
         open.connect_activate({
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| shell.start_screen(&gtk_app)
+            move |_, _| shell.choose_vault(&gtk_app)
         });
         gtk_app.add_action(&open);
 
@@ -307,6 +307,28 @@ impl Shell {
             }
         }
         glib::ExitCode::SUCCESS
+    }
+
+    /// Open Folder…: the picker, straight away.
+    ///
+    /// It used to land on the start screen, which then showed a button that opened this dialog —
+    /// a screen in the way of the thing it was asking for. The start screen is still what a bare
+    /// launch with no vault lands on, where it also lists the recent ones.
+    fn choose_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
+        let parent = gtk_app.active_window();
+        let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+        dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+            // A dismissed chooser is an error here, and not one worth saying anything about.
+            let Some(path) = result.ok().and_then(|folder| folder.path()) else {
+                return;
+            };
+            shell.open_vault(&gtk_app, path, None);
+            // The start screen has done its job if it was what asked.
+            if let Some(window) = shell.start.upgrade() {
+                window.close();
+            }
+        });
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
@@ -1271,11 +1293,25 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
+        // A window with no vault has only this pane, so the whole column comes and goes with
+        // whether there is an outline to put in it. One open text file has none.
+        if self.vault.is_none() {
+            let wanted = self.active_doc().is_some_and(|doc| doc.pdf().is_some());
+            self.sidebar_column.set_visible(wanted);
+        }
         let Some(doc) = self.active_doc() else {
             return sidebar.set_outline(None);
         };
         // A PDF's outline is its bookmarks, with the page thumbnails under them.
         if let Some(pdf) = doc.pdf() {
+            // Still being opened on the render thread, so there is nothing to say yet and
+            // "No Bookmarks" would be a guess.
+            if pdf.page_count() == 0 {
+                return sidebar.set_outline(Some(&sidebar::outline_note(
+                    "Opening…",
+                    "Reading the document.",
+                )));
+            }
             let outline = pdf.outline();
             let content = gtk::Paned::builder()
                 .orientation(gtk::Orientation::Vertical)
@@ -2937,14 +2973,20 @@ fn build_window(
 
     // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
     // between its notes. A window without one is tabs and nothing else.
-    if let Some(vault) = &vault {
-        // Populate straight from the index: the window must be up before reconcile finishes.
-        let rows = gio::ListStore::new::<gtk::StringObject>();
-        tree::fill(&rows, vault, "");
-        tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
-        build_sidebar(&app, &rows, vault);
-    } else {
-        app.sidebar_column.set_visible(false);
+    match &vault {
+        Some(vault) => {
+            // Populate straight from the index: the window must be up before reconcile finishes.
+            let rows = gio::ListStore::new::<gtk::StringObject>();
+            tree::fill(&rows, vault, "");
+            tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
+            build_sidebar(&app, &rows, vault);
+        }
+        // Outline only, and hidden until something with an outline is open: a window showing one
+        // text file has nothing to put in it, and an empty column is a column wasted.
+        None => {
+            build_outline_sidebar(&app);
+            app.sidebar_column.set_visible(false);
+        }
     }
 
     wire_pane(&app, &first);
@@ -2977,6 +3019,7 @@ fn build_window(
 }
 
 /// Files / Search / Tags / Backlinks over the vault tree.
+/// The sidebar for a window with a vault: the tree, the index panes and the outline.
 fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
         vault.clone(),
@@ -3046,9 +3089,19 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }),
         };
+    adopt_sidebar(app, Some((files, data)));
+}
+
+/// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
+/// There is no index behind it, so Files, Search, Tags and Backlinks have nothing to show; an
+/// outline does not need one, and a PDF's bookmarks are the reason such a window has a sidebar.
+fn build_outline_sidebar(app: &Rc<App>) {
+    adopt_sidebar(app, None);
+}
+
+fn adopt_sidebar(app: &Rc<App>, vault: Option<(gtk::Widget, sidebar::Data)>) {
     let pane = sidebar::Sidebar::new(
-        files,
-        data,
+        vault,
         glib::clone!(
             #[weak]
             app,
@@ -3603,10 +3656,13 @@ const CAPTURED: &[&str] = &[
     "win.scroll-down",
     "win.caret-above",
     "win.caret-below",
+    // GtkTextView binds Ctrl+K to deleting to the end of the line, which is not something anyone
+    // reaches for in an editor that has Ctrl+L for the whole line.
+    "win.toggle-comment",
 ];
 
 /// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
-/// moves a chord away from one of the four does not leave the old one claimed.
+/// moves a chord away from one of these does not leave the old one claimed.
 fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
     let old: Vec<gtk::Shortcut> = (0..controller.n_items())
         .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())

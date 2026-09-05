@@ -166,10 +166,14 @@ pub struct RgbaImage {
     pub data: Vec<u8>,
 }
 
+/// How a page is recoloured on its way to the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Theme {
-    Light,
-    Dark,
+    /// Exactly as the document defines it.
+    Plain,
+    /// Remapped so the document's paper lands on `paper` and its ink on `ink`, keeping each
+    /// pixel's own chroma so a coloured figure stays coloured.
+    Recolour { paper: [u8; 3], ink: [u8; 3] },
 }
 
 /// One character with its box on the page. `index` is pdfium's character index and is what
@@ -234,39 +238,40 @@ pub struct Outline {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Dark theme
+// Recolouring
 // ---------------------------------------------------------------------------------------------
 
-// Luminance the darkest input (white paper) maps to, and the brightest (black ink). Not 0.0/1.0:
-// pure black behind text is harsh, and #1e1e1e matches the Adwaita dark view background.
-const DARK_LO: f32 = 0.118; // 0x1e
-const DARK_HI: f32 = 0.922; // 0xeb
-
-/// Invert a pixel's lightness while keeping its chroma, so white paper becomes dark grey and
-/// black text becomes light, but a yellow highlight stays yellow.
+/// Move a pixel onto the theme's paper–ink ramp while keeping its chroma, so white paper becomes
+/// `paper` and black text becomes `ink`, but a yellow highlight stays yellow.
+///
+/// The pixel's luminance picks a point on the ramp; the pixel's own offset from its luminance is
+/// then added back per channel, which is what carries the colour across.
 ///
 // ponytail: this keeps the *absolute* chroma offset `c - luminance` and clamps, which is one
 // multiply-free pass over the buffer and good enough to read by. The ceiling: saturated colours
 // near the ends of the ramp lose some saturation to the clamp, and it is not a real perceptual
-// space. Upgrade path when someone complains is Oklab — convert, negate L, convert back — at
+// space. Upgrade path when someone complains is Oklab — convert, remap L, convert back — at
 // roughly 3x the cost, at which point this wants SIMD or the GPU.
-pub fn dark_pixel(px: [u8; 4]) -> [u8; 4] {
+pub fn recolour_pixel(px: [u8; 4], paper: [u8; 3], ink: [u8; 3]) -> [u8; 4] {
     let (r, g, b) = (
         px[0] as f32 / 255.0,
         px[1] as f32 / 255.0,
         px[2] as f32 / 255.0,
     );
     let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    let l2 = DARK_LO + (1.0 - l) * (DARK_HI - DARK_LO);
-    let map = |c: f32| ((l2 + (c - l)) * 255.0).clamp(0.0, 255.0) as u8;
-    [map(r), map(g), map(b), px[3]]
+    let map = |i: usize, c: f32| {
+        let (ink, paper) = (ink[i] as f32 / 255.0, paper[i] as f32 / 255.0);
+        let target = ink + l * (paper - ink);
+        ((target + (c - l)) * 255.0).clamp(0.0, 255.0) as u8
+    };
+    [map(0, r), map(1, g), map(2, b), px[3]]
 }
 
-/// [`dark_pixel`] over a whole RGBA8 buffer, in place. Shared by the page and tile renders so the
-/// two cannot drift apart.
-fn darken(data: &mut [u8]) {
+/// [`recolour_pixel`] over a whole RGBA8 buffer, in place. Shared by the page and tile renders so
+/// the two cannot drift apart.
+fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
     for px in data.chunks_exact_mut(4) {
-        let out = dark_pixel([px[0], px[1], px[2], px[3]]);
+        let out = recolour_pixel([px[0], px[1], px[2], px[3]], paper, ink);
         px.copy_from_slice(&out);
     }
 }
@@ -341,8 +346,8 @@ impl PdfDoc {
         };
         // Outside the lock on purpose: the theme pass costs about as much as the render itself
         // and touches nothing but our own buffer, so it must not block other pdfium callers.
-        if theme == Theme::Dark {
-            darken(&mut data);
+        if let Theme::Recolour { paper, ink } = theme {
+            recolour(&mut data, paper, ink);
         }
         Ok(RgbaImage {
             width,
@@ -392,8 +397,8 @@ impl PdfDoc {
                 .map_err(|e| anyhow!("render tile of page {page}: {e:?}"))?;
             (w as u32, h as u32, bitmap.as_rgba_bytes())
         };
-        if theme == Theme::Dark {
-            darken(&mut data);
+        if let Theme::Recolour { paper, ink } = theme {
+            recolour(&mut data, paper, ink);
         }
         Ok(RgbaImage {
             width,
@@ -925,7 +930,7 @@ mod tests {
             ]
         );
         // A highlight must actually tint the render.
-        let img = doc.render_page(0, 1.0, Theme::Light).unwrap();
+        let img = doc.render_page(0, 1.0, Theme::Plain).unwrap();
         let px = |x: u32, y: u32| {
             let i = ((y * img.width + x) * 4) as usize;
             [img.data[i], img.data[i + 1], img.data[i + 2]]
@@ -945,7 +950,7 @@ mod tests {
         let Some((_d, doc)) = open_tiny_with(true) else {
             return;
         };
-        doc.render_page(0, 2.0, Theme::Light).unwrap();
+        doc.render_page(0, 2.0, Theme::Plain).unwrap();
         let hls = doc.highlights().unwrap();
         assert_eq!(hls.len(), 1);
         assert_eq!(
@@ -972,7 +977,7 @@ mod tests {
                     for _ in 0..5 {
                         let other = PdfDoc::open(&path).unwrap();
                         assert_eq!(other.page_count(), 2);
-                        doc.render_page(0, 1.0, Theme::Dark).unwrap();
+                        doc.render_page(0, 1.0, adwaita_dark()).unwrap();
                         assert!(!doc.page_text(0).unwrap().is_empty());
                         doc.highlights().unwrap();
                     }
@@ -987,10 +992,10 @@ mod tests {
             return;
         };
         // 200x100pt at 2 px/pt is a 400x200 px page.
-        let full = doc.render_page(0, 2.0, Theme::Light).unwrap();
+        let full = doc.render_page(0, 2.0, Theme::Plain).unwrap();
         let (x, y, w, h) = (60u32, 40u32, 120u32, 80u32);
         let tile = doc
-            .render_tile(0, 2.0, x as i32, y as i32, w as i32, h as i32, Theme::Light)
+            .render_tile(0, 2.0, x as i32, y as i32, w as i32, h as i32, Theme::Plain)
             .unwrap();
         assert_eq!((tile.width, tile.height), (w, h));
         // Byte-identical, not approximate: the tile is the same render translated by a whole
@@ -1007,11 +1012,11 @@ mod tests {
         }
         // A tile running off the page keeps only what is left of it; one starting off it fails.
         let clamped = doc
-            .render_tile(0, 2.0, 380, 190, 100, 100, Theme::Light)
+            .render_tile(0, 2.0, 380, 190, 100, 100, Theme::Plain)
             .unwrap();
         assert_eq!((clamped.width, clamped.height), (20, 10));
         assert!(
-            doc.render_tile(0, 2.0, 400, 0, 10, 10, Theme::Light)
+            doc.render_tile(0, 2.0, 400, 0, 10, 10, Theme::Plain)
                 .is_err()
         );
     }
@@ -1079,32 +1084,49 @@ mod tests {
         assert!(doc.search(0, "second").unwrap().is_empty(), "other page");
     }
 
+    // The two pairs the app asks for: the Adwaita dark view background with its foreground, and
+    // Solarized light's cream paper with its slate ink.
+    const ADWAITA: ([u8; 3], [u8; 3]) = ([0x1d, 0x1d, 0x20], [0xeb, 0xeb, 0xeb]);
+    const SOLARIZED_LIGHT: ([u8; 3], [u8; 3]) = ([0xfd, 0xf6, 0xe3], [0x65, 0x7b, 0x83]);
+
+    fn adwaita_dark() -> Theme {
+        Theme::Recolour {
+            paper: ADWAITA.0,
+            ink: ADWAITA.1,
+        }
+    }
+
     #[test]
-    fn dark_theme_inverts_lightness_but_keeps_hue() {
-        let white = dark_pixel([255, 255, 255, 255]);
-        assert!(white[0] < 60 && white[0] > 10, "white -> {white:?}");
-        assert!(
-            white[0] == white[1] && white[1] == white[2],
-            "stays grey: {white:?}"
-        );
-        assert_eq!(white[3], 255, "alpha preserved");
+    fn recolour_maps_paper_and_ink_to_the_theme() {
+        for (paper, ink) in [ADWAITA, SOLARIZED_LIGHT] {
+            // Tolerance of 1 per channel: the ramp runs through f32 and truncates on the way out.
+            let near = |got: [u8; 4], want: [u8; 3]| (0..3).all(|i| got[i].abs_diff(want[i]) <= 1);
 
-        let black = dark_pixel([0, 0, 0, 255]);
-        assert!(black[0] > 200, "black -> {black:?}");
+            let white = recolour_pixel([255, 255, 255, 255], paper, ink);
+            assert!(near(white, paper), "white -> {white:?}, want {paper:?}");
+            assert_eq!(white[3], 255, "alpha preserved");
 
-        let red = dark_pixel([255, 0, 0, 255]);
-        assert!(
-            red[0] > red[1] + 40 && red[0] > red[2] + 40,
-            "stays reddish: {red:?}"
-        );
-        assert!(red[1] == red[2], "hue unshifted: {red:?}");
+            let black = recolour_pixel([0, 0, 0, 255], paper, ink);
+            assert!(near(black, ink), "black -> {black:?}, want {ink:?}");
+        }
+    }
 
-        // A yellow highlight must remain a yellow highlight.
-        let yellow = dark_pixel([255, 255, 0, 255]);
-        assert!(
-            yellow[0] > yellow[2] + 40 && yellow[1] > yellow[2] + 40,
-            "{yellow:?}"
-        );
+    #[test]
+    fn recolour_keeps_a_saturated_colour_recognisable() {
+        for (paper, ink) in [ADWAITA, SOLARIZED_LIGHT] {
+            // A yellow highlight must remain a yellow highlight, not turn grey.
+            let yellow = recolour_pixel([255, 255, 0, 255], paper, ink);
+            assert!(
+                yellow[0] > yellow[2] + 40 && yellow[1] > yellow[2] + 40,
+                "{yellow:?} on paper {paper:?}"
+            );
+
+            let red = recolour_pixel([255, 0, 0, 255], paper, ink);
+            assert!(
+                red[0] > red[1] + 40 && red[0] > red[2] + 40,
+                "stays reddish: {red:?} on paper {paper:?}"
+            );
+        }
     }
 
     #[test]

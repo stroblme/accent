@@ -928,13 +928,6 @@ impl Tab {
     /// as on a zoom or a preference change, because the share is of a width nothing reports until
     /// the window has been laid out.
     fn set_clamp(&self) {
-        // Code fills the width: a capped column is a prose idea, and an indented block read
-        // through a 70-character window is worse than a horizontal scrollbar.
-        if !self.flavour.is_note() {
-            self.clamp.set_maximum_size(i32::MAX);
-            self.clamp.set_tightening_threshold(i32::MAX);
-            return;
-        }
         let available = self.scroller.hadjustment().page_size().round() as i32;
         let max = column_max(available, self.column.get(), self.zoom.get());
         self.clamp.set_maximum_size(max);
