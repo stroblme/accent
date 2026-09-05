@@ -28,9 +28,13 @@ pub enum PreviewOp {
 
 /// What the bar needs from the window. Two closures, so `find.rs` never names `App`.
 pub struct Wiring {
-    /// Whether the rendered preview, not the editor, is what the user is looking at.
+    /// Whether something other than the editor — the rendered preview, or a PDF — is what the
+    /// user is looking at, so find and go-to are addressed there instead.
     pub presenting: Box<dyn Fn() -> bool>,
     pub preview: Box<dyn Fn(PreviewOp)>,
+    /// How many pages the thing being looked at has, when it is counted in pages rather than
+    /// lines. `None` for an editor, which counts lines.
+    pub pages: Box<dyn Fn() -> Option<usize>>,
 }
 
 /// Which row the bar shows, and whether the replace controls come with it.
@@ -261,8 +265,17 @@ impl Bar {
     pub fn open(self: &Rc<Self>, mode: Mode) {
         match mode {
             Mode::Goto => {
-                let count = self.tab().map(|tab| tab.line_count()).unwrap_or(0);
-                self.lines.set_text(&format!("of {count} lines"));
+                // A PDF is counted in pages and everything else in lines, and the row says so
+                // in both places: a "Line[:column]" prompt over a page count is nonsense.
+                let (label, placeholder) = match self.wiring.get().and_then(|w| (w.pages)()) {
+                    Some(pages) => (format!("of {pages} pages"), "Page"),
+                    None => {
+                        let count = self.tab().map(|tab| tab.line_count()).unwrap_or(0);
+                        (format!("of {count} lines"), "Line[:column]")
+                    }
+                };
+                self.lines.set_text(&label);
+                self.line.set_placeholder_text(Some(placeholder));
                 self.rows.set_visible_child_name("goto");
                 self.bar.set_search_mode(true);
                 self.line.grab_focus();
@@ -299,10 +312,16 @@ impl Bar {
 
     /// The number of matches in the preview, reported by WebKit after a search.
     pub fn set_matches(&self, count: u32) {
-        self.matches.set_text(&match count {
+        self.set_matches_text(&match count {
             0 => "No results".to_string(),
             n => format!("{n} matches"),
         });
+    }
+
+    /// The same readout, said in the caller's own words. The PDF reader counts its matches
+    /// itself and can say "3 of 12", which a plain count cannot.
+    pub fn set_matches_text(&self, text: &str) {
+        self.matches.set_text(text);
     }
 
     // --- internals -------------------------------------------------------------------------

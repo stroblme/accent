@@ -363,6 +363,9 @@ pub fn build(
     selection.set_can_unselect(true);
     let view = gtk::ListView::new(Some(selection), Some(factory));
     view.add_css_class("navigation-sidebar");
+    // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
+    // so a click never costs anything you did not ask for.
+    view.set_single_click_activate(true);
     view.connect_activate(move |view, pos| {
         let Some(row) = view
             .model()

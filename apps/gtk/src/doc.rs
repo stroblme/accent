@@ -12,6 +12,7 @@ use std::rc::Rc;
 
 use crate::editor::Tab;
 use crate::fileops;
+use crate::pdftab::PdfTab;
 
 /// A tab with nothing to edit: an image, or a status page standing in for a file we decline to
 /// open. It keeps only what the tab machinery needs from every document.
@@ -39,6 +40,7 @@ impl Viewer {
 pub enum Doc {
     Text(Rc<Tab>),
     Image(Rc<Viewer>),
+    Pdf(Rc<PdfTab>),
     Status(Rc<Viewer>),
 }
 
@@ -47,6 +49,7 @@ impl Doc {
     pub fn key(&self) -> String {
         match self {
             Doc::Text(tab) => tab.rel(),
+            Doc::Pdf(pdf) => pdf.key(),
             Doc::Image(v) | Doc::Status(v) => v.key(),
         }
     }
@@ -54,6 +57,7 @@ impl Doc {
     pub fn page(&self) -> &adw::TabPage {
         match self {
             Doc::Text(tab) => &tab.page,
+            Doc::Pdf(pdf) => &pdf.page,
             Doc::Image(v) | Doc::Status(v) => &v.page,
         }
     }
@@ -61,6 +65,13 @@ impl Doc {
     pub fn tab(&self) -> Option<&Rc<Tab>> {
         match self {
             Doc::Text(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    pub fn pdf(&self) -> Option<&Rc<PdfTab>> {
+        match self {
+            Doc::Pdf(pdf) => Some(pdf),
             _ => None,
         }
     }
@@ -76,6 +87,7 @@ impl Doc {
     pub fn retarget(&self, root: &Path, key: &str) {
         match self {
             Doc::Text(tab) => tab.retarget(root, key),
+            Doc::Pdf(pdf) => pdf.retarget(root, key),
             Doc::Image(v) | Doc::Status(v) => {
                 *v.key.borrow_mut() = key.to_string();
                 v.page.set_title(file_name(key));
