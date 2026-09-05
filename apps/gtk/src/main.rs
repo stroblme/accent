@@ -14,6 +14,7 @@ mod fileops;
 mod find;
 mod git;
 mod highlight;
+mod marks;
 mod multicaret;
 mod palette;
 mod paned;
@@ -1252,6 +1253,7 @@ impl App {
         }
         self.mark_loose(&tab.page, &tab.rel());
         let page = tab.page.clone();
+        self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab));
         self.tabs().set_selected_page(&page);
         self.sync_active();
@@ -2375,6 +2377,26 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
+        // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
+        // merely noticed an edit is telling us about the very buffer the marks came from.
+        if git.head_changed() {
+            for tab in self.open_tabs() {
+                self.fetch_head(&tab);
+            }
+        }
+    }
+
+    /// Give a tab the committed text its gutter draws against.
+    fn fetch_head(&self, tab: &Rc<Tab>) {
+        let Some(git) = self.git.get() else {
+            return;
+        };
+        let weak = Rc::downgrade(tab);
+        git.head_text(&tab.rel(), move |head| {
+            if let Some(tab) = weak.upgrade() {
+                tab.set_head(head);
+            }
+        });
     }
 
     fn sync_opening(self: &Rc<Self>) {
