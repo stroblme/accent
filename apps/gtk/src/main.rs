@@ -108,6 +108,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
+    (
+        "win.newline-below",
+        "Insert Line Below",
+        &["<Control>Return"],
+    ),
     ("win.toggle-comment", "Toggle Comment", &["<Control>k"]),
     ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
@@ -149,7 +154,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.copy-absolute-path", "Copy Absolute Path", &[]),
     ("win.show-in-files", "Show in Files", &[]),
     ("win.reveal-in-sidebar", "Reveal in Sidebar", &[]),
-    ("win.follow-link", "Follow Link", &["<Control>Return"]),
+    (
+        "win.follow-link",
+        "Follow Link",
+        &["<Control><Shift>Return"],
+    ),
     ("win.rename", "Rename", &["F2"]),
     ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
     ("win.present", "Presentation Mode", &["F5"]),
@@ -2432,6 +2441,15 @@ impl App {
                     tab.delete_line();
                 }
             }
+            "newline-below" => {
+                // `Ctrl+Return` belongs to the git commit box while the keyboard is in it
+                // (DESIGN.md, Git pane). A window accelerator is dispatched ahead of any
+                // controller on the focused widget, so the box cannot claim the chord itself.
+                let committed = self.git.get().is_some_and(|git| git.commit_if_focused());
+                if !committed && let Some(tab) = self.active() {
+                    tab.newline_below();
+                }
+            }
             "scroll-up" => {
                 if let Some(tab) = self.active() {
                     tab.scroll_lines(-1);
@@ -2819,7 +2837,8 @@ impl App {
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
-        let mut recent = self.recent_notes.borrow().clone();
+        let mru = self.recent_notes.borrow().clone();
+        let mut recent = mru.clone();
         for rel in self
             .vault()
             .and_then(|v| v.recent_notes(RECENT_NOTES).ok())
@@ -2833,6 +2852,7 @@ impl App {
         let config = self.config.borrow();
         let sources = palette::Sources {
             recent,
+            mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
             load_files: Box::new({
                 let vault = self.vault.clone();
