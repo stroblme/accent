@@ -17,6 +17,8 @@ mod multicaret;
 mod palette;
 mod paned;
 mod panes;
+mod pdftab;
+mod pdfview;
 mod preview;
 mod settings;
 mod sidebar;
@@ -26,6 +28,7 @@ mod tree;
 mod typing;
 
 use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
+use accent_core::config::PdfZoom;
 use accent_core::index::Phase;
 use accent_core::markdown::{Link, LinkKind};
 use adw::prelude::*;
@@ -125,6 +128,13 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
+    // The PDF reader. Back and forward take the chords a browser uses for the same idea;
+    // the rest live in the palette, where they are found by name rather than by chord.
+    ("win.pdf-back", "Back", &["<Alt>Left"]),
+    ("win.pdf-forward", "Forward", &["<Alt>Right"]),
+    ("win.pdf-fit-width", "Fit Width", &[]),
+    ("win.pdf-fit-page", "Fit Page", &[]),
+    ("win.pdf-invert", "Invert PDF Colours", &[]),
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
@@ -823,7 +833,7 @@ impl App {
         match doc::kind_of(&key) {
             Kind::Note => self.open_text(&key, &path, Flavour::Note),
             Kind::Image => self.open_image(&key, &path),
-            Kind::Pdf => self.toast("The PDF viewer is not built yet"),
+            Kind::Pdf => self.open_pdf(&key, &path),
             Kind::Text => self.open_text(&key, &path, flavour_of(&key)),
         }
     }
@@ -905,6 +915,61 @@ impl App {
         if flavour.is_note() {
             self.sync_conflict_banner(key);
         }
+    }
+
+    /// A PDF, in the reader.
+    fn open_pdf(self: &Rc<Self>, key: &str, path: &Path) {
+        let place = self
+            .vault()
+            .and_then(|v| v.session().pdf.get(key).copied())
+            .unwrap_or_default();
+        let pdf = pdftab::open(
+            path,
+            key,
+            doc::file_name(key),
+            &fileops::display_path(self.root(), key),
+            &self.tabs(),
+            place,
+        );
+        pdf.connect_zoom(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.refresh_zoom()
+        ));
+        pdf.connect_page(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.save_session_soon()
+        ));
+        pdf.connect_outline(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_outline()
+        ));
+        pdf.connect_matches(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| app.find.set_matches_text(&pdf.matches_label())
+        ));
+        pdf.connect_uri(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |uri| {
+                let launcher = gtk::UriLauncher::new(uri);
+                launcher.launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+            }
+        ));
+        let page = pdf.page.clone();
+        self.mark_loose(&page, key);
+        self.docs.borrow_mut().push(Doc::Pdf(pdf));
+        self.tabs().set_selected_page(&page);
+        self.sync_active();
+        self.save_session_soon();
+    }
+
+    /// The PDF in the active tab, for the actions that only mean something in one.
+    fn active_pdf(&self) -> Option<Rc<pdftab::PdfTab>> {
+        self.active_doc()?.pdf().cloned()
     }
 
     /// An image, in a tab that only looks at it.
@@ -1187,8 +1252,16 @@ impl App {
             None => self.encoding_label.set_visible(false),
         }
         self.sync_outline();
-        if let Some(tab) = note {
-            self.render(&tab);
+        self.refresh_zoom();
+        match note {
+            Some(tab) => self.render(&tab),
+            // Nothing here is markdown, so the preview shows nothing rather than the last note
+            // it happened to be given.
+            None => {
+                if let Some(preview) = self.preview.borrow().as_ref() {
+                    preview.render("", "");
+                }
+            }
         }
     }
 
@@ -1201,6 +1274,40 @@ impl App {
         let Some(doc) = self.active_doc() else {
             return sidebar.set_outline(None);
         };
+        // A PDF's outline is its bookmarks, with the page thumbnails under them.
+        if let Some(pdf) = doc.pdf() {
+            let outline = pdf.outline();
+            let content = gtk::Paned::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .resize_start_child(true)
+                .shrink_start_child(false)
+                .shrink_end_child(false)
+                .build();
+            let rows: Vec<(u8, String, usize)> = outline
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.depth as u8 + 1,
+                        entry.title.clone(),
+                        entry.page.unwrap_or(0),
+                    )
+                })
+                .collect();
+            let top = match rows.is_empty() {
+                true => sidebar::outline_note("No Bookmarks", "This PDF has no outline."),
+                false => sidebar::outline_list(
+                    &rows,
+                    glib::clone!(
+                        #[weak]
+                        pdf,
+                        move |page| pdf.goto_page(page)
+                    ),
+                ),
+            };
+            content.set_start_child(Some(&top));
+            content.set_end_child(Some(&pdf.thumbnails()));
+            return sidebar.set_outline(Some(content.upcast_ref()));
+        }
         let Some(tab) = doc.tab() else {
             return sidebar.set_outline(None);
         };
@@ -1545,6 +1652,9 @@ impl App {
                             picture.set_filename(Some(self.root().join(&rel)));
                         }
                     }
+                    // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
+                    // rather than sending the reader back to page one.
+                    Doc::Pdf(pdf) => pdf.refresh(),
                     Doc::Status(_) => {}
                 }
             }
@@ -1554,17 +1664,23 @@ impl App {
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
                     self.sync_conflict_banner(&original);
                 }
-                let Some(doc) = self.doc_for(&rel) else {
-                    return;
-                };
-                // Only a buffer holds work the file no longer does; everything else has nothing
-                // left to show, so its tab goes with the file.
-                match doc.tab().filter(|tab| tab.modified.get()) {
-                    Some(tab) => {
-                        tab.disk_changed.set(true);
-                        tab.show_alert(Alert::Restore);
+                // A trashed folder arrives as one removal, so everything under it goes too:
+                // a tab whose file is inside a folder that no longer exists has nothing left.
+                let prefix = format!("{rel}/");
+                for doc in self.docs() {
+                    let key = doc.key();
+                    if key != rel && !key.starts_with(&prefix) {
+                        continue;
                     }
-                    None => self.close_page(doc.page()),
+                    // Only a buffer holds work the file no longer does; everything else has
+                    // nothing left to show, so its tab goes with the file.
+                    match doc.tab().filter(|tab| tab.modified.get()) {
+                        Some(tab) => {
+                            tab.disk_changed.set(true);
+                            tab.show_alert(Alert::Restore);
+                        }
+                        None => self.close_page(doc.page()),
+                    }
                 }
             }
             Event::FileRenamed { from, to } => {
@@ -1734,6 +1850,10 @@ impl App {
     /// ponytail: markdown only. A PDF tab keeps showing its own view here; route it through the
     /// same preview switch once the PDF viewer lands.
     fn set_presenting(self: &Rc<Self>, on: bool) {
+        // A PDF presents itself: one whole page, and the zoom it had back afterwards.
+        if let Some(pdf) = self.active_pdf() {
+            pdf.set_presenting(on);
+        }
         match (on, self.presenting.get()) {
             (true, None) => {
                 self.presenting.set(Some(Presenting {
@@ -1813,6 +1933,18 @@ impl App {
 
     /// The find bar addressing the rendered preview, which is what it does while presenting.
     fn preview_find(&self, op: find::PreviewOp) {
+        // A PDF gets first refusal: it is what the user is looking at, and it counts its own
+        // matches rather than letting the bar count them.
+        if let Some(pdf) = self.active_pdf() {
+            match op {
+                find::PreviewOp::Find(text) => pdf.find(&text),
+                find::PreviewOp::Next => pdf.step_match(true),
+                find::PreviewOp::Previous => pdf.step_match(false),
+                find::PreviewOp::Clear => pdf.find(""),
+                find::PreviewOp::Line(page) => pdf.goto_page((page as usize).saturating_sub(1)),
+            }
+            return;
+        }
         let preview = self.preview.borrow();
         let Some(preview) = preview.as_ref() else {
             return;
@@ -1976,9 +2108,42 @@ impl App {
                     tab.add_caret(true);
                 }
             }
+            // A PDF zooms its pages; everything else zooms the document font. Same three
+            // chords, because they mean the same thing to the person pressing them.
+            "zoom-in" | "zoom-out" | "zoom-reset" if self.active_pdf().is_some() => {
+                let Some(pdf) = self.active_pdf() else { return };
+                match name {
+                    "zoom-in" => pdf.zoom_step(false),
+                    "zoom-out" => pdf.zoom_step(true),
+                    _ => pdf.set_zoom(PdfZoom::FitWidth),
+                }
+            }
             "zoom-in" => self.set_zoom(self.zoom.get() + ZOOM_STEP),
             "zoom-out" => self.set_zoom(self.zoom.get() - ZOOM_STEP),
             "zoom-reset" => self.set_zoom(1.0),
+            "pdf-back" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.back();
+                }
+            }
+            "pdf-forward" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.forward();
+                }
+            }
+            "pdf-invert" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.toggle_invert();
+                }
+            }
+            "pdf-fit-width" | "pdf-fit-page" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.set_zoom(match name {
+                        "pdf-fit-page" => PdfZoom::FitPage,
+                        _ => PdfZoom::FitWidth,
+                    });
+                }
+            }
             "minimap" => self.toggle_minimap(),
             "copy-relative-path" => {
                 if let (Some(rel), Some(ops)) =
@@ -2060,12 +2225,28 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
         }
-        // 100 % is the state that needs no readout, so Reset makes the pill disappear rather than
-        // leaving a badge saying nothing is going on.
-        self.zoom_label
-            .set_label(&format!("{} %", (zoom * 100.0).round() as i32));
-        self.zoom_pill.set_visible(zoom != 1.0);
+        self.refresh_zoom();
         self.save_session_soon();
+    }
+
+    /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
+    /// PDF, which fits to the window rather than counting percentages.
+    ///
+    /// 100 % and Fit Width are the states that need no readout, so the pill disappears rather
+    /// than leaving a badge saying nothing is going on.
+    fn refresh_zoom(&self) {
+        let zoom = self.zoom.get();
+        let label = match self.active_pdf() {
+            Some(pdf) => pdf.zoom_label(),
+            None => (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32)),
+        };
+        match label {
+            Some(text) => {
+                self.zoom_label.set_label(&text);
+                self.zoom_pill.set_visible(true);
+            }
+            None => self.zoom_pill.set_visible(false),
+        }
     }
 
     /// The minimap is a global preference with no accelerator, so the palette and the preferences
@@ -2384,6 +2565,17 @@ impl App {
             zoom: self.zoom.get(),
             recent_notes: self.recent_notes.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
+            // Merged rather than replaced: a PDF closed earlier in this session keeps the place
+            // it was left at, which is the whole point of remembering it.
+            pdf: {
+                let mut places = self.vault().map(|v| v.session().pdf).unwrap_or_default();
+                for doc in self.docs() {
+                    if let Some(pdf) = doc.pdf() {
+                        places.insert(doc.key(), pdf.place());
+                    }
+                }
+                places
+            },
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -3114,12 +3306,20 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             app,
             #[upgrade_or]
             false,
-            move || app.presenting.get().is_some()
+            // A PDF answers find and go-to itself, whether or not anything is being presented.
+            move || app.presenting.get().is_some() || app.active_pdf().is_some()
         )),
         preview: Box::new(glib::clone!(
             #[weak]
             app,
             move |op| app.preview_find(op)
+        )),
+        pages: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[upgrade_or]
+            None,
+            move || app.active_pdf().map(|pdf| pdf.page_count())
         )),
     });
 
@@ -3259,6 +3459,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     theme::refresh();
                     for tab in app.open_tabs() {
                         tab.restyle();
+                    }
+                    // A PDF is rendered light or dark rather than recoloured, so the theme
+                    // change is a re-render of whatever is on screen.
+                    for doc in app.docs() {
+                        if let Some(pdf) = doc.pdf() {
+                            pdf.restyle();
+                        }
                     }
                     if let Some(preview) = app.preview.borrow().as_ref() {
                         preview.restyle();

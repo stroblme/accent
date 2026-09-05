@@ -14,7 +14,15 @@ PROFILE   ?= release
 DESTDIR   ?=
 PREFIX    ?= $(HOME)/.local
 BINDIR    ?= $(PREFIX)/bin
+LIBDIR    ?= $(PREFIX)/lib
 DATADIR   ?= $(PREFIX)/share
+
+# libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
+# bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and PDFIUM_SHA256 together.
+PDFIUM_BUILD  := 8035
+PDFIUM_URL    := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)/pdfium-linux-x64.tgz
+PDFIUM_SHA256 := 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+PDFIUM_LIB    := vendor/pdfium/libpdfium.so
 
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
@@ -33,7 +41,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fat
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate icons flatpak cargo-sources help
+        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium help
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -51,8 +59,22 @@ test:
 	$(CARGO) test --workspace --locked
 
 ## test-pdf: run the PDF tests too (needs libpdfium, see vendor/pdfium or ACCENT_PDFIUM_DIR)
-test-pdf:
+test-pdf: pdfium
 	$(CARGO) test -p accent-core --features pdf --locked
+
+## pdfium: fetch libpdfium into vendor/pdfium (does nothing if it is already there)
+pdfium: | $(PDFIUM_LIB)
+$(PDFIUM_LIB):
+	@test -n "$(PDFIUM_SHA256)" || \
+		{ echo "PDFIUM_SHA256 is empty: refusing to install an unverified libpdfium"; exit 1; }
+	@mkdir -p $(dir $(PDFIUM_LIB))
+	curl -fL --retry 3 -o $(PDFIUM_LIB).tgz "$(PDFIUM_URL)"
+	echo "$(PDFIUM_SHA256)  $(PDFIUM_LIB).tgz" | sha256sum -c -
+	@# The release keeps the library under lib/ and its metadata at the top level; we want the
+	@# three files side by side, and none of the headers.
+	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) --strip-components=1 lib/libpdfium.so
+	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) LICENSE VERSION
+	rm -f $(PDFIUM_LIB).tgz
 
 ## fmt: format the whole workspace
 fmt:
@@ -64,10 +86,10 @@ fmt-check:
 
 ## clippy: lint everything, warnings are errors
 clippy:
-	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --locked --features accent-core/pdf -- -D warnings
 
 ## check: the pre-flight gate, what CI runs
-check: fmt-check clippy test
+check: fmt-check clippy test test-pdf
 
 ## doc: build and open the API documentation
 doc:
@@ -105,6 +127,10 @@ install: all
 		$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
 	install -Dm644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
+	@# Best effort: `make pdfium` may never have run, and the PDF tab degrades to a status page
+	@# without the library. $(LIBDIR)/accent is `../lib/accent` seen from the binary in $(BINDIR),
+	@# which is the second place crates/core/src/pdf.rs looks.
+	-@test -f $(PDFIUM_LIB) && install -Dm755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null
@@ -119,6 +145,8 @@ uninstall:
 	rm -f $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
+	rm -f $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
+	-@rmdir $(DESTDIR)$(LIBDIR)/accent 2>/dev/null
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	@echo "Uninstalled from $(DESTDIR)$(PREFIX)"
 

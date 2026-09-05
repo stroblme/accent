@@ -37,19 +37,19 @@ modules:
         url: https://download.gnome.org/sources/libspelling/0.4/libspelling-0.4.10.tar.xz
         sha256: 56e3f01a3a18b575beea4c34349f99cdaba316e1f7c271b1231f7bcf5d9af73b
 
-  # Phase 2, cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core
-  # looks for it in ACCENT_PDFIUM_DIR (crates/core/src/pdf.rs), so enabling this module also means
-  # adding --env=ACCENT_PDFIUM_DIR=/app/lib/pdfium to finish-args above. Build 8035 matches the
-  # copy in vendor/pdfium. TODO: fill in the sha256 of the release asset before enabling.
-  # - name: pdfium
-  #   buildsystem: simple
-  #   build-commands:
-  #     - install -Dm755 lib/libpdfium.so -t /app/lib/pdfium
-  #   sources:
-  #     - type: archive
-  #       url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
-  #       sha256: TODO
-  #       strip-components: 0
+  # Cargo feature `pdf`. pdfium-render dlopen()s libpdfium.so at runtime and accent-core looks
+  # next to the binary first (crates/core/src/pdf.rs), so /app/bin/accent finds /app/lib/accent
+  # with no environment variable. Build 8035 matches what `make pdfium` puts in vendor/pdfium.
+  - name: pdfium
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 lib/libpdfium.so -t /app/lib/accent
+    sources:
+      - type: archive
+        url: https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F8035/pdfium-linux-x64.tgz
+        sha256: 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+        # The archive has no top-level directory: lib/ and LICENSE sit at its root.
+        strip-components: 0
 
   - name: accent
     buildsystem: simple

@@ -23,17 +23,26 @@ use serde::{Deserialize, Serialize};
 
 /// Directory that contains `libpdfium.so`.
 ///
-/// `ACCENT_PDFIUM_DIR` overrides it; otherwise `<workspace>/vendor/pdfium`.
+/// `ACCENT_PDFIUM_DIR` overrides it, then `../lib/accent` next to the executable, which is where
+/// `make install` and the Flatpak manifest put the library; otherwise `<workspace>/vendor/pdfium`.
 ///
-// ponytail: the default is baked in from `CARGO_MANIFEST_DIR` at build time, which is only
-// correct in this checkout. The shipped app resolves the library next to the executable (desktop)
-// or from the APK's `jniLibs` (Android), where the loader finds `libpdfium.so` on its own — at
-// that point this default becomes "" and `bind_to_system_library()` does the work.
+// ponytail: the last fallback is baked in from `CARGO_MANIFEST_DIR` at build time and is only
+// correct in this checkout, which is all `cargo test` and `cargo run` need. The exe-relative step
+// above it is what a shipped desktop app needs. Android is still uncovered: the APK's `jniLibs`
+// has no such layout, so there this yields a nonexistent directory and `bind_to_system_library()`
+// does the work.
 pub fn library_dir() -> PathBuf {
-    match std::env::var_os("ACCENT_PDFIUM_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/pdfium"),
+    if let Some(dir) = std::env::var_os("ACCENT_PDFIUM_DIR") {
+        return PathBuf::from(dir);
     }
+    // The probe spells the file name out while the binding below derives it from the platform.
+    // They agree on every target that reaches this branch (Linux, and the exe-relative layout is
+    // a desktop install), and keeping the probe a plain `exists()` keeps it readable.
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|bin| bin.join("../lib/accent")))
+        .filter(|dir| dir.join("libpdfium.so").exists())
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/pdfium"))
 }
 
 // `Pdfium` may be initialised exactly once per process (it asserts on a second `Pdfium::new`), and

@@ -2,16 +2,18 @@
 //!
 //! The user's real vault is never read, not even to sample it — this only mimics its *shape*:
 //! folder depth, note-size distribution, wikilinks/embeds, a ~300-tag Zipf pool, Syncthing
-//! conflicts and temp files, `.obsidian/`, a symlinked external code repo, an in-vault `.venv`.
+//! conflicts and temp files, `.obsidian/`, a symlinked external code repo, an in-vault `.venv`,
+//! and a `Code/` folder of files that are not notes: the ones the editor has to open, refuse or
+//! convert.
 //!
 //! Deterministic: the same `--seed --notes --files` produces a byte-identical tree, because
 //! every random draw comes from one splitmix64 stream consumed in a fixed order (hence: no
 //! parallel writing).
 //!
-//! ponytail: std only, no `rand`/`chrono`/image crates. Images carry the right magic bytes and
-//! random payload but are not decodable; upgrade to real IHDR/IDAT chunks the day a thumbnailer
-//! test needs one. PDFs *are* valid (hand-written objects + xref), so the `pdf` module can open
-//! them.
+//! ponytail: std only, no `rand`/`chrono`/image crates. PNGs *are* decodable (IHDR + a
+//! stored-deflate IDAT + IEND, checksums by hand) and PDFs *are* valid (objects + xref), so the
+//! preview and the `pdf` module can open them. JPEGs still carry only the right magic bytes
+//! around a random payload; give them the same treatment the day something has to decode one.
 
 use anyhow::{Context, Result, bail};
 use std::collections::HashSet;
@@ -529,11 +531,100 @@ impl Gen {
 
 // ------------------------------------------------------------------ binary payloads
 
+/// CRC-32 as PNG and zlib define it. The table is built at compile time because every
+/// image byte written goes through it.
+const CRC32: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 == 0 {
+                c >> 1
+            } else {
+                0xEDB8_8320 ^ (c >> 1)
+            };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut c = u32::MAX;
+    for &b in bytes {
+        c = CRC32[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
+    }
+    !c
+}
+
+/// Adler-32 with zlib's own deferred modulo: 5552 bytes can never overflow the accumulators.
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for run in bytes.chunks(5552) {
+        for &x in run {
+            a += u32::from(x);
+            b += a;
+        }
+        a %= 65521;
+        b %= 65521;
+    }
+    (b << 16) | a
+}
+
+/// Length, type, data, CRC over type+data — appended in place, so a multi-MiB IDAT is
+/// never copied to be checksummed.
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+    out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    let start = out.len();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(body);
+    let crc = crc32(&out[start..]);
+    out.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// A zlib stream of stored (uncompressed) deflate blocks: a valid IDAT without a
+/// compressor. The payload is noise, so nothing would have compressed anyway.
+fn zlib_stored(raw: &[u8]) -> Vec<u8> {
+    let mut z = vec![0x78, 0x01]; // deflate, 32 KiB window, no preset dictionary
+    let mut blocks = raw.chunks(0xFFFF).peekable();
+    while let Some(b) = blocks.next() {
+        z.push(u8::from(blocks.peek().is_none())); // BFINAL on the last block only
+        z.extend_from_slice(&(b.len() as u16).to_le_bytes());
+        z.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
+        z.extend_from_slice(b);
+    }
+    z.extend_from_slice(&adler32(raw).to_be_bytes());
+    z
+}
+
 impl Gen {
+    /// A decodable 8-bit RGB PNG of roughly `n` bytes: square-ish, random pixels, one
+    /// stored deflate stream. Real images and the vault's size distribution are not in
+    /// conflict — noise does not compress, so the file is as big as its pixels.
     fn png(&mut self, n: usize) -> Vec<u8> {
-        let mut v = Vec::with_capacity(n);
+        let w = (n / 3).isqrt().max(1);
+        let h = (n / (3 * w + 1)).max(1);
+        let mut px = Vec::with_capacity(w * h * 3);
+        self.payload(w * h * 3, &mut px);
+        // One filter byte (0 = None) in front of every scanline.
+        let mut raw = Vec::with_capacity(h * (1 + w * 3));
+        for row in px.chunks(w * 3) {
+            raw.push(0);
+            raw.extend_from_slice(row);
+        }
+        let mut ihdr = Vec::with_capacity(13);
+        ihdr.extend_from_slice(&(w as u32).to_be_bytes());
+        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]); // 8 bits, truecolour, no interlace
+        let mut v = Vec::with_capacity(n + 128);
         v.extend_from_slice(b"\x89PNG\r\n\x1a\n");
-        self.payload(n.saturating_sub(8), &mut v);
+        png_chunk(&mut v, b"IHDR", &ihdr);
+        png_chunk(&mut v, b"IDAT", &zlib_stored(&raw));
+        png_chunk(&mut v, b"IEND", b"");
         v
     }
 
@@ -747,7 +838,9 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    let floor = notes + 20 + venv_in + flat_imgs + flat_pdfs + excal;
+    // 29: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // Syncthing artefacts, pyvenv.cfg), which the bulk fill has to leave room for.
+    let floor = notes + 29 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -893,6 +986,83 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
           ![[Attachments/paper-0.pdf]]\n\n\
           ## Notes\n\n{{cursor}}\n",
     )?;
+
+    // ---- Code/: a handful of files that are not notes, in the vault proper rather than in a
+    // tree the walk skips. LICENSE and Makefile carry no extension the language guesser can use
+    // (and the Makefile's recipes are tabs, which is the point of it); README.md is CRLF and
+    // pulse.bin holds NUL bytes, the two shapes the editor has to convert or refuse.
+    g.mkdir("Code")?;
+    g.write(
+        "Code/LICENSE",
+        b"                    GNU GENERAL PUBLIC LICENSE\n\
+          \x20                     Version 3, 29 June 2007\n\n\
+          This program is free software: you can redistribute it and/or modify it under the\n\
+          terms of the GNU General Public License as published by the Free Software Foundation,\n\
+          either version 3 of the License, or (at your option) any later version.\n\n\
+          This program is distributed in the hope that it will be useful, but WITHOUT ANY\n\
+          WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A\n\
+          PARTICULAR PURPOSE.  See the GNU General Public License for more details.\n\n\
+          You should have received a copy of the GNU General Public License along with this\n\
+          program.  If not, see <https://www.gnu.org/licenses/>.\n",
+    )?;
+    g.write(
+        "Code/Makefile",
+        b"# Regenerate the figures the thesis notes embed.\n\n\
+          PY := python3\n\
+          OUT := ../Attachments\n\n\
+          .PHONY: all clean\n\n\
+          all: $(OUT)/figures.stamp\n\n\
+          $(OUT)/figures.stamp: analyze.py plot.py\n\
+          \t$(PY) analyze.py | $(PY) plot.py --out $(OUT)\n\
+          \ttouch $@\n\n\
+          clean:\n\
+          \trm -f $(OUT)/figures.stamp\n",
+    )?;
+    g.write(
+        "Code/build.sh",
+        b"#!/usr/bin/env bash\n\
+          # Rebuild the sweep data the noise-atlas notes read.\n\
+          set -euo pipefail\n\n\
+          out=\"${1:-../Attachments}\"\n\
+          mkdir -p \"$out\"\n\
+          for shots in 128 1024 8192; do\n\
+          \x20   python3 analyze.py --shots \"$shots\" > \"$out/sweep-$shots.csv\"\n\
+          done\n",
+    )?;
+    g.write(
+        "Code/pyproject.toml",
+        b"[project]\n\
+          name = \"sweep\"\n\
+          version = \"0.3.1\"\n\
+          description = \"Scripts the vault's notes refer to.\"\n\
+          requires-python = \">=3.11\"\n\
+          dependencies = [\"numpy\", \"matplotlib\"]\n\n\
+          [tool.ruff]\n\
+          line-length = 100\n",
+    )?;
+    g.write(
+        "Code/tasks.json",
+        b"{\n\
+          \x20 \"version\": \"2.0.0\",\n\
+          \x20 \"tasks\": [\n\
+          \x20   {\"label\": \"sweep\", \"type\": \"shell\", \"command\": \"./build.sh\"},\n\
+          \x20   {\"label\": \"plot\", \"type\": \"shell\", \"command\": \"python3 plot.py\"}\n\
+          \x20 ]\n\
+          }\n",
+    )?;
+    for m in ["analyze", "plot"] {
+        let body = g.py_module(m);
+        g.write(&format!("Code/{m}.py"), &body)?;
+    }
+    g.write(
+        "Code/README.md",
+        b"# Code\r\n\r\n\
+          Scripts and licence for the figures the notes embed. Run `make` here, not in the vault\r\n\
+          root. Saved with CRLF line endings, the way it arrived from a Windows machine.\r\n",
+    )?;
+    let mut blob = b"WAVE\x00\x00\x00\x01".to_vec();
+    g.payload(4088, &mut blob);
+    g.write("Code/pulse.bin", &blob)?;
 
     // ---- a real .venv inside the vault, PEP 405 marker and all: no ignore file mentions it, and
     // the walk skips it by that marker alone.
@@ -1149,6 +1319,33 @@ mod tests {
         assert!(daily.contains("{{cursor}}"), "{daily}");
         assert!(daily.contains("{{date:"), "{daily}");
         assert!(vault.join(".obsidian/daily-notes.json").is_file());
+
+        // Attachments are decodable images, not noise behind the right magic bytes.
+        let png = fs::read(vault.join("Attachments/img-0.png")).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(&png[12..16], b"IHDR");
+        assert!(png.ends_with(&[0xAE, 0x42, 0x60, 0x82]), "IEND and its CRC");
+
+        // The files that are not notes.
+        for f in [
+            "LICENSE",
+            "Makefile",
+            "build.sh",
+            "pyproject.toml",
+            "tasks.json",
+            "analyze.py",
+            "plot.py",
+        ] {
+            assert!(vault.join("Code").join(f).is_file(), "Code/{f} must exist");
+        }
+        let mk = fs::read_to_string(vault.join("Code/Makefile")).unwrap();
+        assert!(mk.contains("\n\t$(PY)"), "recipes must be tabs: {mk}");
+        let readme = fs::read(vault.join("Code/README.md")).unwrap();
+        assert!(readme.windows(2).any(|w| w == b"\r\n"), "CRLF fixture");
+        assert!(
+            fs::read(vault.join("Code/pulse.bin")).unwrap().contains(&0),
+            "binary fixture"
+        );
 
         let r = walk::scan(&vault, &ScanOptions::default());
         let md = r

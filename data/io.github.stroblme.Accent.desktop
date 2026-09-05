@@ -7,5 +7,5 @@ Icon=io.github.stroblme.Accent
 Terminal=false
 Categories=Office;Utility;TextEditor;GTK;GNOME;
 Keywords=markdown;notes;vault;wiki;pdf;
-MimeType=text/markdown;inode/directory;
+MimeType=text/markdown;inode/directory;application/pdf;text/plain;
 StartupNotify=true

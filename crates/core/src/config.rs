@@ -121,6 +121,28 @@ impl Default for VaultConfig {
 
 /// What a window looked like when it was last closed. Cheap to lose, so it lives in the state
 /// dir rather than in the config.
+/// How a PDF is sized to its window. Here rather than in the app because the session remembers
+/// it per document, and the session is core's to write.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PdfZoom {
+    /// The widest page fills the width. What a reader wants for text, so it is the default.
+    #[default]
+    FitWidth,
+    /// The tallest page fits entirely, so one page is one screen.
+    FitPage,
+    /// A fixed multiple of the page's natural size.
+    Scale(f64),
+}
+
+/// Where a PDF was last being read.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PdfPlace {
+    pub page: usize,
+    pub zoom: PdfZoom,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
@@ -140,6 +162,11 @@ pub struct Session {
     pub recent_notes: Vec<String>,
     /// Full action names of the commands run from the palette or a menu, most recent first.
     pub recent_commands: Vec<String>,
+    /// Where each PDF this vault has opened was left, keyed by vault-relative path.
+    ///
+    /// ponytail: never pruned, so a state file grows by an entry per PDF ever opened. Drop the
+    /// ones the index no longer has the day that is measurable.
+    pub pdf: BTreeMap<String, PdfPlace>,
 }
 
 impl Default for Session {
@@ -154,6 +181,7 @@ impl Default for Session {
             zoom: 1.0,
             recent_notes: Vec::new(),
             recent_commands: Vec::new(),
+            pdf: BTreeMap::new(),
         }
     }
 }
@@ -479,6 +507,13 @@ mod tests {
             zoom: 1.2,
             recent_notes: vec!["Daily/2026-09-03.md".to_string()],
             recent_commands: vec!["win.save".to_string()],
+            pdf: BTreeMap::from([(
+                "Attachments/paper.pdf".to_string(),
+                PdfPlace {
+                    page: 4,
+                    zoom: PdfZoom::Scale(1.5),
+                },
+            )]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -490,6 +525,7 @@ mod tests {
             let back = Session::load(&vault);
             assert_eq!(back.open, s.open);
             assert_eq!(back.active, s.active);
+            assert_eq!(back.pdf, s.pdf);
             assert!(!back.sidebar);
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.view, "preview");
