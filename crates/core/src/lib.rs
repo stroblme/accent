@@ -2,6 +2,7 @@
 //! Rule: no UI toolkit types in this crate. Everything here must work on Linux and Android.
 
 pub mod config;
+pub mod csv;
 pub mod diff;
 pub mod fs;
 pub mod index;

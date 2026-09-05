@@ -8,6 +8,7 @@
 //! the origin at the bottom-left; the conversion happens at the boundary in [`Rect::from_pdf`] /
 //! [`Rect::to_pdf`].
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -196,6 +197,33 @@ pub struct Highlight {
     pub contents: Option<String>,
 }
 
+/// Where a `/Link` annotation points.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum LinkTarget {
+    /// Another page of the same document. `top` is the y the viewer should scroll to, in points
+    /// of the *target* page, top-left origin; `None` means "keep the current position".
+    Page {
+        page: usize,
+        top: Option<f32>,
+    },
+    Uri(String),
+}
+
+/// A `/Link` annotation: the clickable box and where it leads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Link {
+    pub rect: Rect,
+    pub target: LinkTarget,
+}
+
+/// One entry of the document outline, flattened depth-first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Outline {
+    pub depth: usize,
+    pub title: String,
+    pub page: Option<usize>,
+}
+
 // ---------------------------------------------------------------------------------------------
 // Dark theme
 // ---------------------------------------------------------------------------------------------
@@ -223,6 +251,15 @@ pub fn dark_pixel(px: [u8; 4]) -> [u8; 4] {
     let l2 = DARK_LO + (1.0 - l) * (DARK_HI - DARK_LO);
     let map = |c: f32| ((l2 + (c - l)) * 255.0).clamp(0.0, 255.0) as u8;
     [map(r), map(g), map(b), px[3]]
+}
+
+/// [`dark_pixel`] over a whole RGBA8 buffer, in place. Shared by the page and tile renders so the
+/// two cannot drift apart.
+fn darken(data: &mut [u8]) {
+    for px in data.chunks_exact_mut(4) {
+        let out = dark_pixel([px[0], px[1], px[2], px[3]]);
+        px.copy_from_slice(&out);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -296,10 +333,58 @@ impl PdfDoc {
         // Outside the lock on purpose: the theme pass costs about as much as the render itself
         // and touches nothing but our own buffer, so it must not block other pdfium callers.
         if theme == Theme::Dark {
-            for px in data.chunks_exact_mut(4) {
-                let out = dark_pixel([px[0], px[1], px[2], px[3]]);
-                px.copy_from_slice(&out);
+            darken(&mut data);
+        }
+        Ok(RgbaImage {
+            width,
+            height,
+            data,
+        })
+    }
+
+    /// One tile of a page, `(x, y, w, h)` in device pixels of the page scaled to `scale` px/pt.
+    ///
+    /// The tile must lie inside the page: pdfium clears only the part of the destination bitmap
+    /// the page covers, so pixels beyond the page edge would be whatever the freshly allocated
+    /// bitmap happens to hold. `w` and `h` are therefore clamped to what is left of
+    /// `round(page_size * scale)`, and an origin outside the page is an error.
+    // The rectangle stays four plain arguments: the caller is a tile cache that has them loose
+    // anyway, and a wrapper struct would only be unpacked again here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_tile(
+        &self,
+        page: usize,
+        scale: f32,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        theme: Theme,
+    ) -> Result<RgbaImage> {
+        let (width, height, mut data) = {
+            let _guard = lock();
+            let p = self.page(page)?;
+            let page_w = (p.width().value * scale).round() as i32;
+            let page_h = (p.height().value * scale).round() as i32;
+            let (w, h) = (w.min(page_w - x), h.min(page_h - y));
+            if x < 0 || y < 0 || w <= 0 || h <= 0 {
+                return Err(anyhow!(
+                    "tile ({x},{y}) {w}x{h} is outside page {page} at {page_w}x{page_h} px"
+                ));
             }
+            // A negative origin shifts the page up and left; the render is clipped to the bitmap.
+            let config = PdfRenderConfig::new()
+                .scale_page_by_factor(scale)
+                .set_origin(-x, -y)
+                .render_annotations(true);
+            let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA)
+                .map_err(|e| anyhow!("tile bitmap {w}x{h}: {e:?}"))?;
+            p.render_into_bitmap_with_config(&mut bitmap, &config)
+                .map_err(|e| anyhow!("render tile of page {page}: {e:?}"))?;
+            (w as u32, h as u32, bitmap.as_rgba_bytes())
+        };
+        if theme == Theme::Dark {
+            darken(&mut data);
         }
         Ok(RgbaImage {
             width,
@@ -431,6 +516,139 @@ impl PdfDoc {
         }
         Ok(out)
     }
+
+    /// The `/Link` annotations on one page, in document order. Links whose target we cannot
+    /// resolve to a page or a URI are skipped.
+    ///
+    /// Deliberately **not** `PdfPage::links()`. `PdfPageLinks::get(i)` treats `i` as a link index,
+    /// but passes it to `FPDFLink_Enumerate` as a start position in the page's `/Annots` array,
+    /// and that function scans *forward* from there to the next `/Link`. So every non-link
+    /// annotation before a link makes that link answer one more index: on our own two-page
+    /// fixture, whose first page is a highlight followed by a link, `links()` reports two links
+    /// and returns the same one for both. Filtering `annotations()` is exact and no more code, so
+    /// do not "simplify" this back.
+    pub fn links(&self, page: usize) -> Result<Vec<Link>> {
+        let _guard = lock();
+        let p = self.page(page)?;
+        let page_height = p.height().value;
+        // Destination tops are in the target page's coordinates, so resolving one costs a page
+        // load; a table of contents points at many pages, often repeatedly.
+        let mut heights: HashMap<usize, f32> = HashMap::new();
+        let mut out = Vec::new();
+        for a in p.annotations().iter() {
+            if a.annotation_type() != PdfPageAnnotationType::Link {
+                continue;
+            }
+            let (Ok(bounds), Some(link)) = (
+                a.bounds(),
+                a.as_link_annotation().and_then(|l| l.link().ok()),
+            ) else {
+                continue;
+            };
+            // `destination()` already resolves a `/A` GoTo action, so it comes first.
+            let target = if let Some(dest) = link.destination() {
+                let Ok(target) = dest.page_index() else {
+                    continue;
+                };
+                let target = target as usize;
+                let top = dest.view_settings().ok().and_then(view_top).map(|y| {
+                    let height = *heights.entry(target).or_insert_with(|| {
+                        self.page(target).map_or(page_height, |p| p.height().value)
+                    });
+                    height - y
+                });
+                LinkTarget::Page { page: target, top }
+            } else if let Some(uri) = link
+                .action()
+                .and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok()))
+            {
+                LinkTarget::Uri(uri)
+            } else {
+                continue;
+            };
+            out.push(Link {
+                rect: Rect::from_pdf(bounds, page_height),
+                target,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The document outline (`/Outlines`), flattened depth-first.
+    ///
+    // ponytail: the walk is capped at `OUTLINE_MAX_DEPTH` levels and `OUTLINE_MAX_ENTRIES`
+    // entries, because a `/Outlines` tree whose `/Next` or `/First` chain loops back on itself is
+    // malformed but trivial to write, and would otherwise spin the worker forever. No real
+    // document comes near either cap. The upgrade path, if one ever does, is a visited set keyed
+    // by the raw `FPDF_BOOKMARK` handle, which pdfium-render keeps private today.
+    pub fn outline(&self) -> Result<Vec<Outline>> {
+        let _guard = lock();
+        let mut out = Vec::new();
+        let Some(root) = self.doc().bookmarks().root() else {
+            return Ok(out);
+        };
+        // Pre-order: a node's sibling is pushed before its child, so the child pops first.
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if out.len() >= OUTLINE_MAX_ENTRIES {
+                break;
+            }
+            out.push(Outline {
+                depth,
+                title: node.title().unwrap_or_default(),
+                page: node
+                    .destination()
+                    .and_then(|d| d.page_index().ok())
+                    .map(|i| i as usize),
+            });
+            if let Some(sibling) = node.next_sibling() {
+                stack.push((sibling, depth));
+            }
+            if depth + 1 < OUTLINE_MAX_DEPTH
+                && let Some(child) = node.first_child()
+            {
+                stack.push((child, depth + 1));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Text matches on one page: one entry per match, one rect per line the match spans.
+    /// Case-insensitive; an empty query finds nothing.
+    pub fn search(&self, page: usize, query: &str) -> Result<Vec<Vec<Rect>>> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let _guard = lock();
+        let p = self.page(page)?;
+        let page_height = p.height().value;
+        let text = p.text().map_err(|e| anyhow!("text page {page}: {e:?}"))?;
+        let search = text
+            .search(query, &PdfSearchOptions::new())
+            .map_err(|e| anyhow!("search page {page}: {e:?}"))?;
+        Ok(search
+            .iter(PdfSearchDirection::SearchForward)
+            .map(|hit| {
+                hit.iter()
+                    .map(|s| Rect::from_pdf(s.bounds(), page_height))
+                    .collect()
+            })
+            .collect())
+    }
+}
+
+const OUTLINE_MAX_DEPTH: usize = 32;
+const OUTLINE_MAX_ENTRIES: usize = 10_000;
+
+/// The y a destination wants at the top of the window, in pdfium's bottom-left-origin points,
+/// for the view modes that carry one.
+fn view_top(view: PdfDestinationViewSettings) -> Option<f32> {
+    match view {
+        PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _)
+        | PdfDestinationViewSettings::FitPageHorizontallyToWindow(y) => y.map(|y| y.value),
+        PdfDestinationViewSettings::FitPageToRectangle(r) => Some(r.top().value),
+        _ => None,
+    }
 }
 
 /// The colour an annotation is drawn in.
@@ -508,31 +726,58 @@ fn item_offset(lines: &[Range<usize>], idx: usize) -> (usize, usize) {
 mod tests {
     use super::*;
 
-    /// A one-page PDF with a line of Helvetica, built by hand so the tests need no fixture.
-    /// With `highlight`, the page also carries a `/Highlight` annotation over that line.
+    /// A two-page PDF built by hand so the tests need no fixture: a line of Helvetica on each
+    /// page, an internal link from page 1 to page 2, a URI link on page 2, and a two-level
+    /// outline. With `highlight`, page 1 also carries a `/Highlight` annotation over its line —
+    /// listed *before* the link in `/Annots`, which is what trips a links-by-annotation-index
+    /// implementation.
     fn tiny_pdf(highlight: bool) -> Vec<u8> {
-        let content = "BT /F1 24 Tf 20 40 Td (Hello accent) Tj ET";
-        let annots = if highlight { "/Annots[6 0 R]" } else { "" };
-        let mut objs = vec![
-            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
-            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        let content1 = "BT /F1 24 Tf 20 40 Td (Hello accent) Tj ET";
+        let content2 = "BT /F1 18 Tf 20 40 Td (Second page) Tj ET";
+        // Object 6 is written either way so the numbering below never shifts; without
+        // `highlight` nothing references it and pdfium never sees it.
+        let annots1 = if highlight {
+            "/Annots[6 0 R 7 0 R]"
+        } else {
+            "/Annots[7 0 R]"
+        };
+        let objs = vec![
+            "<</Type/Catalog/Pages 2 0 R/Outlines 8 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R 9 0 R]/Count 2>>".to_string(),
             format!(
                 "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]\
-                 /Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R{annots}>>"
+                 /Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R{annots1}>>"
             ),
             "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
-            format!("<</Length {}>>stream\n{content}\nendstream", content.len()),
-        ];
-        if highlight {
+            format!(
+                "<</Length {}>>stream\n{content1}\nendstream",
+                content1.len()
+            ),
             // /QuadPoints is in the PDF spec's order: upper-left, upper-right, lower-left,
             // lower-right, bottom-left page origin.
-            objs.push(
-                "<</Type/Annot/Subtype/Highlight/Rect[18 36 140 64]\
-                 /QuadPoints[18 64 140 64 18 36 140 36]/C[1 1 0]/CA 1\
-                 /Contents(check this)/F 4>>"
-                    .to_string(),
-            );
-        }
+            "<</Type/Annot/Subtype/Highlight/Rect[18 36 140 64]\
+             /QuadPoints[18 64 140 64 18 36 140 36]/C[1 1 0]/CA 1\
+             /Contents(check this)/F 4>>"
+                .to_string(),
+            "<</Type/Annot/Subtype/Link/Rect[20 30 140 60]/Border[0 0 0]\
+             /Dest[9 0 R /XYZ 0 80 0]>>"
+                .to_string(),
+            "<</Type/Outlines/First 12 0 R/Last 12 0 R/Count 2>>".to_string(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]\
+             /Resources<</Font<</F1 4 0 R>>>>/Contents 10 0 R/Annots[11 0 R]>>"
+                .to_string(),
+            format!(
+                "<</Length {}>>stream\n{content2}\nendstream",
+                content2.len()
+            ),
+            "<</Type/Annot/Subtype/Link/Rect[10 10 100 30]/Border[0 0 0]\
+             /A<</S/URI/URI(https://example.org)>>>>"
+                .to_string(),
+            "<</Title(Second)/Parent 8 0 R/First 13 0 R/Last 13 0 R/Count 1\
+             /Dest[9 0 R /XYZ 0 80 0]>>"
+                .to_string(),
+            "<</Title(Child)/Parent 12 0 R/Dest[9 0 R /XYZ 0 60 0]>>".to_string(),
+        ];
         let mut out = String::from("%PDF-1.4\n");
         let mut offsets = Vec::new();
         for (i, o) in objs.iter().enumerate() {
@@ -573,7 +818,7 @@ mod tests {
     #[test]
     fn opens_and_reports_geometry() {
         let Some((_d, doc)) = open_tiny() else { return };
-        assert_eq!(doc.page_count(), 1);
+        assert_eq!(doc.page_count(), 2);
         let (w, h) = doc.page_size(0).unwrap();
         assert!(
             (w - 200.0).abs() < 0.5 && (h - 100.0).abs() < 0.5,
@@ -717,7 +962,7 @@ mod tests {
                 s.spawn(|| {
                     for _ in 0..5 {
                         let other = PdfDoc::open(&path).unwrap();
-                        assert_eq!(other.page_count(), 1);
+                        assert_eq!(other.page_count(), 2);
                         doc.render_page(0, 1.0, Theme::Dark).unwrap();
                         assert!(!doc.page_text(0).unwrap().is_empty());
                         doc.highlights().unwrap();
@@ -725,6 +970,104 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn render_tile_matches_the_full_render() {
+        let Some((_d, doc)) = open_tiny_with(true) else {
+            return;
+        };
+        // 200x100pt at 2 px/pt is a 400x200 px page.
+        let full = doc.render_page(0, 2.0, Theme::Light).unwrap();
+        let (x, y, w, h) = (60u32, 40u32, 120u32, 80u32);
+        let tile = doc
+            .render_tile(0, 2.0, x as i32, y as i32, w as i32, h as i32, Theme::Light)
+            .unwrap();
+        assert_eq!((tile.width, tile.height), (w, h));
+        // Byte-identical, not approximate: the tile is the same render translated by a whole
+        // number of pixels, so pdfium rasterises it onto the same device grid.
+        for row in 0..h {
+            let src = (((y + row) * full.width + x) * 4) as usize;
+            let dst = ((row * w) * 4) as usize;
+            let n = (w * 4) as usize;
+            assert_eq!(
+                &full.data[src..src + n],
+                &tile.data[dst..dst + n],
+                "row {row}"
+            );
+        }
+        // A tile running off the page keeps only what is left of it; one starting off it fails.
+        let clamped = doc
+            .render_tile(0, 2.0, 380, 190, 100, 100, Theme::Light)
+            .unwrap();
+        assert_eq!((clamped.width, clamped.height), (20, 10));
+        assert!(
+            doc.render_tile(0, 2.0, 400, 0, 10, 10, Theme::Light)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn links_read_dest_and_uri() {
+        let Some((_d, doc)) = open_tiny_with(true) else {
+            return;
+        };
+        // Page 1 lists the highlight before the link, which is what used to yield the link twice.
+        let first = doc.links(0).unwrap();
+        assert_eq!(first.len(), 1, "{first:?}");
+        // /Rect[20 30 140 60] on a 100pt page: top = 100 - 60, bottom = 100 - 30.
+        let r = first[0].rect;
+        assert!(
+            (r.left - 20.0).abs() < 0.5
+                && (r.top - 40.0).abs() < 0.5
+                && (r.bottom - 70.0).abs() < 0.5,
+            "{r:?}"
+        );
+        // /Dest [page 2 /XYZ 0 80 0] on a 100pt page: top-left y = 100 - 80 = 20.
+        let LinkTarget::Page { page, top } = first[0].target else {
+            panic!("{:?}", first[0].target);
+        };
+        assert_eq!(page, 1);
+        assert!(top.is_some_and(|t| (t - 20.0).abs() < 0.5), "{top:?}");
+
+        let second = doc.links(1).unwrap();
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_eq!(
+            second[0].target,
+            LinkTarget::Uri("https://example.org".to_string())
+        );
+    }
+
+    #[test]
+    fn outline_is_flat_with_depths() {
+        let Some((_d, doc)) = open_tiny() else { return };
+        let got: Vec<_> = doc
+            .outline()
+            .unwrap()
+            .into_iter()
+            .map(|o| (o.title, o.depth, o.page))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Second".to_string(), 0, Some(1)),
+                ("Child".to_string(), 1, Some(1)),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_is_case_insensitive_and_empty_safe() {
+        let Some((_d, doc)) = open_tiny() else { return };
+        let hits = doc.search(1, "second").unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(
+            hits[0].iter().any(|r| r.width() > 0.0 && r.height() > 0.0),
+            "{:?}",
+            hits[0]
+        );
+        assert!(doc.search(1, "").unwrap().is_empty(), "empty query");
+        assert!(doc.search(0, "second").unwrap().is_empty(), "other page");
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //! worker thread reconciles and watches in the background. The window is never blocked, and every
 //! change the vault reports arrives here as an [`Event`].
 
+mod comment;
 mod completion;
 mod diff;
+mod doc;
 mod editor;
 mod fileops;
 mod find;
@@ -25,9 +27,10 @@ mod typing;
 
 use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
 use accent_core::index::Phase;
-use accent_core::markdown::{self, Link, LinkKind};
+use accent_core::markdown::{Link, LinkKind};
 use adw::prelude::*;
-use editor::{Alert, Tab};
+use doc::{Doc, Kind};
+use editor::{Alert, Flavour, Prefs, Tab};
 use gtk::{gdk, gio, glib, pango};
 use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -65,6 +68,7 @@ const TREE_REPAINT: i64 = 250_000;
 /// (DESIGN.md, Keyboard). Tab switching is `AdwTabView`'s own set of shortcuts.
 const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
+    ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
@@ -77,7 +81,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
-    ("win.palette-files", "Open Note…", &["<Control>e"]),
+    ("win.palette-files", "Go to File…", &["<Control>e"]),
     (
         "win.palette-commands",
         "Run a Command…",
@@ -95,6 +99,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
+    ("win.toggle-comment", "Toggle Comment", &["<Control>slash"]),
+    ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
     ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
     ("win.caret-above", "Add Caret Above", &["<Shift><Alt>Up"]),
@@ -118,6 +124,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
+    ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
@@ -178,7 +185,8 @@ struct Shell {
     config: Rc<RefCell<Config>>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
-    windows: RefCell<Vec<(PathBuf, Rc<App>)>>,
+    /// `None` for the one window opened on files rather than on a folder.
+    windows: RefCell<Vec<(Option<PathBuf>, Rc<App>)>>,
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     start: glib::WeakRef<adw::ApplicationWindow>,
@@ -264,18 +272,30 @@ impl Shell {
             }
             return glib::ExitCode::SUCCESS;
         };
-        let path = PathBuf::from(arg);
-        let root = match path.canonicalize() {
-            Ok(root) if root.is_dir() => root,
-            _ => {
+        // Resolved against the *invoking* process's directory, not this one's: a second
+        // `accent notes/x.md` is forwarded here by the single instance, whose cwd is its own.
+        let path = match command_line.create_file_for_arg(arg).path() {
+            Some(path) => path,
+            None => {
                 // `printerr_literal` needs glib 2.80, which this build does not enable; a
                 // local invocation is the only one that has a terminal to print to anyway.
-                eprintln!("not a directory: {}", path.display());
+                eprintln!("cannot resolve: {}", arg.to_string_lossy());
                 return glib::ExitCode::FAILURE;
             }
         };
-        let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
-        self.open_vault(gtk_app, root, note);
+        match path.canonicalize() {
+            Ok(root) if root.is_dir() => {
+                let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
+                self.open_vault(gtk_app, root, note);
+            }
+            // A file rather than a folder: opened where it belongs, which is how accent works as
+            // the system's PDF viewer and text editor.
+            Ok(file) => self.open_file(gtk_app, file),
+            Err(e) => {
+                eprintln!("cannot open {}: {e}", path.display());
+                return glib::ExitCode::FAILURE;
+            }
+        }
         glib::ExitCode::SUCCESS
     }
 
@@ -308,7 +328,7 @@ impl Shell {
             window.present();
             return;
         }
-        let Some(app) = build_window(gtk_app, self, root.clone(), note) else {
+        let Some(app) = build_window(gtk_app, self, Some(root.clone()), note) else {
             return;
         };
         // A second `close-request` handler. `wire_window`'s is connected first and can still stop
@@ -323,13 +343,59 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((root, app));
+        self.windows.borrow_mut().push((Some(root), app));
     }
 
     fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
         let windows = self.windows.borrow();
-        let (_, app) = windows.iter().find(|(path, _)| path == root)?;
+        let (_, app) = windows
+            .iter()
+            .find(|(path, _)| path.as_deref() == Some(root))?;
         Some(app.window.clone())
+    }
+
+    /// Open `path` wherever it belongs: in the window whose vault contains it, or in the one
+    /// window this process keeps for files that are in no vault.
+    ///
+    /// ponytail: one vault-less window per process, so a second loose file joins it as a tab.
+    /// Give it a window each the day two of them need to sit side by side.
+    fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) {
+        let inside = self.windows.borrow().iter().find_map(|(root, app)| {
+            let rel = path.strip_prefix(root.as_ref()?).ok()?;
+            Some((app.clone(), rel.to_string_lossy().into_owned()))
+        });
+        if let Some((app, rel)) = inside {
+            app.window.present();
+            app.open_path(&rel);
+            return;
+        }
+        let loose = self
+            .windows
+            .borrow()
+            .iter()
+            .find(|(root, _)| root.is_none())
+            .map(|(_, app)| app.clone());
+        let app = match loose {
+            Some(app) => app,
+            None => {
+                let Some(app) = build_window(gtk_app, self, None, None) else {
+                    return;
+                };
+                app.window.connect_close_request({
+                    let shell = Rc::downgrade(self);
+                    move |window| {
+                        if let Some(shell) = shell.upgrade() {
+                            shell.forget(window);
+                        }
+                        glib::Propagation::Proceed
+                    }
+                });
+                self.windows.borrow_mut().push((None, app.clone()));
+                app
+            }
+        };
+        app.window.present();
+        app.open_path(&path.to_string_lossy());
     }
 }
 
@@ -387,8 +453,11 @@ struct Presenting {
 // ----------------------------------------------------------------------------------- app state
 
 struct App {
+    /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
+    /// no index, no watcher, no session, and every tab keyed by an absolute path.
+    ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
-    vault: Arc<Vault>,
+    vault: Option<Arc<Vault>>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
     /// Every open pane, in the order they were created. The arrangement itself lives in the
@@ -404,10 +473,9 @@ struct App {
     /// used to sit in the header band, which the vault name and note path were already competing
     /// with.
     status: gtk::ProgressBar,
-    /// A `Vec`, not a map: a rename retargets an open tab, so `rel` is not a stable key.
-    open: RefCell<Vec<Rc<Tab>>>,
-    /// View-only image tabs, which have no buffer, no etag and no place in the session.
-    images: RefCell<Vec<(String, adw::TabPage)>>,
+    /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
+    /// so its key is not a stable one.
+    docs: RefCell<Vec<Doc>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     sidebar: OnceCell<sidebar::Sidebar>,
@@ -435,6 +503,9 @@ struct App {
     /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
     zoom_pill: gtk::Box,
     zoom_label: gtk::Label,
+    /// How the active file is encoded and how its lines end, for a code tab. It rides in the
+    /// header, so the chrome fade already takes it with everything else.
+    encoding_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -459,14 +530,40 @@ struct App {
 }
 
 impl App {
+    /// The vault, for everything that needs one. A window without one still edits and saves;
+    /// what it cannot do is index, search, link or remember a session.
+    fn vault(&self) -> Option<&Arc<Vault>> {
+        self.vault.as_ref()
+    }
+
+    /// The vault root that keys are relative to.
+    ///
+    /// ponytail: a window with no vault answers `/`, which is never seen: every key such a window
+    /// holds is absolute, and joining an absolute path onto any root gives the path back.
+    fn root(&self) -> &Path {
+        self.vault.as_ref().map_or(Path::new("/"), |v| v.root())
+    }
+
+    /// Say why something needs a folder open, for the actions that do.
+    fn needs_vault(&self, what: &str) {
+        self.toast(&format!("Open a folder to {what}"));
+    }
+
     fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
     }
 
-    fn ops(&self) -> &Rc<fileops::Ops> {
-        self.ops
-            .get()
-            .expect("file operations are set up in build_window")
+    fn ops(&self) -> Option<&Rc<fileops::Ops>> {
+        self.ops.get()
+    }
+
+    /// The file operations, or a toast saying why there are none.
+    fn need_ops(&self, what: &str) -> Option<&Rc<fileops::Ops>> {
+        let ops = self.ops();
+        if ops.is_none() {
+            self.needs_vault(what);
+        }
+        ops
     }
 
     /// The pane a note opens into: the last one whose tab was selected or whose editor had focus.
@@ -554,7 +651,7 @@ impl App {
                     from.tabs.transfer_page(&page, &pane.tabs, 0);
                 }
             }
-            None => self.open_note(rel),
+            None => self.open_path(rel),
         }
         // Nothing arrived: the path was unopenable, or it was the only note in the pane it came
         // from, which has closed itself and left this one holding the same note it already had.
@@ -651,19 +748,37 @@ impl App {
             Zone::Split(side) => self.open_beside(pane, side, &rel),
             Zone::Here => {
                 self.set_active_pane(pane);
-                self.open_note(&rel);
+                self.open_path(&rel);
             }
         }
         true
     }
 
+    /// The active tab, if it is one with a buffer. Everything that edits, saves, finds or
+    /// previews goes through here, so an image or a PDF simply makes those actions no-ops.
     fn active(&self) -> Option<Rc<Tab>> {
+        self.active_doc()?.tab().cloned()
+    }
+
+    fn active_doc(&self) -> Option<Doc> {
         let page = self.tabs().selected_page()?;
-        self.open.borrow().iter().find(|t| t.page == page).cloned()
+        self.doc_for_page(&page)
+    }
+
+    fn doc_for_page(&self, page: &adw::TabPage) -> Option<Doc> {
+        self.docs
+            .borrow()
+            .iter()
+            .find(|d| d.page() == page)
+            .cloned()
+    }
+
+    fn doc_for(&self, key: &str) -> Option<Doc> {
+        self.docs.borrow().iter().find(|d| d.key() == key).cloned()
     }
 
     fn tab_for(&self, rel: &str) -> Option<Rc<Tab>> {
-        self.open.borrow().iter().find(|t| t.rel() == rel).cloned()
+        self.doc_for(rel)?.tab().cloned()
     }
 
     fn is_active(&self, tab: &Rc<Tab>) -> bool {
@@ -673,63 +788,187 @@ impl App {
     /// Every open tab, cloned out: the callbacks below reach back into `open`, and a live borrow
     /// across them would be a panic waiting to happen.
     fn open_tabs(&self) -> Vec<Rc<Tab>> {
-        self.open.borrow().clone()
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.tab().cloned())
+            .collect()
+    }
+
+    /// Every open document, cloned out for the same reason as [`App::open_tabs`].
+    fn docs(&self) -> Vec<Doc> {
+        self.docs.borrow().clone()
     }
 
     // --- opening -------------------------------------------------------------------------
 
-    fn open_note(self: &Rc<Self>, rel: &str) {
-        let Some(rel) = self.safe_rel(rel) else {
-            // A session pointing at a note that has since been deleted lands here too, and
+    /// Open anything, from the tree, the palette, a link, a drop, the session or the command
+    /// line. This is the only door into a tab.
+    ///
+    /// What a file opens as is decided by its name first, and then by its bytes when the name
+    /// says "text": a `.png` that is really random bytes is still an image tab, but a `.py` full
+    /// of NULs is a status page rather than a screen of garbage.
+    fn open_path(self: &Rc<Self>, key: &str) {
+        let Some((key, path)) = self.locate(key) else {
+            // A session pointing at a file that has since been deleted lands here too, and
             // "outside this vault" would be the wrong thing to say about it.
-            return match self.vault.root().join(rel).exists() {
-                true => self.toast(&format!("{rel} is outside this vault")),
-                false => self.toast(&format!("Cannot open {rel}: no such note")),
+            return match self.root().join(key).exists() {
+                true => self.toast(&format!("{key} is outside this vault")),
+                false => self.toast(&format!("Cannot open {key}: no such file")),
             };
         };
-        if let Some(tab) = self.tab_for(&rel) {
-            return self.reveal_page(&tab.page);
+        if let Some(doc) = self.doc_for(&key) {
+            return self.reveal_page(doc.page());
         }
-        let (spellcheck, font, minimap, line_numbers, column_width) = {
-            let config = self.config.borrow();
-            (
-                config.spellcheck,
-                config.editor_font.clone(),
-                config.minimap,
-                config.line_numbers,
-                config.column_width,
-            )
-        };
-        let opened = editor::open(
-            self.vault.root(),
-            &rel,
-            &self.tabs(),
-            {
-                let vault = self.vault.clone();
-                move |prefix| {
-                    vault
-                        .complete_notes(prefix, COMPLETIONS)
-                        .unwrap_or_default()
-                }
-            },
-            {
-                let vault = self.vault.clone();
-                move |prefix| vault.complete_tags(prefix, COMPLETIONS).unwrap_or_default()
-            },
-            spellcheck,
-            font.as_deref(),
-            self.zoom.get(),
-            column_width,
-        );
-        match opened {
-            Ok(tab) => {
-                tab.set_minimap(minimap);
-                tab.set_line_numbers(line_numbers);
-                self.adopt(tab);
-                self.sync_conflict_banner(&rel);
+        match doc::kind_of(&key) {
+            Kind::Note => self.open_text(&key, &path, Flavour::Note),
+            Kind::Image => self.open_image(&key, &path),
+            Kind::Pdf => self.toast("The PDF viewer is not built yet"),
+            Kind::Text => self.open_text(&key, &path, flavour_of(&key)),
+        }
+    }
+
+    /// Open a note. Kept as its own name because most callers mean exactly this, and it says so.
+    fn open_note(self: &Rc<Self>, rel: &str) {
+        self.open_path(rel);
+    }
+
+    /// The preferences every text tab is built with.
+    fn prefs(&self) -> Prefs {
+        let config = self.config.borrow();
+        Prefs {
+            spellcheck: config.spellcheck,
+            font: config.editor_font.clone(),
+            zoom: self.zoom.get(),
+            column_width: config.column_width,
+            minimap: config.minimap,
+            line_numbers: config.line_numbers,
+        }
+    }
+
+    /// A text file in an editor tab, unless its bytes say it is not one after all.
+    fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour) {
+        let text = match accent_core::fs::read_text(path) {
+            Ok(accent_core::fs::Read::Text(text)) => text,
+            Ok(accent_core::fs::Read::Binary { size }) => {
+                return self.open_status(
+                    key,
+                    "Binary File",
+                    &format!("{} is not text, so there is nothing to edit.", human(size)),
+                );
             }
-            Err(e) => self.toast(&format!("Cannot open {rel}: {e}")),
+            Ok(accent_core::fs::Read::TooLarge { size }) => {
+                return self.open_status(
+                    key,
+                    "File Too Large",
+                    &format!(
+                        "{} is over the {} accent will read into an editor.",
+                        human(size),
+                        human(accent_core::fs::MAX_TEXT)
+                    ),
+                );
+            }
+            Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
+        };
+        let prefs = self.prefs();
+        let tab = editor::open(
+            self.root(),
+            key,
+            text,
+            flavour,
+            &self.tabs(),
+            &prefs,
+            (
+                // Without a vault there is nothing to complete against, and the closures are
+                // only ever installed on a note anyway.
+                {
+                    let vault = self.vault.clone();
+                    move |prefix: &str| {
+                        vault
+                            .as_ref()
+                            .and_then(|v| v.complete_notes(prefix, COMPLETIONS).ok())
+                            .unwrap_or_default()
+                    }
+                },
+                {
+                    let vault = self.vault.clone();
+                    move |prefix: &str| {
+                        vault
+                            .as_ref()
+                            .and_then(|v| v.complete_tags(prefix, COMPLETIONS).ok())
+                            .unwrap_or_default()
+                    }
+                },
+            ),
+        );
+        self.adopt(tab);
+        if flavour.is_note() {
+            self.sync_conflict_banner(key);
         }
+    }
+
+    /// An image, in a tab that only looks at it.
+    fn open_image(self: &Rc<Self>, key: &str, path: &Path) {
+        let picture = gtk::Picture::for_filename(path);
+        picture.set_content_fit(gtk::ContentFit::ScaleDown);
+        picture.set_can_shrink(true);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .child(&picture)
+            .build();
+        self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+    }
+
+    /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
+    /// sentence and at most one button).
+    fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str) {
+        let key = key.to_string();
+        let status = adw::StatusPage::builder()
+            .icon_name("dialog-warning-symbolic")
+            .title(title)
+            .description(body)
+            .build();
+        let button = gtk::Button::builder()
+            .label("Show in Files")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
+        button.connect_clicked(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[strong]
+            key,
+            move |_| {
+                let path = app.root().join(&key);
+                let toast = app.clone();
+                fileops::reveal(&app.window, &path, move |m| toast.toast(m));
+            }
+        ));
+        status.set_child(Some(&button));
+        self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic");
+    }
+
+    /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
+    /// [`App::open_status`].
+    fn adopt_viewer(
+        self: &Rc<Self>,
+        wrap: fn(Rc<doc::Viewer>) -> Doc,
+        key: &str,
+        child: &impl IsA<gtk::Widget>,
+        icon: &str,
+    ) {
+        let page = self.tabs().append(child);
+        page.set_title(doc::file_name(key));
+        page.set_tooltip(&fileops::display_path(self.root(), key));
+        page.set_icon(Some(&gio::ThemedIcon::new(icon)));
+        self.mark_loose(&page, key);
+        self.docs
+            .borrow_mut()
+            .push(wrap(doc::Viewer::new(key, page.clone())));
+        self.tabs().set_selected_page(&page);
+        self.sync_active();
+        self.save_session_soon();
     }
 
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
@@ -759,11 +998,15 @@ impl App {
     /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
     /// would come back as a changed-on-disk banner instead of a replacement.
     fn replace_in_notes(self: &Rc<Self>, re: &accent_api::Regex, replacement: &str, literal: bool) {
+        let Some(vault) = self.vault() else {
+            return self.needs_vault("replace across notes");
+        };
+        let Some(ops) = self.ops() else { return };
         let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
-        (self.ops().flush)(&open);
-        match self.vault.replace_all(re, replacement, literal) {
+        (ops.flush)(&open);
+        match vault.replace_all(re, replacement, literal) {
             Ok(report) => {
-                let unsaved = (self.ops().reload)(&report.rewritten);
+                let unsaved = (ops.reload)(&report.rewritten);
                 self.toast(&replace_message(
                     report.matches,
                     report.rewritten.len(),
@@ -775,64 +1018,75 @@ impl App {
         }
     }
 
-    /// An image from the tree, in a tab that only looks at it.
-    ///
-    /// ponytail: the file goes straight into a `GtkPicture` at full resolution, the tab is not
-    /// retargeted by a rename, it is left out of the session, and in split view the preview keeps
-    /// showing the last note. All three want a real tab type, which is what Phase 2's PDF viewer
-    /// has to build anyway.
-    fn open_image(&self, rel: &str) {
-        let Some(rel) = self.safe_rel(rel) else {
-            return self.toast(&format!("{rel} is outside this vault"));
-        };
-        // Cloned out of the borrow: selecting a page runs the handlers that read this list.
-        let open = self
-            .images
-            .borrow()
-            .iter()
-            .find(|(r, _)| *r == rel)
-            .map(|(_, page)| page.clone());
-        if let Some(page) = open {
-            return self.reveal_page(&page);
-        }
-        let picture = gtk::Picture::for_filename(self.vault.root().join(&rel));
-        picture.set_content_fit(gtk::ContentFit::ScaleDown);
-        picture.set_can_shrink(true);
-        let scroller = gtk::ScrolledWindow::builder()
-            .hexpand(true)
-            .vexpand(true)
-            .child(&picture)
-            .build();
-        let page = self.tabs().append(&scroller);
-        page.set_title(rel.rsplit('/').next().unwrap_or(&rel));
-        page.set_tooltip(&fileops::display_path(self.vault.root(), &rel));
-        page.set_icon(Some(&gio::ThemedIcon::new("image-x-generic-symbolic")));
-        self.images.borrow_mut().push((rel, page.clone()));
-        self.tabs().set_selected_page(&page);
-    }
-
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
     fn open_target(self: &Rc<Self>, target: &str) {
-        match self.vault.resolve_link(target) {
+        let Some(vault) = self.vault() else {
+            return self.needs_vault("follow a link");
+        };
+        match vault.resolve_link(target) {
             Ok(Some(rel)) => self.open_note(&rel),
             Ok(None) => self.toast(&format!("No note called {target}")),
             Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
         }
     }
 
-    /// A vault-relative path that really is inside the vault, or `None`.
+    /// Where `key` really is: the key to open it under, and the path to read.
     ///
     /// Wikilink targets come out of note content, so `![[../../../../etc/passwd]]` reaches
-    /// `open_note` from the preview and has to be stopped here rather than by the reader.
-    ///
-    /// ponytail: a note reached through a directory symlink canonicalises outside the root and is
-    /// refused with it. Compare against `Index::symlink_dirs` as well the day linked-in code
-    /// trees have to be openable from the preview.
-    fn safe_rel(&self, rel: &str) -> Option<String> {
-        let root = self.vault.root();
-        let canonical = root.join(rel).canonicalize().ok()?;
-        let inside = canonical.strip_prefix(root).ok()?;
-        inside.to_str().map(str::to_string)
+    /// `open_path` from the preview and has to be stopped here rather than by the reader. The
+    /// check is the vault's own lexical one: canonicalising would refuse a note reached through
+    /// one of the directory symlinks a vault links in on purpose, which the walk indexed and the
+    /// tree is already showing.
+    fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
+        if doc::is_loose_key(key) {
+            let path = PathBuf::from(key);
+            return path.is_file().then(|| (key.to_string(), path));
+        }
+        // A window with no vault has nothing to be relative to, so only absolute keys open.
+        let path = self.vault()?.resolve(key).ok()?;
+        if !path.exists() {
+            return None;
+        }
+        // Normalised, so `./a.md` and `a.md` are one tab rather than two.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?;
+        Some((key.to_string(), path))
+    }
+
+    /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one
+    /// from outside opens as a loose tab in this window, marked as being from outside it.
+    fn open_file_dialog(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder().title("Open File").build();
+        if let Some(vault) = self.vault() {
+            dialog.set_initial_folder(Some(&gio::File::for_path(vault.root())));
+        }
+        dialog.open(
+            Some(&self.window),
+            gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| {
+                    // A dismissed chooser is an error here, and not one worth a toast.
+                    let Some(path) = result.ok().and_then(|file| file.path()) else {
+                        return;
+                    };
+                    let key = match app.vault().and_then(|v| path.strip_prefix(v.root()).ok()) {
+                        Some(rel) => rel.to_string_lossy().into_owned(),
+                        None => path.to_string_lossy().into_owned(),
+                    };
+                    app.open_path(&key);
+                }
+            ),
+        );
+    }
+
+    /// A tab on a file from outside this window's vault says so on its own tab, so saving it is
+    /// never a surprise and it is obvious why it has no backlinks.
+    fn mark_loose(&self, page: &adw::TabPage, key: &str) {
+        if self.vault.is_some() && doc::is_loose_key(key) {
+            page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
+            page.set_indicator_tooltip("Outside this vault");
+        }
     }
 
     /// Wire a freshly opened tab into the window.
@@ -845,7 +1099,12 @@ impl App {
         tab.connect_edited(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |tab| app.queue_render(tab)
+            move |tab| {
+                app.queue_render(tab);
+                if app.is_active(tab) {
+                    app.sync_outline();
+                }
+            }
         ));
         tab.connect_banner(glib::clone!(
             #[weak(rename_to = app)]
@@ -869,8 +1128,19 @@ impl App {
             move |_| app.on_edit()
         ));
 
+        // Nothing else watches a loose file: the vault's worker only reports on its own tree.
+        if doc::is_loose_key(&tab.rel()) {
+            tab.watch_file(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |tab| {
+                    app.refresh_tab(tab);
+                }
+            ));
+        }
+        self.mark_loose(&tab.page, &tab.rel());
         let page = tab.page.clone();
-        self.open.borrow_mut().push(tab);
+        self.docs.borrow_mut().push(Doc::Text(tab));
         self.tabs().set_selected_page(&page);
         self.sync_active();
         self.save_session_soon();
@@ -879,26 +1149,88 @@ impl App {
     /// Keep the window subtitle, the backlinks pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
-        let Some(tab) = self.active() else {
+        let Some(doc) = self.active_doc() else {
             self.title.set_subtitle("");
             if let Some(sidebar) = self.sidebar.get() {
                 sidebar.set_backlinks(&[]);
             }
             return;
         };
-        let rel = tab.rel();
-        self.note_used(&rel);
-        self.title.set_subtitle(&rel);
+        let key = doc.key();
+        self.note_used(&key);
+        self.title.set_subtitle(&match doc.is_loose() {
+            true => fileops::display_path(self.root(), &key),
+            false => key.clone(),
+        });
+        // Backlinks and the preview are about notes. A source file, an image or a status page
+        // leaves both empty rather than showing the last note's.
+        let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
         if let Some(sidebar) = self.sidebar.get() {
             let mut sources: Vec<String> = Vec::new();
-            for link in self.vault.backlinks(&rel).unwrap_or_default() {
-                if !sources.contains(&link.src_rel_path) {
-                    sources.push(link.src_rel_path);
+            if let Some(vault) = self.vault().filter(|_| note.is_some()) {
+                for link in vault.backlinks(&key).unwrap_or_default() {
+                    if !sources.contains(&link.src_rel_path) {
+                        sources.push(link.src_rel_path);
+                    }
                 }
             }
             sidebar.set_backlinks(&sources);
         }
-        self.render(&tab);
+        // Only code says how it is encoded: a note is UTF-8 with LF endings or it would not be
+        // a note, and a readout that never changes is chrome for nothing.
+        let code = doc.tab().filter(|t| !t.flavour().is_note());
+        match code {
+            Some(tab) => {
+                self.encoding_label.set_label(&tab.encoding_label());
+                self.encoding_label.set_visible(true);
+            }
+            None => self.encoding_label.set_visible(false),
+        }
+        self.sync_outline();
+        if let Some(tab) = note {
+            self.render(&tab);
+        }
+    }
+
+    /// Fill the Outline pane from the active tab: a note's headings, or a sentence saying why
+    /// there are none.
+    fn sync_outline(self: &Rc<Self>) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let Some(doc) = self.active_doc() else {
+            return sidebar.set_outline(None);
+        };
+        let Some(tab) = doc.tab() else {
+            return sidebar.set_outline(None);
+        };
+        if !tab.flavour().is_note() {
+            // ponytail: an outline of code is a symbol list, which is the language server's job.
+            return sidebar.set_outline(Some(&sidebar::outline_note(
+                "No Outline",
+                "Symbols arrive with language server support.",
+            )));
+        }
+        let headings: Vec<(u8, String, usize)> = tab
+            .headings()
+            .into_iter()
+            .map(|h| (h.level, h.text, h.range.start))
+            .collect();
+        if headings.is_empty() {
+            return sidebar.set_outline(Some(&sidebar::outline_note(
+                "No Headings",
+                "This note has no headings yet.",
+            )));
+        }
+        let key = doc.key();
+        sidebar.set_outline(Some(&sidebar::outline_list(
+            &headings,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |at| app.open_note_at(&key, Some(at))
+            ),
+        )));
     }
 
     // --- saving --------------------------------------------------------------------------
@@ -912,14 +1244,13 @@ impl App {
     /// `explicit` is a Ctrl+S, which may raise a dialog. An autosave never can: interrupting
     /// someone mid-sentence with a modal is exactly what autosave exists to avoid.
     fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
-        let text = tab.text();
-        match self.write_tab(tab, &text, tab.etag.get()) {
+        match self.write_tab(tab, tab.etag.get()) {
             Ok(()) => {
                 if explicit {
                     self.toast("Saved");
                 }
             }
-            Err(SaveError::ChangedOnDisk { .. }) if explicit => self.ask_overwrite(tab, text),
+            Err(SaveError::ChangedOnDisk { .. }) if explicit => self.ask_overwrite(tab),
             Err(SaveError::ChangedOnDisk { .. }) => {
                 tab.disk_changed.set(true);
                 tab.show_alert(Alert::Compare);
@@ -930,13 +1261,17 @@ impl App {
 
     /// Write the buffer and hand the error back instead of reporting it: a caller that is about
     /// to make the buffer unreachable has to know whether the bytes landed.
-    fn write_tab(
-        &self,
-        tab: &Rc<Tab>,
-        text: &str,
-        expected: Option<Etag>,
-    ) -> Result<(), SaveError> {
-        let etag = self.vault.save(&tab.rel(), text, expected)?;
+    fn write_tab(&self, tab: &Rc<Tab>, expected: Option<Etag>) -> Result<(), SaveError> {
+        // What the file should hold, not what the buffer holds: a code file loses its trailing
+        // whitespace here and a DOS file gets its CRLFs back.
+        let text = tab.for_disk();
+        // A loose tab is not in any vault, so it writes through core directly. Same atomic save,
+        // same etag gate; what it misses is the watcher being told the write was ours, which the
+        // tab's own file monitor makes harmless.
+        let etag = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.save(&tab.rel(), &text, expected)?,
+            None => accent_core::fs::write_note(&tab.path(), &text, expected)?,
+        };
         tab.mark_clean(etag);
         tab.clear_disk_alert();
         Ok(())
@@ -957,7 +1292,7 @@ impl App {
         true
     }
 
-    fn ask_overwrite(self: &Rc<Self>, tab: &Rc<Tab>, text: String) {
+    fn ask_overwrite(self: &Rc<Self>, tab: &Rc<Tab>) {
         let dialog = adw::AlertDialog::new(
             Some("File Changed on Disk"),
             Some(&format!(
@@ -982,7 +1317,7 @@ impl App {
             gio::Cancellable::NONE,
             move |response| match response.as_str() {
                 "compare" => app.compare_with_disk(&tab),
-                "overwrite" => match app.write_tab(&tab, &text, None) {
+                "overwrite" => match app.write_tab(&tab, None) {
                     Ok(()) => app.toast("Overwritten"),
                     Err(e) => app.toast(&format!("Save failed: {e}")),
                 },
@@ -1029,7 +1364,7 @@ impl App {
                         tab.discard();
                         true
                     }
-                    "overwrite" => match app.write_tab(&tab, &tab.text(), None) {
+                    "overwrite" => match app.write_tab(&tab, None) {
                         Ok(()) => true,
                         Err(e) => {
                             app.toast(&format!("Save failed: {e}"));
@@ -1046,8 +1381,7 @@ impl App {
     /// Forget a page that is really closing. Called on every path that closes one, because
     /// `close_page_finish` does not come back through the `close-page` handler.
     fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
-        self.open.borrow_mut().retain(|t| &t.page != page);
-        self.images.borrow_mut().retain(|(_, p)| p != page);
+        self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
         self.save_session_soon();
     }
@@ -1056,10 +1390,12 @@ impl App {
     /// goes up, not read off the file system when the button is pressed.
     fn answer_banner(self: &Rc<Self>, tab: &Rc<Tab>) {
         match tab.alert() {
+            // Reports rather than asks, so it has no button and this cannot be reached from one.
+            Some(Alert::ReadOnly) => {}
             // Both sides hold work, so neither is thrown away on one click: the diff shows what
             // differs and the user picks (DESIGN.md: a choice that can lose data is a dialog).
             Some(Alert::Compare) => self.compare_with_disk(tab),
-            Some(Alert::Restore) => match self.write_tab(tab, &tab.text(), None) {
+            Some(Alert::Restore) => match self.write_tab(tab, None) {
                 Ok(()) => self.toast("Saved"),
                 Err(e) => self.toast(&format!("Save failed: {e}")),
             },
@@ -1067,7 +1403,12 @@ impl App {
             // another window, or by Syncthing, since the banner went up.
             Some(Alert::Conflict) => {
                 let rel = tab.rel();
-                match self.vault.conflicts_of(&rel).unwrap_or_default().first() {
+                match self
+                    .vault()
+                    .and_then(|v| v.conflicts_of(&rel).ok())
+                    .unwrap_or_default()
+                    .first()
+                {
                     Some(conflict) => self.resolve_conflict(&rel, conflict),
                     None => {
                         tab.hide_banner();
@@ -1082,7 +1423,7 @@ impl App {
     /// The unsaved buffer against the file underneath it, in the conflict resolver.
     fn compare_with_disk(self: &Rc<Self>, tab: &Rc<Tab>) {
         let rel = tab.rel();
-        let Ok((disk, _)) = self.vault.read(&rel) else {
+        let Ok((disk, _)) = accent_core::fs::read_note(&tab.path()) else {
             return self.toast(&format!("Cannot read {rel} from disk"));
         };
         let mine = tab.text();
@@ -1096,7 +1437,7 @@ impl App {
                     if let Some(text) = edited {
                         tab.set_text(&text);
                     }
-                    match app.write_tab(&tab, &tab.text(), None) {
+                    match app.write_tab(&tab, None) {
                         Ok(()) => app.toast("Saved"),
                         Err(e) => app.toast(&format!("Save failed: {e}")),
                     }
@@ -1166,7 +1507,12 @@ impl App {
                     "Indexed {} files ({} new, {} updated)",
                     stats.scanned, stats.added, stats.updated
                 );
-                match self.vault.conflicts().unwrap_or_default().len() {
+                match self
+                    .vault()
+                    .and_then(|v| v.conflicts().ok())
+                    .unwrap_or_default()
+                    .len()
+                {
                     0 => {}
                     n => message.push_str(&format!(", {n} with sync conflicts")),
                 }
@@ -1181,12 +1527,25 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => {
-                let Some(tab) = self.tab_for(&rel) else {
+                let Some(doc) = self.doc_for(&rel) else {
                     return;
                 };
-                self.refresh_tab(&tab);
-                if self.is_active(&tab) {
-                    self.sync_active();
+                match &doc {
+                    Doc::Text(tab) => {
+                        self.refresh_tab(tab);
+                        if self.is_active(tab) {
+                            self.sync_active();
+                        }
+                    }
+                    // Re-point the picture at the same file: the texture it holds is of the old
+                    // contents, so redrawing alone would show them again.
+                    Doc::Image(_) => {
+                        if let Some(picture) = picture_of(doc.page()) {
+                            picture.set_file(gio::File::NONE);
+                            picture.set_filename(Some(self.root().join(&rel)));
+                        }
+                    }
+                    Doc::Status(_) => {}
                 }
             }
             Event::FileRemoved(rel) => {
@@ -1195,24 +1554,27 @@ impl App {
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
                     self.sync_conflict_banner(&original);
                 }
-                let Some(tab) = self.tab_for(&rel) else {
+                let Some(doc) = self.doc_for(&rel) else {
                     return;
                 };
-                if tab.modified.get() {
-                    tab.disk_changed.set(true);
-                    tab.show_alert(Alert::Restore);
-                } else {
-                    self.close_page(&tab.page);
+                // Only a buffer holds work the file no longer does; everything else has nothing
+                // left to show, so its tab goes with the file.
+                match doc.tab().filter(|tab| tab.modified.get()) {
+                    Some(tab) => {
+                        tab.disk_changed.set(true);
+                        tab.show_alert(Alert::Restore);
+                    }
+                    None => self.close_page(doc.page()),
                 }
             }
             Event::FileRenamed { from, to } => {
                 let prefix = format!("{from}/");
-                for tab in self.open_tabs() {
-                    let rel = tab.rel();
-                    if rel == from {
-                        tab.retarget(self.vault.root(), &to);
-                    } else if let Some(rest) = rel.strip_prefix(&prefix) {
-                        tab.retarget(self.vault.root(), &format!("{to}/{rest}"));
+                for doc in self.docs() {
+                    let key = doc.key();
+                    if key == from {
+                        doc.retarget(self.root(), &to);
+                    } else if let Some(rest) = key.strip_prefix(&prefix) {
+                        doc.retarget(self.root(), &format!("{to}/{rest}"));
                     }
                 }
                 accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
@@ -1230,10 +1592,19 @@ impl App {
     /// "changed on disk" banner if one is up, which loses no work: `disk_changed` still holds
     /// autosave back and Ctrl+S still raises the overwrite dialog.
     fn sync_conflict_banner(&self, rel: &str) {
+        // Conflict copies are a vault idea: they are found by the index.
+        if self.vault.is_none() {
+            return;
+        }
         let Some(tab) = self.tab_for(rel) else {
             return;
         };
-        match self.vault.conflicts_of(rel).unwrap_or_default().is_empty() {
+        match self
+            .vault()
+            .and_then(|v| v.conflicts_of(rel).ok())
+            .unwrap_or_default()
+            .is_empty()
+        {
             false => tab.show_alert(Alert::Conflict),
             true if tab.alert() == Some(Alert::Conflict) => tab.hide_banner(),
             true => {}
@@ -1241,9 +1612,10 @@ impl App {
     }
 
     fn resolve_conflict(self: &Rc<Self>, original: &str, conflict: &str) {
-        let (Ok((mine, _)), Ok((theirs, _))) =
-            (self.vault.read(original), self.vault.read(conflict))
-        else {
+        let Some(vault) = self.vault() else {
+            return;
+        };
+        let (Ok((mine, _)), Ok((theirs, _))) = (vault.read(original), vault.read(conflict)) else {
             return self.toast("Cannot read the conflicting notes");
         };
         let resolve = {
@@ -1254,13 +1626,15 @@ impl App {
                 // the merged text is written first. Keeping theirs adopts the copy.
                 let rewritten = match choice {
                     diff::Choice::KeepTheirs => {
-                        if let Err(e) = app.vault.adopt_conflict(&original, &conflict) {
+                        let Some(vault) = app.vault() else { return };
+                        if let Err(e) = vault.adopt_conflict(&original, &conflict) {
                             return app.toast(&format!("Cannot resolve: {e:#}"));
                         }
                         true
                     }
                     diff::Choice::KeepMine { edited: Some(text) } => {
-                        if let Err(e) = app.vault.save(&original, &text, None) {
+                        let Some(vault) = app.vault() else { return };
+                        if let Err(e) = vault.save(&original, &text, None) {
                             return app.toast(&format!("Cannot resolve: {e}"));
                         }
                         true
@@ -1272,7 +1646,9 @@ impl App {
                 if rewritten && let Some(tab) = app.tab_for(&original) {
                     app.refresh_tab(&tab);
                 }
-                fileops::trash(app.ops(), &conflict);
+                if let Some(ops) = app.ops() {
+                    fileops::trash(ops, &conflict);
+                }
                 app.sync_conflict_banner(&original);
             }
         };
@@ -1384,7 +1760,7 @@ impl App {
             return;
         }
         let preview = preview::Preview::new(
-            self.vault.root().to_path_buf(),
+            self.root().to_path_buf(),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -1527,14 +1903,22 @@ impl App {
     fn run_action(self: &Rc<Self>, name: &str) {
         match name {
             "save" => self.save_active(),
+            "open-file" => self.open_file_dialog(),
             "new-note" => {
+                let Some(vault) = self.vault() else {
+                    return self.needs_vault("create a note");
+                };
                 let dir = self
                     .selected_dir()
-                    .unwrap_or_else(|| self.vault.config().new_note_dir);
-                fileops::new_note(self.ops(), &dir);
+                    .unwrap_or_else(|| vault.config().new_note_dir);
+                if let Some(ops) = self.ops() {
+                    fileops::new_note(ops, &dir);
+                }
             }
             "new-folder" => {
-                fileops::new_folder(self.ops(), &self.selected_dir().unwrap_or_default())
+                if let Some(ops) = self.need_ops("create a folder") {
+                    fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
+                }
             }
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
@@ -1555,6 +1939,16 @@ impl App {
             "duplicate-line" => {
                 if let Some(tab) = self.active() {
                     tab.duplicate_line();
+                }
+            }
+            "toggle-comment" => {
+                if let Some(tab) = self.active() {
+                    tab.toggle_comment();
+                }
+            }
+            "toggle-wrap" => {
+                if let Some(tab) = self.active() {
+                    tab.toggle_wrap();
                 }
             }
             "delete-line" => {
@@ -1587,18 +1981,26 @@ impl App {
             "zoom-reset" => self.set_zoom(1.0),
             "minimap" => self.toggle_minimap(),
             "copy-relative-path" => {
-                if let Some(rel) = self.menu_rel() {
-                    fileops::copy_relative_path(self.ops(), &rel);
+                if let (Some(rel), Some(ops)) =
+                    (self.menu_rel(), self.need_ops("copy a vault path"))
+                {
+                    fileops::copy_relative_path(ops, &rel);
                 }
             }
             "copy-absolute-path" => {
                 if let Some(rel) = self.menu_rel() {
-                    fileops::copy_absolute_path(self.ops(), &rel);
+                    match self.ops() {
+                        Some(ops) => fileops::copy_absolute_path(ops, &rel),
+                        // No vault, so the key already is the absolute path.
+                        None => self.window.clipboard().set_text(&rel),
+                    }
                 }
             }
             "show-in-files" => {
                 if let Some(rel) = self.menu_rel() {
-                    fileops::show_in_files(self.ops(), &rel);
+                    let path = self.root().join(&rel);
+                    let toast = self.clone();
+                    fileops::reveal(&self.window, &path, move |m| toast.toast(m));
                 }
             }
             "reveal-in-sidebar" => self.reveal_in_sidebar(),
@@ -1614,6 +2016,7 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
+            "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => {
@@ -1626,13 +2029,14 @@ impl App {
                     .selected_row()
                     .map(|(_, rel)| rel)
                     .or_else(|| self.active().map(|tab| tab.rel()));
-                if let Some(rel) = target {
-                    fileops::rename(self.ops(), &rel);
+                if let (Some(rel), Some(ops)) = (target, self.need_ops("rename a file")) {
+                    fileops::rename(ops, &rel);
                 }
             }
-            "daily-note" => match self.vault.daily_note() {
-                Ok((rel, _)) => self.open_note(&rel),
-                Err(e) => self.toast(&format!("Cannot open today's note: {e:#}")),
+            "daily-note" => match self.vault().map(|v| v.daily_note()) {
+                Some(Ok((rel, _))) => self.open_note(&rel),
+                Some(Err(e)) => self.toast(&format!("Cannot open today's note: {e:#}")),
+                None => self.needs_vault("open today's note"),
             },
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
@@ -1707,21 +2111,9 @@ impl App {
     /// active tab when the same action is fired from the palette.
     fn menu_rel(&self) -> Option<String> {
         let Some(page) = self.menu_page.borrow().clone() else {
-            return self.active().map(|tab| tab.rel());
+            return self.active_doc().map(|d| d.key());
         };
-        let note = self
-            .open
-            .borrow()
-            .iter()
-            .find(|t| t.page == page)
-            .map(|t| t.rel());
-        note.or_else(|| {
-            self.images
-                .borrow()
-                .iter()
-                .find(|(_, p)| *p == page)
-                .map(|(rel, _)| rel.clone())
-        })
+        self.doc_for_page(&page).map(|d| d.key())
     }
 
     /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
@@ -1757,7 +2149,11 @@ impl App {
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mut recent = self.recent_notes.borrow().clone();
-        for rel in self.vault.recent_notes(RECENT_NOTES).unwrap_or_default() {
+        for rel in self
+            .vault()
+            .and_then(|v| v.recent_notes(RECENT_NOTES).ok())
+            .unwrap_or_default()
+        {
             if !recent.contains(&rel) {
                 recent.push(rel);
             }
@@ -1766,9 +2162,15 @@ impl App {
         let config = self.config.borrow();
         let sources = palette::Sources {
             recent,
-            load_notes: Box::new({
+            // Every file, not only the notes: a source file has to be reachable by name too.
+            load_files: Box::new({
                 let vault = self.vault.clone();
-                move || vault.note_paths().unwrap_or_default()
+                move || {
+                    vault
+                        .as_ref()
+                        .and_then(|v| v.file_paths().ok())
+                        .unwrap_or_default()
+                }
             }),
             commands: ACTIONS
                 .iter()
@@ -1783,7 +2185,8 @@ impl App {
                 let vault = self.vault.clone();
                 move || {
                     vault
-                        .tags()
+                        .as_ref()
+                        .and_then(|v| v.tags().ok())
                         .unwrap_or_default()
                         .into_iter()
                         .map(|(tag, _)| tag)
@@ -1810,7 +2213,7 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |item: &palette::Item| match item {
-                    palette::Item::Note(rel) => app.open_note(rel),
+                    palette::Item::File(rel) => app.open_path(rel),
                     palette::Item::Command { action, .. } => {
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }
@@ -1861,7 +2264,9 @@ impl App {
     /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
     /// or a re-read from disk can have changed.
     fn apply_config(self: &Rc<Self>, config: &Config) {
-        self.vault.set_config(config.vault(self.vault.root()));
+        if let Some(vault) = self.vault() {
+            vault.set_config(config.vault(self.root()));
+        }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
         theme::apply(config.theme);
@@ -1898,7 +2303,7 @@ impl App {
         settings::present(
             &self.window,
             self.config.clone(),
-            self.vault.root().to_path_buf(),
+            self.vault().map(|v| v.root().to_path_buf()),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -1962,8 +2367,8 @@ impl App {
 
     fn save_session(&self) {
         let session = Session {
-            open: self.open.borrow().iter().map(|tab| tab.rel()).collect(),
-            active: self.active().map(|tab| tab.rel()),
+            open: self.docs.borrow().iter().map(|d| d.key()).collect(),
+            active: self.active_doc().map(|d| d.key()),
             // Presentation is not a session state, so the sidebar it hid is saved as it was.
             sidebar: match self.presenting.get() {
                 Some(before) => before.sidebar,
@@ -1980,25 +2385,33 @@ impl App {
             recent_notes: self.recent_notes.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
         };
-        if let Err(e) = self.vault.save_session(&session) {
+        let Some(vault) = self.vault() else {
+            // Nothing to key a session file on, and nothing worth restoring: a window opened on
+            // one file is opened again the same way.
+            return;
+        };
+        if let Err(e) = vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
         }
     }
 
     /// Restored after the window is on screen, so nothing here is on the path to the first frame.
     fn restore_session(self: &Rc<Self>) {
-        let session = self.vault.session();
+        let Some(vault) = self.vault() else {
+            return;
+        };
+        let session = vault.session();
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
         // ponytail: every note comes back into one pane, because the session does not record the
         // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
         // being what someone who left four panes open expects.
-        for rel in &session.open {
-            self.open_note(rel);
+        for key in &session.open {
+            self.open_path(key);
         }
-        if let Some(tab) = session.active.as_deref().and_then(|rel| self.tab_for(rel)) {
-            self.tabs().set_selected_page(&tab.page);
+        if let Some(doc) = session.active.as_deref().and_then(|key| self.doc_for(key)) {
+            self.tabs().set_selected_page(doc.page());
         }
         // A state file written before panes were saved leaves the name empty; that keeps
         // whichever pane the sidebar was built showing.
@@ -2026,6 +2439,39 @@ impl App {
     }
 }
 
+/// The `GtkPicture` inside a page built by [`App::open_image`].
+fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
+    page.child()
+        .downcast::<gtk::ScrolledWindow>()
+        .ok()?
+        .child()
+        .and_downcast::<gtk::Picture>()
+}
+
+/// Which editor a text file gets. Only CSV is special: its columns are coloured instead of it
+/// being handed to a language, because `csv.lang` would tint numbers and strings underneath.
+fn flavour_of(key: &str) -> Flavour {
+    match doc::file_name(key).rsplit_once('.') {
+        Some((_, ext)) if ext.eq_ignore_ascii_case("csv") => Flavour::Csv,
+        _ => Flavour::Code,
+    }
+}
+
+/// A byte count as a person reads it, in the decimal units GNOME shows in Files.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["bytes", "kB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} bytes"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
 /// Zoom in tenths, between half size and triple. Rounded as well as clamped, so stepping does
 /// not drift into 0.7999999999999999 and a hand-edited state file cannot ask for 0.
 fn clamp_zoom(zoom: f64) -> f64 {
@@ -2046,34 +2492,43 @@ fn sidebar_width(stored: i32) -> i32 {
 fn build_window(
     gtk_app: &adw::Application,
     shell: &Rc<Shell>,
-    root: PathBuf,
+    root: Option<PathBuf>,
     note: Option<String>,
 ) -> Option<Rc<App>> {
     install_document_font();
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
 
-    let vault_config = shell.config.borrow().vault(&root);
-    let (vault, events) = match Vault::open(&root, vault_config) {
-        Ok(opened) => opened,
-        Err(e) => {
-            eprintln!("cannot open {}: {e:#}", root.display());
-            return None;
+    // No root is a window opened on a file: no index to build, no watcher to run, and nothing
+    // to add to the recent-vaults list.
+    let (vault, events) = match &root {
+        Some(root) => {
+            let vault_config = shell.config.borrow().vault(root);
+            match Vault::open(root, vault_config) {
+                Ok((vault, events)) => (Some(Arc::new(vault)), Some(events)),
+                Err(e) => {
+                    eprintln!("cannot open {}: {e:#}", root.display());
+                    return None;
+                }
+            }
         }
+        None => (None, None),
     };
-    let vault = Arc::new(vault);
-    {
+    if let Some(root) = &root {
         let mut config = shell.config.borrow_mut();
-        config.touch_recent(&root);
+        config.touch_recent(root);
         if let Err(e) = config.save() {
             tracing::warn!("saving config: {e:#}");
         }
     }
 
-    let vault_name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| root.display().to_string());
+    let vault_name = match &root {
+        Some(root) => root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string()),
+        None => "Accent".to_string(),
+    };
     let title = adw::WindowTitle::new(&vault_name, "");
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
@@ -2125,6 +2580,11 @@ fn build_window(
         .valign(gtk::Align::Center)
         .build();
     zoom_reset.add_css_class("flat");
+    let encoding_label = gtk::Label::new(None);
+    encoding_label.add_css_class("numeric");
+    encoding_label.add_css_class("dim-label");
+    encoding_label.set_visible(false);
+
     let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
     zoom_pill.append(&zoom_label);
     zoom_pill.append(&zoom_reset);
@@ -2181,6 +2641,7 @@ fn build_window(
     header.pack_end(&menu);
     header.pack_end(&modes);
     header.pack_end(&zoom_pill);
+    header.pack_end(&encoding_label);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -2239,6 +2700,7 @@ fn build_window(
 
     let app = Rc::new(App {
         vault: vault.clone(),
+        // (`vault` is an `Option` here: `None` is a window opened on a file, with no folder.)
         config: shell.config.clone(),
         window: window.clone(),
         panes: RefCell::new(vec![first.clone()]),
@@ -2247,8 +2709,7 @@ fn build_window(
         toasts,
         find,
         status,
-        open: RefCell::new(Vec::new()),
-        images: RefCell::new(Vec::new()),
+        docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         ops: OnceCell::new(),
@@ -2266,6 +2727,7 @@ fn build_window(
         zoom: Cell::new(1.0),
         zoom_pill,
         zoom_label,
+        encoding_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -2277,19 +2739,29 @@ fn build_window(
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
     });
-    let _ = app.ops.set(build_ops(&app));
+    if let Some(vault) = &vault {
+        let _ = app.ops.set(build_ops(&app, vault));
+    }
 
-    // Populate straight from the index: the window must be up before reconcile finishes.
-    let rows = gio::ListStore::new::<gtk::StringObject>();
-    tree::fill(&rows, &vault, "");
-    tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
-    build_sidebar(&app, &rows);
+    // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
+    // between its notes. A window without one is tabs and nothing else.
+    if let Some(vault) = &vault {
+        // Populate straight from the index: the window must be up before reconcile finishes.
+        let rows = gio::ListStore::new::<gtk::StringObject>();
+        tree::fill(&rows, vault, "");
+        tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
+        build_sidebar(&app, &rows, vault);
+    } else {
+        app.sidebar_column.set_visible(false);
+    }
 
     wire_pane(&app, &first);
 
     install_actions(gtk_app, &app);
     wire_window(&app, &modes);
-    wire_tree(&app);
+    if vault.is_some() {
+        wire_tree(&app);
+    }
 
     window.connect_map(|_| tracing::debug!(t_ms = ms(), "window mapped"));
     window.present();
@@ -2301,28 +2773,28 @@ fn build_window(
         move || {
             app.restore_session();
             if let Some(rel) = note {
-                app.open_note(&rel);
+                app.open_path(&rel);
             }
         }
     ));
     install_bench_hooks(&app);
-    start_events(&app, events);
+    if let Some(events) = events {
+        start_events(&app, events);
+    }
     Some(app)
 }
 
 /// Files / Search / Tags / Backlinks over the vault tree.
-fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
+fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
-        app.vault.clone(),
+        vault.clone(),
         rows,
+        // The row's kind used to decide what opened. `open_path` reads the name itself, so the
+        // tree no longer has to agree with it about what a file is.
         glib::clone!(
             #[weak]
             app,
-            move |kind, rel: &str| match kind {
-                'm' => app.open_note(rel),
-                _ if markdown::is_image(rel) => app.open_image(rel),
-                _ => app.toast("Only markdown notes and images open in this phase"),
-            }
+            move |_kind, rel: &str| app.open_path(rel)
         ),
         // A drag out of the tree is the only notice the panes get that their drop zones should
         // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
@@ -2340,13 +2812,22 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
         sidebar::Data {
             // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
             search: Arc::new({
-                let vault = app.vault.clone();
+                let vault = vault.clone();
                 move |query| match query {
                     sidebar::Query::Fts(text) => {
                         sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
                     }
-                    sidebar::Query::Grep(re) => {
-                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                    sidebar::Query::Grep { re, files } => {
+                        let (mut hits, mut total) =
+                            vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                        // Notes first, because they are what the index can rank and count; the
+                        // rest is read from disk with whatever room is left in the list.
+                        if files {
+                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
+                            let (rest, more) = vault.grep_files(&re, room).unwrap_or_default();
+                            hits.extend(rest);
+                            total += more;
+                        }
                         sidebar::Answer::Grep(hits, total)
                     }
                 }
@@ -2358,11 +2839,11 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
                     .replace_in_notes(re, replacement, literal)
             )),
             tags: Box::new({
-                let vault = app.vault.clone();
+                let vault = vault.clone();
                 move || vault.tags().unwrap_or_default()
             }),
             files_with_tag: Box::new({
-                let vault = app.vault.clone();
+                let vault = vault.clone();
                 move |tag| {
                     vault
                         .files_with_tag(tag)
@@ -2396,7 +2877,9 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore) {
 
 /// Everything `fileops` needs from the window, as closures. Weak throughout: the operations
 /// outlive nothing, and a strong capture here would keep a closed window's vault open.
-fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
+/// The file operations the tree, the tab menus and the palette share. `None` without a vault:
+/// creating, renaming and trashing are all things done to a vault, not to a lone open file.
+fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
     let open = Rc::downgrade(app);
     let split = Rc::downgrade(app);
@@ -2405,7 +2888,7 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
     let close = Rc::downgrade(app);
     let reconciled = Rc::downgrade(app);
     Rc::new(fileops::Ops {
-        vault: app.vault.clone(),
+        vault: vault.clone(),
         window: app.window.clone(),
         toast: Box::new(move |message| {
             if let Some(app) = toast.upgrade() {
@@ -2414,7 +2897,7 @@ fn build_ops(app: &Rc<App>) -> Rc<fileops::Ops> {
         }),
         open: Box::new(move |rel| {
             if let Some(app) = open.upgrade() {
-                app.open_note(rel);
+                app.open_path(rel);
             }
         }),
         split: Box::new(move |rel, side| {
@@ -2470,7 +2953,7 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .find(|t| &t.page == page)
                 .filter(|t| t.modified.get());
             if let Some(tab) = dirty
-                && let Err(e) = app.write_tab(&tab, &tab.text(), tab.etag.get())
+                && let Err(e) = app.write_tab(&tab, tab.etag.get())
             {
                 let (tabs, page) = (tabs.clone(), page.clone());
                 app.ask_unsaved(&tab, &e, move |app, close| {
@@ -2600,7 +3083,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
                 return false;
             };
             app.set_active_pane(&pane);
-            app.open_note(&rel);
+            app.open_path(&rel);
             true
         }
     ));
@@ -2698,7 +3181,7 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         glib::Propagation::Proceed,
         move |_| {
             for tab in app.open_tabs().iter().filter(|t| t.modified.get()) {
-                let Err(e) = app.write_tab(tab, &tab.text(), tab.etag.get()) else {
+                let Err(e) = app.write_tab(tab, tab.etag.get()) else {
                     continue;
                 };
                 app.ask_unsaved(tab, &e, |app, close| {
@@ -2829,7 +3312,9 @@ fn wire_tree(app: &Rc<App>) {
                 return;
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-            fileops::context_menu(app.ops(), tree.widget(), &rel, kind == 'd', anchor);
+            if let Some(ops) = app.ops() {
+                fileops::context_menu(ops, tree.widget(), &rel, kind == 'd', anchor);
+            }
         }
     ));
     list.add_controller(click);
@@ -2848,14 +3333,23 @@ fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Proceed;
             };
             match key {
-                gdk::Key::Delete => fileops::trash(app.ops(), &rel),
-                gdk::Key::Menu => fileops::context_menu(
-                    app.ops(),
-                    tree.widget(),
-                    &rel,
-                    kind == 'd',
-                    row_anchor(tree.view(), tree.widget()),
-                ),
+                gdk::Key::Delete => {
+                    if let Some(ops) = app.ops() {
+                        fileops::trash(ops, &rel);
+                    }
+                }
+                gdk::Key::Menu => {
+                    let Some(ops) = app.ops() else {
+                        return glib::Propagation::Proceed;
+                    };
+                    fileops::context_menu(
+                        ops,
+                        tree.widget(),
+                        &rel,
+                        kind == 'd',
+                        row_anchor(tree.view(), tree.widget()),
+                    );
+                }
                 _ => return glib::Propagation::Proceed,
             }
             glib::Propagation::Stop

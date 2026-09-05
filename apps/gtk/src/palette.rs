@@ -28,8 +28,9 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 
 /// One thing the palette can offer.
 pub enum Item {
-    /// A note to open, by vault-relative path.
-    Note(String),
+    /// A file to open, by vault-relative path. Any file, not only a note: a source file
+    /// has to be reachable by name too.
+    File(String),
     /// A `GAction` on the window, with the label and accelerator to show.
     Command {
         action: String,
@@ -48,7 +49,7 @@ impl Item {
     /// The text the palette matches against and shows first in the row.
     fn text(&self) -> &str {
         match self {
-            Item::Note(rel) => rel,
+            Item::File(rel) => rel,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
         }
@@ -59,7 +60,7 @@ impl Item {
 pub struct Sources {
     /// Shown in file mode until the first keystroke; never matched against.
     pub recent: Vec<String>,
-    pub load_notes: Box<dyn Fn() -> Vec<String>>,
+    pub load_files: Box<dyn Fn() -> Vec<String>>,
     pub commands: Vec<Item>,
     pub load_tags: Box<dyn Fn() -> Vec<String>>,
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
@@ -82,7 +83,7 @@ impl Mode {
     /// Header title. An empty entry says nothing about the mode, so the header has to.
     fn title(self) -> &'static str {
         match self {
-            Mode::Files => "Open Note",
+            Mode::Files => "Go to File",
             Mode::Commands => "Run Command",
             Mode::Tags => "Filter by Tag",
         }
@@ -90,7 +91,7 @@ impl Mode {
 
     fn placeholder(self) -> &'static str {
         match self {
-            Mode::Files => "Search notes…",
+            Mode::Files => "Search files…",
             Mode::Commands => "Run a command…",
             Mode::Tags => "Filter by tag…",
         }
@@ -287,7 +288,7 @@ fn row_factory(
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         match &*entry {
-            Item::Note(rel) => {
+            Item::File(rel) => {
                 let (base, parent) = split_note(rel);
                 name.set_text(base);
                 dir.set_text(parent);
@@ -407,7 +408,7 @@ pub fn present(
 ) {
     let Sources {
         recent,
-        load_notes,
+        load_files,
         commands,
         load_tags,
         on_rebind,
@@ -520,15 +521,15 @@ pub fn present(
                 Mode::Files if empty_query => recent
                     .iter()
                     .take(MAX_RESULTS)
-                    .map(|rel| Rc::new(Item::Note(rel.clone())))
+                    .map(|rel| Rc::new(Item::File(rel.clone())))
                     .collect(),
                 Mode::Files => {
-                    let corpus = cache(&notes, &load_notes);
+                    let corpus = cache(&notes, &load_files);
                     let mut m = matcher.borrow_mut();
                     m.config = Config::DEFAULT.match_paths();
                     rank(&corpus, &[], query, &mut m)
                         .into_iter()
-                        .map(|i| Rc::new(Item::Note(corpus[i].clone())))
+                        .map(|i| Rc::new(Item::File(corpus[i].clone())))
                         .collect()
                 }
                 // Labels and tags are not paths, so they score better under the plain config.
@@ -873,7 +874,7 @@ mod tests {
             command("win.save", &["<Control>s"]),
             command("win.find", &["<Control>f", "<Control>s"]),
             command("win.about", &[]),
-            Rc::new(Item::Note("a.md".to_string())),
+            Rc::new(Item::File("a.md".to_string())),
         ];
         let twice = conflicts(&items);
         assert_eq!(twice.len(), 1);
