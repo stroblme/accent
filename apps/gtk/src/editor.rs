@@ -9,11 +9,11 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{completion, highlight, multicaret, typing};
+use crate::{comment, completion, highlight, multicaret, typing};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::Link;
 use adw::prelude::*;
-use gtk::{gdk, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,9 @@ pub enum Alert {
     /// Syncthing left a `*.sync-conflict-*` copy of this note beside it. The button opens the
     /// same side-by-side resolver the tree offers, on the copy the vault reports.
     Conflict,
+    /// The bytes are not valid UTF-8, so what is on screen is a lossy reading of them. There is
+    /// no button: the only safe answer is to leave the file alone, which is what the tab does.
+    ReadOnly,
 }
 
 impl Alert {
@@ -80,16 +83,51 @@ impl Alert {
             Alert::Compare => "This note changed on disk",
             Alert::Restore => "This note was deleted on disk",
             Alert::Conflict => "A sync conflict copy of this note exists",
+            Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
         }
     }
 
-    fn button(self) -> &'static str {
+    /// `None` for a banner that only reports, which DESIGN.md allows: a banner is a state that
+    /// persists, and not every state has an answer.
+    fn button(self) -> Option<&'static str> {
         match self {
-            Alert::Compare => "Compare",
-            Alert::Restore => "Save",
-            Alert::Conflict => "Resolve",
+            Alert::Compare => Some("Compare"),
+            Alert::Restore => Some("Save"),
+            Alert::Conflict => Some("Resolve"),
+            Alert::ReadOnly => None,
         }
     }
+}
+
+/// What kind of text a tab holds.
+///
+/// Prose and code share every mechanism a tab has — the etag, autosave, find, zoom, the banner —
+/// and differ only in how they are shown, so this is a field rather than a second tab type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Flavour {
+    /// A markdown note: our own styling spans, wikilink completion, spellcheck, a capped column.
+    Note,
+    /// Anything else that is text: a GtkSourceView language, monospace, the full width.
+    Code,
+    /// A CSV, which is code that gets its columns coloured instead of a language.
+    Csv,
+}
+
+impl Flavour {
+    pub fn is_note(self) -> bool {
+        self == Flavour::Note
+    }
+}
+
+/// The preferences a tab is built with. A struct rather than five positional arguments, which is
+/// what they were until code tabs needed a sixth.
+pub struct Prefs {
+    pub spellcheck: bool,
+    pub font: Option<String>,
+    pub zoom: f64,
+    pub column_width: u32,
+    pub minimap: bool,
+    pub line_numbers: bool,
 }
 
 pub struct Tab {
@@ -110,6 +148,17 @@ pub struct Tab {
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
+    /// What this tab holds, fixed when it opened. Everything markdown-specific — the styling
+    /// spans, completion, spellcheck, the column cap, the hanging heading markers — asks this
+    /// first, so a source file gets a source editor and a note is unchanged.
+    flavour: Flavour,
+    /// The file used CRLF line endings. The buffer never sees them and every save puts them back,
+    /// so editing one line of a DOS file does not rewrite every line of it.
+    crlf: Cell<bool>,
+    /// The bytes were not valid UTF-8 and what is shown is a lossy reading of them. The view is
+    /// not editable, because writing the buffer back would replace every undecodable byte with a
+    /// replacement character.
+    lossy: Cell<bool>,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
     pub etag: Cell<Option<Etag>>,
@@ -135,48 +184,89 @@ pub struct Tab {
     on_follow: LinkHook,
 }
 
-/// Open `rel` from `root` in a new tab of `tabs`.
+/// Open `key` in a new tab of `tabs`, with `text` already read from disk.
 ///
-/// `notes` and `tags` feed the `[[wikilink]]` and `#tag` completions; they are the only way this
-/// module ever reaches the vault. `spellcheck`, `font`, `zoom` and `column_width` (the document
-/// column's percentage of the editor's width) are the current preferences.
-#[allow(clippy::too_many_arguments)]
+/// The bytes are read by the caller rather than here, because deciding what a file is — text,
+/// binary, too large — is what picks the kind of tab in the first place, and by the time we are
+/// called that question is settled.
+///
+/// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
+/// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
+/// `completions` are the note and tag lookups behind `[[wikilink]]` and `#tag` completion, and
+/// the only way this module ever reaches the vault; a code tab never calls them.
 pub fn open(
     root: &Path,
-    rel: &str,
+    key: &str,
+    text: fs::Text,
+    flavour: Flavour,
     tabs: &adw::TabView,
-    notes: impl Fn(&str) -> Vec<String> + 'static,
-    tags: impl Fn(&str) -> Vec<String> + 'static,
-    spellcheck: bool,
-    font: Option<&str>,
-    zoom: f64,
-    column_width: u32,
-) -> std::io::Result<Rc<Tab>> {
-    let path = root.join(rel);
-    let (text, etag) = fs::read_note(&path)?;
+    prefs: &Prefs,
+    completions: (
+        impl Fn(&str) -> Vec<String> + 'static,
+        impl Fn(&str) -> Vec<String> + 'static,
+    ),
+) -> Rc<Tab> {
+    let path = root.join(key);
+    let (zoom, column_width) = (prefs.zoom, prefs.column_width);
 
+    // A language for code, none for a note (our own spans do that) and none for a CSV, whose
+    // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
+    let language = match flavour {
+        Flavour::Code => guess_language(&path, &text.text),
+        Flavour::Note | Flavour::Csv => None,
+    };
     let buffer = sourceview5::Buffer::new(None);
-    highlight::install_tags(&buffer);
-    buffer.set_text(&text);
-    buffer.set_highlight_matching_brackets(false);
+    buffer.set_language(language.as_ref());
+    if flavour.is_note() {
+        highlight::install_tags(&buffer);
+    }
+    buffer.set_text(&text.text);
+    // Bracket matching is noise in prose and the point in code.
+    buffer.set_highlight_matching_brackets(!flavour.is_note());
     sync_scheme(&buffer);
 
     // A subclass, so `Shift+Alt+Up`/`Down` can leave extra carets in the buffer. Everything else
     // in this file treats it as the plain view it is.
     let view: sourceview5::View = multicaret::View::new().upcast();
     view.set_buffer(Some(&buffer));
-    view.set_monospace(false);
-    view.add_css_class("accent-doc");
+    view.set_monospace(!flavour.is_note());
+    view.add_css_class(match flavour {
+        Flavour::Note => "accent-doc",
+        _ => "accent-code",
+    });
     view.set_widget_name(&next_view_name());
-    view.set_wrap_mode(gtk::WrapMode::WordChar);
+    // Prose wraps because a line is a paragraph; code does not, because a line is a line.
+    view.set_wrap_mode(match flavour {
+        Flavour::Note => gtk::WrapMode::WordChar,
+        _ => gtk::WrapMode::None,
+    });
     view.set_show_line_numbers(false);
+    if !flavour.is_note() {
+        view.set_auto_indent(true);
+        view.set_indent_on_tab(true);
+        view.set_smart_backspace(true);
+        view.set_highlight_current_line(true);
+        view.set_tab_width(4);
+        // Everything but a makefile, where a leading tab is syntax.
+        let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
+        view.set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
+    }
+    // Not valid UTF-8: what is on screen is lossy, so it must not be written back.
+    if text.lossy {
+        view.set_editable(false);
+    }
     // Apostrophe-like page: generous side gutters, room to breathe at the ends. `set_page`,
     // called from `set_font` below, puts the zoomed values here.
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
     let numbers = line_numbers(&view, &buffer);
-    completion::install(&view, notes, tags);
-    typing::install(&view);
+    // Both are markdown behaviour: wikilink and tag completion, and continuing a list or a fence
+    // on Return. In a Python file they would be wrong rather than merely unused.
+    if flavour.is_note() {
+        let (notes, tags) = completions;
+        completion::install(&view, notes, tags);
+        typing::install(&view);
+    }
 
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
@@ -210,12 +300,12 @@ pub fn open(
     column.append(&banner);
     column.append(&document);
     let page = tabs.append(&column);
-    page.set_title(title_of(rel));
+    page.set_title(tab_name(key, flavour));
     // The title is only the file name, so where the note really lives is a hover away.
-    page.set_tooltip(&crate::fileops::display_path(root, rel));
+    page.set_tooltip(&crate::fileops::display_path(root, key));
 
     let tab = Rc::new(Tab {
-        rel: RefCell::new(rel.to_string()),
+        rel: RefCell::new(key.to_string()),
         path: RefCell::new(path),
         view: view.clone(),
         buffer: buffer.clone(),
@@ -225,9 +315,12 @@ pub fn open(
         column: Cell::new(column_width),
         map: map.clone(),
         numbers,
+        flavour,
+        crlf: Cell::new(text.crlf),
+        lossy: Cell::new(text.lossy),
         page,
         banner: banner.clone(),
-        etag: Cell::new(Some(etag)),
+        etag: Cell::new(Some(text.etag)),
         modified: Cell::new(false),
         disk_changed: Cell::new(false),
         alert: Cell::new(None),
@@ -245,8 +338,13 @@ pub fn open(
         on_cursor: RefCell::new(None),
         on_follow: RefCell::new(None),
     });
-    tab.set_font(font, zoom);
-    tab.set_spellcheck(spellcheck);
+    tab.set_font(prefs.font.as_deref(), zoom);
+    tab.set_spellcheck(prefs.spellcheck);
+    tab.set_minimap(prefs.minimap);
+    tab.set_line_numbers(prefs.line_numbers);
+    if text.lossy {
+        tab.show_alert(Alert::ReadOnly);
+    }
 
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
     // width changes. GTK 4 dropped ::size-allocate, and the scrolled window publishes its
@@ -259,19 +357,22 @@ pub fn open(
             move |_| tab.set_clamp()
         ));
 
-    *tab.links.borrow_mut() = highlight::apply(&buffer).links;
+    tab.analyse();
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
     // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
-    // (a background tab is only mapped when it is first selected).
-    highlight::restyle(&buffer, &view);
-    view.connect_map(glib::clone!(
-        #[strong]
-        buffer,
-        move |view| {
-            highlight::restyle(&buffer, view);
-            highlight::hang(&buffer, view);
-        }
-    ));
+    // (a background tab is only mapped when it is first selected). Code takes its colours from
+    // the style scheme, which needs none of this.
+    if flavour.is_note() {
+        highlight::restyle(&buffer, &view);
+        view.connect_map(glib::clone!(
+            #[strong]
+            buffer,
+            move |view| {
+                highlight::restyle(&buffer, view);
+                highlight::hang(&buffer, view);
+            }
+        ));
+    }
 
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
     // strong capture here would be the cycle that kept every closed tab alive.
@@ -342,7 +443,25 @@ pub fn open(
     ));
     view.add_controller(motion);
 
-    Ok(tab)
+    tab
+}
+
+/// The language for `path`, or `None` when GtkSourceView knows none for it.
+///
+/// The content type is guessed first and handed over with the name, which is what makes a file
+/// with no extension work: gio matches `Makefile` and `Dockerfile` by name and falls back to
+/// sniffing the bytes, so a `#!/bin/sh` script with no suffix still lands on `sh`.
+fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
+    let (content_type, _) = gio::content_type_guess(Some(path), text.as_bytes());
+    sourceview5::LanguageManager::default().guess_language(Some(path), Some(&content_type))
+}
+
+/// A tab's label: the file name, with `.md` dropped for a note because every note has it.
+fn tab_name(key: &str, flavour: Flavour) -> &str {
+    match flavour {
+        Flavour::Note => title_of(key),
+        _ => crate::doc::file_name(key),
+    }
 }
 
 /// The clamp's maximum for a column that is `percent` of an editor `available` pixels wide.
@@ -518,6 +637,30 @@ impl Tab {
         self.path.borrow().clone()
     }
 
+    pub fn flavour(&self) -> Flavour {
+        self.flavour
+    }
+
+    /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and
+    /// the line endings it arrived with. A note is written exactly as typed — two trailing spaces
+    /// are a hard line break in markdown.
+    pub fn for_disk(&self) -> String {
+        fs::for_disk(&self.text(), self.crlf.get(), !self.flavour.is_note())
+    }
+
+    /// How the file is encoded and how its lines end, for the readout in the header.
+    pub fn encoding_label(&self) -> String {
+        let encoding = match self.lossy.get() {
+            true => "Not UTF-8",
+            false => "UTF-8",
+        };
+        let ending = match self.crlf.get() {
+            true => "CRLF",
+            false => "LF",
+        };
+        format!("{encoding} · {ending}")
+    }
+
     /// A rename landed: point the tab at the new path without losing the buffer.
     pub fn retarget(&self, root: &Path, new_rel: &str) {
         *self.rel.borrow_mut() = new_rel.to_string();
@@ -538,7 +681,7 @@ impl Tab {
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
-        *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
+        self.analyse();
     }
 
     pub fn mark_clean(&self, etag: Etag) {
@@ -551,8 +694,21 @@ impl Tab {
     /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
     pub fn reload_keep_cursor(&self) -> std::io::Result<()> {
         let offset = self.buffer.iter_at_mark(&self.buffer.get_insert()).offset();
-        let (text, etag) = fs::read_note(&self.path())?;
-        self.set_text(&text);
+        let text = match fs::read_text(&self.path())? {
+            fs::Read::Text(text) => text,
+            // It stopped being text while we had it open. The buffer keeps the last readable
+            // version rather than showing the user a screen of replacement characters.
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "not text any more",
+                ));
+            }
+        };
+        self.crlf.set(text.crlf);
+        self.lossy.set(text.lossy);
+        let etag = text.etag;
+        self.set_text(&text.text);
         let iter = self
             .buffer
             .iter_at_offset(offset.min(self.buffer.char_count()));
@@ -565,16 +721,19 @@ impl Tab {
     }
 
     pub fn restyle(&self) {
+        // The scheme is what recolours code, and it is also what a note's own tags sit on.
         sync_scheme(&self.buffer);
-        highlight::restyle(&self.buffer, &self.view);
-        highlight::hang(&self.buffer, &self.view);
+        if self.flavour.is_note() {
+            highlight::restyle(&self.buffer, &self.view);
+            highlight::hang(&self.buffer, &self.view);
+        }
     }
 
     /// Raise the banner for `alert`, which decides both what it says and what its button does.
     pub fn show_alert(&self, alert: Alert) {
         self.alert.set(Some(alert));
         self.banner.set_title(alert.title());
-        self.banner.set_button_label(Some(alert.button()));
+        self.banner.set_button_label(alert.button());
         self.banner.set_revealed(true);
     }
 
@@ -614,7 +773,7 @@ impl Tab {
 
     fn tab_title(&self) -> String {
         let rel = self.rel();
-        let name = title_of(&rel);
+        let name = tab_name(&rel, self.flavour);
         match self.modified.get() {
             true => format!("• {name}"),
             false => name.to_string(),
@@ -624,6 +783,10 @@ impl Tab {
     // --- preferences ---------------------------------------------------------------------
 
     pub fn set_spellcheck(&self, on: bool) {
+        // Prose only. A checker over identifiers and keywords is a wall of red squiggles.
+        if !self.flavour.is_note() {
+            return;
+        }
         // Cloned out first: the adapter is created inside the `else`, which borrows mutably.
         let existing = self.spell.borrow().clone();
         let adapter = match existing {
@@ -657,10 +820,19 @@ impl Tab {
         // At the default zoom and with no font of its own a tab needs no provider at all: the
         // display-wide document font rule already says exactly the right thing. Zooming has to
         // name a font anyway, because CSS has no way to scale a size it cannot see.
-        let name = match font.filter(|f| !f.is_empty()) {
-            Some(font) => Some(font.to_string()),
-            None if zoom != 1.0 => Some(default_font()),
-            None => None,
+        let name = match self.flavour {
+            Flavour::Note => match font.filter(|f| !f.is_empty()) {
+                Some(font) => Some(font.to_string()),
+                None if zoom != 1.0 => Some(default_font()),
+                None => None,
+            },
+            // Code names its font every time: the display-wide rule installed for prose is the
+            // GNOME *document* font, and a source file wants the monospace one instead.
+            _ => Some(
+                adw::StyleManager::default()
+                    .monospace_font_name()
+                    .to_string(),
+            ),
         };
         if let Some(name) = name {
             let provider = gtk::CssProvider::new();
@@ -676,7 +848,10 @@ impl Tab {
             );
             *self.font.borrow_mut() = Some(provider);
         }
-        self.rehang();
+        // Only a note has markers hanging in the gutter to re-measure.
+        if self.flavour.is_note() {
+            self.rehang();
+        }
     }
 
     /// Scale the page with the text. Zoom used to touch the font alone, so a zoomed-in column
@@ -698,6 +873,13 @@ impl Tab {
     /// as on a zoom or a preference change, because the share is of a width nothing reports until
     /// the window has been laid out.
     fn set_clamp(&self) {
+        // Code fills the width: a capped column is a prose idea, and an indented block read
+        // through a 70-character window is worse than a horizontal scrollbar.
+        if !self.flavour.is_note() {
+            self.clamp.set_maximum_size(i32::MAX);
+            self.clamp.set_tightening_threshold(i32::MAX);
+            return;
+        }
         let available = self.scroller.hadjustment().page_size().round() as i32;
         let max = column_max(available, self.column.get(), self.zoom.get());
         self.clamp.set_maximum_size(max);
@@ -725,7 +907,9 @@ impl Tab {
 
     /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in.
     pub fn set_line_numbers(&self, on: bool) {
-        self.numbers.set_visible(on);
+        // The preference is about prose, where a number beside every line is clutter. Code is
+        // read by line number — a compiler error names one — so it always has them.
+        self.numbers.set_visible(on || !self.flavour.is_note());
     }
 
     /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
@@ -738,6 +922,61 @@ impl Tab {
         };
         self.scroller
             .set_policy(gtk::PolicyType::Automatic, vertical);
+    }
+
+    /// Comment or uncomment the selected lines with the language's own markers.
+    ///
+    /// GtkSourceView carries the markers in the language's metadata but does no toggling of its
+    /// own, so the text goes out to [`crate::comment`] and comes back as one replacement, inside
+    /// a single user action so one Ctrl+Z undoes the whole thing.
+    pub fn toggle_comment(&self) {
+        let Some(language) = self.buffer.language() else {
+            return;
+        };
+        let had_selection = self.buffer.has_selection();
+        let (mut start, mut end) = match self.buffer.selection_bounds() {
+            Some(bounds) => bounds,
+            None => {
+                let at = self.buffer.iter_at_mark(&self.buffer.get_insert());
+                (at, at)
+            }
+        };
+        // Whole lines: a marker goes in front of a line, never in front of a word.
+        start.set_line_offset(0);
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        let text = self.buffer.text(&start, &end, true);
+        let toggled = match language.metadata("line-comment-start") {
+            Some(marker) => comment::toggle_lines(&text, &marker),
+            None => {
+                let (Some(open), Some(close)) = (
+                    language.metadata("block-comment-start"),
+                    language.metadata("block-comment-end"),
+                ) else {
+                    return;
+                };
+                comment::toggle_block(&text, &open, &close)
+            }
+        };
+        let anchor = start.offset();
+        self.buffer.begin_user_action();
+        self.buffer.delete(&mut start, &mut end);
+        self.buffer.insert(&mut start, &toggled);
+        self.buffer.end_user_action();
+        if had_selection {
+            self.buffer
+                .select_range(&self.buffer.iter_at_offset(anchor), &start);
+        }
+    }
+
+    /// Wrap long lines, or stop. Prose starts wrapped and code does not; either can be told
+    /// otherwise for as long as the tab is open.
+    pub fn toggle_wrap(&self) {
+        self.view.set_wrap_mode(match self.view.wrap_mode() {
+            gtk::WrapMode::None => gtk::WrapMode::WordChar,
+            _ => gtk::WrapMode::None,
+        });
     }
 
     // --- line operations -----------------------------------------------------------------
@@ -1022,8 +1261,16 @@ impl Tab {
     /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
     /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
     fn reanalyse(self: &Rc<Self>) {
-        *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
+        self.analyse();
         self.emit(&self.on_edited);
+    }
+
+    /// Re-derive whatever this tab's text implies. A note gets its styling spans and its link
+    /// table; code gets nothing, because the style scheme colours it from the language.
+    fn analyse(&self) {
+        if self.flavour.is_note() {
+            *self.links.borrow_mut() = highlight::apply(&self.buffer).links;
+        }
     }
 
     fn schedule_autosave(self: &Rc<Self>) {
