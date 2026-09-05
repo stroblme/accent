@@ -114,7 +114,13 @@ impl Pane {
         shade.set_visible(false);
         let hint = gtk::Box::new(gtk::Orientation::Vertical, 0);
         hint.append(&shade);
-        hint.set_visible(false);
+        // Mapped from the start and merely untargetable until a drag, rather than shown when one
+        // begins. A widget that appears mid-drag has to be mapped and allocated before GTK can
+        // pick it, and on Wayland that never happened: the drop zones took no drags at all, while
+        // X11 picked the sheet on the next motion and worked. `can-target` is a flag on a widget
+        // that is already laid out, so there is nothing to wait for. It draws nothing while it is
+        // off, and `gtk_widget_pick` skips its children too, so clicks still reach the editor.
+        hint.set_can_target(false);
         let drop = gtk::DropTarget::new(
             glib::Type::INVALID,
             gdk::DragAction::MOVE | gdk::DragAction::COPY,
@@ -160,11 +166,11 @@ impl Pane {
             .any(|item| item.downcast_ref::<adw::TabPage>() == Some(page))
     }
 
-    /// Take the drop sheet in or out of the picture. It has to be mapped for GTK to pick it, so
-    /// it is only there while something is actually being dragged; the rest of the time it would
-    /// swallow every click meant for the editor underneath.
+    /// Take the drop sheet in or out of the picture. It stays mapped either way and only stops
+    /// being targetable, because a widget mapped mid-drag is not picked on every backend; while
+    /// it is off it draws nothing and every click reaches the editor underneath.
     pub fn set_drop_active(&self, on: bool) {
-        self.hint.set_visible(on);
+        self.hint.set_can_target(on);
         if !on {
             self.show_zone(None);
         }
