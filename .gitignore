@@ -8,3 +8,4 @@
 /.codegraph
 /build-aux/build
 /.flatpak-builder
+/.claude/worktrees
