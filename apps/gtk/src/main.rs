@@ -12,7 +12,9 @@ mod doc;
 mod editor;
 mod fileops;
 mod find;
+mod git;
 mod highlight;
+mod marks;
 mod multicaret;
 mod palette;
 mod paned;
@@ -24,6 +26,7 @@ mod settings;
 mod sidebar;
 mod start;
 mod statusbar;
+mod terminal;
 mod theme;
 mod tree;
 mod typing;
@@ -76,6 +79,13 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    ("win.terminal", "Toggle Terminal", &["<Control>j"]),
+    ("win.terminal-new", "New Terminal", &["<Control><Shift>j"]),
+    (
+        "win.terminal-close",
+        "Close Terminal",
+        &["<Control><Shift>w"],
+    ),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
@@ -128,6 +138,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
+    ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // The PDF reader. Back and forward take the chords a browser uses for the same idea;
     // the rest live in the palette, where they are found by name rather than by chord.
@@ -481,6 +492,7 @@ impl Mode {
 struct Presenting {
     mode: Mode,
     sidebar: bool,
+    terminal: bool,
 }
 
 // ----------------------------------------------------------------------------------- app state
@@ -510,10 +522,15 @@ struct App {
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     sidebar: OnceCell<sidebar::Sidebar>,
+    /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
+    git: OnceCell<Rc<git::Panel>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
+    /// The document above, the terminal panel below; the panel is hidden until it is asked for.
+    dock: gtk::Paned,
+    terminal: Rc<terminal::Panel>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
@@ -553,7 +570,7 @@ struct App {
     recent_notes: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
-    /// rebind has to rebuild it: see [`fill_captured`].
+    /// rebind has to rebuild it: see [`fill_shortcuts`].
     captured: gtk::ShortcutController,
 }
 
@@ -1248,6 +1265,7 @@ impl App {
         }
         self.mark_loose(&tab.page, &tab.rel());
         let page = tab.page.clone();
+        self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab));
         self.tabs().set_selected_page(&page);
         self.sync_active();
@@ -1431,6 +1449,11 @@ impl App {
         };
         tab.mark_clean(etag);
         tab.clear_disk_alert();
+        // Our own writes go through the vault, which tells the watcher they were ours, so no
+        // event comes back to say the working tree moved. The pane is told here instead.
+        if let Some(git) = self.git.get() {
+            git.schedule_refresh();
+        }
         Ok(())
     }
 
@@ -1630,6 +1653,19 @@ impl App {
     // --- vault events --------------------------------------------------------------------
 
     fn on_event(self: &Rc<Self>, event: Event) {
+        // Anything that touched a file may have changed what git says about it. The pane
+        // debounces, so a burst of watcher events still costs one `git status`.
+        if matches!(
+            event,
+            Event::Reconciled(_)
+                | Event::DirsChanged(_)
+                | Event::FileChanged(_)
+                | Event::FileRemoved(_)
+                | Event::FileRenamed { .. }
+        ) && let Some(git) = self.git.get()
+        {
+            git.schedule_refresh();
+        }
         match event {
             Event::Progress(p) => {
                 self.statusbar.set_progress(Some(&match p.total {
@@ -1939,8 +1975,10 @@ impl App {
                 self.presenting.set(Some(Presenting {
                     mode: self.mode.get(),
                     sidebar: self.sidebar_column.is_visible(),
+                    terminal: self.terminal.widget().is_visible(),
                 }));
                 self.sidebar_column.set_visible(false);
+                self.terminal.widget().set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
                 self.toolbar.set_reveal_bottom_bars(false);
                 self.apply_layout();
@@ -1948,6 +1986,7 @@ impl App {
             (false, Some(before)) => {
                 self.presenting.set(None);
                 self.sidebar_column.set_visible(before.sidebar);
+                self.terminal.widget().set_visible(before.terminal);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
@@ -2134,6 +2173,15 @@ impl App {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
                 }
             }
+            "terminal" => self.set_terminal(!self.terminal.widget().is_visible()),
+            "terminal-new" => {
+                let first = self.terminal.is_empty();
+                self.set_terminal(true);
+                if !first {
+                    self.terminal.spawn();
+                }
+            }
+            "terminal-close" => self.terminal.close_current(),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -2263,6 +2311,7 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
+            "pane-git" => self.show_pane("git"),
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -2342,6 +2391,87 @@ impl App {
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_words(words);
+        self.sync_branch();
+    }
+
+    /// Show or hide the terminal panel. Showing it focuses a shell, creating one if there is
+    /// none; hiding it hands the keyboard back to the document, because `gtk_widget_hide` drops
+    /// the window's focus when it was inside what just went away.
+    fn set_terminal(self: &Rc<Self>, on: bool) {
+        let panel = self.terminal.clone();
+        panel.widget().set_visible(on);
+        if on {
+            self.dock
+                .set_position(terminal::divider(self.dock.height(), panel.height()));
+            match panel.is_empty() {
+                true => panel.spawn(),
+                false => panel.focus(),
+            }
+        } else {
+            self.focus_document();
+        }
+        self.save_session_soon();
+    }
+
+    /// Put the keyboard back in whatever the active tab holds.
+    fn focus_document(&self) {
+        match self.active_doc() {
+            Some(Doc::Text(tab)) => {
+                tab.view.grab_focus();
+            }
+            Some(doc) => {
+                doc.page().child().grab_focus();
+            }
+            None => {}
+        }
+    }
+
+    /// The branch of the repository the active document sits in, which for a nested repository is
+    /// not the vault's own. A comparison tab is no file, so it keeps whatever was showing.
+    fn sync_branch(&self) {
+        let Some(git) = self.git.get() else {
+            return;
+        };
+        let key = self
+            .active_doc()
+            .filter(|d| !d.is_transient())
+            .map(|d| d.key());
+        self.statusbar
+            .set_branch(git.branch_label(key.as_deref()).as_deref());
+    }
+
+    /// A git refresh landed. The single place the window reacts to one, so everything that has to
+    /// follow the repository is added here rather than wired into the pane.
+    fn on_git_changed(&self) {
+        let (Some(sidebar), Some(git)) = (self.sidebar.get(), self.git.get()) else {
+            return;
+        };
+        // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
+        sidebar.set_git_visible(git.has_repos());
+        if let Some(tree) = self.tree.get() {
+            tree.set_ignored(git.ignored());
+        }
+        self.sync_branch();
+        // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
+        // merely noticed an edit is telling us about the very buffer the marks came from.
+        if git.head_changed() {
+            for tab in self.open_tabs() {
+                self.fetch_head(&tab);
+            }
+        }
+    }
+
+    /// Give a tab the committed text its gutter draws against.
+    fn fetch_head(&self, tab: &Rc<Tab>) {
+        let Some(git) = self.git.get() else {
+            return;
+        };
+        let weak = Rc::downgrade(tab);
+        git.head_text(&tab.rel(), move |head| {
+            if let Some(tab) = weak.upgrade() {
+                tab.set_head(head);
+            }
+        });
     }
 
     fn sync_opening(self: &Rc<Self>) {
@@ -2563,7 +2693,16 @@ impl App {
             let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
-        fill_captured(&self.captured, &config);
+        let captured: Vec<(&str, String)> = CAPTURED
+            .iter()
+            .flat_map(|action| {
+                accels_for(&config, action)
+                    .into_iter()
+                    .map(move |accel| (*action, accel))
+            })
+            .collect();
+        fill_captured(&self.captured, &captured);
+        fill_shortcuts(&self.terminal.forwarded, &forwarded(&config));
     }
 
     /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
@@ -2604,6 +2743,7 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
         }
+        self.terminal.restyle();
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -2726,8 +2866,7 @@ impl App {
                 }
                 places
             },
-            // WP3 replaces this with the panel's own height once the terminal exists.
-            terminal_height: 0,
+            terminal_height: self.terminal.height(),
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -2748,6 +2887,9 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
+        // The height only: the shells themselves are not restored, because a shell is where the
+        // user was rather than what they were reading.
+        self.terminal.set_height(session.terminal_height);
         // ponytail: every note comes back into one pane, because the session does not record the
         // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
         // being what someone who left four panes open expects.
@@ -2999,9 +3141,27 @@ fn build_window(
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
     let find = find::Bar::new();
+    // A shell starts where everything else in the window is measured from. With no vault there is
+    // no such place, so it starts at home.
+    let terminal = terminal::Panel::new(match root {
+        Some(root) => root.to_path_buf(),
+        None => glib::home_dir(),
+    });
+    // Inside the editor column, so it spans editor and preview but never the sidebar, and under
+    // the toast overlay, so a toast does not land on the shell.
+    let dock = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .start_child(&toasts)
+        .end_child(terminal.widget())
+        .resize_start_child(true)
+        .resize_end_child(false)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .build();
+
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     editor_column.append(find.widget());
-    editor_column.append(&toasts);
+    editor_column.append(&dock);
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
     // `content` and presentation mode takes them away with it rather than unrevealing them.
@@ -3053,8 +3213,11 @@ fn build_window(
         docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
+        git: OnceCell::new(),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
+        dock,
+        terminal,
         split,
         sidebar_column,
         sidebar_header,
@@ -3102,6 +3265,7 @@ fn build_window(
     }
 
     wire_pane(&app, &first);
+    wire_terminal(&app);
 
     install_actions(gtk_app, &app);
     wire_window(&app, &modes);
@@ -3201,7 +3365,56 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }),
         };
-    adopt_sidebar(app, Some((files, data)));
+    let git = build_git(app, vault);
+    adopt_sidebar(
+        app,
+        Some((files, data, git.widget().clone(), git.divider().clone())),
+    );
+    let _ = app.git.set(git);
+    if let Some(git) = app.git.get() {
+        git.schedule_refresh();
+    }
+}
+
+/// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
+/// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
+fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
+    let (toast, open, diff, trash, changed) = (
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+        Rc::downgrade(app),
+    );
+    git::Panel::new(git::Hooks {
+        vault: vault.clone(),
+        window: app.window.clone(),
+        toast: Box::new(move |text| {
+            if let Some(app) = toast.upgrade() {
+                app.toast(text);
+            }
+        }),
+        open: Box::new(move |key| {
+            if let Some(app) = open.upgrade() {
+                app.open_path(key);
+            }
+        }),
+        open_diff: Box::new(move |key, title, body| {
+            if let Some(app) = diff.upgrade() {
+                app.open_diff(key, title, body);
+            }
+        }),
+        trash: Box::new(move |key| {
+            if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
+                fileops::trash(&ops, key);
+            }
+        }),
+        changed: Box::new(move || {
+            if let Some(app) = changed.upgrade() {
+                app.on_git_changed();
+            }
+        }),
+    })
 }
 
 /// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
@@ -3211,7 +3424,10 @@ fn build_outline_sidebar(app: &Rc<App>) {
     adopt_sidebar(app, None);
 }
 
-fn adopt_sidebar(app: &Rc<App>, vault: Option<(gtk::Widget, sidebar::Data)>) {
+fn adopt_sidebar(
+    app: &Rc<App>,
+    vault: Option<(gtk::Widget, sidebar::Data, gtk::Widget, gtk::Paned)>,
+) {
     let pane = sidebar::Sidebar::new(
         vault,
         glib::clone!(
@@ -3295,6 +3511,33 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
 
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
+/// The panel's own bookkeeping: remember where the divider was left, and take the panel away
+/// when its last shell exits.
+fn wire_terminal(app: &Rc<App>) {
+    app.dock.connect_position_notify(glib::clone!(
+        #[weak]
+        app,
+        move |dock| {
+            if app.terminal.widget().is_visible() {
+                app.terminal.set_height(dock.height() - dock.position());
+                app.save_session_soon();
+            }
+        }
+    ));
+    app.terminal.tabs.connect_page_detached(glib::clone!(
+        #[weak]
+        app,
+        move |tabs, _, _| {
+            if tabs.n_pages() > 0 {
+                return;
+            }
+            // From an idle: the page is still being torn down, and hiding the panel underneath it
+            // reparents what libadwaita is in the middle of removing.
+            glib::idle_add_local_once(move || app.set_terminal(false));
+        }
+    ));
+}
+
 fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
@@ -3519,6 +3762,9 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     divider.set_position(Session::default().sidebar_width);
                 } else if divider == &app.paned {
                     app.centre_handle();
+                } else if divider == &app.dock {
+                    app.terminal.set_height(0);
+                    divider.set_position(terminal::divider(divider.height(), 0));
                 } else if !app
                     .sidebar
                     .get()
@@ -3635,10 +3881,17 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     if let Some(preview) = app.preview.borrow().as_ref() {
                         preview.restyle();
                     }
+                    app.terminal.restyle();
                 }
             ),
         );
     }
+    // A terminal is code, so it follows the monospace font rather than the document one.
+    style.connect_monospace_font_name_notify(glib::clone!(
+        #[weak]
+        app,
+        move |_| app.terminal.refont()
+    ));
     style.connect_document_font_name_notify(glib::clone!(
         #[weak]
         app,
@@ -3773,23 +4026,74 @@ const CAPTURED: &[&str] = &[
     "win.toggle-comment",
 ];
 
-/// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
-/// moves a chord away from one of these does not leave the old one claimed.
-fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
+/// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
+/// which no shell claims, plus the toggle itself so the panel can always be put away.
+///
+/// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
+/// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
+/// GTK, which the tests do not have.
+fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
+    ACTIONS
+        .iter()
+        .flat_map(|(action, _, _)| {
+            accels_for(config, action)
+                .into_iter()
+                .map(move |accel| (*action, accel))
+        })
+        .filter(|(action, accel)| {
+            *action == "win.terminal" || (accel.contains("<Control>") && accel.contains("<Shift>"))
+        })
+        .collect()
+}
+
+fn clear(controller: &gtk::ShortcutController) {
     let old: Vec<gtk::Shortcut> = (0..controller.n_items())
         .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())
         .collect();
     for shortcut in old {
         controller.remove_shortcut(&shortcut);
     }
-    for action in CAPTURED {
-        for accel in accels_for(config, action) {
-            if let Some(trigger) = gtk::ShortcutTrigger::parse_string(&accel) {
-                controller.add_shortcut(gtk::Shortcut::new(
-                    Some(trigger),
-                    Some(gtk::NamedAction::new(action)),
-                ));
-            }
+}
+
+/// The window's capture controller, which takes chords the text widgets would otherwise claim.
+///
+/// It runs before everything, so it has to ask who has the keyboard first: these are editor
+/// chords, and a shell wants `Ctrl+K` to kill to the end of the line rather than to toggle a
+/// comment in a note nobody is looking at.
+fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String)]) {
+    clear(controller);
+    for (action, accel) in bindings {
+        let Some(trigger) = gtk::ShortcutTrigger::parse_string(accel) else {
+            continue;
+        };
+        let action = action.to_string();
+        controller.add_shortcut(gtk::Shortcut::new(
+            Some(trigger),
+            Some(gtk::CallbackAction::new(move |widget, _| {
+                let editing = widget
+                    .root()
+                    .and_downcast::<gtk::Window>()
+                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
+                    .is_some_and(|f| f.is::<sourceview5::View>());
+                if !editing {
+                    return glib::Propagation::Proceed;
+                }
+                widget.activate_action(&action, None).is_ok().into()
+            })),
+        ));
+    }
+}
+
+/// Refill a capture controller from the accelerators in force. Cleared first, so a rebind that
+/// moves a chord away from one of these does not leave the old one claimed.
+fn fill_shortcuts(controller: &gtk::ShortcutController, bindings: &[(&str, String)]) {
+    clear(controller);
+    for (action, accel) in bindings {
+        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(accel) {
+            controller.add_shortcut(gtk::Shortcut::new(
+                Some(trigger),
+                Some(gtk::NamedAction::new(action)),
+            ));
         }
     }
 }
@@ -4128,6 +4432,9 @@ fn install_chrome_css() {
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-dimmed {{ opacity: 0.5; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
+             .git-actions {{ opacity: 0; }} \
+             row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
+             .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
@@ -4233,6 +4540,36 @@ mod tests {
 
     /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
     /// action listed first. The table is the only place that can go wrong, and it is pure data.
+    #[test]
+    fn a_shell_hands_back_the_ctrl_shift_chords_and_the_toggle() {
+        let config = Config::default();
+        let forwarded = forwarded(&config);
+        let has =
+            |action: &str, accel: &str| forwarded.iter().any(|(a, k)| *a == action && k == accel);
+        // Claimed: the toggle, so the panel can always be put away, and every Ctrl+Shift chord.
+        assert!(has("win.terminal", "<Control>j"));
+        assert!(has("win.new-folder", "<Control><Shift>n"));
+        assert!(has("win.terminal-close", "<Control><Shift>w"));
+        // Left to the shell: plain Ctrl, and anything without Control at all.
+        assert!(!has("win.save", "<Control>s"));
+        assert!(!has("win.find-previous", "<Shift>F3"));
+    }
+
+    #[test]
+    fn a_rebound_chord_moves_what_the_shell_hands_back() {
+        let mut config = Config::default();
+        config.shortcuts.insert(
+            "win.save".to_string(),
+            vec!["<Control><Shift>s".to_string()],
+        );
+        let forwarded = forwarded(&config);
+        assert!(
+            forwarded
+                .iter()
+                .any(|(a, k)| *a == "win.save" && k == "<Control><Shift>s")
+        );
+    }
+
     #[test]
     fn no_two_actions_claim_the_same_accelerator() {
         let mut seen = std::collections::HashMap::new();

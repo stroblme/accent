@@ -22,8 +22,8 @@ const TAG_FILLER: &str = "filler";
 /// hue is a fixed weight and everything else is derived: it is mixed with the theme foreground,
 /// which pulls the tint dark on a light theme and light on a dark one, then laid down at a low
 /// alpha over the view background so the text on top keeps its contrast either way.
-const ADDED_HUE: (f32, f32, f32) = (0.15, 0.70, 0.35);
-const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
+pub(crate) const ADDED_HUE: (f32, f32, f32) = (0.15, 0.70, 0.35);
+pub(crate) const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
 const CHANGE_ALPHA: f32 = 0.16;
@@ -131,7 +131,7 @@ fn install_tags(buffer: &sourceview5::Buffer) {
     }
 }
 
-fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA {
+pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     let mix = |h: f32, f: f32| h * HUE_MIX + f * (1.0 - HUE_MIX);
     gdk::RGBA::new(
         mix(hue.0, fg.red()),

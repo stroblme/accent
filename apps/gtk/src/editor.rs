@@ -136,6 +136,10 @@ pub struct Tab {
     path: RefCell<PathBuf>,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
+    /// The committed text this buffer is drawn against, and the bars in the gutter that say how
+    /// it differs. `None` when the file is in no repository, or is not tracked in one.
+    head: RefCell<Option<String>>,
+    marks: crate::marks::Renderer,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
     /// The width cap on the document column, sized by [`Tab::set_clamp`].
@@ -268,6 +272,10 @@ pub fn open(
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
     let numbers = line_numbers(&view, &buffer);
+    // Between the numbers and the text: a change bar belongs next to the line it is about.
+    let marks = crate::marks::Renderer::new();
+    marks.set_visible(false);
+    sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&marks, 1);
     // Both are markdown behaviour: wikilink and tag completion, and continuing a list or a fence
     // on Return. In a Python file they would be wrong rather than merely unused.
     if flavour.is_note() {
@@ -323,6 +331,8 @@ pub fn open(
         column: Cell::new(column_width),
         map: map.clone(),
         numbers,
+        head: RefCell::new(None),
+        marks: marks.clone(),
         flavour,
         crlf: Cell::new(text.crlf),
         lossy: Cell::new(text.lossy),
@@ -391,6 +401,14 @@ pub fn open(
             }
         ));
     }
+    // The change bars need the same resolved foreground, whatever the flavour: a source file in a
+    // repository gets them exactly as a note does.
+    marks.restyle(&view);
+    view.connect_map(glib::clone!(
+        #[strong]
+        marks,
+        move |view| marks.restyle(view)
+    ));
 
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
     // strong capture here would be the cycle that kept every closed tab alive.
@@ -659,6 +677,18 @@ impl Tab {
         self.flavour
     }
 
+    /// Point the gutter's change bars at the committed text, or take them away with `None`. The
+    /// caller is the Git pane, which is the only thing in the window that has asked git anything.
+    pub fn set_head(&self, head: Option<String>) {
+        let showing = head.is_some();
+        *self.head.borrow_mut() = head;
+        self.marks.set_visible(showing);
+        match showing {
+            true => self.update_marks(),
+            false => self.marks.set_marks(Vec::new()),
+        }
+    }
+
     /// The GtkSourceView language this tab was given, by its display name ("Rust", "Makefile").
     /// `None` for a file no language claimed, which the status bar calls plain text.
     pub fn language(&self) -> Option<String> {
@@ -788,6 +818,7 @@ impl Tab {
             Flavour::Csv => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
         }
+        self.marks.restyle(&self.view);
     }
 
     /// Raise the banner for `alert`, which decides both what it says and what its button does.
@@ -1332,6 +1363,21 @@ impl Tab {
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
         }
+        self.update_marks();
+    }
+
+    /// Redraw the gutter's change bars from the committed text. Rides the same path as styling,
+    /// so it follows a keystroke on a small note and the debounce on a large one.
+    fn update_marks(&self) {
+        let head = self.head.borrow();
+        let Some(head) = head.as_ref() else {
+            return;
+        };
+        let lines = accent_core::diff::lines(head, &self.text());
+        self.marks.set_marks(crate::marks::marks(
+            &lines,
+            self.buffer.line_count() as usize,
+        ));
     }
 
     fn schedule_autosave(self: &Rc<Self>) {
