@@ -368,7 +368,9 @@ impl Panel {
         });
         on_click(self, &self.commit, |panel| panel.do_commit());
 
-        // Ctrl+Return commits from inside the box, which is where the hands already are.
+        // Ctrl+Return commits from inside the box, which is where the hands already are. This
+        // controller only gets the chord while no window accelerator claims it; while one does,
+        // `commit_if_focused` below is how the window hands it over.
         let keys = gtk::EventControllerKey::new();
         let weak = Rc::downgrade(self);
         keys.connect_key_pressed(move |_, key, _, state| {
@@ -383,6 +385,17 @@ impl Panel {
             }
         });
         self.message.add_controller(keys);
+    }
+
+    /// Commit, if the message box is where the keyboard is. GTK dispatches a window accelerator
+    /// ahead of every controller on the focused widget, so the box cannot take `Ctrl+Return` back
+    /// from `win.newline-below` by itself: the window's handler offers it here first.
+    pub fn commit_if_focused(self: &Rc<Self>) -> bool {
+        let mine = self.message.has_focus();
+        if mine {
+            self.do_commit();
+        }
+        mine
     }
 
     fn wire_changes(self: &Rc<Self>, view: &gtk::ListView) {

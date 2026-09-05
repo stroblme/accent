@@ -142,8 +142,9 @@ pub struct Tab {
     marks: crate::marks::Renderer,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
-    /// The width cap on the document column, sized by [`Tab::set_clamp`].
-    clamp: adw::Clamp,
+    /// The width cap on the document column, sized by [`Tab::set_clamp`]. Scrollable, so the
+    /// view below it is the scrolled window's own scrollable child rather than a viewport's.
+    clamp: adw::ClampScrollable,
     /// What the cap is computed from: the document zoom and the column's percentage of the
     /// editor's width. Kept here because the editor is also resized from the outside, and a
     /// resize has to recompute the cap without being told the other two again.
@@ -287,13 +288,34 @@ pub fn open(
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
     // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
-    let clamp = adw::Clamp::builder().child(&view).build();
+    //
+    // `AdwClampScrollable` and not `AdwClamp`, because only the scrollable one lets the view
+    // through to the scrolled window: with a plain clamp GTK inserts a `GtkViewport`, the view's
+    // adjustments are then throwaway ones nothing reads, and every `scroll_to_mark` — GTK's own
+    // caret following included — writes to a dead adjustment while the viewport scrolls to the
+    // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
+    // scrolled note back at the top on any focus change.
+    let clamp = adw::ClampScrollable::builder().child(&view).build();
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)
         .child(&clamp)
         .build();
+
+    // How the column learns the editor's width. The view being the scrollable child, the
+    // horizontal adjustment now reports the *column's* width rather than the scroller's, so
+    // feeding it back into `set_clamp` would collapse the column to its floor and then go quiet.
+    // GTK 4 has no signal for "my width changed" — `::size-allocate` is gone and `GtkWidget` has
+    // no width property — and `GtkDrawingArea::resize` is the one public signal that fires on
+    // every allocation, so a zero-sized one laid over the scroller is what reports it. It draws
+    // nothing, takes no input and is invisible to assistive technology.
+    let width = gtk::DrawingArea::builder()
+        .can_target(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    let overlay = gtk::Overlay::builder().child(&scroller).build();
+    overlay.add_overlay(&width);
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
@@ -302,7 +324,7 @@ pub fn open(
     map.set_vexpand(true);
     map.set_visible(false);
     let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    document.append(&scroller);
+    document.append(&overlay);
     document.append(&map);
 
     let banner = adw::Banner::new("");
@@ -367,15 +389,13 @@ pub fn open(
     }
 
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
-    // width changes. GTK 4 dropped ::size-allocate, and the scrolled window publishes its
-    // viewport width as the horizontal adjustment's page size, which is the same number.
-    scroller
-        .hadjustment()
-        .connect_page_size_notify(glib::clone!(
-            #[weak(rename_to = tab)]
-            tab,
-            move |_| tab.set_clamp()
-        ));
+    // width changes: a window resize, a paned drag, the sidebar, a split, the minimap. One hook
+    // covers all of them, because the overlaid area is allocated the scroller's own width.
+    width.connect_resize(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, _, _| tab.set_clamp()
+    ));
 
     tab.analyse();
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
@@ -637,6 +657,14 @@ pub fn default_font() -> String {
     desc.to_str().to_string()
 }
 
+/// The spaces and tabs a line opens with, which is what a line inserted below it copies.
+fn leading_indent(line: &str) -> &str {
+    let end = line
+        .find(|c: char| c != ' ' && c != '\t')
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
 /// The text a duplicated line is inserted as. A line that already ends in a newline can be
 /// repeated as it stands; the last line of a file has none, so the copy brings its own.
 fn duplicated(line: &str) -> String {
@@ -799,8 +827,12 @@ impl Tab {
             .buffer
             .iter_at_offset(offset.min(self.buffer.char_count()));
         self.buffer.place_cursor(&iter);
-        self.view
-            .scroll_to_mark(&self.buffer.get_insert(), 0.0, false, 0.0, 0.5);
+        // One idle later, because the buffer has only just been replaced: a scroll measured
+        // against lines the view has not laid out yet lands short of the caret.
+        let (view, buffer) = (self.view.clone(), self.buffer.clone());
+        glib::idle_add_local_once(move || {
+            view.scroll_to_mark(&buffer.get_insert(), 0.0, false, 0.0, 0.5);
+        });
         self.mark_clean(etag);
         self.clear_disk_alert();
         Ok(())
@@ -965,7 +997,9 @@ impl Tab {
     /// as on a zoom or a preference change, because the share is of a width nothing reports until
     /// the window has been laid out.
     fn set_clamp(&self) {
-        let available = self.scroller.hadjustment().page_size().round() as i32;
+        // The scroller's own width, not the horizontal adjustment's page size: with the view as
+        // the scrollable child that page size *is* the clamped column, so it would feed back.
+        let available = self.scroller.width();
         let max = column_max(available, self.column.get(), self.zoom.get());
         self.clamp.set_maximum_size(max);
         // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
@@ -1076,6 +1110,27 @@ impl Tab {
         // exactly where the line ends, so the answer is the same either way.
         end.forward_line();
         (start, end)
+    }
+
+    /// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
+    /// same indent, so a list item or an indented block carries on where it was. That is the idiom
+    /// `typing.rs` already uses on Return; continuing the marker itself is Return's job, not this
+    /// one's, because this is also how a line is opened *out* of a list.
+    pub fn newline_below(&self) {
+        let (start, end) = self.line_bounds();
+        let line = self.buffer.text(&start, &end, true);
+        let indent = leading_indent(&line).to_string();
+        // Insert before the line's own newline, or at the end of the buffer on a last line that
+        // has none. One user action, so one Ctrl+Z takes the whole line back.
+        let mut at = end;
+        if line.ends_with('\n') {
+            at.backward_char();
+        }
+        self.buffer.begin_user_action();
+        self.buffer.insert(&mut at, &format!("\n{indent}"));
+        self.buffer.end_user_action();
+        self.buffer.place_cursor(&at);
+        self.view.scroll_mark_onscreen(&self.buffer.get_insert());
     }
 
     pub fn duplicate_line(&self) {
@@ -1450,6 +1505,19 @@ impl Drop for Tab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_indent_is_the_spaces_and_tabs_a_line_opens_with() {
+        assert_eq!(leading_indent(""), "");
+        assert_eq!(leading_indent("  - a"), "  ");
+        assert_eq!(leading_indent("\tx"), "\t");
+        assert_eq!(leading_indent("no indent\n"), "");
+        assert_eq!(
+            leading_indent("   \n"),
+            "   ",
+            "a blank line still has its indent"
+        );
+    }
 
     #[test]
     fn column_max_is_a_share_of_the_editor_with_a_floor_under_it() {
