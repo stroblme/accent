@@ -343,6 +343,8 @@ impl Editable {
 }
 
 /// A two-pane diff. `left` and `right` are (title, text) pairs; `lines` is the precomputed diff.
+/// `editable` opens the left pane for typing, which is what resolving a conflict by hand needs;
+/// a git diff is a view of what is already written and passes false.
 ///
 /// ponytail: the row background says which lines changed and the word emphasis says where, both
 /// straight from `diff::lines`. A pair too dissimilar for `similar` to refine gets no emphasis and
@@ -352,11 +354,12 @@ pub fn view(
     left: (&str, &str),
     right: (&str, &str),
     lines: &[DiffLine],
+    editable: bool,
 ) -> (gtk::Widget, Editable) {
     // The texts are in the signature so a caller that already holds them can hand them over; the
     // panes are built from `lines`, which carries every line of both sides already.
     let (left_rows, right_rows) = align(lines);
-    let old = pane(left.0, &left_rows, Side::Old, true);
+    let old = pane(left.0, &left_rows, Side::Old, editable);
     let new = pane(right.0, &right_rows, Side::New, false);
     let edits = Editable {
         buffer: old.buffer.clone(),
@@ -439,31 +442,24 @@ pub enum Choice {
     KeepTheirs,
 }
 
-/// The conflict resolver built on top of [`view`]. `on_choice` receives the user's decision; the
-/// caller does the file work, because this module does not touch the vault.
+/// The conflict resolver built on top of [`view`], as a widget for a tab. `on_choice` receives
+/// the user's decision; the caller does the file work and closes the tab, because this module
+/// does not touch the vault.
 ///
-/// `title` names the kind of conflict (a sync copy, a file that changed under an open buffer);
-/// `original` and `conflict` are (label, text), the label being what each pane is called. Escape
-/// closes without a choice, which is a real option here: neither side is touched until one is
-/// picked.
-pub fn present_conflict(
-    parent: &impl IsA<gtk::Widget>,
-    title: &str,
+/// `original` and `conflict` are (label, text), the label being what each pane is called.
+/// Closing the tab without picking a side is a real option: neither is touched until one is.
+pub fn conflict(
     original: (&str, &str),
     conflict: (&str, &str),
     on_choice: impl Fn(Choice) + 'static,
-) {
+) -> gtk::Widget {
     let lines = accent_core::diff::lines(original.1, conflict.1);
     let mine = format!("Mine — {}", original.0);
     let theirs = format!("Theirs — {}", conflict.0);
     // ponytail: the Mine pane is editable and its diff tags are not recomputed as it is typed
     // into, so the green and red rows go stale. They still say what the two texts looked like
-    // when the dialog opened, which is what the reader is comparing against.
-    let (diff, edits) = view((&mine, original.1), (&theirs, conflict.1), &lines);
-
-    let header = adw::HeaderBar::new();
-    let note = original.0.rsplit('/').next().unwrap_or(original.0);
-    header.set_title_widget(Some(&adw::WindowTitle::new(title, note)));
+    // when the tab opened, which is what the reader is comparing against.
+    let (diff, edits) = view((&mine, original.1), (&theirs, conflict.1), &lines, true);
 
     let keep_theirs = gtk::Button::with_label("Keep Theirs");
     let keep_mine = gtk::Button::with_label("Keep Mine");
@@ -480,39 +476,26 @@ pub fn present_conflict(
     buttons.append(&keep_theirs);
     buttons.append(&keep_mine);
 
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&diff));
-    toolbar.add_bottom_bar(&buttons);
-
-    let dialog = adw::Dialog::builder()
-        .title(title)
-        .content_width(1100)
-        .content_height(700)
-        .child(&toolbar)
-        .build();
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    diff.set_vexpand(true);
+    column.append(&diff);
+    column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    column.append(&buttons);
 
     let on_choice = Rc::new(on_choice);
     let edits = Rc::new(edits);
     for (button, mine) in [(&keep_theirs, false), (&keep_mine, true)] {
-        // Weak dialog: the button is inside it, so a strong capture here is the cycle that kept
-        // every resolved conflict, both texts included, alive until the process exited.
-        let (dialog, on_choice, edits) = (dialog.downgrade(), on_choice.clone(), edits.clone());
+        let (on_choice, edits) = (on_choice.clone(), edits.clone());
         button.connect_clicked(move |_| {
-            // Read before the close, so the answer never depends on when the widgets go.
-            let choice = match mine {
+            on_choice(match mine {
                 true => Choice::KeepMine {
                     edited: edits.edited(),
                 },
                 false => Choice::KeepTheirs,
-            };
-            if let Some(dialog) = dialog.upgrade() {
-                dialog.close();
-            }
-            on_choice(choice);
+            });
         });
     }
-    dialog.present(Some(parent));
+    column.upcast()
 }
 
 #[cfg(test)]

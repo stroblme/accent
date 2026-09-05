@@ -31,6 +31,10 @@ const DARK_TEXT: &str = "#839496";
 const VIEW_LIGHT: &str = "#ffffff";
 const VIEW_DARK: &str = "#1d1d20";
 
+/// The text colour libadwaita's dark scheme puts on `VIEW_DARK`. Only the PDF renderer needs it
+/// spelled out: every widget gets it from `--view-fg-color`, but a rendered page is pixels.
+const VIEW_DARK_TEXT: &str = "#ebebeb";
+
 /// Surfaces that take the flat background: the window and everything painted on it.
 const FLAT: [&str; 5] = [
     "window",
@@ -102,6 +106,29 @@ pub fn view_bg(dark: bool) -> &'static str {
         (_, true) => VIEW_DARK,
         (_, false) => VIEW_LIGHT,
     }
+}
+
+/// The paper and ink a PDF page is recoloured onto, or `None` to leave it exactly as the
+/// document defines it.
+///
+/// A light theme leaves a page alone: white paper on a white view is what the author intended
+/// and what a printout looks like. Every other theme is asking for the page to belong to the
+/// window, so it is remapped — which is also how Solarized gets its cream paper rather than a
+/// white rectangle in the middle of a cream window.
+pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
+    match (CHOICE.get(), dark) {
+        (Theme::Solarized, true) => Some((rgb(DARK_BASE), rgb(DARK_TEXT))),
+        (Theme::Solarized, false) => Some((rgb(LIGHT_BASE), rgb(LIGHT_TEXT))),
+        (_, true) => Some((rgb(VIEW_DARK), rgb(VIEW_DARK_TEXT))),
+        (_, false) => None,
+    }
+}
+
+/// One of this module's own `#rrggbb` constants as bytes. Nothing else parses colours: this file
+/// is the only one allowed to write them down (DESIGN.md, Colour).
+fn rgb(hex: &str) -> [u8; 3] {
+    let byte = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap_or(0);
+    [byte(1), byte(3), byte(5)]
 }
 
 /// The GtkSourceView style scheme for the editor. GtkSourceView paints its background from the

@@ -23,6 +23,7 @@ mod preview;
 mod settings;
 mod sidebar;
 mod start;
+mod statusbar;
 mod theme;
 mod tree;
 mod typing;
@@ -102,7 +103,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.goto-line", "Go to Line", &["<Control>g"]),
     ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
     ("win.delete-line", "Delete Line", &["<Control>l"]),
-    ("win.toggle-comment", "Toggle Comment", &["<Control>slash"]),
+    ("win.toggle-comment", "Toggle Comment", &["<Control>k"]),
     ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
     ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
     ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
@@ -210,7 +211,7 @@ impl Shell {
         let open = gio::SimpleAction::new("open-vault", None);
         open.connect_activate({
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| shell.start_screen(&gtk_app)
+            move |_, _| shell.choose_vault(&gtk_app)
         });
         gtk_app.add_action(&open);
 
@@ -307,6 +308,28 @@ impl Shell {
             }
         }
         glib::ExitCode::SUCCESS
+    }
+
+    /// Open Folder…: the picker, straight away.
+    ///
+    /// It used to land on the start screen, which then showed a button that opened this dialog —
+    /// a screen in the way of the thing it was asking for. The start screen is still what a bare
+    /// launch with no vault lands on, where it also lists the recent ones.
+    fn choose_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
+        let parent = gtk_app.active_window();
+        let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+        dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
+            // A dismissed chooser is an error here, and not one worth saying anything about.
+            let Some(path) = result.ok().and_then(|folder| folder.path()) else {
+                return;
+            };
+            shell.open_vault(&gtk_app, path, None);
+            // The start screen has done its job if it was what asked.
+            if let Some(window) = shell.start.upgrade() {
+                window.close();
+            }
+        });
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
@@ -479,10 +502,8 @@ struct App {
     toasts: adw::ToastOverlay,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
-    /// Indexing progress, a thin bar under the main header. It replaces the status label that
-    /// used to sit in the header band, which the vault name and note path were already competing
-    /// with.
-    status: gtk::ProgressBar,
+    /// The bar along the bottom of the editor column: progress, branch, file type, word count.
+    statusbar: statusbar::Bar,
     /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
     /// so its key is not a stable one.
     docs: RefCell<Vec<Doc>>,
@@ -513,9 +534,6 @@ struct App {
     /// The zoom readout floating over the document, shown only while the zoom is not 100 %.
     zoom_pill: gtk::Box,
     zoom_label: gtk::Label,
-    /// How the active file is encoded and how its lines end, for a code tab. It rides in the
-    /// header, so the chrome fade already takes it with everything else.
-    encoding_label: gtk::Label,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
@@ -946,6 +964,14 @@ impl App {
             self,
             move |_| app.sync_outline()
         ));
+        pdf.connect_opened(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                app.sync_opening();
+                app.sync_outline();
+            }
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1016,6 +1042,23 @@ impl App {
 
     /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
     /// [`App::open_status`].
+    /// A comparison as a tab. `key` says which comparison it is, so asking for the same one twice
+    /// reveals the tab already showing it rather than stacking a second copy; `title` is what the
+    /// tab is called, since the key is not a path and would not read as one.
+    fn open_diff(self: &Rc<Self>, key: &str, title: &str, body: &impl IsA<gtk::Widget>) {
+        if let Some(doc) = self.doc_for(key) {
+            return self.reveal_page(doc.page());
+        }
+        let page = self.tabs().append(body);
+        page.set_title(title);
+        page.set_icon(Some(&gio::ThemedIcon::new("view-dual-symbolic")));
+        self.docs
+            .borrow_mut()
+            .push(Doc::Diff(doc::Viewer::new(key, page.clone())));
+        self.tabs().set_selected_page(&page);
+        self.sync_active();
+    }
+
     fn adopt_viewer(
         self: &Rc<Self>,
         wrap: fn(Rc<doc::Viewer>) -> Doc,
@@ -1222,11 +1265,18 @@ impl App {
             return;
         };
         let key = doc.key();
-        self.note_used(&key);
-        self.title.set_subtitle(&match doc.is_loose() {
-            true => fileops::display_path(self.root(), &key),
-            false => key.clone(),
-        });
+        // A diff is not a file: it is no note anyone opened, and its key names a comparison
+        // rather than a path, so the subtitle says what the tab is called instead.
+        match doc.is_transient() {
+            true => self.title.set_subtitle(&doc.page().title()),
+            false => {
+                self.note_used(&key);
+                self.title.set_subtitle(&match doc.is_loose() {
+                    true => fileops::display_path(self.root(), &key),
+                    false => key.clone(),
+                });
+            }
+        }
         // Backlinks and the preview are about notes. A source file, an image or a status page
         // leaves both empty rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
@@ -1241,17 +1291,9 @@ impl App {
             }
             sidebar.set_backlinks(&sources);
         }
-        // Only code says how it is encoded: a note is UTF-8 with LF endings or it would not be
-        // a note, and a readout that never changes is chrome for nothing.
-        let code = doc.tab().filter(|t| !t.flavour().is_note());
-        match code {
-            Some(tab) => {
-                self.encoding_label.set_label(&tab.encoding_label());
-                self.encoding_label.set_visible(true);
-            }
-            None => self.encoding_label.set_visible(false),
-        }
+        self.sync_status();
         self.sync_outline();
+        self.sync_opening();
         self.refresh_zoom();
         match note {
             Some(tab) => self.render(&tab),
@@ -1276,6 +1318,14 @@ impl App {
         };
         // A PDF's outline is its bookmarks, with the page thumbnails under them.
         if let Some(pdf) = doc.pdf() {
+            // Still being opened on the render thread, so there is nothing to say yet and
+            // "No Bookmarks" would be a guess.
+            if pdf.page_count() == 0 {
+                return sidebar.set_outline(Some(&sidebar::outline_note(
+                    "Opening…",
+                    "Reading the document.",
+                )));
+            }
             let outline = pdf.outline();
             let content = gtk::Paned::builder()
                 .orientation(gtk::Orientation::Vertical)
@@ -1555,12 +1605,25 @@ impl App {
                 }
             }
         };
-        diff::present_conflict(
-            &self.window,
-            "Changed on disk",
+        let key = format!("conflict:disk:{rel}");
+        let body = diff::conflict(
             (&format!("{rel} (unsaved)"), &mine),
             (&format!("{rel} (on disk)"), &disk),
-            resolve,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[strong]
+                key,
+                move |choice| {
+                    resolve(choice);
+                    app.close_diff(&key);
+                }
+            ),
+        );
+        self.open_diff(
+            &key,
+            &format!("{} (Changed on Disk)", doc::file_name(&rel)),
+            &body,
         );
     }
 
@@ -1569,15 +1632,10 @@ impl App {
     fn on_event(self: &Rc<Self>, event: Event) {
         match event {
             Event::Progress(p) => {
-                self.status.set_visible(true);
-                self.status
-                    .set_tooltip_text(Some(&format!("Indexing… {}/{} files", p.done, p.total)));
-                match p.total {
-                    0 => self.status.pulse(),
-                    total => self
-                        .status
-                        .set_fraction((p.done as f64 / total as f64).clamp(0.0, 1.0)),
-                }
+                self.statusbar.set_progress(Some(&match p.total {
+                    0 => "Indexing…".to_string(),
+                    total => format!("Indexing… {}/{total} files", p.done),
+                }));
                 // The indexer commits rows in batches and the walk hands it files depth-first,
                 // so the root level is queryable long before the reconcile ends. Without this the
                 // tree of a cold vault stays empty for the whole two seconds. Throttled, and
@@ -1599,7 +1657,7 @@ impl App {
                     unchanged = stats.unchanged,
                     "reconcile done"
                 );
-                self.status.set_visible(false);
+                self.statusbar.set_progress(None);
                 self.reconciled.set(true);
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
@@ -1655,7 +1713,9 @@ impl App {
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
                     // rather than sending the reader back to page one.
                     Doc::Pdf(pdf) => pdf.refresh(),
-                    Doc::Status(_) => {}
+                    // A diff is a snapshot of two texts and is keyed by the comparison rather
+                    // than by a path, so a file changing under it reaches neither.
+                    Doc::Status(_) | Doc::Diff(_) => {}
                 }
             }
             Event::FileRemoved(rel) => {
@@ -1768,13 +1828,33 @@ impl App {
                 app.sync_conflict_banner(&original);
             }
         };
-        diff::present_conflict(
-            &self.window,
-            "Sync conflict",
+        let key = format!("conflict:sync:{original}");
+        let body = diff::conflict(
             (original, &mine),
             (conflict, &theirs),
-            resolve,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[strong]
+                key,
+                move |choice| {
+                    resolve(choice);
+                    app.close_diff(&key);
+                }
+            ),
         );
+        self.open_diff(
+            &key,
+            &format!("{} (Sync Conflict)", doc::file_name(original)),
+            &body,
+        );
+    }
+
+    /// Close a diff tab once its question has been answered.
+    fn close_diff(self: &Rc<Self>, key: &str) {
+        if let Some(doc) = self.doc_for(key) {
+            self.close_page(doc.page());
+        }
     }
 
     // --- view modes and preview -----------------------------------------------------------
@@ -1862,12 +1942,14 @@ impl App {
                 }));
                 self.sidebar_column.set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
+                self.toolbar.set_reveal_bottom_bars(false);
                 self.apply_layout();
             }
             (false, Some(before)) => {
                 self.presenting.set(None);
                 self.sidebar_column.set_visible(before.sidebar);
                 self.toolbar.set_reveal_top_bars(true);
+                self.toolbar.set_reveal_bottom_bars(true);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
                 self.set_mode(before.mode);
             }
@@ -2229,6 +2311,55 @@ impl App {
         self.save_session_soon();
     }
 
+    /// Show the header's progress bar while the active tab is a PDF still being opened.
+    ///
+    /// The same thin bar indexing uses, for the same reason: something is being read and the
+    /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
+    /// that exists only while an open is in flight.
+    /// The file's own facts in the status bar: what it is, and for a note how long it is.
+    fn sync_status(&self) {
+        let (kind, words) = match self.active_doc() {
+            Some(Doc::Text(tab)) => match tab.flavour() {
+                editor::Flavour::Note => (
+                    Some("Markdown".to_string()),
+                    Some(statusbar::word_count(&tab.text())),
+                ),
+                editor::Flavour::Code => (
+                    Some(statusbar::code_label(
+                        tab.language().as_deref(),
+                        &tab.encoding_label(),
+                    )),
+                    None,
+                ),
+                editor::Flavour::Csv => (
+                    Some(statusbar::code_label(Some("CSV"), &tab.encoding_label())),
+                    None,
+                ),
+            },
+            Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
+            Some(Doc::Image(_)) => (Some("Image".to_string()), None),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
+        };
+        self.statusbar.set_kind(kind.as_deref());
+        self.statusbar.set_words(words);
+    }
+
+    fn sync_opening(self: &Rc<Self>) {
+        let opening = self
+            .active_doc()
+            .and_then(|doc| doc.pdf().cloned())
+            .is_some_and(|pdf| pdf.opening());
+        if opening {
+            self.statusbar.set_progress(Some("Opening the document…"));
+            return;
+        }
+        // Indexing owns the same slot and is the slower of the two: leave its text alone if it is
+        // still going, and let `Reconciled` clear it.
+        if self.vault.is_none() || self.reconciled.get() {
+            self.statusbar.set_progress(None);
+        }
+    }
+
     /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
     /// PDF, which fits to the window rather than counting percentages.
     ///
@@ -2282,6 +2413,11 @@ impl App {
     }
 
     fn show_pane(&self, name: &str) {
+        // A window with no vault has only the outline, and asking for a pane it does not have
+        // must not open an empty column.
+        if !self.sidebar.get().is_some_and(|s| s.has_pane(name)) {
+            return;
+        }
         self.sidebar_column.set_visible(true);
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.show_pane(name);
@@ -2292,9 +2428,14 @@ impl App {
     /// active tab when the same action is fired from the palette.
     fn menu_rel(&self) -> Option<String> {
         let Some(page) = self.menu_page.borrow().clone() else {
-            return self.active_doc().map(|d| d.key());
+            return self
+                .active_doc()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key());
         };
-        self.doc_for_page(&page).map(|d| d.key())
+        self.doc_for_page(&page)
+            .filter(|d| !d.is_transient())
+            .map(|d| d.key())
     }
 
     /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
@@ -2548,8 +2689,17 @@ impl App {
 
     fn save_session(&self) {
         let session = Session {
-            open: self.docs.borrow().iter().map(|d| d.key()).collect(),
-            active: self.active_doc().map(|d| d.key()),
+            open: self
+                .docs
+                .borrow()
+                .iter()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key())
+                .collect(),
+            active: self
+                .active_doc()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key()),
             // Presentation is not a session state, so the sidebar it hid is saved as it was.
             sidebar: match self.presenting.get() {
                 Some(before) => before.sidebar,
@@ -2576,6 +2726,8 @@ impl App {
                 }
                 places
             },
+            // WP3 replaces this with the panel's own height once the terminal exists.
+            terminal_height: 0,
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -2727,7 +2879,7 @@ fn build_window(
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
     // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
     // would slide it away instead if that ever reads as a jump.
-    let status = gtk::ProgressBar::builder().visible(false).build();
+    let statusbar = statusbar::Bar::new();
 
     // An empty vault window should say so rather than showing a blank rectangle.
     let placeholder = adw::StatusPage::builder()
@@ -2772,10 +2924,6 @@ fn build_window(
         .valign(gtk::Align::Center)
         .build();
     zoom_reset.add_css_class("flat");
-    let encoding_label = gtk::Label::new(None);
-    encoding_label.add_css_class("numeric");
-    encoding_label.add_css_class("dim-label");
-    encoding_label.set_visible(false);
 
     let zoom_pill = gtk::Box::builder().spacing(6).visible(false).build();
     zoom_pill.append(&zoom_label);
@@ -2833,7 +2981,6 @@ fn build_window(
     header.pack_end(&menu);
     header.pack_end(&modes);
     header.pack_end(&zoom_pill);
-    header.pack_end(&encoding_label);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -2860,7 +3007,9 @@ fn build_window(
     // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
-    toolbar.add_top_bar(&status);
+    // A bottom bar rather than a row inside the content: presentation mode takes it away with the
+    // header for one line, and the find bar and the terminal panel stack above it.
+    toolbar.add_bottom_bar(statusbar.widget());
     toolbar.set_content(Some(&editor_column));
 
     // One flat background across sidebar, chrome and document (DESIGN.md, Colour): without it
@@ -2900,7 +3049,7 @@ fn build_window(
         title,
         toasts,
         find,
-        status,
+        statusbar,
         docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
@@ -2919,7 +3068,6 @@ fn build_window(
         zoom: Cell::new(1.0),
         zoom_pill,
         zoom_label,
-        encoding_label,
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
         reconciled: Cell::new(false),
@@ -2937,14 +3085,20 @@ fn build_window(
 
     // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
     // between its notes. A window without one is tabs and nothing else.
-    if let Some(vault) = &vault {
-        // Populate straight from the index: the window must be up before reconcile finishes.
-        let rows = gio::ListStore::new::<gtk::StringObject>();
-        tree::fill(&rows, vault, "");
-        tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
-        build_sidebar(&app, &rows, vault);
-    } else {
-        app.sidebar_column.set_visible(false);
+    match &vault {
+        Some(vault) => {
+            // Populate straight from the index: the window must be up before reconcile finishes.
+            let rows = gio::ListStore::new::<gtk::StringObject>();
+            tree::fill(&rows, vault, "");
+            tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
+            build_sidebar(&app, &rows, vault);
+        }
+        // Outline only, and collapsed: a window opened on one file is that file, and the
+        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+L.
+        None => {
+            build_outline_sidebar(&app);
+            app.sidebar_column.set_visible(false);
+        }
     }
 
     wire_pane(&app, &first);
@@ -2977,6 +3131,7 @@ fn build_window(
 }
 
 /// Files / Search / Tags / Backlinks over the vault tree.
+/// The sidebar for a window with a vault: the tree, the index panes and the outline.
 fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
         vault.clone(),
@@ -3046,9 +3201,19 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }),
         };
+    adopt_sidebar(app, Some((files, data)));
+}
+
+/// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
+/// There is no index behind it, so Files, Search, Tags and Backlinks have nothing to show; an
+/// outline does not need one, and a PDF's bookmarks are the reason such a window has a sidebar.
+fn build_outline_sidebar(app: &Rc<App>) {
+    adopt_sidebar(app, None);
+}
+
+fn adopt_sidebar(app: &Rc<App>, vault: Option<(gtk::Widget, sidebar::Data)>) {
     let pane = sidebar::Sidebar::new(
-        files,
-        data,
+        vault,
         glib::clone!(
             #[weak]
             app,
@@ -3603,10 +3768,13 @@ const CAPTURED: &[&str] = &[
     "win.scroll-down",
     "win.caret-above",
     "win.caret-below",
+    // GtkTextView binds Ctrl+K to deleting to the end of the line, which is not something anyone
+    // reaches for in an editor that has Ctrl+L for the whole line.
+    "win.toggle-comment",
 ];
 
 /// Refill the capture controller from the accelerators in force. Cleared first, so a rebind that
-/// moves a chord away from one of the four does not leave the old one claimed.
+/// moves a chord away from one of these does not leave the old one claimed.
 fn fill_captured(controller: &gtk::ShortcutController, config: &Config) {
     let old: Vec<gtk::Shortcut> = (0..controller.n_items())
         .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())

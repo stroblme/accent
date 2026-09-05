@@ -24,12 +24,18 @@ const HISTORY: usize = 100;
 /// What the render thread is asked for.
 enum Request {
     /// Visible tiles first, then one viewport of prefetch. A newer batch replaces an older one.
+    ///
+    /// The colours are resolved by the caller, not here: `theme.rs` keeps the chosen theme in
+    /// thread-local state, so a render thread asking it would always get the default.
     Tiles {
         scale: f32,
         dark: bool,
+        theme: pdf::Theme,
         wants: Vec<Want>,
     },
     Links(usize),
+    /// The glyphs of one page, so text on it can be selected.
+    Text(usize),
     Outline,
     Search {
         query: u64,
@@ -43,6 +49,9 @@ pub use accent_core::config::PdfPlace as Place;
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
+
+/// A drag over one page, as the two page points it ran between.
+type Drag = (usize, (f32, f32), (f32, f32));
 
 pub struct PdfTab {
     key: RefCell<String>,
@@ -65,10 +74,21 @@ pub struct PdfTab {
     future: RefCell<Vec<Anchor>>,
     /// Colours inverted against the system's choice, for a document that renders badly either way.
     inverted: Cell<bool>,
+    /// The document could not be opened, so it is not opening either.
+    failed: Cell<bool>,
     /// The zoom to restore when presentation mode ends.
     presenting: Cell<Option<PdfZoom>>,
     links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
+    /// Each page's glyphs, fetched the first time someone drags across that page.
+    glyphs: RefCell<std::collections::HashMap<usize, Vec<pdf::Glyph>>>,
+    /// The selected text, for Ctrl+C.
+    selected: RefCell<String>,
     outline: RefCell<Vec<pdf::Outline>>,
+    /// A drag that arrived before the page's glyphs did, to answer when they land.
+    pending_select: Cell<Option<Drag>>,
+    /// Where the session says this document was left, until the first page sizes arrive and it
+    /// can be applied. `None` afterwards, so a reload keeps the reader where they are instead.
+    pending: Cell<Option<Place>>,
     /// Which search these results belong to, so a stale page's answer is dropped.
     query: Cell<u64>,
     matches: RefCell<Vec<(usize, pdf::Rect)>>,
@@ -76,6 +96,8 @@ pub struct PdfTab {
     on_zoom: Hook,
     on_page: Hook,
     on_outline: Hook,
+    /// Fired when the document's pages are known, which is when it stops being "opening".
+    on_open: Hook,
     on_matches: Hook,
     on_uri: UriHook,
 }
@@ -130,8 +152,13 @@ pub fn open(
         history: RefCell::new(Vec::new()),
         future: RefCell::new(Vec::new()),
         inverted: Cell::new(false),
+        failed: Cell::new(false),
         presenting: Cell::new(None),
+        pending: Cell::new(Some(place)),
+        pending_select: Cell::new(None),
         links: RefCell::new(std::collections::HashMap::new()),
+        glyphs: RefCell::new(std::collections::HashMap::new()),
+        selected: RefCell::new(String::new()),
         outline: RefCell::new(Vec::new()),
         query: Cell::new(0),
         matches: RefCell::new(Vec::new()),
@@ -139,6 +166,7 @@ pub fn open(
         on_zoom: RefCell::new(None),
         on_page: RefCell::new(None),
         on_outline: RefCell::new(None),
+        on_open: RefCell::new(None),
         on_matches: RefCell::new(None),
         on_uri: RefCell::new(None),
     });
@@ -149,20 +177,13 @@ pub fn open(
     tab.wire(&thumbs);
     tab.wire_keys();
 
-    match tab.start() {
-        Ok(sizes) => {
-            tab.view.set_sizes(sizes.clone());
-            tab.thumbs.set_sizes(sizes);
-            tab.stack.set_visible_child_name("view");
-            tab.ask(Request::Outline);
-            // After the first allocation, when the layout knows how big a page is.
-            glib::idle_add_local_once(glib::clone!(
-                #[weak(rename_to = tab)]
-                tab,
-                move || tab.view.goto_page(place.page, None)
-            ));
-        }
-        Err(message) => tab.show_status(&message),
+    // Nothing about the document is known yet, and deliberately so: opening it and measuring its
+    // pages is pdfium work, which for a thousand-page file is most of a second. The tab goes up
+    // empty and fills in when the render thread reports back, so the window is on screen in the
+    // time it takes to build a widget.
+    tab.stack.set_visible_child_name("view");
+    if let Err(message) = tab.start() {
+        tab.show_status(&message);
     }
     tab
 }
@@ -268,6 +289,16 @@ impl PdfTab {
         self.view.scroll_to(to);
     }
 
+    /// Put the selected text on the clipboard. Nothing selected is not an error: Ctrl+C on a
+    /// page with no selection simply leaves the clipboard alone.
+    pub fn copy_selection(&self) {
+        let text = self.selected.borrow().clone();
+        if text.is_empty() {
+            return;
+        }
+        self.view.clipboard().set_text(&text);
+    }
+
     /// The bookmarks, for the Outline pane.
     pub fn outline(&self) -> Vec<pdf::Outline> {
         self.outline.borrow().clone()
@@ -359,6 +390,16 @@ impl PdfTab {
         *self.on_outline.borrow_mut() = Some(Rc::new(f));
     }
 
+    /// Called once the document is open and its pages are known, and again after a reload.
+    pub fn connect_opened(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_open.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Whether the render thread is still opening the document.
+    pub fn opening(&self) -> bool {
+        self.view.page_count() == 0 && !self.failed.get()
+    }
+
     pub fn connect_matches(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
         *self.on_matches.borrow_mut() = Some(Rc::new(f));
     }
@@ -409,28 +450,35 @@ impl PdfTab {
 }
 
 impl PdfTab {
-    /// Start the render thread and get the page sizes, which is all the widget needs to lay out.
+    /// Start the render thread, which opens the document and then answers requests for it.
     ///
-    /// The thread owns the `PdfDoc` for its whole life. Nothing else may touch pdfium while it
-    /// runs: the library is serialised by one process-wide lock, and two threads in it abort.
-    fn start(self: &Rc<Self>) -> Result<Vec<(f32, f32)>, String> {
+    /// The thread owns the `PdfDoc` for its whole life, opening included. Nothing else may touch
+    /// pdfium while it runs: the library is serialised by one process-wide lock, and two threads
+    /// inside it abort the process.
+    fn start(self: &Rc<Self>) -> Result<(), String> {
         if !pdf::available() {
             return Err("libpdfium was not found".to_string());
         }
         let path = self.path();
-        let doc = PdfDoc::open(&path).map_err(|e| format!("{e:#}"))?;
-        let sizes = page_sizes(&doc);
-        if sizes.is_empty() {
-            return Err("This file has no pages.".to_string());
-        }
         let (tx, rx) = channel::<Request>();
         let weak = glib::SendWeakRef::from(self.view.downgrade());
         std::thread::Builder::new()
             .name("accent-pdf".to_string())
-            .spawn(move || render_loop(doc, path, rx, weak))
+            .spawn(move || {
+                let doc = match PdfDoc::open(&path) {
+                    Ok(doc) => doc,
+                    Err(e) => return send(&weak, Reply::Failed(format!("{e:#}"))),
+                };
+                let sizes = page_sizes(&doc);
+                if sizes.is_empty() {
+                    return send(&weak, Reply::Failed("This file has no pages.".to_string()));
+                }
+                send(&weak, Reply::Reloaded(sizes));
+                render_loop(doc, path, rx, weak);
+            })
             .map_err(|e| format!("cannot start the renderer: {e}"))?;
         *self.tx.borrow_mut() = Some(tx);
-        Ok(sizes)
+        Ok(())
     }
 
     /// Hook up one of the two views: what it wants rendered, and what comes back.
@@ -439,7 +487,12 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |_, scale, dark, wants| {
-                tab.ask(Request::Tiles { scale, dark, wants });
+                tab.ask(Request::Tiles {
+                    scale,
+                    dark,
+                    theme: theme_of(dark),
+                    wants,
+                });
             }
         ));
         view.connect_reply(glib::clone!(
@@ -469,6 +522,11 @@ impl PdfTab {
             self,
             move |view, x, y| tab.click(view, x, y)
         ));
+        view.connect_select(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, page, from, to| tab.selected_between(page, from, to)
+        ));
         view.connect_motion(glib::clone!(
             #[weak(rename_to = tab)]
             self,
@@ -476,7 +534,13 @@ impl PdfTab {
                 // The pointer only changes when the answer does: a GDK call per pixel of travel
                 // is what the editor's link hover deliberately avoids too.
                 let over = tab.link_at(view, x, y).is_some();
-                view.set_cursor_from_name(Some(if over { "pointer" } else { "default" }));
+                let on_page = view.page_point(x, y).is_some();
+                view.set_cursor_from_name(Some(match (over, on_page) {
+                    (true, _) => "pointer",
+                    // A page is text to be dragged across, and says so before anyone tries.
+                    (false, true) => "text",
+                    (false, false) => "default",
+                }));
             }
         ));
     }
@@ -491,6 +555,10 @@ impl PdfTab {
             glib::Propagation::Proceed,
             move |_, key, _, state| {
                 let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                    tab.copy_selection();
+                    return glib::Propagation::Stop;
+                }
                 match key {
                     gtk::gdk::Key::space if shift => tab.previous_page(),
                     gtk::gdk::Key::space => tab.next_page(),
@@ -504,8 +572,52 @@ impl PdfTab {
         self.view.add_controller(keys);
     }
 
+    /// A drag across a page selected the text between two points on it.
+    ///
+    /// The glyphs are fetched the first time a page is dragged on and kept afterwards, so the
+    /// first drag on a page may land a moment late and every one after it is immediate.
+    fn selected_between(self: &Rc<Self>, page: usize, from: (f32, f32), to: (f32, f32)) {
+        if self.glyphs.borrow().contains_key(&page) {
+            self.pending_select.set(None);
+            return self.select(page, from, to);
+        }
+        self.pending_select.set(Some((page, from, to)));
+        self.ask(Request::Text(page));
+    }
+
+    /// Mark every glyph between the two points and remember the text they spell.
+    fn select(&self, page: usize, from: (f32, f32), to: (f32, f32)) {
+        let glyphs = self.glyphs.borrow();
+        let Some(glyphs) = glyphs.get(&page) else {
+            return;
+        };
+        let (Some(a), Some(b)) = (nearest(glyphs, from), nearest(glyphs, to)) else {
+            return;
+        };
+        let (start, end) = (a.min(b), a.max(b));
+        let picked = &glyphs[start..=end];
+        *self.selected.borrow_mut() = picked.iter().map(|g| g.ch).collect();
+        // A glyph with no box of its own — a space between words — would paint as a dot.
+        let boxes: Vec<pdf::Rect> = picked
+            .iter()
+            .map(|g| g.rect)
+            .filter(|r| r.width() > 0.0 && r.height() > 0.0)
+            .collect();
+        self.view.set_selection(Some((page, boxes)));
+    }
+
+    /// Drop the selection, on a click that is not a drag.
+    fn clear_selection(&self) {
+        if self.selected.borrow().is_empty() {
+            return;
+        }
+        self.selected.borrow_mut().clear();
+        self.view.set_selection(None);
+    }
+
     /// A click on the page: follow a link if there is one under it.
     fn click(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
+        self.clear_selection();
         let Some(target) = self.link_at(view, x, y) else {
             return;
         };
@@ -538,6 +650,16 @@ impl PdfTab {
         match reply {
             Reply::Links(page, links) => {
                 self.links.borrow_mut().insert(page, links);
+            }
+            Reply::Text(page, glyphs) => {
+                self.glyphs.borrow_mut().insert(page, glyphs);
+                // The drag that asked for them is usually still going, so answer it now rather
+                // than making the user drag again.
+                let pending = self.pending_select.get();
+                if let Some((at, from, to)) = pending.filter(|(at, _, _)| *at == page) {
+                    self.select(page, from, to);
+                    let _ = at;
+                }
             }
             Reply::Outline(outline) => {
                 *self.outline.borrow_mut() = outline;
@@ -574,8 +696,18 @@ impl PdfTab {
                 self.links.borrow_mut().clear();
                 self.view.set_sizes(sizes.clone());
                 self.thumbs.set_sizes(sizes);
-                self.view.scroll_to(anchor);
+                match self.pending.take() {
+                    // The document just opened: go where the session left the reader.
+                    Some(place) => self.view.goto_page(place.page, None),
+                    None => self.view.scroll_to(anchor),
+                }
                 self.ask(Request::Outline);
+                self.emit(&self.on_open);
+            }
+            Reply::Failed(message) => {
+                self.failed.set(true);
+                self.show_status(&message);
+                self.emit(&self.on_open);
             }
             // Textures never reach here; `PdfView::deliver` keeps those.
             Reply::Tile(..) | Reply::Lowres { .. } => {}
@@ -583,11 +715,34 @@ impl PdfTab {
     }
 }
 
-/// Every page's size in points.
+/// The glyph nearest a point on the page, which is the one a drag means to start or end on.
+///
+/// A hit inside a glyph's own box wins outright; otherwise the closest box by the distance from
+/// the point to it, so a drag through the margin still catches the line it is level with.
+fn nearest(glyphs: &[pdf::Glyph], (x, y): (f32, f32)) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for (i, glyph) in glyphs.iter().enumerate() {
+        let r = glyph.rect;
+        if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+            return Some(i);
+        }
+        // Distance to the box, zero along an axis the point already lies within.
+        let dx = (r.left - x).max(0.0).max(x - r.right);
+        let dy = (r.top - y).max(0.0).max(y - r.bottom);
+        let d = dx * dx + dy * dy;
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// Every page's size in points, which is all the widget needs to lay the document out.
+///
+/// One pdfium call for the whole document, not one per page: asking a loaded page for its size
+/// costs a full parse of that page, and 1 554 of those is eleven seconds before anything appears.
 fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
-    (0..doc.page_count())
-        .map(|page| doc.page_size(page).unwrap_or((612.0, 792.0)))
-        .collect()
+    doc.page_sizes().unwrap_or_default()
 }
 
 /// The render thread.
@@ -606,8 +761,12 @@ fn render_loop(
         let mut request = Some(first);
         while let Some(current) = request.take() {
             match current {
-                Request::Tiles { scale, dark, wants } => {
-                    let theme = theme_of(dark);
+                Request::Tiles {
+                    scale,
+                    dark,
+                    theme,
+                    wants,
+                } => {
                     for want in wants {
                         // Anything newer wins: the viewport it was for has moved.
                         match rx.try_recv() {
@@ -624,6 +783,11 @@ fn render_loop(
                 Request::Links(page) => {
                     if let Ok(links) = doc.links(page) {
                         send(&view, Reply::Links(page, links));
+                    }
+                }
+                Request::Text(page) => {
+                    if let Ok(glyphs) = doc.page_text(page) {
+                        send(&view, Reply::Text(page, glyphs));
                     }
                 }
                 Request::Outline => {
@@ -720,10 +884,13 @@ fn render_want(
     }
 }
 
+/// How the pages of a document are coloured under the theme in force.
+///
+/// Must be called on the main thread: `theme.rs` holds the chosen theme in thread-local state.
 fn theme_of(dark: bool) -> pdf::Theme {
-    match dark {
-        true => pdf::Theme::Dark,
-        false => pdf::Theme::Light,
+    match crate::theme::pdf_colours(dark) {
+        Some((paper, ink)) => pdf::Theme::Recolour { paper, ink },
+        None => pdf::Theme::Plain,
     }
 }
 

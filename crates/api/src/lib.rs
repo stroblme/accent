@@ -24,6 +24,10 @@ use accent_core::{diff, fs, markdown, template};
 pub use accent_core::config::{Config, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
 pub use accent_core::fs::{Etag, SaveError};
+// The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
+// reach them as `accent_api::git::status(&repo)` after asking the vault which repos there are.
+pub use accent_core::git;
+pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
     Backlink, FileRow, HeadingRow, Match, Progress, ReconcileStats, SearchHit, Stats,
 };
@@ -659,6 +663,24 @@ impl Vault {
 
     pub fn save_session(&self, s: &Session) -> Result<()> {
         s.save(&self.root)
+    }
+}
+
+// ----------------------------------------------------------------------- git
+
+impl Vault {
+    /// The repositories the vault touches: the one holding the root, plus every indexed directory
+    /// carrying a `.git` entry. Runs on the caller's thread, which is never the main one.
+    ///
+    /// The walk hard-skips `.git`, so a repository is only ever found by the directory holding it.
+    pub fn repos(&self) -> Vec<Repo> {
+        // The searcher's connection, not the main thread's: discovery spawns a `git` process per
+        // candidate directory and must not hold the lock the UI reads through.
+        let dirs = self.searcher().dirs(&self.root).unwrap_or_else(|e| {
+            tracing::debug!("listing vault directories for git discovery: {e}");
+            Vec::new()
+        });
+        git::discover(&self.root, &dirs)
     }
 }
 
@@ -1825,5 +1847,42 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn repos_lists_the_vault_repo_and_a_nested_one() {
+        // No git binary, nothing to discover; the rest of the vault works either way.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let f = Fixture::open(VaultConfig::default());
+        let root = f.vault.root().to_path_buf();
+        f.write("sub/Note.md", "hi");
+        for dir in [root.clone(), root.join("sub")] {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["init", "-q", "-b", "main"])
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git init in {}", dir.display());
+        }
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let repos = f.vault.repos();
+        assert_eq!(
+            repos.len(),
+            2,
+            "the vault's own repository and the nested one"
+        );
+        assert_eq!(repos[0].root, root);
+        assert_eq!(repos[1].root, root.join("sub"));
     }
 }

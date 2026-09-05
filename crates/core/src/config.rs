@@ -167,6 +167,10 @@ pub struct Session {
     /// ponytail: never pruned, so a state file grows by an entry per PDF ever opened. Drop the
     /// ones the index no longer has the day that is measurable.
     pub pdf: BTreeMap<String, PdfPlace>,
+    /// Height of the terminal panel in pixels. Zero means the divider was never dragged, so the
+    /// panel opens at a share of the column instead of a remembered height. The terminals
+    /// themselves are not restored: a shell is where the user was, not what they were reading.
+    pub terminal_height: i32,
 }
 
 impl Default for Session {
@@ -182,6 +186,7 @@ impl Default for Session {
             recent_notes: Vec::new(),
             recent_commands: Vec::new(),
             pdf: BTreeMap::new(),
+            terminal_height: 0,
         }
     }
 }
@@ -514,6 +519,7 @@ mod tests {
                     zoom: PdfZoom::Scale(1.5),
                 },
             )]),
+            terminal_height: 240,
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -533,6 +539,7 @@ mod tests {
             assert_eq!(back.zoom, 1.2);
             assert_eq!(back.recent_notes, s.recent_notes);
             assert_eq!(back.recent_commands, s.recent_commands);
+            assert_eq!(back.terminal_height, 240);
         });
     }
 
@@ -558,6 +565,7 @@ mod tests {
             assert_eq!(back.open, ["a.md"]);
             assert_eq!(back.pane, "files");
             assert_eq!(back.zoom, 1.0);
+            assert_eq!(back.terminal_height, 0);
         });
     }
 }
