@@ -1042,6 +1042,23 @@ impl App {
 
     /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
     /// [`App::open_status`].
+    /// A comparison as a tab. `key` says which comparison it is, so asking for the same one twice
+    /// reveals the tab already showing it rather than stacking a second copy; `title` is what the
+    /// tab is called, since the key is not a path and would not read as one.
+    fn open_diff(self: &Rc<Self>, key: &str, title: &str, body: &impl IsA<gtk::Widget>) {
+        if let Some(doc) = self.doc_for(key) {
+            return self.reveal_page(doc.page());
+        }
+        let page = self.tabs().append(body);
+        page.set_title(title);
+        page.set_icon(Some(&gio::ThemedIcon::new("view-dual-symbolic")));
+        self.docs
+            .borrow_mut()
+            .push(Doc::Diff(doc::Viewer::new(key, page.clone())));
+        self.tabs().set_selected_page(&page);
+        self.sync_active();
+    }
+
     fn adopt_viewer(
         self: &Rc<Self>,
         wrap: fn(Rc<doc::Viewer>) -> Doc,
@@ -1248,11 +1265,18 @@ impl App {
             return;
         };
         let key = doc.key();
-        self.note_used(&key);
-        self.title.set_subtitle(&match doc.is_loose() {
-            true => fileops::display_path(self.root(), &key),
-            false => key.clone(),
-        });
+        // A diff is not a file: it is no note anyone opened, and its key names a comparison
+        // rather than a path, so the subtitle says what the tab is called instead.
+        match doc.is_transient() {
+            true => self.title.set_subtitle(&doc.page().title()),
+            false => {
+                self.note_used(&key);
+                self.title.set_subtitle(&match doc.is_loose() {
+                    true => fileops::display_path(self.root(), &key),
+                    false => key.clone(),
+                });
+            }
+        }
         // Backlinks and the preview are about notes. A source file, an image or a status page
         // leaves both empty rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
@@ -1581,12 +1605,25 @@ impl App {
                 }
             }
         };
-        diff::present_conflict(
-            &self.window,
-            "Changed on disk",
+        let key = format!("conflict:disk:{rel}");
+        let body = diff::conflict(
             (&format!("{rel} (unsaved)"), &mine),
             (&format!("{rel} (on disk)"), &disk),
-            resolve,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[strong]
+                key,
+                move |choice| {
+                    resolve(choice);
+                    app.close_diff(&key);
+                }
+            ),
+        );
+        self.open_diff(
+            &key,
+            &format!("{} (Changed on Disk)", doc::file_name(&rel)),
+            &body,
         );
     }
 
@@ -1676,7 +1713,9 @@ impl App {
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
                     // rather than sending the reader back to page one.
                     Doc::Pdf(pdf) => pdf.refresh(),
-                    Doc::Status(_) => {}
+                    // A diff is a snapshot of two texts and is keyed by the comparison rather
+                    // than by a path, so a file changing under it reaches neither.
+                    Doc::Status(_) | Doc::Diff(_) => {}
                 }
             }
             Event::FileRemoved(rel) => {
@@ -1789,13 +1828,33 @@ impl App {
                 app.sync_conflict_banner(&original);
             }
         };
-        diff::present_conflict(
-            &self.window,
-            "Sync conflict",
+        let key = format!("conflict:sync:{original}");
+        let body = diff::conflict(
             (original, &mine),
             (conflict, &theirs),
-            resolve,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[strong]
+                key,
+                move |choice| {
+                    resolve(choice);
+                    app.close_diff(&key);
+                }
+            ),
         );
+        self.open_diff(
+            &key,
+            &format!("{} (Sync Conflict)", doc::file_name(original)),
+            &body,
+        );
+    }
+
+    /// Close a diff tab once its question has been answered.
+    fn close_diff(self: &Rc<Self>, key: &str) {
+        if let Some(doc) = self.doc_for(key) {
+            self.close_page(doc.page());
+        }
     }
 
     // --- view modes and preview -----------------------------------------------------------
@@ -2279,7 +2338,7 @@ impl App {
             },
             Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
-            Some(Doc::Status(_)) | None => (None, None),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_words(words);
@@ -2369,9 +2428,14 @@ impl App {
     /// active tab when the same action is fired from the palette.
     fn menu_rel(&self) -> Option<String> {
         let Some(page) = self.menu_page.borrow().clone() else {
-            return self.active_doc().map(|d| d.key());
+            return self
+                .active_doc()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key());
         };
-        self.doc_for_page(&page).map(|d| d.key())
+        self.doc_for_page(&page)
+            .filter(|d| !d.is_transient())
+            .map(|d| d.key())
     }
 
     /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
@@ -2625,8 +2689,17 @@ impl App {
 
     fn save_session(&self) {
         let session = Session {
-            open: self.docs.borrow().iter().map(|d| d.key()).collect(),
-            active: self.active_doc().map(|d| d.key()),
+            open: self
+                .docs
+                .borrow()
+                .iter()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key())
+                .collect(),
+            active: self
+                .active_doc()
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key()),
             // Presentation is not a session state, so the sidebar it hid is saved as it was.
             sidebar: match self.presenting.get() {
                 Some(before) => before.sidebar,

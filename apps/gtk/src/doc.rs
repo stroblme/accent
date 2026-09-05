@@ -42,6 +42,8 @@ pub enum Doc {
     Image(Rc<Viewer>),
     Pdf(Rc<PdfTab>),
     Status(Rc<Viewer>),
+    /// A comparison of two texts: a git diff, a note against what is on disk, a sync conflict.
+    Diff(Rc<Viewer>),
 }
 
 impl Doc {
@@ -50,15 +52,22 @@ impl Doc {
         match self {
             Doc::Text(tab) => tab.rel(),
             Doc::Pdf(pdf) => pdf.key(),
-            Doc::Image(v) | Doc::Status(v) => v.key(),
+            Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => v.key(),
         }
+    }
+
+    /// Not a file. A diff is a view of two texts that happens to live in a tab, so it is never
+    /// written to the session, never a recent note, and a rename does not point it anywhere new:
+    /// it is opened again from the pane that produced it, not restored.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Doc::Diff(_))
     }
 
     pub fn page(&self) -> &adw::TabPage {
         match self {
             Doc::Text(tab) => &tab.page,
             Doc::Pdf(pdf) => &pdf.page,
-            Doc::Image(v) | Doc::Status(v) => &v.page,
+            Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => &v.page,
         }
     }
 
@@ -88,6 +97,8 @@ impl Doc {
         match self {
             Doc::Text(tab) => tab.retarget(root, key),
             Doc::Pdf(pdf) => pdf.retarget(root, key),
+            // A diff is not a file, so a rename has nothing to point it at.
+            Doc::Diff(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
                 *v.key.borrow_mut() = key.to_string();
                 v.page.set_title(file_name(key));
@@ -153,5 +164,7 @@ mod tests {
     fn a_loose_key_is_an_absolute_path() {
         assert!(is_loose_key("/etc/hosts"));
         assert!(!is_loose_key("Inbox/note.md"));
+        // A diff key names a comparison, not a path, so it is never loose whatever it compares.
+        assert!(!is_loose_key("diff:worktree:/etc/hosts"));
     }
 }
