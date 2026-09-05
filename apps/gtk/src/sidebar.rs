@@ -775,7 +775,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         &status_page(
             "system-search-symbolic",
             "Search Notes",
-            "Type to search every note in this vault.",
+            "Type to search this vault. Files widens it past the notes.",
         ),
         Some("prompt"),
     );

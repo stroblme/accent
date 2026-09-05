@@ -391,13 +391,27 @@ pub fn copy_absolute_path(ops: &Rc<Ops>, rel: &str) {
 
 /// Open the file manager on the containing folder with the file selected, through the portal.
 pub fn show_in_files(ops: &Rc<Ops>, rel: &str) {
-    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(ops.vault.root().join(rel))));
-    let window = ops.window.clone();
-    let (ops, name) = (ops.clone(), basename(rel).to_string());
-    launcher.open_containing_folder(Some(&window), gio::Cancellable::NONE, move |result| {
+    let ops = ops.clone();
+    let path = ops.vault.root().join(rel);
+    reveal(&ops.window.clone(), &path, move |message| {
+        (ops.toast)(message)
+    });
+}
+
+/// Reveal `path` in the file manager.
+///
+/// Takes a path rather than a vault-relative one, and its own way of complaining, so a window
+/// with no vault can still show where a loose file lives.
+pub fn reveal(window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str) + 'static) {
+    let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    launcher.open_containing_folder(Some(window), gio::Cancellable::NONE, move |result| {
         // Only the failure is worth saying: a file manager that opened is its own report.
         if let Err(e) = result {
-            (ops.toast)(&format!("Cannot show {name}: {e}"));
+            toast(&format!("Cannot show {name}: {e}"));
         }
     });
 }

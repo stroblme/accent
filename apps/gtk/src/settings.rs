@@ -24,12 +24,14 @@ const THEMES: [(Theme, &str); 4] = [
     (Theme::Solarized, "Solarized"),
 ];
 
-/// `root` identifies which vault's per-vault settings are being edited. `on_change` is called
+/// `root` identifies which vault's per-vault settings are being edited, and is `None` in a window
+/// opened on a file rather than a folder, where that group has no vault to be about. `on_change`
+/// is called
 /// after every edit, with the config already saved to disk, so the caller can apply it live.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     config: Rc<RefCell<Config>>,
-    root: PathBuf,
+    root: Option<PathBuf>,
     on_change: impl Fn(&Config) + 'static,
 ) {
     page(parent.as_ref(), config, root, Rc::new(on_change));
@@ -41,7 +43,7 @@ pub fn present(
 fn page(
     parent: &gtk::Widget,
     config: Rc<RefCell<Config>>,
-    root: PathBuf,
+    root: Option<PathBuf>,
     on_change: Rc<dyn Fn(&Config)>,
 ) {
     // The config is cloned out of the cell before saving, so `on_change` is free to borrow it
@@ -64,7 +66,9 @@ fn page(
     let page = adw::PreferencesPage::new();
     page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
-    page.add(&vault_group(&config, &root, &save));
+    if let Some(root) = &root {
+        page.add(&vault_group(&config, root, &save));
+    }
     page.add(&reset_group(
         &dialog, parent, &config, &root, &save, &on_change,
     ));
@@ -338,7 +342,7 @@ fn reset_group(
     dialog: &adw::PreferencesDialog,
     parent: &gtk::Widget,
     config: &Rc<RefCell<Config>>,
-    root: &Path,
+    root: &Option<PathBuf>,
     save: &Rc<dyn Fn()>,
     on_change: &Rc<dyn Fn(&Config)>,
 ) -> adw::PreferencesGroup {
@@ -348,7 +352,7 @@ fn reset_group(
     row.connect_activated({
         let (config, root, save, on_change) = (
             config.clone(),
-            root.to_path_buf(),
+            root.clone(),
             save.clone(),
             on_change.clone(),
         );

@@ -175,6 +175,9 @@ pub struct Tab {
     /// keeping them costs nothing over throwing them away.
     headings: RefCell<Vec<Heading>>,
     font: RefCell<Option<gtk::CssProvider>>,
+    /// A watch on the file itself, for a tab no vault watcher covers. `None` for everything
+    /// inside a vault, which the worker already reports on.
+    monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
     debounce: RefCell<Option<glib::SourceId>>,
@@ -334,6 +337,7 @@ pub fn open(
         links: RefCell::new(Vec::new()),
         headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
+        monitor: RefCell::new(None),
         loading: Cell::new(false),
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
@@ -653,6 +657,33 @@ impl Tab {
 
     pub fn flavour(&self) -> Flavour {
         self.flavour
+    }
+
+    /// Watch the file behind this tab and call `f` when someone else writes it.
+    ///
+    /// Only for a tab outside every vault: inside one, the vault's own watcher reports the change
+    /// and knows which writes were ours, which a bare file monitor cannot.
+    pub fn watch_file(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
+        let file = gio::File::for_path(self.path());
+        let Ok(monitor) = file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        else {
+            return;
+        };
+        monitor.connect_changed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, _, event| {
+                // `ChangesDoneHint` is the settled write; `Created` is the rename an atomic save
+                // lands as, ours included, which the etag check then makes a no-op.
+                if matches!(
+                    event,
+                    gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::Created
+                ) {
+                    f(&tab);
+                }
+            }
+        ));
+        *self.monitor.borrow_mut() = Some(monitor);
     }
 
     /// The note's headings, most recent analysis, for the Outline pane.
