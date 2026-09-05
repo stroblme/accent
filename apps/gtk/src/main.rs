@@ -86,6 +86,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
+    ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
@@ -185,6 +186,7 @@ fn main() -> glib::ExitCode {
         config: Rc::new(RefCell::new(Config::load())),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
+        landing: RefCell::new(None),
     });
     shell.install_app_actions(&app);
     app.connect_command_line({
@@ -206,6 +208,22 @@ struct Shell {
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     start: glib::WeakRef<adw::ApplicationWindow>,
+    /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
+    /// somewhere to put it. See [`Landing`].
+    landing: RefCell<Option<Landing>>,
+}
+
+/// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
+///
+/// libadwaita detaches a dragged page from its view for the length of the drag, and neither
+/// `attach_page` nor the page's own view is public, so nothing can give a page a view back except
+/// the `create-window` handler, which libadwaita calls on the source view the moment a drop is
+/// declined. Our drop zones therefore record where the drop landed and decline it; the handler
+/// hands back the tab view named here and libadwaita does the attaching.
+struct Landing {
+    app: Rc<App>,
+    pane: Rc<Pane>,
+    zone: Zone,
 }
 
 impl Shell {
@@ -219,6 +237,17 @@ impl Shell {
             move |_, _| shell.choose_vault(&gtk_app)
         });
         gtk_app.add_action(&open);
+
+        // GNOME Shell offers New Window in the launcher's context menu only when it finds an
+        // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
+        // keys. Both of the first two are provided: this is the one DESIGN.md's Keyboard rule
+        // asks for, and the desktop file carries the other for a shell that reads it first.
+        let new_window = gio::SimpleAction::new("new-window", None);
+        new_window.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| shell.start_screen(&gtk_app)
+        });
+        gtk_app.add_action(&new_window);
 
         let close = gio::SimpleAction::new("close-vault", None);
         close.connect_activate({
@@ -285,6 +314,13 @@ impl Shell {
                 app.window.present();
                 app.open_terminal();
             }
+            return glib::ExitCode::SUCCESS;
+        }
+        // `accent --new-window` is the launcher's New Window action, and a second process is how
+        // it arrives. The start screen rather than a vault: opening a vault that already has a
+        // window would only raise it, and no vault ever gets a second one.
+        if args.iter().any(|a| a == "--new-window") {
+            self.start_screen(gtk_app);
             return glib::ExitCode::SUCCESS;
         }
         let Some(arg) = args.get(1) else {
@@ -365,6 +401,9 @@ impl Shell {
         self.start.set(Some(&window));
     }
 
+    /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
+    /// than opening a second one on the same index, session and watcher. New Window lands on the
+    /// start screen instead, where a vault without a window yet is picked.
     fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -375,9 +414,19 @@ impl Shell {
             window.present();
             return;
         }
-        let Some(app) = build_window(gtk_app, self, Some(root.clone()), note) else {
-            return;
-        };
+        self.add_window(gtk_app, Some(root), note);
+    }
+
+    /// Build a window on `root` — a vault, or `None` for the one with no vault — and take charge
+    /// of it. The only place a window joins `windows`, so the handler that takes it out again is
+    /// written once.
+    fn add_window(
+        self: &Rc<Self>,
+        gtk_app: &adw::Application,
+        root: Option<PathBuf>,
+        note: Option<String>,
+    ) -> Option<Rc<App>> {
+        let app = build_window(gtk_app, self, root.clone(), note)?;
         // A second `close-request` handler. `wire_window`'s is connected first and can still stop
         // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
         // handler does, so this one only ever sees a close that is really happening.
@@ -390,7 +439,132 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((Some(root), app));
+        self.windows.borrow_mut().push((root, app.clone()));
+        Some(app)
+    }
+
+    /// The window a page belongs to, and what it holds. libadwaita's tab drag hands a page to any
+    /// window in the process, so this is how the receiving one finds out where it came from.
+    fn owner_of(&self, page: &adw::TabPage) -> Option<(Rc<App>, Doc)> {
+        self.windows
+            .borrow()
+            .iter()
+            .find_map(|(_, app)| Some((app.clone(), app.doc_for_page(page)?)))
+    }
+
+    /// A page has landed in `into`'s tab view that `into` knows nothing about: either a tab
+    /// dragged out of another window, or one of its own a moment before it is registered.
+    ///
+    /// From an idle rather than here, because `page-attached` fires inside libadwaita's own drop
+    /// handling, which is still holding the page — and because a page this window has just built
+    /// is attached before it reaches `docs`, so the second look is what tells the two apart.
+    fn adopt_soon(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
+        let (shell, into, page) = (Rc::downgrade(self), Rc::downgrade(into), page.clone());
+        glib::idle_add_local_once(move || {
+            if let (Some(shell), Some(into)) = (shell.upgrade(), into.upgrade()) {
+                shell.adopt_page(&into, &page);
+            }
+        });
+    }
+
+    /// A dragged tab was let go over `pane`. Recorded rather than moved: see [`Landing`].
+    fn aim(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
+        *self.landing.borrow_mut() = Some(Landing {
+            app: app.clone(),
+            pane: pane.clone(),
+            zone,
+        });
+        // Spent by `create-window` in the same turn of the main loop; this is only so a drop that
+        // never reaches one cannot misdirect the next drag.
+        let shell = Rc::downgrade(self);
+        glib::idle_add_local_once(move || {
+            if let Some(shell) = shell.upgrade() {
+                *shell.landing.borrow_mut() = None;
+            }
+        });
+    }
+
+    /// The tab view a page let go over one of our drop zones belongs in, or `None` when the drop
+    /// was nowhere of ours.
+    fn where_to_land(&self) -> Option<adw::TabView> {
+        // Left in place rather than taken: `landed` spends it, once the page is somewhere.
+        let (app, pane) = self
+            .landing
+            .borrow()
+            .as_ref()
+            .map(|l| (l.app.clone(), l.pane.clone()))?;
+        // The pane may have closed itself behind the drag, having held nothing else.
+        let at = match app.panes.borrow().iter().any(|p| Rc::ptr_eq(p, &pane)) {
+            true => pane,
+            false => app.pane(),
+        };
+        app.window.present();
+        Some(at.tabs.clone())
+    }
+
+    /// A page has been attached to `pane`, which is where a drag ends. Two things may be owed:
+    /// the split the drop asked for, and — for a page out of another window — the move into this
+    /// window's bookkeeping.
+    ///
+    /// The split waits for an idle because this runs inside libadwaita's drag handling, and
+    /// re-parenting the pane it is emitting from fails GTK's own assertion.
+    fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
+        let side = self
+            .landing
+            .borrow_mut()
+            .take()
+            .filter(|l| Rc::ptr_eq(&l.pane, pane))
+            .and_then(|l| match l.zone {
+                Zone::Split(side) => Some(side),
+                Zone::Here => None,
+            });
+        if let Some(side) = side {
+            let (app, pane, page) = (app.clone(), pane.clone(), page.clone());
+            glib::idle_add_local_once(move || app.split_page(&pane, side, &page));
+        }
+        // Before the adoption, which is queued behind it: the note is reopened in whichever pane
+        // the window is working in, and a split has just made that the new one.
+        if app.doc_for_page(page).is_none() {
+            self.adopt_soon(app, page);
+        }
+    }
+
+    /// Move a tab from the window it was dragged out of into the window it was dropped on.
+    ///
+    /// One vault never has two windows, so the note always comes from another vault: it is
+    /// adopted as an absolute-path tab, the files-outside-a-vault model (DESIGN.md, Window
+    /// without a vault). It edits and saves; it gets no index, backlinks or wikilinks here. The
+    /// buffer is written out first, because the receiving window opens the *file* — a drag is a
+    /// focus change, and a focus change always saves.
+    fn adopt_page(self: &Rc<Self>, into: &Rc<App>, page: &adw::TabPage) {
+        // Gone again, or one of `into`'s own that had not reached `docs` when it was attached.
+        if into.pane_of(page).is_none() || into.doc_for_page(page).is_some() {
+            return;
+        }
+        let Some((from, doc)) = self.owner_of(page) else {
+            return tracing::debug!("a tab in no window's bookkeeping; left where it is");
+        };
+        // A shell is a running process and a diff is a view of two texts: neither is a file the
+        // other window could open, so the drag goes back where it came from.
+        if doc.is_transient() {
+            return return_page(into, &from, page, "This tab cannot move between windows.");
+        }
+        let key = doc.key();
+        let path = match doc::is_loose_key(&key) {
+            true => PathBuf::from(&key),
+            false => from.root().join(&key),
+        };
+        if let Some(tab) = doc.tab().filter(|tab| tab.modified.get())
+            && let Err(e) = from.write_tab(tab, tab.etag.get())
+        {
+            // Refused rather than dropped: a drag must never be the thing that loses an edit.
+            return return_page(into, &from, page, &format!("Save failed: {e}"));
+        }
+        // Opened before the old page goes, so a pane that the drop has just split off never
+        // stands empty and closes itself out from under the note arriving in it.
+        into.open_path(&into.key_for(&path));
+        from.forget_page(page);
+        into.close_page(page);
     }
 
     fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
@@ -435,19 +609,21 @@ impl Shell {
         if let Some(app) = loose {
             return Some(app);
         }
-        let app = build_window(gtk_app, self, None, None)?;
-        app.window.connect_close_request({
-            let shell = Rc::downgrade(self);
-            move |window| {
-                if let Some(shell) = shell.upgrade() {
-                    shell.forget(window);
-                }
-                glib::Propagation::Proceed
-            }
-        });
-        self.windows.borrow_mut().push((None, app.clone()));
-        Some(app)
+        self.add_window(gtk_app, None, None)
     }
+}
+
+/// Hand a page back to the window it was dragged out of, and say there why.
+///
+/// The pane it left may have closed itself behind it, so it goes to whichever pane that window is
+/// working in rather than to the one it came from.
+fn return_page(into: &Rc<App>, from: &Rc<App>, page: &adw::TabPage, why: &str) {
+    let Some(here) = into.pane_of(page) else {
+        return;
+    };
+    here.tabs.transfer_page(page, &from.pane().tabs, 0);
+    from.window.present();
+    from.toast(why);
 }
 
 // ---------------------------------------------------------------------------------- view mode
@@ -509,6 +685,9 @@ struct App {
     ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
     vault: Option<Arc<Vault>>,
+    /// The process's other windows, for the one thing a window cannot answer alone: a tab dragged
+    /// in from another one. Weak, because the shell owns this `App`.
+    shell: std::rc::Weak<Shell>,
     config: Rc<RefCell<Config>>,
     window: adw::ApplicationWindow,
     /// Every open pane, in the order they were created. The arrangement itself lives in the
@@ -660,9 +839,9 @@ impl App {
     /// Move `page` into a new pane beside `at`. Splitting a pane's only note off it would empty
     /// the pane, which closes it again, so that one is refused rather than done and undone.
     fn split_page(self: &Rc<Self>, at: &Rc<Pane>, side: Side, page: &adw::TabPage) {
-        // Not one of ours: libadwaita raises `is-transferring-page` on every tab view in the
-        // process, so a tab dragged in another window reaches this window's drop sheets too, and
-        // there would be no view to move it out of.
+        // A page in no pane of ours: a drag still in flight, which libadwaita has detached from
+        // its view. `Shell::landed` waits for the attach before asking for a split, so this is
+        // only reachable from the menu and the palette, where there is nothing to split off.
         let Some(from) = self.pane_of(page) else {
             return;
         };
@@ -758,35 +937,18 @@ impl App {
         }
     }
 
-    /// A tab or a vault path let go over `pane`. `true` when it was taken.
+    /// A tab or a vault path let go over `pane`. `true` when it was taken — never for a tab,
+    /// which is declined on purpose so that `create-window` fires; see [`Landing`].
     fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
-        if let Ok(page) = value.get::<adw::TabPage>() {
-            // A tab from another window has no pane of ours to leave, and moving it here would
-            // put a note of another vault under this window's tab machinery. Refused; the tab
-            // bars still take it natively, which is libadwaita's own behaviour and its own risk.
-            let Some(from) = self.pane_of(&page) else {
-                return false;
-            };
-            return match zone {
-                Zone::Split(side) => {
-                    self.split_page(pane, side, &page);
-                    true
-                }
-                // Already here, so the drop is taken and nothing moves. Accepted rather than
-                // refused, because libadwaita's own bar does the same for a tab dropped back
-                // where it started, and a refusal animates the tab flying home for no reason.
-                Zone::Here if Rc::ptr_eq(&from, pane) => true,
-                Zone::Here => {
-                    from.tabs
-                        .transfer_page(&page, &pane.tabs, pane.tabs.n_pages());
-                    pane.tabs.set_selected_page(&page);
-                    // Said outright rather than left to the selection notify, which does not
-                    // fire when the transfer already left this page selected.
-                    self.set_active_pane(pane);
-                    self.sync_active();
-                    true
-                }
-            };
+        if value.get::<adw::TabPage>().is_ok() {
+            // Recorded, and deliberately declined: a dragged page has left its view, and
+            // declining is what summons the `create-window` that can give it one again. Whose
+            // tab it is does not matter here — `Shell::adopt_page` sorts that out from
+            // `page-attached` once libadwaita has attached it.
+            if let Some(shell) = self.shell.upgrade() {
+                shell.aim(self, pane, zone);
+            }
+            return false;
         }
         let Ok(rel) = value.get::<String>() else {
             return false;
@@ -822,6 +984,16 @@ impl App {
 
     fn doc_for(&self, key: &str) -> Option<Doc> {
         self.docs.borrow().iter().find(|d| d.key() == key).cloned()
+    }
+
+    /// The key `path` opens under in this window: vault-relative inside the vault, absolute
+    /// outside it, which is what a file from another window's vault always is.
+    fn key_for(&self, path: &Path) -> String {
+        self.vault()
+            .and_then(|vault| path.strip_prefix(vault.root()).ok())
+            .and_then(Path::to_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| path.to_string_lossy().into_owned())
     }
 
     fn tab_for(&self, rel: &str) -> Option<Rc<Tab>> {
@@ -3225,6 +3397,7 @@ fn build_window(
     let app = Rc::new(App {
         vault: vault.clone(),
         // (`vault` is an `Option` here: `None` is a window opened on a file, with no folder.)
+        shell: Rc::downgrade(shell),
         config: shell.config.clone(),
         window: window.clone(),
         panes: RefCell::new(vec![first.clone()]),
@@ -3585,6 +3758,36 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         #[weak]
         app,
         move |_| app.sync_panes()
+    ));
+    // A tab let go outside every tab bar. libadwaita reads that as "detach into a window of its
+    // own" and this is the only public way to give a dragged page a view again, so a drop on one
+    // of our pane zones — which `dropped` declines for exactly this reason — arrives here too.
+    pane.tabs.connect_create_window(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        None,
+        move |view| {
+            let aimed = app.shell.upgrade().and_then(|shell| shell.where_to_land());
+            // Let go on nothing of ours: back where it came from. A window per detached tab is a
+            // gesture one-window-per-vault has no answer for, and `None` is an error here.
+            Some(aimed.unwrap_or_else(|| view.clone()))
+        }
+    ));
+    // Where a drag ends: the split the drop asked for, and the move into this window's
+    // bookkeeping when the page came out of another one — libadwaita's tab bars take a foreign
+    // page natively, so a note of vault A would otherwise land under window B's `docs`, session
+    // and backlinks.
+    pane.tabs.connect_page_attached(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_, page, _| {
+            if let Some(shell) = app.shell.upgrade() {
+                shell.landed(&app, &pane, page);
+            }
+        }
     ));
     // A pane that has just lost its last page has nothing left to be. Closing it from an idle
     // rather than here, because this also fires in the middle of `transfer_page`, which is still
