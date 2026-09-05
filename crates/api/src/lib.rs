@@ -168,9 +168,10 @@ impl Vault {
     /// `daily_dir` of `../Outside` arrives here straight from the config, and Phase 2's MCP
     /// server and Phase 3's Android bindings call the façade with whatever their caller said.
     ///
-    /// The test is lexical rather than `canonicalize`: a vault links external directories in on
-    /// purpose, and resolving those would reject the very paths the walk indexed.
-    fn path(&self, rel: &str) -> io::Result<PathBuf> {
+    /// The test is deliberately lexical and never `canonicalize`s: a vault links external
+    /// directories in on purpose, so resolving would reject the very paths the walk indexed and
+    /// a note reached through a directory symlink has to stay openable.
+    pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
         let mut out = self.root.clone();
         for part in Path::new(rel).components() {
             match part {
@@ -228,7 +229,7 @@ impl Drop for Vault {
 
 impl Vault {
     pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
-        fs::read_note(&self.path(rel)?)
+        fs::read_note(&self.resolve(rel)?)
     }
 
     /// Write a note, then tell the worker about it: the index is correct within a millisecond
@@ -238,7 +239,7 @@ impl Vault {
     /// frame on an SSD. If a slow disk ever shows up, move the write to the worker and answer
     /// with an event.
     pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
-        let etag = fs::write_note(&self.path(rel)?, text, expected)?;
+        let etag = fs::write_note(&self.resolve(rel)?, text, expected)?;
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
@@ -256,13 +257,13 @@ impl Vault {
         let rel = with_md(rel);
         let (text, cursor) = match template {
             Some(t) => {
-                let (raw, _) = fs::read_note(&self.path(t)?)
+                let (raw, _) = fs::read_note(&self.resolve(t)?)
                     .with_context(|| format!("reading template {t}"))?;
                 template::render(&raw, &stem(&rel), chrono::Local::now().naive_local())
             }
             None => (String::new(), None),
         };
-        fs::create_note(&self.path(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
+        fs::create_note(&self.resolve(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
         self.post(Msg::Update {
             rel: rel.clone(),
             own: true,
@@ -271,7 +272,7 @@ impl Vault {
     }
 
     pub fn create_dir(&self, rel: &str) -> io::Result<()> {
-        std::fs::create_dir_all(self.path(rel)?)?;
+        std::fs::create_dir_all(self.resolve(rel)?)?;
         // ponytail: only the deepest component is indexed straight away; intermediate levels of a
         // nested path wait for the watcher or the next reconcile. Post one update per component
         // if the tree ever looks wrong right after "New folder".
@@ -289,7 +290,7 @@ impl Vault {
     pub fn plan_rename(&self, from: &str, to: &str) -> Result<RenamePlan> {
         let renamed = stem_key(from) != stem_key(to);
         let mut rewrites = Vec::new();
-        if renamed && !self.path(from)?.is_dir() {
+        if renamed && !self.resolve(from)?.is_dir() {
             rewrites = self
                 .index()
                 .backlinks(from)?
@@ -317,7 +318,7 @@ impl Vault {
         } else {
             Vec::new()
         };
-        fs::rename(&self.path(&plan.from)?, &self.path(&plan.to)?)
+        fs::rename(&self.resolve(&plan.from)?, &self.resolve(&plan.to)?)
             .with_context(|| format!("renaming {} to {}", plan.from, plan.to))?;
         // Both ends, so the index and the tree do not wait for inotify.
         self.post(Msg::Update {
@@ -361,7 +362,7 @@ impl Vault {
 
     /// `Ok(false)` when the note turned out to link nowhere near the renamed file.
     fn rewrite_one(&self, rel: &str, targets: &[String], to: &str) -> Result<bool> {
-        let path = self.path(rel)?;
+        let path = self.resolve(rel)?;
         let (text, etag) = fs::read_note(&path)?;
         let Some(rewritten) = markdown::rewrite_targets(&text, targets, to) else {
             return Ok(false);
@@ -418,7 +419,7 @@ impl Vault {
         replacement: &str,
         literal: bool,
     ) -> Result<usize> {
-        let path = self.path(rel)?;
+        let path = self.resolve(rel)?;
         let (text, etag) = fs::read_note(&path)?;
         let matches = re.find_iter(&text).count();
         if matches == 0 {
@@ -445,9 +446,9 @@ impl Vault {
     /// deleting it belongs in the system trash. Keeping mine needs no call here at all, it is
     /// just trashing the copy.
     pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
-        let (text, _) =
-            fs::read_note(&self.path(conflict)?).with_context(|| format!("reading {conflict}"))?;
-        let target = self.path(original)?;
+        let (text, _) = fs::read_note(&self.resolve(conflict)?)
+            .with_context(|| format!("reading {conflict}"))?;
+        let target = self.resolve(original)?;
         let keep = target.with_file_name(accent_conflict_name(
             basename(original),
             chrono::Local::now().naive_local(),
@@ -468,10 +469,10 @@ impl Vault {
 
     /// Side-by-side rows for the conflict UI: mine on the left, theirs on the right.
     pub fn conflict_diff(&self, original: &str, conflict: &str) -> Result<Vec<DiffLine>> {
-        let (mine, _) =
-            fs::read_note(&self.path(original)?).with_context(|| format!("reading {original}"))?;
-        let (theirs, _) =
-            fs::read_note(&self.path(conflict)?).with_context(|| format!("reading {conflict}"))?;
+        let (mine, _) = fs::read_note(&self.resolve(original)?)
+            .with_context(|| format!("reading {original}"))?;
+        let (theirs, _) = fs::read_note(&self.resolve(conflict)?)
+            .with_context(|| format!("reading {conflict}"))?;
         Ok(diff::lines(&mine, &theirs))
     }
 
@@ -490,7 +491,7 @@ impl Vault {
         } else {
             format!("{}/{name}", cfg.daily_dir.trim_end_matches('/'))
         });
-        if self.path(&rel)?.exists() {
+        if self.resolve(&rel)?.exists() {
             return Ok((rel, None));
         }
         self.create_note(&rel, cfg.daily_template.as_deref())
@@ -869,7 +870,7 @@ impl Worker {
                 b.rewatch |= kind == FileKind::Dir;
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
-                if kind == FileKind::Markdown && !own && b.removed.remove(rel) {
+                if kind != FileKind::Dir && !own && b.removed.remove(rel) {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
@@ -880,7 +881,9 @@ impl Worker {
             }
             Ok(Change::Updated(kind)) => {
                 b.resolve = true;
-                if kind == FileKind::Markdown && !own {
+                // Every kind but a directory reports: a PDF rebuilt by a tool or a source file
+                // edited in another editor has to refresh in the UI just like a note does.
+                if kind != FileKind::Dir && !own {
                     self.emit(Event::FileChanged(rel.to_string()));
                 }
             }
@@ -1152,6 +1155,23 @@ mod tests {
             || !f.vault.search("kumquat", 10).unwrap().is_empty(),
             BUDGET
         ));
+    }
+
+    /// Non-markdown files are stat-only rows in the index, but an external edit still has to
+    /// reach whoever has the file open. Depends on real inotify events.
+    #[test]
+    fn external_write_to_a_code_file_emits_file_changed() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("tool.py", "print(1)\n");
+        assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+
+        f.write("tool.py", "print(2)\n");
+
+        assert!(
+            f.wait(|e| matches!(e, Event::FileChanged(p) if p == "tool.py"))
+                .is_some(),
+            "an external edit to a source file must reach the UI"
+        );
     }
 
     /// The watch set is one watch per directory, built from the index, so a subdirectory that was
