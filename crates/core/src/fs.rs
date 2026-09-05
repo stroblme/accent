@@ -45,6 +45,85 @@ pub fn read_note(path: &Path) -> io::Result<(String, Etag)> {
     Ok((text, Etag::of(path)?))
 }
 
+/// Biggest file we will pull into memory as text; anything larger stays closed.
+pub const MAX_TEXT: u64 = 16 * 1024 * 1024;
+
+/// What a file turned out to be when we tried to open it as text.
+#[derive(Debug)]
+pub enum Read {
+    Text(Text),
+    Binary { size: u64 },
+    TooLarge { size: u64 },
+}
+
+/// A file that decoded as text, together with what had to be changed to get there.
+#[derive(Debug)]
+pub struct Text {
+    pub text: String,
+    pub etag: Etag,
+    /// The file uses CRLF on disk; `text` holds it normalised to `\n`.
+    pub crlf: bool,
+    /// The bytes were not valid UTF-8 and were decoded with replacement characters, so what is
+    /// in `text` no longer round-trips to the original file.
+    pub lossy: bool,
+}
+
+/// Read any file as text, saying so when it is binary or too big to hold.
+///
+/// As in [`read_note`], the stat happens *after* the read, so a writer that raced us costs a
+/// refused save rather than a silent overwrite.
+pub fn read_text(path: &Path) -> io::Result<Read> {
+    let size = std::fs::metadata(path)?.size();
+    if size > MAX_TEXT {
+        return Ok(Read::TooLarge { size });
+    }
+    let bytes = std::fs::read(path)?;
+    // A NUL byte is the same "this is not text" test `grep` and `git` use.
+    if bytes.contains(&0) {
+        return Ok(Read::Binary {
+            size: bytes.len() as u64,
+        });
+    }
+    let (text, lossy) = match String::from_utf8(bytes) {
+        Ok(text) => (text, false),
+        Err(e) => (String::from_utf8_lossy(&e.into_bytes()).into_owned(), true),
+    };
+    let crlf = text.contains("\r\n");
+    let text = if crlf {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    };
+    Ok(Read::Text(Text {
+        text,
+        etag: Etag::of(path)?,
+        crlf,
+        lossy,
+    }))
+}
+
+/// The inverse of [`read_text`]: put an editor buffer back into the shape the file had.
+///
+/// Stripping runs first so the CRLF pass cannot re-insert a `\r` that stripping would then keep.
+pub fn for_disk(text: &str, crlf: bool, strip_trailing: bool) -> String {
+    let stripped = if strip_trailing {
+        // `split_inclusive` keeps each line's own newline, so a missing final one stays missing.
+        text.split_inclusive('\n')
+            .map(|line| match line.strip_suffix('\n') {
+                Some(body) => format!("{}\n", body.trim_end_matches([' ', '\t'])),
+                None => line.trim_end_matches([' ', '\t']).to_string(),
+            })
+            .collect()
+    } else {
+        text.to_string()
+    };
+    if crlf {
+        stripped.replace('\n', "\r\n")
+    } else {
+        stripped
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SaveError {
     #[error("file changed on disk since it was read")]
@@ -221,6 +300,46 @@ mod tests {
         let (text, read_back) = read_note(&note).unwrap();
         assert_eq!(text, "two");
         assert_eq!(read_back, new_etag);
+    }
+
+    #[test]
+    fn read_text_classifies_binary_and_normalises_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bin = dir.path().join("bin");
+        std::fs::write(&bin, b"a\0b").unwrap();
+        match read_text(&bin).unwrap() {
+            Read::Binary { size } => assert_eq!(size, 3),
+            other => panic!("expected Binary, got {other:?}"),
+        }
+
+        let dos = dir.path().join("dos.md");
+        std::fs::write(&dos, "x\r\ny").unwrap();
+        match read_text(&dos).unwrap() {
+            Read::Text(t) => {
+                assert!(t.crlf);
+                assert!(!t.lossy);
+                assert_eq!(t.text, "x\ny");
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+
+        let broken = dir.path().join("broken.md");
+        std::fs::write(&broken, [0xff, b'a']).unwrap();
+        match read_text(&broken).unwrap() {
+            Read::Text(t) => {
+                assert!(t.lossy);
+                assert!(!t.crlf);
+                assert!(t.text.ends_with('a'));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_disk_strips_and_restores_crlf() {
+        assert_eq!(for_disk("a  \nb\t\n", true, true), "a\r\nb\r\n");
+        assert_eq!(for_disk("a  \nb\t\n", false, false), "a  \nb\t\n");
     }
 
     #[test]

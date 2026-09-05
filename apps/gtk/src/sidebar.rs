@@ -31,6 +31,10 @@ const PULSE: Duration = Duration::from_millis(80);
 /// reads as "paste a link here" rather than "what links here", and it is the only icon of the four
 /// whose artwork is off centre, sitting a pixel low in its 16 px box.
 const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
+const OUTLINE_ICON: &str = "view-list-bullet-symbolic";
+
+/// How far each heading level is indented in the Outline pane, on the 6/12/18 spacing scale.
+const OUTLINE_INDENT: i32 = 12;
 
 /// Open a note, at a byte offset inside it when the row that was activated names one.
 type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
@@ -40,8 +44,9 @@ type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
 pub enum Query {
     /// Ranked full text: what a plain query with no toggle means, and the fast path.
     Fts(String),
-    /// Exact matching over note bodies, one result row per match.
-    Grep(Regex),
+    /// Exact matching over bodies, one result row per match. `files` widens it past the notes
+    /// to every other text file in the vault, which are not in the index and are read from disk.
+    Grep { re: Regex, files: bool },
 }
 
 /// What a [`Query`] answered. The `usize` is the total match count, which the capped list cannot
@@ -74,6 +79,10 @@ pub struct Sidebar {
     replace_entry: gtk::Entry,
     backlinks: gtk::StringList,
     backlinks_stack: gtk::Stack,
+    /// Whatever the Outline pane is showing. A `Bin` rather than a list of its own, because what
+    /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
+    /// thumbnails, or a sentence saying why there is nothing.
+    outline_bin: adw::Bin,
     tags_dirty: Rc<Cell<bool>>,
     tags_divider: gtk::Paned,
     select_tag: Rc<dyn Fn(&str)>,
@@ -119,6 +128,10 @@ impl Sidebar {
             BACKLINK_ICON,
         );
 
+        let outline_bin = adw::Bin::builder().vexpand(true).build();
+        outline_bin.set_child(Some(&outline_empty()));
+        stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", OUTLINE_ICON);
+
         // Lazy fill: a background reindex only flips the flag, so it costs no query while the user
         // is looking at Files or Search.
         stack.connect_visible_child_notify({
@@ -154,6 +167,7 @@ impl Sidebar {
             replace_entry: search.replace_entry,
             backlinks,
             backlinks_stack,
+            outline_bin,
             tags_dirty: tags.dirty,
             tags_divider: tags.divider,
             select_tag: tags.select,
@@ -192,13 +206,21 @@ impl Sidebar {
             .set_visible_child_name(if refs.is_empty() { "empty" } else { "list" });
     }
 
+    /// Replace what the Outline pane shows; `None` puts the empty state back.
+    pub fn set_outline(&self, content: Option<&gtk::Widget>) {
+        match content {
+            Some(widget) => self.outline_bin.set_child(Some(widget)),
+            None => self.outline_bin.set_child(Some(&outline_empty())),
+        }
+    }
+
     /// The tag list is out of date; refill it the next time the Tags pane is shown.
     pub fn mark_tags_dirty(&self) {
         self.tags_dirty.set(true);
     }
 
-    /// Show a pane by name: "files", "search", "tags" or "backlinks", focusing its entry where
-    /// there is one.
+    /// Show a pane by name: "files", "search", "tags", "backlinks" or "outline", focusing its
+    /// entry where there is one.
     pub fn show_pane(&self, name: &str) {
         self.stack.set_visible_child_name(name);
         if name == "search" {
@@ -414,8 +436,11 @@ fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 struct Key {
     text: String,
     options: Options,
-    /// Exact matching rather than ranked full text: any toggle on, or the replace row open.
+    /// Exact matching rather than ranked full text: any toggle on, the replace row open, or the
+    /// search widened past the notes, which have the only index there is.
     grep: bool,
+    /// Search files that are not notes as well.
+    files: bool,
 }
 
 /// The search pane's query loop and the widgets it drives, in one `Rc` so the future that waits
@@ -423,7 +448,7 @@ struct Key {
 struct Search {
     data: Rc<Data>,
     entry: gtk::SearchEntry,
-    toggles: [gtk::ToggleButton; 3],
+    toggles: [gtk::ToggleButton; 4],
     replace_row: gtk::Revealer,
     replace_entry: gtk::Entry,
     apply: gtk::Button,
@@ -455,12 +480,15 @@ impl Search {
             word: self.toggles[1].is_active(),
             regex: self.toggles[2].is_active(),
         };
+        let files = self.toggles[3].is_active();
         Key {
             text: self.entry.text().to_string(),
             options,
             // Replacing is an exact operation, so opening the replace row switches modes too:
-            // a ranked full-text hit is not a place in a file that can be rewritten.
-            grep: options.any() || self.replace_row.reveals_child(),
+            // a ranked full-text hit is not a place in a file that can be rewritten. Widening
+            // past the notes does the same, for the plainer reason that only notes are indexed.
+            grep: options.any() || files || self.replace_row.reveals_child(),
+            files,
         }
     }
 
@@ -597,7 +625,9 @@ impl Search {
     /// How many matches a Replace All would rewrite. The list is capped, the count is not.
     fn set_total(&self, total: usize) {
         self.apply.set_label(&format!("Replace All ({total})"));
-        self.apply.set_sensitive(total > 0);
+        // Replace rewrites notes only, so widening the search past them takes the button away
+        // rather than letting it rewrite a subset of what is on screen.
+        self.apply.set_sensitive(total > 0 && !self.key().files);
     }
 
     /// Rewrite the vault, then ask the same question again so the rows show what is there now.
@@ -614,7 +644,10 @@ impl Search {
 /// A [`Key`] as the worker thread needs it.
 fn compile(key: &Key) -> Result<Query, search::Error> {
     match key.grep {
-        true => Ok(Query::Grep(compile_regex(key)?)),
+        true => Ok(Query::Grep {
+            re: compile_regex(key)?,
+            files: key.files,
+        }),
         false => Ok(Query::Fts(key.text.clone())),
     }
 }
@@ -742,7 +775,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         &status_page(
             "system-search-symbolic",
             "Search Notes",
-            "Type to search every note in this vault.",
+            "Type to search this vault. Files widens it past the notes.",
         ),
         Some("prompt"),
     );
@@ -766,7 +799,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
     body.set_visible_child_name("prompt");
 
     let entry = gtk::SearchEntry::builder()
-        .placeholder_text("Search notes…")
+        .placeholder_text("Search…")
         .hexpand(true)
         .build();
     // A bar spanning the width right above the results, not a spinner beside the entry: the wait
@@ -792,6 +825,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         ("Aa", "Match Case"),
         ("Word", "Match Whole Word"),
         (".*", "Use Regular Expression"),
+        ("Files", "Search Files That Are Not Notes"),
     ]
     .map(|(label, tooltip)| {
         let button = gtk::ToggleButton::builder()
@@ -1115,6 +1149,67 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
         select,
         refill,
     }
+}
+
+/// What the Outline pane says with nothing to outline.
+fn outline_empty() -> gtk::Widget {
+    status_page(
+        OUTLINE_ICON,
+        "No Outline",
+        "Open a note to see its headings.",
+    )
+    .upcast()
+}
+
+/// A sentence in the Outline pane's own shape, for a tab that has no outline to give.
+pub fn outline_note(title: &str, body: &str) -> gtk::Widget {
+    status_page(OUTLINE_ICON, title, body).upcast()
+}
+
+/// A note's headings as rows that jump to them: `(level, text, byte offset into the note)`.
+///
+/// Indented by level rather than nested in a tree: a heading list is read top to bottom, and an
+/// expander per row would hide exactly what the pane exists to show.
+pub fn outline_list(
+    headings: &[(u8, String, usize)],
+    on_jump: impl Fn(usize) + 'static,
+) -> gtk::Widget {
+    let texts: Vec<&str> = headings.iter().map(|(_, text, _)| text.as_str()).collect();
+    let model = gtk::StringList::new(&texts);
+    let levels: Vec<u8> = headings.iter().map(|(level, _, _)| *level).collect();
+    let offsets: Vec<usize> = headings.iter().map(|(_, _, at)| *at).collect();
+
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
+        item.downcast_ref::<gtk::ListItem>()
+            .expect("list item")
+            .set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        if let (Some(label), Some(s)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<gtk::StringObject>(),
+        ) {
+            label.set_text(&s.string());
+            let level = levels.get(item.position() as usize).copied().unwrap_or(1);
+            label.set_margin_start(OUTLINE_INDENT * i32::from(level.saturating_sub(1)));
+        }
+    });
+
+    let view = gtk::ListView::new(Some(gtk::SingleSelection::new(Some(model))), Some(factory));
+    view.add_css_class("navigation-sidebar");
+    view.set_single_click_activate(true);
+    view.connect_activate(move |_, pos| {
+        if let Some(at) = offsets.get(pos as usize) {
+            on_jump(*at);
+        }
+    });
+    scroller(&view).upcast()
 }
 
 fn backlinks_body(model: &gtk::StringList, on_open: OnOpen) -> gtk::Stack {
