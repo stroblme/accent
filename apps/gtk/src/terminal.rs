@@ -20,6 +20,9 @@ use vte4::TerminalExtManual;
 
 /// Scrollback, in lines. Enough to read back a build, far short of a memory question.
 const SCROLLBACK: i64 = 10_000;
+/// Breathing room either side of the shell, off DESIGN.md's spacing scale. Not the editor's 48 px
+/// page gutter: that is a measure for prose, and a terminal is a grid that should keep its columns.
+const PAD: i32 = 12;
 
 /// One open shell.
 pub struct Term {
@@ -51,6 +54,9 @@ pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
     view.set_scrollback_lines(SCROLLBACK);
     view.set_vexpand(true);
     view.set_hexpand(true);
+    view.set_margin_start(PAD);
+    view.set_margin_end(PAD);
+    view.set_margin_top(PAD / 2);
     // An underline rather than a block, so the character under the cursor stays readable. VTE owns
     // the blink itself; System follows GNOME's own cursor-blink setting.
     view.set_cursor_shape(vte4::CursorShape::Underline);
