@@ -56,6 +56,9 @@ const SEARCH_LIMIT: usize = 100;
 const COMPLETIONS: usize = 20;
 /// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
 const RENDER: Duration = Duration::from_millis(300);
+/// How often the header's progress bar steps while a PDF is being opened. The sidebar's search
+/// bar pulses at the same rate, and for the same reason: GTK4 has no indeterminate mode.
+const PULSE: Duration = Duration::from_millis(80);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
@@ -550,6 +553,8 @@ struct App {
     menu_page: RefCell<Option<adw::TabPage>>,
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
+    /// Pulses the header's progress bar while a PDF is being opened, the same bar indexing uses.
+    opening: RefCell<Option<glib::SourceId>>,
     render: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
@@ -968,6 +973,14 @@ impl App {
             self,
             move |_| app.sync_outline()
         ));
+        pdf.connect_opened(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                app.sync_opening();
+                app.sync_outline();
+            }
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1274,6 +1287,7 @@ impl App {
             None => self.encoding_label.set_visible(false),
         }
         self.sync_outline();
+        self.sync_opening();
         self.refresh_zoom();
         match note {
             Some(tab) => self.render(&tab),
@@ -2265,6 +2279,48 @@ impl App {
         self.save_session_soon();
     }
 
+    /// Show the header's progress bar while the active tab is a PDF still being opened.
+    ///
+    /// The same thin bar indexing uses, for the same reason: something is being read and the
+    /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
+    /// that exists only while an open is in flight.
+    fn sync_opening(self: &Rc<Self>) {
+        let opening = self
+            .active_doc()
+            .and_then(|doc| doc.pdf().cloned())
+            .is_some_and(|pdf| pdf.opening());
+        if !opening {
+            if let Some(id) = self.opening.borrow_mut().take() {
+                id.remove();
+            }
+            // Indexing owns the bar too, and is the slower of the two: leave it alone if it is
+            // still going, and let `Reconciled` take it down.
+            if self.vault.is_none() || self.reconciled.get() {
+                self.status.set_visible(false);
+            }
+            return;
+        }
+        if self.opening.borrow().is_some() {
+            return;
+        }
+        self.status.set_visible(true);
+        self.status.set_tooltip_text(Some("Opening the document…"));
+        let id = glib::timeout_add_local(
+            PULSE,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    app.status.pulse();
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+        *self.opening.borrow_mut() = Some(id);
+    }
+
     /// The zoom readout in the header: the document zoom for a text tab, and the PDF's own for a
     /// PDF, which fits to the window rather than counting percentages.
     ///
@@ -2961,6 +3017,7 @@ fn build_window(
         reconciled: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
+        opening: RefCell::new(None),
         render: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),

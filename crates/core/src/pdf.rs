@@ -321,10 +321,33 @@ impl PdfDoc {
     }
 
     /// `(width, height)` in points.
+    /// One page's size in points, without loading the page.
+    ///
+    /// `FPDF_GetPageSizeByIndexF` reads the size out of the page tree; going through a loaded
+    /// `PdfPage` instead costs a full parse of that page's content, which for a 1 500-page
+    /// document is eleven seconds of work to learn how big the paper is.
     pub fn page_size(&self, page: usize) -> Result<(f32, f32)> {
         let _guard = lock();
-        let p = self.page(page)?;
-        Ok((p.width().value, p.height().value))
+        let rect = self
+            .doc()
+            .pages()
+            .page_size(page as PdfPageIndex)
+            .map_err(|e| anyhow!("page {page}: {e:?}"))?;
+        Ok((rect.width().value, rect.height().value))
+    }
+
+    /// Every page's size in points, in one pass and without loading a single page.
+    pub fn page_sizes(&self) -> Result<Vec<(f32, f32)>> {
+        let _guard = lock();
+        let sizes = self
+            .doc()
+            .pages()
+            .page_sizes()
+            .map_err(|e| anyhow!("page sizes: {e:?}"))?;
+        Ok(sizes
+            .into_iter()
+            .map(|rect| (rect.width().value, rect.height().value))
+            .collect())
     }
 
     /// Render one page at `scale` pixels per point.

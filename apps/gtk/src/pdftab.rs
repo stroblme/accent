@@ -74,6 +74,8 @@ pub struct PdfTab {
     future: RefCell<Vec<Anchor>>,
     /// Colours inverted against the system's choice, for a document that renders badly either way.
     inverted: Cell<bool>,
+    /// The document could not be opened, so it is not opening either.
+    failed: Cell<bool>,
     /// The zoom to restore when presentation mode ends.
     presenting: Cell<Option<PdfZoom>>,
     links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
@@ -94,6 +96,8 @@ pub struct PdfTab {
     on_zoom: Hook,
     on_page: Hook,
     on_outline: Hook,
+    /// Fired when the document's pages are known, which is when it stops being "opening".
+    on_open: Hook,
     on_matches: Hook,
     on_uri: UriHook,
 }
@@ -148,6 +152,7 @@ pub fn open(
         history: RefCell::new(Vec::new()),
         future: RefCell::new(Vec::new()),
         inverted: Cell::new(false),
+        failed: Cell::new(false),
         presenting: Cell::new(None),
         pending: Cell::new(Some(place)),
         pending_select: Cell::new(None),
@@ -161,6 +166,7 @@ pub fn open(
         on_zoom: RefCell::new(None),
         on_page: RefCell::new(None),
         on_outline: RefCell::new(None),
+        on_open: RefCell::new(None),
         on_matches: RefCell::new(None),
         on_uri: RefCell::new(None),
     });
@@ -382,6 +388,16 @@ impl PdfTab {
 
     pub fn connect_outline(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
         *self.on_outline.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Called once the document is open and its pages are known, and again after a reload.
+    pub fn connect_opened(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_open.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Whether the render thread is still opening the document.
+    pub fn opening(&self) -> bool {
+        self.view.page_count() == 0 && !self.failed.get()
     }
 
     pub fn connect_matches(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
@@ -686,8 +702,13 @@ impl PdfTab {
                     None => self.view.scroll_to(anchor),
                 }
                 self.ask(Request::Outline);
+                self.emit(&self.on_open);
             }
-            Reply::Failed(message) => self.show_status(&message),
+            Reply::Failed(message) => {
+                self.failed.set(true);
+                self.show_status(&message);
+                self.emit(&self.on_open);
+            }
             // Textures never reach here; `PdfView::deliver` keeps those.
             Reply::Tile(..) | Reply::Lowres { .. } => {}
         }
@@ -716,11 +737,12 @@ fn nearest(glyphs: &[pdf::Glyph], (x, y): (f32, f32)) -> Option<usize> {
     best.map(|(_, i)| i)
 }
 
-/// Every page's size in points.
+/// Every page's size in points, which is all the widget needs to lay the document out.
+///
+/// One pdfium call for the whole document, not one per page: asking a loaded page for its size
+/// costs a full parse of that page, and 1 554 of those is eleven seconds before anything appears.
 fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
-    (0..doc.page_count())
-        .map(|page| doc.page_size(page).unwrap_or((612.0, 792.0)))
-        .collect()
+    doc.page_sizes().unwrap_or_default()
 }
 
 /// The render thread.
