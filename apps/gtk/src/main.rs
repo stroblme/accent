@@ -4298,7 +4298,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, trash, changed) = (
+    let (toast, open, diff, trash, changed, syncing) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -4331,6 +4332,11 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         changed: Box::new(move || {
             if let Some(app) = changed.upgrade() {
                 app.on_git_changed();
+            }
+        }),
+        syncing: Box::new(move |on| {
+            if let Some(app) = syncing.upgrade() {
+                app.statusbar.set_syncing(on);
             }
         }),
     })
@@ -5479,6 +5485,13 @@ thread_local! {
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
 //
+// A handle under the pointer takes the accent colour without changing size, so it says it can be
+// dragged before it is. `box-shadow: none` is what makes it visible at all: Adwaita draws the line
+// as a 1 px inset shadow over a transparent background, and on a 1 px handle that shadow covers
+// the whole allocation, so a background colour alone would never show. The dragging rule above
+// paints 3 px, of which the shadow still covers one; the hover rule follows it, so a handle being
+// dragged is the same colour as one being aimed at and only the width changes.
+//
 // ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
 // by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
 // outline or a negative margin, was measured: it only ever reaches the side rendered before the
@@ -5504,6 +5517,8 @@ fn install_chrome_css() {
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
+             paned > separator:hover {{ box-shadow: none; \
+               background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
