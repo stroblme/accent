@@ -3695,17 +3695,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                     sidebar::Query::Fts(text) => {
                         sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
                     }
-                    sidebar::Query::Grep { re, files } => {
-                        let (mut hits, mut total) =
-                            vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
-                        // Notes first, because they are what the index can rank and count; the
-                        // rest is read from disk with whatever room is left in the list.
-                        if files {
-                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                            let (rest, more) = vault.grep_files(&re, room).unwrap_or_default();
-                            hits.extend(rest);
-                            total += more;
-                        }
+                    sidebar::Query::Grep { re } => {
+                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
                         sidebar::Answer::Grep(hits, total)
                     }
                 }

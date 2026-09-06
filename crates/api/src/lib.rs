@@ -534,43 +534,6 @@ impl Vault {
         self.searcher().grep(re, limit)
     }
 
-    /// The same exact search over the files the index stores no body for: only markdown is read
-    /// and hashed, so a `.py` or a `.toml` has nothing in the index to match against.
-    ///
-    /// Deliberately separate from [`grep`](Self::grep) rather than folded into it: this one reads
-    /// from disk on the caller's thread — the sidebar's search worker — so the index lock is
-    /// released before the first file is opened, and it stops at `limit` instead of scanning on
-    /// to a full count. The returned total therefore says how many matches were seen on the way
-    /// to filling the list, not how many the vault holds.
-    ///
-    /// Images and the archive and media containers are skipped unopened; `fs::read_text`'s NUL
-    /// sniff catches the rest. A lossily decoded file is dropped because its match offsets would
-    /// no longer point at the bytes on disk.
-    pub fn grep_files(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
-        // Collected before the first read: the guard must not be held across file I/O.
-        let paths = self.searcher().other_paths()?;
-        let (mut out, mut total) = (Vec::new(), 0usize);
-        for rel in paths {
-            if out.len() >= limit {
-                break;
-            }
-            if is_binary_name(&rel) {
-                continue;
-            }
-            let Ok(path) = self.resolve(&rel) else {
-                continue;
-            };
-            match fs::read_text(&path) {
-                Ok(fs::Read::Text(t)) if !t.lossy => {
-                    Index::matches_in(&rel, None, &t.text, re, limit, &mut out, &mut total);
-                }
-                Ok(_) => {}
-                Err(e) => tracing::debug!("grep skipped {rel}: {e}"),
-            }
-        }
-        Ok((out, total))
-    }
-
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
         self.index().tags()
     }
@@ -1079,20 +1042,6 @@ fn outside(rel: &str) -> io::Error {
     )
 }
 
-/// Archive and media containers: certainly not text, and typically the largest files in a vault,
-/// so [`Vault::grep_files`] is better off never opening them than reading megabytes to find a NUL.
-const BINARY_EXT: [&str; 10] = [
-    "zip", "gz", "xz", "zst", "tar", "mp3", "mp4", "mkv", "wav", "ogg",
-];
-
-/// Whether the name alone says a file is not worth opening as text.
-fn is_binary_name(rel: &str) -> bool {
-    markdown::is_image(rel)
-        || rel
-            .rsplit_once('.')
-            .is_some_and(|(_, e)| BINARY_EXT.contains(&e.to_ascii_lowercase().as_str()))
-}
-
 /// A directory with something in it, which is what a moved-in tree looks like.
 fn has_children(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some())
@@ -1429,8 +1378,9 @@ mod tests {
         );
     }
 
+    /// Bodies outside the notes are in the index now, so the one grep reaches them.
     #[test]
-    fn grep_files_finds_text_outside_notes() {
+    fn grep_reaches_text_outside_notes() {
         let f = Fixture::open(VaultConfig::default());
         f.write("tool.py", "import os\nprint('zorblat')\n");
         f.write("bin.dat", "\0zorblat\n");
@@ -1438,14 +1388,11 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let re = search::pattern("zorblat", Options::default()).unwrap();
-        let (hits, total) = f.vault.grep_files(&re, 10).unwrap();
+        let (hits, total) = f.vault.grep(&re, 10).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
         assert_eq!(total, 1, "the NUL byte keeps bin.dat out");
-
-        // Neither file is a note, so the indexed grep sees nothing at all.
-        assert_eq!(f.vault.grep(&re, 10).unwrap().1, 0);
     }
 
     /// Only regex mode expands `$1`; a literal replacement is written as typed.

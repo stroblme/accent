@@ -46,9 +46,8 @@ type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
 pub enum Query {
     /// Ranked full text: what a plain query with no toggle means, and the fast path.
     Fts(String),
-    /// Exact matching over bodies, one result row per match. `files` widens it past the notes
-    /// to every other text file in the vault, which are not in the index and are read from disk.
-    Grep { re: Regex, files: bool },
+    /// Exact matching over bodies, one result row per match.
+    Grep { re: Regex },
 }
 
 /// What a [`Query`] answered. The `usize` is the total match count, which the capped list cannot
@@ -728,7 +727,6 @@ fn compile(key: &Key) -> Result<Query, search::Error> {
     match key.grep {
         true => Ok(Query::Grep {
             re: compile_regex(key)?,
-            files: key.files,
         }),
         false => Ok(Query::Fts(key.text.clone())),
     }

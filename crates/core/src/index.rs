@@ -16,7 +16,16 @@ use std::time::Instant;
 use crate::search::Regex;
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
+/// Biggest non-markdown file whose text goes into the index.
+///
+/// Deliberately far stricter than [`crate::fs::MAX_TEXT`] (16 MiB), which is the cap on what a
+/// tab will *open*: opening a 15 MiB generated file is something the user asked for once, while
+/// indexing it is something the vault pays for on every reconcile, in database size and in the
+/// FTS terms every later query has to merge. Measured on `testvault/`: none of its 17 700
+/// non-note text files reach 1 MiB, so the cap costs nothing a real vault would notice. A note
+/// is never subject to it — markdown is read whatever its size.
+const MAX_INDEXED_BODY: u64 = 1024 * 1024;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 const BATCH: usize = 500;
@@ -648,11 +657,21 @@ fn upsert(
     existing_id: Option<i64>,
     stats: &mut ReconcileStats,
 ) -> Result<i64> {
-    // ponytail: only markdown is read and hashed. PDFs and binaries are cheap
-    // `(mtime, size, ino)` rows here; the `pdf` feature will add text extraction
-    // and can reuse the same hash column when it does.
-    let (hash, text) = if f.kind == FileKind::Markdown {
-        match std::fs::read(&f.canonical) {
+    // A note is read whole and hashed raw. Everything else that decodes as text under
+    // [`MAX_INDEXED_BODY`] is read through `fs::read_text`, which brings the NUL sniff, the CRLF
+    // normalisation and the `lossy` flag with it; a lossy decode is dropped because its byte
+    // offsets would no longer point at what is on disk. PDFs and binaries stay cheap
+    // `(mtime, size, ino)` rows; the `pdf` feature will add text extraction and can reuse the
+    // same hash column when it does.
+    //
+    // The two branches hash different bytes — a note's raw file, a text file's normalised text.
+    // That is safe and deliberate: a hash is only ever compared against an earlier hash of the
+    // same file by the same branch, never across kinds, so the two need not agree.
+    //
+    // The size test uses the stat the walk already took rather than letting `read_text` pull a
+    // 15 MiB file into memory only for the cap to throw it away.
+    let (hash, text) = match f.kind {
+        FileKind::Markdown => match std::fs::read(&f.canonical) {
             Ok(bytes) => {
                 stats.bytes_read += bytes.len() as u64;
                 let h = blake3::hash(&bytes);
@@ -660,9 +679,16 @@ fn upsert(
             }
             // Vanished or unreadable mid-walk: keep the stat row, drop the content.
             Err(_) => (None, None),
-        }
-    } else {
-        (None, None)
+        },
+        FileKind::Other if f.size <= MAX_INDEXED_BODY => match crate::fs::read_text(&f.canonical) {
+            Ok(crate::fs::Read::Text(t)) if !t.lossy => {
+                stats.bytes_read += t.text.len() as u64;
+                let h = blake3::hash(t.text.as_bytes());
+                (Some(h), Some(t.text))
+            }
+            _ => (None, None),
+        },
+        _ => (None, None),
     };
 
     // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
@@ -695,7 +721,13 @@ fn upsert(
         return Ok(id);
     }
 
-    let analysis = text.as_deref().map(markdown::analyze);
+    // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
+    // heading, so nothing but a note reaches the analyser; the `file_stem` fallback below is what
+    // gives every other file a title.
+    let analysis = match f.kind {
+        FileKind::Markdown => text.as_deref().map(markdown::analyze),
+        _ => None,
+    };
     let title = analysis
         .as_ref()
         .and_then(|a| a.title.clone())
@@ -735,7 +767,7 @@ fn upsert(
         stats.added += 1;
     }
 
-    if let (Some(a), Some(body)) = (analysis.as_ref(), text.as_ref()) {
+    if let Some(a) = analysis.as_ref() {
         for l in &a.links {
             tx.prepare_cached(
                 "INSERT INTO links(src_file, target, resolved_file, kind, anchor, byte_start, byte_end)
@@ -760,6 +792,8 @@ fn upsert(
             )?
             .execute(params![id, h.level as i64, h.text, h.range.start as i64])?;
         }
+    }
+    if let Some(body) = text.as_ref() {
         // Explicit delete + insert: REPLACE would only fire the FTS delete trigger
         // with recursive_triggers on.
         tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
@@ -865,16 +899,6 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The files the index knows a name for and nothing else: only markdown is read and hashed,
-    /// so these rows carry no body a query could look at. The façade greps them from disk.
-    pub fn other_paths(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
-        )?;
-        let rows = st.query_map([FileKind::Other.as_i64()], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// The `limit` most recently modified notes: what the switcher lists before the user types.
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
@@ -893,8 +917,9 @@ impl Index {
         Ok(st.query_row([rel_path], file_row).optional()?)
     }
 
-    /// Full-text search over note titles and bodies. Conflict/PDF/binary files are never in
-    /// `notes`.
+    /// Full-text search over the titles and bodies the index holds: every note, plus every other
+    /// file that decoded as text under [`MAX_INDEXED_BODY`]. Directories, PDFs, conflict copies
+    /// and binaries have no `notes` row and so can never be a hit.
     ///
     /// Ranking is "the note you named, then the notes that are about it": a title equal to the
     /// query, ignoring case, comes first, and the rest go by `bm25` with the title weighted ten
@@ -950,12 +975,13 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every hit of `re` in a note body, in `rel_path` order: at most `limit` of them, plus the
-    /// total the scan saw, so a truncated list can still say how much a Replace All would touch.
+    /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
+    /// the total the scan saw, so a truncated list can still say how much a Replace All would
+    /// touch.
     ///
-    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which notes
+    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
     /// are about this", regexes answer "where exactly does this text occur". The bodies are
-    /// already in the index, so no note is read from disk, and the statement streams them one row
+    /// already in the index, so nothing is read from disk, and the statement streams them one row
     /// at a time rather than materialising the whole vault's text.
     pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
         let mut st = self.conn.prepare_cached(GREP_SQL)?;
@@ -985,9 +1011,10 @@ impl Index {
     /// Every hit of `re` in one body, appended to `out` and counted in `total`.
     ///
     /// Lifted out of [`grep`](Self::grep) so the façade can run the same matching over files the
-    /// index holds no body for — only markdown reaches the `notes` table — and hand the sidebar
-    /// rows it cannot tell apart from a note's. It touches neither the index nor the disk: the
-    /// caller supplies the text and says where it came from.
+    /// index holds no body for — one too large for [`MAX_INDEXED_BODY`], or one under a tree the
+    /// walk never entered — and hand the sidebar rows it cannot tell apart from a note's. It
+    /// touches neither the index nor the disk: the caller supplies the text and says where it
+    /// came from.
     ///
     /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
     /// it, so a truncated list can still say how much a Replace All would touch.
@@ -1037,9 +1064,13 @@ impl Index {
 
     /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
     /// replace has to visit every file, not only the ones the sidebar had room to list.
+    ///
+    /// Markdown only, unlike [`grep`](Self::grep), which now reaches every indexed body: Replace
+    /// All is Replace in Notes, and rewriting a source file from a notes app is not what the
+    /// button offers.
     pub fn grep_paths(&self, re: &Regex) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(GREP_SQL)?;
-        let mut rows = st.query([])?;
+        let mut st = self.conn.prepare_cached(GREP_NOTES_SQL)?;
+        let mut rows = st.query([FileKind::Markdown.as_i64()])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
@@ -1123,10 +1154,17 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
-/// Every note's path, title and text, for the two regex scans. Ordered so both agree on which
-/// matches a capped list drops.
+/// Every indexed path, title and text, for the sidebar's regex scan. Ordered so a capped list
+/// and an uncapped one agree on which matches they drop.
 const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
      FROM notes n JOIN files f ON f.id = n.file_id
+     ORDER BY f.rel_path";
+
+/// [`GREP_SQL`] narrowed to markdown (`?1` is [`FileKind::Markdown`]), for the one caller that
+/// rewrites what it finds.
+const GREP_NOTES_SQL: &str = "SELECT f.rel_path, f.title, n.body
+     FROM notes n JOIN files f ON f.id = n.file_id
+     WHERE f.kind = ?1
      ORDER BY f.rel_path";
 
 /// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
@@ -1955,6 +1993,75 @@ mod tests {
             ix.file_paths().unwrap(),
             vec!["a.md", "sub/Beta.md", "c.pdf", "tool.py"]
         );
-        assert_eq!(ix.other_paths().unwrap(), vec!["tool.py"]);
+    }
+
+    /// A text file that is not a note is searchable, a huge or binary one is not, and none of
+    /// them is analysed as markdown.
+    #[test]
+    fn non_markdown_text_is_indexed_within_the_cap() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("tool.py"),
+            "# zorblat helper\nimport os  # not #atag\n",
+        )
+        .unwrap();
+        fs::write(vault.path().join("big.txt"), "zorblat\n".repeat(300_000)).unwrap();
+        fs::write(vault.path().join("bin.dat"), b"\0zorblat\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        assert!(vault.path().join("big.txt").metadata().unwrap().len() > MAX_INDEXED_BODY);
+
+        // Both query paths reach the source file with no change of their own.
+        let hits = ix.search("zorblat", 10).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["tool.py"],
+            "{hits:?}"
+        );
+        let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
+        let (matches, total) = ix.grep(&re, 10).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(matches[0].rel_path, "tool.py");
+
+        // Over the cap and binary: a stat row each, and nothing to match against.
+        let body_count = |rel: &str| -> i64 {
+            ix.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM notes n JOIN files f ON f.id = n.file_id
+                     WHERE f.rel_path = ?1",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(body_count("tool.py"), 1);
+        assert_eq!(body_count("big.txt"), 0, "over MAX_INDEXED_BODY");
+        assert_eq!(body_count("bin.dat"), 0, "a NUL byte is not text");
+        assert!(
+            ix.get_file("big.txt").unwrap().is_some(),
+            "still a file row"
+        );
+        assert!(
+            ix.get_file("bin.dat").unwrap().is_some(),
+            "still a file row"
+        );
+
+        // The markdown analyser never sees it: `#` is a comment, not a tag or a heading.
+        assert!(ix.headings("tool.py").unwrap().is_empty());
+        assert!(
+            !ix.tags().unwrap().iter().any(|(t, _)| t == "atag"),
+            "{:?}",
+            ix.tags().unwrap()
+        );
+        assert_eq!(
+            ix.get_file("tool.py").unwrap().unwrap().title.as_deref(),
+            Some("tool"),
+            "the file stem is the title fallback"
+        );
+
+        // Replace All stays notes-only: `a` is in all three bodies, only the notes come back.
+        let re = crate::search::pattern("a", crate::search::Options::default()).unwrap();
+        assert_eq!(ix.grep_paths(&re).unwrap(), vec!["a.md", "sub/Beta.md"]);
     }
 }
