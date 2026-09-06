@@ -15,15 +15,22 @@ use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+pub mod remote;
+pub mod rpc;
+pub mod ssh;
 
 use accent_core::index::{Change, Index};
 use accent_core::walk;
 use accent_core::watch::{VaultEvent, Watcher};
-use accent_core::{diff, fs, markdown, template};
+use accent_core::{diff, markdown, template};
+// The module too: a tab matches on `fs::Read`, and the façade hands one back.
+pub use accent_core::fs;
 
 pub use accent_core::config::{Config, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
-pub use accent_core::fs::{Etag, SaveError};
+pub use accent_core::fs::{Etag, Read, SaveError, Text};
 // The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
 // reach them as `accent_api::git::status(&repo)` after asking the vault which repos there are.
 pub use accent_core::git;
@@ -57,6 +64,25 @@ pub enum Event {
         original: String,
         conflict: String,
     },
+    /// Something under a repository's `.git` moved: a commit, a checkout, a stage. The git pane
+    /// refreshes on it, which is how a `git commit` typed in a shell reaches the UI.
+    GitChanged,
+    /// A remote vault is still getting ready, and this is what it is doing. Shown where the
+    /// indexing progress is shown, because to the reader it is the same wait.
+    ///
+    /// `fraction` is how far the step has got, 0 to 1, for the one step that can measure itself:
+    /// uploading the server binary, which is most of a first connection's wait. The others are
+    /// waits of unknown length, and say so with `None` rather than with a number nobody computed.
+    Connecting {
+        what: String,
+        fraction: Option<f64>,
+    },
+    /// The remote vault is answering. A local vault never sends this: it is connected from the
+    /// moment it opens.
+    Connected,
+    /// The remote vault is not answering, and why. Reads stay served from whatever the UI already
+    /// has; writes fail until [`Vault::reconnect`] succeeds.
+    Disconnected(String),
     Error(String),
 }
 
@@ -84,11 +110,600 @@ pub struct RenameReport {
     pub failed: Vec<(String, String)>,
 }
 
-/// One open vault: the index, the watcher, and the worker thread that owns both writers.
+// --------------------------------------------------------------------- vault
+
+/// One open vault, wherever it lives.
+///
+/// A window holds exactly one of these and cannot tell the two apart: every method below means
+/// the same thing whether the files are on this machine or on the other end of an ssh connection.
+/// That is the whole point of the split — the UI was written against a local vault and did not
+/// have to learn anything to work on a remote one.
+///
+/// Reads and writes are synchronous here, as they always were. A remote call is a round trip, so
+/// the desktop runs the ones that paint a list or open a document on a worker thread; the ones
+/// that follow a click and write a file stay where they are, because a save that takes a
+/// millisecond longer is not something anyone can feel.
 pub struct Vault {
+    backend: Backend,
+    /// What this vault is called in the config, the recents and the session file: the root for a
+    /// local vault, the `ssh://` address for a remote one. Never a path to open.
+    key: PathBuf,
+}
+
+// ponytail: `Local` is the big variant, so every remote `Vault` carries its footprint too. One
+// per window makes that a few hundred bytes in the whole process; box it if that ever stops being
+// true.
+#[allow(clippy::large_enum_variant)]
+enum Backend {
+    Local(Local),
+    Remote(std::sync::Arc<remote::Remote>),
+}
+
+impl Vault {
+    /// Open a vault on this machine.
+    pub fn open(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+        let (local, events) = Local::open(root, cfg)?;
+        Ok((Vault::of(Backend::Local(local)), events))
+    }
+
+    /// [`open`](Self::open) with an explicit index file, for tests and tooling.
+    pub fn open_at(root: &Path, db: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+        let (local, events) = Local::open_at(root, db, cfg)?;
+        Ok((Vault::of(Backend::Local(local)), events))
+    }
+
+    /// Open a vault on another machine, addressed as `ssh://[user@]host[:port]/path`.
+    ///
+    /// Returns before the connection exists. The window opens on the spot and the connection
+    /// reports itself through the events: [`Event::Connecting`] while it works, then
+    /// [`Event::Connected`] or [`Event::Disconnected`].
+    pub fn open_remote(url: &str, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+        let url = ssh::parse(url).map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+        let (events, event_rx) = channel::<Event>();
+        let key = PathBuf::from(url.to_string());
+        let remote = remote::Remote::open(url, cfg, events);
+        Ok((
+            Vault {
+                backend: Backend::Remote(remote),
+                key,
+            },
+            event_rx,
+        ))
+    }
+
+    fn of(backend: Backend) -> Vault {
+        let key = match &backend {
+            Backend::Local(v) => v.root().to_path_buf(),
+            Backend::Remote(r) => PathBuf::from(r.url().to_string()),
+        };
+        Vault { backend, key }
+    }
+
+    /// The vault root: an absolute path *on the machine holding the files*. Every `rel` this API
+    /// takes or returns is relative to it, and so is every path a [`Repo`] carries.
+    pub fn root(&self) -> PathBuf {
+        match &self.backend {
+            Backend::Local(v) => v.root().to_path_buf(),
+            Backend::Remote(r) => r.root(),
+        }
+    }
+
+    /// What this vault is keyed by: the root locally, the `ssh://` address remotely. The recent
+    /// list, the per-vault settings and the session file all use this, so a remote vault keeps
+    /// its own history without ever being mistaken for a directory on this machine.
+    pub fn key(&self) -> &Path {
+        &self.key
+    }
+
+    /// The remote half, for the things only a remote vault has: a shell on the host, a port
+    /// forward, an upload. `None` for a local vault, which is how the UI decides what to offer.
+    pub fn remote(&self) -> Option<&std::sync::Arc<remote::Remote>> {
+        match &self.backend {
+            Backend::Remote(r) => Some(r),
+            Backend::Local(_) => None,
+        }
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote().is_some()
+    }
+
+    /// Try the connection again after [`Event::Disconnected`]. Does nothing to a local vault.
+    pub fn reconnect(&self) {
+        if let Backend::Remote(r) = &self.backend {
+            r.reconnect();
+        }
+    }
+
+    pub fn config(&self) -> VaultConfig {
+        match &self.backend {
+            Backend::Local(v) => v.config(),
+            Backend::Remote(r) => r.config(),
+        }
+    }
+
+    pub fn set_config(&self, cfg: VaultConfig) {
+        match &self.backend {
+            Backend::Local(v) => v.set_config(cfg),
+            Backend::Remote(r) => r.set_config(cfg),
+        }
+    }
+
+    pub fn rescan(&self) {
+        match &self.backend {
+            Backend::Local(v) => v.rescan(),
+            Backend::Remote(r) => {
+                let _ = r.call::<()>("rescan", json!([]));
+            }
+        }
+    }
+
+    /// Join `rel` to the vault root, refusing anything that would land outside it.
+    ///
+    /// For a remote vault the answer is a path on the *host*, so it is what to show and what to
+    /// pass to a remote command — never something to open. Use [`fetch`](Self::fetch) for that.
+    pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
+        match &self.backend {
+            Backend::Local(v) => v.resolve(rel),
+            Backend::Remote(_) => Local::join(&self.root(), rel),
+        }
+    }
+
+    /// The session as it was left. Always this machine's: where the windows and tabs were is a
+    /// fact about the desk, not about the files.
+    pub fn session(&self) -> Session {
+        Session::load(&self.key)
+    }
+
+    pub fn save_session(&self, s: &Session) -> Result<()> {
+        s.save(&self.key)
+    }
+}
+
+/// Turn an RPC failure into the `anyhow` error every caller of the façade already handles.
+fn remote_err(e: rpc::RpcError) -> anyhow::Error {
+    anyhow::anyhow!("{}", e.message)
+}
+
+macro_rules! ask {
+    ($self:ident, $local:expr, $method:literal, $params:expr) => {
+        match &$self.backend {
+            Backend::Local(v) => $local(v),
+            Backend::Remote(r) => r.call($method, $params).map_err(remote_err),
+        }
+    };
+}
+
+// Files. Every one of these is the same operation on either machine; what differs is only where
+// the bytes are, and none of them carry any.
+impl Vault {
+    pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
+        match &self.backend {
+            Backend::Local(v) => v.read(rel),
+            Backend::Remote(r) => r
+                .call("read", json!([rel]))
+                .map_err(rpc::RpcError::io_error),
+        }
+    }
+
+    pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {
+        match &self.backend {
+            Backend::Local(v) => v.read_text(rel),
+            Backend::Remote(r) => r
+                .call("read_text", json!([rel]))
+                .map_err(rpc::RpcError::io_error),
+        }
+    }
+
+    pub fn stat(&self, rel: &str) -> io::Result<Option<Etag>> {
+        match &self.backend {
+            Backend::Local(v) => v.stat(rel),
+            Backend::Remote(r) => r
+                .call("stat", json!([rel]))
+                .map_err(rpc::RpcError::io_error),
+        }
+    }
+
+    /// Whether there is anything at `rel`. One `stat`, and the answer the tree and the open path
+    /// actually want.
+    pub fn exists(&self, rel: &str) -> bool {
+        matches!(self.stat(rel), Ok(Some(_)))
+    }
+
+    pub fn save(&self, rel: &str, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
+        match &self.backend {
+            Backend::Local(v) => v.save(rel, text, expected),
+            Backend::Remote(r) => r
+                .call("save", json!([rel, text, expected]))
+                .map_err(rpc::RpcError::save_error),
+        }
+    }
+
+    /// Delete a file or a directory. Local vaults go to the system trash through the desktop, so
+    /// this is the remote path only — permanent, and confirmed as such by the UI.
+    pub fn delete(&self, rel: &str) -> io::Result<()> {
+        match &self.backend {
+            Backend::Local(v) => v.delete(rel),
+            Backend::Remote(r) => r
+                .call("delete", json!([rel]))
+                .map_err(rpc::RpcError::io_error),
+        }
+    }
+
+    /// A path on *this* machine holding `rel`'s current bytes: the file itself when the vault is
+    /// local, a cached copy fetched over ssh when it is not. For the readers that need a real
+    /// file — the PDF viewer, an image, the preview's assets.
+    pub fn fetch(&self, rel: &str) -> io::Result<PathBuf> {
+        match &self.backend {
+            Backend::Local(v) => v.resolve(rel),
+            Backend::Remote(r) => r.fetch(rel),
+        }
+    }
+
+    /// Copy a file from this machine into the vault.
+    pub fn upload(&self, local: &Path, rel: &str) -> io::Result<()> {
+        match &self.backend {
+            Backend::Local(v) => std::fs::copy(local, v.resolve(rel)?).map(|_| ()),
+            Backend::Remote(r) => r.upload(local, rel),
+        }
+    }
+
+    /// Copy a file out of the vault to somewhere on this machine.
+    pub fn download(&self, rel: &str, dest: &Path) -> io::Result<()> {
+        match &self.backend {
+            Backend::Local(v) => std::fs::copy(v.resolve(rel)?, dest).map(|_| ()),
+            Backend::Remote(r) => r.download(rel, dest),
+        }
+    }
+
+    pub fn create_note(
+        &self,
+        rel: &str,
+        template: Option<&str>,
+    ) -> Result<(String, Option<usize>)> {
+        ask!(
+            self,
+            |v: &Local| v.create_note(rel, template),
+            "create_note",
+            json!([rel, template])
+        )
+    }
+
+    pub fn create_dir(&self, rel: &str) -> io::Result<()> {
+        match &self.backend {
+            Backend::Local(v) => v.create_dir(rel),
+            Backend::Remote(r) => r
+                .call("create_dir", json!([rel]))
+                .map_err(rpc::RpcError::io_error),
+        }
+    }
+
+    pub fn plan_rename(&self, from: &str, to: &str) -> Result<RenamePlan> {
+        ask!(
+            self,
+            |v: &Local| v.plan_rename(from, to),
+            "plan_rename",
+            json!([from, to])
+        )
+    }
+
+    pub fn rename(&self, plan: &RenamePlan, rewrite_links: bool) -> Result<RenameReport> {
+        ask!(
+            self,
+            |v: &Local| v.rename(plan, rewrite_links),
+            "rename",
+            json!([plan, rewrite_links])
+        )
+    }
+
+    /// Replace every match in every note that has one.
+    ///
+    /// The pattern crosses as what the user typed plus the three toggles, not as a compiled
+    /// regex: a `Regex` cannot be serialised, and case-insensitivity lives in the builder rather
+    /// than in the pattern string, so sending the string alone would quietly change the search.
+    pub fn replace_all(
+        &self,
+        query: &str,
+        options: Options,
+        replacement: &str,
+        literal: bool,
+    ) -> Result<ReplaceReport> {
+        match &self.backend {
+            Backend::Local(v) => {
+                v.replace_all(&search::pattern(query, options)?, replacement, literal)
+            }
+            Backend::Remote(r) => r
+                .call("replace_all", json!([query, options, replacement, literal]))
+                .map_err(remote_err),
+        }
+    }
+
+    pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
+        ask!(
+            self,
+            |v: &Local| v.adopt_conflict(original, conflict),
+            "adopt_conflict",
+            json!([original, conflict])
+        )
+    }
+
+    pub fn conflict_diff(&self, original: &str, conflict: &str) -> Result<Vec<DiffLine>> {
+        ask!(
+            self,
+            |v: &Local| v.conflict_diff(original, conflict),
+            "conflict_diff",
+            json!([original, conflict])
+        )
+    }
+
+    pub fn daily_note(&self) -> Result<(String, Option<usize>)> {
+        ask!(self, |v: &Local| v.daily_note(), "daily_note", json!([]))
+    }
+
+    pub fn templates(&self) -> Result<Vec<String>> {
+        ask!(self, |v: &Local| v.templates(), "templates", json!([]))
+    }
+}
+
+// Index reads.
+impl Vault {
+    pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
+        ask!(self, |v: &Local| v.list_dir(rel), "list_dir", json!([rel]))
+    }
+
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        ask!(
+            self,
+            |v: &Local| v.search(query, limit, include_ignored),
+            "search",
+            json!([query, limit, include_ignored])
+        )
+    }
+
+    pub fn grep(
+        &self,
+        query: &str,
+        options: Options,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<(Vec<Match>, usize)> {
+        match &self.backend {
+            Backend::Local(v) => v.grep(&search::pattern(query, options)?, limit, include_ignored),
+            Backend::Remote(r) => r
+                .call("grep", json!([query, options, limit, include_ignored]))
+                .map_err(remote_err),
+        }
+    }
+
+    pub fn grep_unindexed(
+        &self,
+        query: &str,
+        options: Options,
+        limit: usize,
+    ) -> Result<Vec<Match>> {
+        match &self.backend {
+            Backend::Local(v) => v.grep_unindexed(&search::pattern(query, options)?, limit),
+            Backend::Remote(r) => r
+                .call("grep_unindexed", json!([query, options, limit]))
+                .map_err(remote_err),
+        }
+    }
+
+    pub fn tags(&self) -> Result<Vec<(String, i64)>> {
+        ask!(self, |v: &Local| v.tags(), "tags", json!([]))
+    }
+
+    pub fn files_with_tag(&self, tag: &str) -> Result<Vec<FileRow>> {
+        ask!(
+            self,
+            |v: &Local| v.files_with_tag(tag),
+            "files_with_tag",
+            json!([tag])
+        )
+    }
+
+    pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
+        ask!(
+            self,
+            |v: &Local| v.backlinks(rel),
+            "backlinks",
+            json!([rel])
+        )
+    }
+
+    pub fn note_paths(&self) -> Result<Vec<String>> {
+        ask!(self, |v: &Local| v.note_paths(), "note_paths", json!([]))
+    }
+
+    pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |v: &Local| v.file_paths(include_ignored),
+            "file_paths",
+            json!([include_ignored])
+        )
+    }
+
+    pub fn set_git_ignored(&self, entries: &[String]) -> Result<()> {
+        ask!(
+            self,
+            |v: &Local| v.set_git_ignored(entries),
+            "set_git_ignored",
+            json!([entries])
+        )
+    }
+
+    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |v: &Local| v.recent_notes(limit),
+            "recent_notes",
+            json!([limit])
+        )
+    }
+
+    pub fn headings(&self, rel: &str) -> Result<Vec<HeadingRow>> {
+        ask!(self, |v: &Local| v.headings(rel), "headings", json!([rel]))
+    }
+
+    pub fn resolve_link(&self, target: &str) -> Result<Option<String>> {
+        ask!(
+            self,
+            |v: &Local| v.resolve_link(target),
+            "resolve_link",
+            json!([target])
+        )
+    }
+
+    pub fn conflicts(&self) -> Result<Vec<(String, String)>> {
+        ask!(self, |v: &Local| v.conflicts(), "conflicts", json!([]))
+    }
+
+    pub fn conflicts_of(&self, rel: &str) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |v: &Local| v.conflicts_of(rel),
+            "conflicts_of",
+            json!([rel])
+        )
+    }
+
+    pub fn complete_notes(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |v: &Local| v.complete_notes(prefix, limit),
+            "complete_notes",
+            json!([prefix, limit])
+        )
+    }
+
+    pub fn complete_tags(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |v: &Local| v.complete_tags(prefix, limit),
+            "complete_tags",
+            json!([prefix, limit])
+        )
+    }
+}
+
+// Git. The repositories belong to the machine the files are on, so every one of these runs there
+// — the `git` binary the user configured, with their hooks and their credential helper.
+impl Vault {
+    pub fn repos(&self) -> Vec<Repo> {
+        match &self.backend {
+            Backend::Local(v) => v.repos(),
+            Backend::Remote(r) => r.call("repos", json!([])).unwrap_or_default(),
+        }
+    }
+
+    pub fn git_status(&self, repo: &Repo) -> Result<Status> {
+        ask!(
+            self,
+            |_: &Local| git::status(repo).map_err(anyhow::Error::from),
+            "git_status",
+            json!([repo])
+        )
+    }
+
+    /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
+    /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
+    /// there is nothing in it for a remote host to do.
+    pub fn git_log(&self, repo: &Repo, skip: usize, limit: usize) -> Result<Vec<Commit>> {
+        ask!(
+            self,
+            |_: &Local| git::log(repo, skip, limit).map_err(anyhow::Error::from),
+            "git_log",
+            json!([repo, skip, limit])
+        )
+    }
+
+    pub fn git_show(&self, repo: &Repo, rev: &str, path: &str) -> Result<Option<git::Blob>> {
+        ask!(
+            self,
+            |_: &Local| git::show(repo, rev, path).map_err(anyhow::Error::from),
+            "git_show",
+            json!([repo, rev, path])
+        )
+    }
+
+    pub fn git_changed_files(&self, repo: &Repo, oid: &str) -> Result<Vec<(char, String)>> {
+        ask!(
+            self,
+            |_: &Local| git::changed_files(repo, oid).map_err(anyhow::Error::from),
+            "git_changed_files",
+            json!([repo, oid])
+        )
+    }
+
+    pub fn git_submodules(&self, repo: &Repo) -> Result<Vec<Submodule>> {
+        ask!(
+            self,
+            |_: &Local| git::submodules(repo).map_err(anyhow::Error::from),
+            "git_submodules",
+            json!([repo])
+        )
+    }
+
+    pub fn git_commit(&self, repo: &Repo, message: &str, all: bool) -> Result<String> {
+        ask!(
+            self,
+            |_: &Local| git::commit(repo, message, all).map_err(anyhow::Error::from),
+            "git_commit",
+            json!([repo, message, all])
+        )
+    }
+
+    pub fn git_sync(&self, repo: &Repo) -> Result<String> {
+        ask!(
+            self,
+            |_: &Local| git::sync(repo).map_err(anyhow::Error::from),
+            "git_sync",
+            json!([repo])
+        )
+    }
+
+    pub fn git_stage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
+        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        ask!(
+            self,
+            |_: &Local| git::stage(repo, &borrowed).map_err(anyhow::Error::from),
+            "git_stage",
+            json!([repo, paths])
+        )
+    }
+
+    pub fn git_unstage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
+        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        ask!(
+            self,
+            |_: &Local| git::unstage(repo, &borrowed).map_err(anyhow::Error::from),
+            "git_unstage",
+            json!([repo, paths])
+        )
+    }
+
+    pub fn git_discard(&self, repo: &Repo, paths: &[String]) -> Result<()> {
+        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+        ask!(
+            self,
+            |_: &Local| git::discard(repo, &borrowed).map_err(anyhow::Error::from),
+            "git_discard",
+            json!([repo, paths])
+        )
+    }
+}
+
+/// One open vault: the index, the watcher, and the worker thread that owns both writers.
+struct Local {
     root: PathBuf,
     /// The caller's connection. The mutex is not about contention (WAL readers never block):
-    /// it is what makes `Vault` `Send + Sync`, which uniffi will need in Phase 3.
+    /// it is what makes `Local` `Send + Sync`, which uniffi will need in Phase 3.
     index: Mutex<Index>,
     /// A reader of its own for the sidebar's search, which runs on a worker thread. A regex scan
     /// of every note holds its connection for as long as it takes, and the main thread's
@@ -101,15 +716,15 @@ pub struct Vault {
 
 // ---------------------------------------------------------------------- open
 
-impl Vault {
+impl Local {
     /// Open `root` with its index in the shared cache directory.
-    pub fn open(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+    fn open(root: &Path, cfg: VaultConfig) -> Result<(Local, Receiver<Event>)> {
         let db = accent_core::index::default_db_path(root);
-        Vault::open_at(root, &db, cfg)
+        Local::open_at(root, &db, cfg)
     }
 
     /// [`open`](Self::open) with an explicit index file, for tests and tooling.
-    pub fn open_at(root: &Path, db: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+    fn open_at(root: &Path, db: &Path, cfg: VaultConfig) -> Result<(Local, Receiver<Event>)> {
         // One spelling of the root for everything downstream: index paths, watcher events and
         // symlink targets are all compared against it.
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -130,6 +745,7 @@ impl Vault {
             watcher: None,
             symlinks: Vec::new(),
             seen_conflicts: BTreeSet::new(),
+            git_dirs: Vec::new(),
         };
         let handle = std::thread::Builder::new()
             .name("accent-vault".to_string())
@@ -137,7 +753,7 @@ impl Vault {
             .context("spawning the vault worker")?;
 
         Ok((
-            Vault {
+            Local {
                 root,
                 index: Mutex::new(index),
                 search: Mutex::new(search),
@@ -176,7 +792,13 @@ impl Vault {
     /// directories in on purpose, so resolving would reject the very paths the walk indexed and
     /// a note reached through a directory symlink has to stay openable.
     pub fn resolve(&self, rel: &str) -> io::Result<PathBuf> {
-        let mut out = self.root.clone();
+        Local::join(&self.root, rel)
+    }
+
+    /// [`resolve`](Self::resolve) against any root, so a remote vault can do the same arithmetic
+    /// with the root the server reported.
+    pub fn join(root: &Path, rel: &str) -> io::Result<PathBuf> {
+        let mut out = root.to_path_buf();
         for part in Path::new(rel).components() {
             match part {
                 Component::Normal(name) => out.push(name),
@@ -184,7 +806,7 @@ impl Vault {
                 Component::ParentDir => {
                     // `..` may walk back down to the root, never past it.
                     out.pop();
-                    if !out.starts_with(&self.root) {
+                    if !out.starts_with(root) {
                         return Err(outside(rel));
                     }
                 }
@@ -216,7 +838,7 @@ impl Vault {
     }
 }
 
-impl Drop for Vault {
+impl Drop for Local {
     /// Stop the worker before the vault goes away, so no thread outlives the window that opened it.
     ///
     /// ponytail: the join waits for whatever the worker is doing, and a cold reconcile of a large
@@ -231,7 +853,7 @@ impl Drop for Vault {
 
 // --------------------------------------------------------------------- files
 
-impl Vault {
+impl Local {
     pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
         fs::read_note(&self.resolve(rel)?)
     }
@@ -249,6 +871,41 @@ impl Vault {
             own: true,
         });
         Ok(etag)
+    }
+
+    /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
+    /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
+    pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {
+        fs::read_text(&self.resolve(rel)?)
+    }
+
+    /// The file's etag, or `None` when there is no file there. One `stat`, which is how a tab
+    /// asks "did this change under me" and how the app asks "does this path exist".
+    pub fn stat(&self, rel: &str) -> io::Result<Option<Etag>> {
+        match Etag::of(&self.resolve(rel)?) {
+            Ok(etag) => Ok(Some(etag)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete a file or a whole directory, permanently.
+    ///
+    /// The desktop trashes through `gio` instead and never calls this; it exists for a vault on
+    /// another machine, where there is no session bus to ask and no trash to ask it about. The
+    /// UI is what makes that difference visible, by confirming the way it already confirms a
+    /// delete the trash could not take.
+    pub fn delete(&self, rel: &str) -> io::Result<()> {
+        let path = self.resolve(rel)?;
+        match path.is_dir() {
+            true => std::fs::remove_dir_all(&path)?,
+            false => std::fs::remove_file(&path)?,
+        }
+        self.post(Msg::Update {
+            rel: rel.to_string(),
+            own: true,
+        });
+        Ok(())
     }
 
     /// Create a note, optionally from a template. Returns the final path, which may have gained
@@ -521,7 +1178,7 @@ impl Vault {
 
 // -------------------------------------------------------------- index reads
 
-impl Vault {
+impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
     /// costs what it shows.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
@@ -701,19 +1358,11 @@ impl Vault {
             .take(limit)
             .collect())
     }
-
-    pub fn session(&self) -> Session {
-        Session::load(&self.root)
-    }
-
-    pub fn save_session(&self, s: &Session) -> Result<()> {
-        s.save(&self.root)
-    }
 }
 
 // ----------------------------------------------------------------------- git
 
-impl Vault {
+impl Local {
     /// The repositories the vault touches: the one holding the root, plus every indexed directory
     /// carrying a `.git` entry. Runs on the caller's thread, which is never the main one.
     ///
@@ -725,7 +1374,14 @@ impl Vault {
             tracing::debug!("listing vault directories for git discovery: {e}");
             Vec::new()
         });
-        git::discover(&self.root, &dirs)
+        let repos = git::discover(&self.root, &dirs);
+        // The watcher learns the repositories from here rather than finding them itself: this is
+        // the only place that knows them, it already runs off the main thread, and the git pane
+        // calls it whenever the set could have changed.
+        self.post(Msg::WatchGit(
+            repos.iter().map(|r| r.git_dir.clone()).collect(),
+        ));
+        repos
     }
 }
 
@@ -734,7 +1390,13 @@ impl Vault {
 /// The worker's inbox. The watcher pushes `Fs`, the public API pushes the rest.
 enum Msg {
     Fs(VaultEvent),
-    Update { rel: String, own: bool },
+    Update {
+        rel: String,
+        own: bool,
+    },
+    /// The git directories to watch, as `repos()` last found them. The walk hard-skips `.git`,
+    /// so these are never in the index's directory list and the watcher has to be told.
+    WatchGit(Vec<PathBuf>),
     Rescan,
     Shutdown,
 }
@@ -753,6 +1415,9 @@ struct Worker {
     symlinks: Vec<(PathBuf, String)>,
     /// Conflict copies the UI has already been offered, so a rescan never repeats one.
     seen_conflicts: BTreeSet<String>,
+    /// Every watched repository's git directory, absolute. A change under one of these is news
+    /// for the git pane and nothing else: `.git` is not indexed and must never be.
+    git_dirs: Vec<PathBuf>,
 }
 
 /// What one batch has accumulated: the directories whose children changed, the paths it took out
@@ -792,6 +1457,24 @@ impl Worker {
     }
 
     fn process(&mut self, batch: Vec<Msg>) {
+        // Git first, and before anything else looks at these paths. A `.git` directory is full of
+        // children, so `needs_rescan` would read a commit as a whole tree moved in and walk the
+        // vault; and `rel` cannot place a submodule's git directory, which lives outside the
+        // vault entirely. Taking them out here leaves the rest of the worker exactly as it was.
+        let (git, batch): (Vec<Msg>, Vec<Msg>) = batch
+            .into_iter()
+            .partition(|m| matches!(m, Msg::Fs(VaultEvent::Git(_))));
+        if !git.is_empty() {
+            self.emit(Event::GitChanged);
+        }
+        for msg in &batch {
+            if let Msg::WatchGit(dirs) = msg
+                && *dirs != self.git_dirs
+            {
+                self.git_dirs = dirs.clone();
+                self.rebuild_watcher();
+            }
+        }
         if batch.iter().any(|m| self.needs_rescan(m)) {
             // The walk replaces the index wholesale, but the moves in this batch are still news:
             // a tab open on a path that was renamed under it has to follow.
@@ -808,7 +1491,7 @@ impl Worker {
         let mut batched = Batch::default();
         for msg in batch {
             match msg {
-                Msg::Rescan | Msg::Shutdown => {}
+                Msg::Rescan | Msg::Shutdown | Msg::WatchGit(_) => {}
                 Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
             }
@@ -889,10 +1572,17 @@ impl Worker {
         symlinks.sort_by_key(|(target, _)| std::cmp::Reverse(target.as_os_str().len()));
         // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
         // must not come back in through a recursive watch on the root.
-        let dirs = self.index.dirs(&self.root).unwrap_or_else(|e| {
+        let mut dirs = self.index.dirs(&self.root).unwrap_or_else(|e| {
             tracing::warn!("listing the directories to watch: {e:#}");
             Vec::new()
         });
+        // A repository's own directory and the branch tips inside it. Two watches per repo is
+        // what tells the git pane a commit happened in a terminal; `notify` refuses a path that
+        // does not exist, so a repository removed under us costs a warning, not the watch set.
+        for git_dir in &self.git_dirs {
+            dirs.push(git_dir.clone());
+            dirs.push(git_dir.join("refs/heads"));
+        }
 
         let tx = self.tx.clone();
         // Drop the old watch set first: two registrations on one tree would double every event.
@@ -910,8 +1600,9 @@ impl Worker {
 
     fn apply(&mut self, ev: VaultEvent, b: &mut Batch) {
         match ev {
-            // Handled in `needs_rescan` before the batch is walked.
-            VaultEvent::Rescan => {}
+            // Both handled before the batch is walked: a rescan in `needs_rescan`, a git change
+            // in the partition at the top of `process`.
+            VaultEvent::Rescan | VaultEvent::Git(_) => {}
             VaultEvent::Changed(p) => {
                 if let Some(rel) = self.rel(&p) {
                     self.update(&rel, false, b);
@@ -1451,10 +2142,10 @@ mod tests {
         f.vault.rescan();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let re = search::pattern("colour", Options::default()).unwrap();
-        assert_eq!(f.vault.grep(&re, 10, false).unwrap().1, 3);
+        let plain = Options::default();
+        assert_eq!(f.vault.grep("colour", plain, 10, false).unwrap().1, 3);
 
-        let report = f.vault.replace_all(&re, "color", true).unwrap();
+        let report = f.vault.replace_all("colour", plain, "color", true).unwrap();
         assert_eq!(report.rewritten, ["a.md", "sub/b.md"]);
         assert_eq!(report.matches, 3);
         assert!(report.failed.is_empty());
@@ -1463,7 +2154,10 @@ mod tests {
         assert_eq!(f.read("c.md"), "nothing here\n");
 
         assert!(
-            poll_until(|| f.vault.grep(&re, 10, false).unwrap().1 == 0, BUDGET),
+            poll_until(
+                || f.vault.grep("colour", plain, 10, false).unwrap().1 == 0,
+                BUDGET
+            ),
             "the rewrites must reach the index without a rescan"
         );
     }
@@ -1479,11 +2173,11 @@ mod tests {
         f.vault.rescan();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let re = search::pattern("zorblat", Options::default()).unwrap();
+        let plain = Options::default();
         // The index never walked node_modules, so its own grep cannot see the dependency.
-        assert_eq!(f.vault.grep(&re, 10, true).unwrap().1, 1);
+        assert_eq!(f.vault.grep("zorblat", plain, 10, true).unwrap().1, 1);
 
-        let hits = f.vault.grep_unindexed(&re, 10).unwrap();
+        let hits = f.vault.grep_unindexed("zorblat", plain, 10).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "node_modules/dep.js");
         assert!(
@@ -1501,8 +2195,10 @@ mod tests {
         f.vault.rescan();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let re = search::pattern("zorblat", Options::default()).unwrap();
-        let (hits, total) = f.vault.grep(&re, 10, false).unwrap();
+        let (hits, total) = f
+            .vault
+            .grep("zorblat", Options::default(), 10, false)
+            .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
@@ -1521,12 +2217,12 @@ mod tests {
         f.vault.rescan();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let re = search::pattern("zorblat", Options::default()).unwrap();
-        let (hits, total) = f.vault.grep(&re, 10, false).unwrap();
+        let plain = Options::default();
+        let (hits, total) = f.vault.grep("zorblat", plain, 10, false).unwrap();
         assert_eq!(hits.len(), 3, "the list shows both files: {hits:?}");
         assert_eq!(total, 1, "only the note's match is a rewrite");
         // And that is exactly what the rewrite then visits.
-        let report = f.vault.replace_all(&re, "zzz", true).unwrap();
+        let report = f.vault.replace_all("zorblat", plain, "zzz", true).unwrap();
         assert_eq!(report.rewritten, vec!["a.md".to_string()]);
         assert_eq!(report.matches, 1);
         assert_eq!(f.read("tool.py"), "zorblat\nzorblat again\n");
@@ -1544,8 +2240,9 @@ mod tests {
             regex: true,
             ..Options::default()
         };
-        let re = search::pattern(r"hello (\w+)", opts).unwrap();
-        f.vault.replace_all(&re, "bye $1", false).unwrap();
+        f.vault
+            .replace_all(r"hello (\w+)", opts, "bye $1", false)
+            .unwrap();
         assert_eq!(f.read("a.md"), "bye world\n");
     }
 
@@ -1968,5 +2665,51 @@ mod tests {
         );
         assert_eq!(repos[0].root, root);
         assert_eq!(repos[1].root, root.join("sub"));
+    }
+
+    /// A commit made anywhere but in the app — a shell, another editor, a script — has to reach
+    /// the git pane, and `.git` is the one tree the walk deliberately never enters. The watcher
+    /// takes the repositories from `repos()` and reports them as their own kind of event, so a
+    /// commit never looks like a hundred files appearing in the vault.
+    #[test]
+    fn a_commit_outside_the_app_reports_as_a_git_change() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let f = Fixture::open(VaultConfig::default());
+        let root = f.vault.root().to_path_buf();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        f.write("a.md", "one\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        // Asking for the repositories is what puts `.git` in the watch set.
+        assert_eq!(f.vault.repos().len(), 1);
+        git(&["add", "a.md"]);
+        git(&["commit", "-qm", "one"]);
+
+        assert!(
+            f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
+            "a commit has to reach the pane"
+        );
     }
 }

@@ -43,14 +43,29 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
         || rel.rsplit('/').next().is_some_and(is_sync_conflict)
 }
 
-/// Bring `store` in step with the direct children of `prefix`. `list_dir` already returns
-/// directories first, then names case-insensitively.
+/// Bring `store` in step with the direct children of `prefix`.
+///
+/// The listing is asked for on a worker thread and spliced in when it lands, so the store this
+/// returns to is empty for a frame or two. That is what lets a vault on another machine expand a
+/// directory without the click waiting for a round trip; on a local vault the index answers in
+/// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
+/// names case-insensitively.
 pub fn fill(store: &gio::ListStore, vault: &Arc<Vault>, prefix: &str) {
-    let rows = match vault.list_dir(prefix) {
-        Ok(rows) => rows,
-        // Leaving the rows alone beats blanking a directory the index simply could not answer for.
-        Err(e) => return tracing::warn!(dir = prefix, "listing the directory failed: {e:#}"),
-    };
+    let (store, vault, dir) = (store.clone(), vault.clone(), prefix.to_string());
+    glib::spawn_future_local(async move {
+        let listed = gio::spawn_blocking(move || vault.list_dir(&dir)).await;
+        match listed {
+            Ok(Ok(rows)) => splice(&store, rows),
+            // Leaving the rows alone beats blanking a directory the index simply could not answer
+            // for — or, on a remote vault, one the connection could not reach.
+            Ok(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
+            Err(_) => tracing::warn!("the tree worker panicked"),
+        }
+    });
+}
+
+/// The rows the listing produced, against the ones the store already holds.
+fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>) {
     let items: Vec<String> = rows
         .into_iter()
         .filter(|r| !hidden(r.kind, &r.rel_path))
@@ -179,8 +194,9 @@ impl Tree {
         };
         for (dir, store) in stores {
             // A directory that is gone keeps no model: a same-named one created later must be
-            // listed afresh instead of re-expanding into the files this one used to hold.
-            if !dir.is_empty() && !self.vault.root().join(dir).is_dir() {
+            // listed afresh instead of re-expanding into the files this one used to hold. Asked
+            // of the index rather than of the disk, which on a remote vault is not here at all.
+            if !dir.is_empty() && !self.vault.exists(dir) {
                 self.cache.borrow_mut().remove(dir);
                 continue;
             }
@@ -309,7 +325,7 @@ pub fn build(
 
     // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
     // window is open, and the label is only ever a prefix of a tooltip.
-    let root_label = crate::fileops::display_path(vault.root(), "");
+    let root_label = crate::fileops::display_path(&vault.root(), "");
     // Shared, because `setup` runs once per recycled row widget and both ends of every drag
     // report through the same closure.
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);

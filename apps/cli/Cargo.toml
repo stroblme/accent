@@ -16,3 +16,10 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# The opt-in remote test drives the real backend.
+accent-api.workspace = true
+# The serve test speaks the protocol by hand, which is the point: it checks the wire, not our
+# own client.
+serde_json.workspace = true

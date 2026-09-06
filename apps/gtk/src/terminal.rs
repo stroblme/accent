@@ -20,7 +20,7 @@
 //! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
 //! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -102,7 +102,21 @@ pub fn has_focus(window: &adw::ApplicationWindow) -> bool {
 }
 
 /// Open a shell in `cwd` as a tab of `tabs`.
-pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
+/// What a shell tab runs.
+///
+/// A remote vault's shell belongs on the remote: the files are there, the repository is there,
+/// and a build the user starts in it has to see them. It is an ordinary tab either way — the
+/// same split, the same drag, the same chords — because it is the same widget with a different
+/// argument vector.
+pub enum Shell {
+    /// The user's own shell, in a directory on this machine.
+    Local(PathBuf),
+    /// An interactive login on the host, landing in the vault root. Built by
+    /// `accent_api::ssh::shell`, which is also what carries the ControlPath.
+    Remote { argv: Vec<String>, host: String },
+}
+
+pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     let view = vte4::Terminal::new();
     view.set_scrollback_lines(SCROLLBACK);
     view.set_vexpand(true);
@@ -126,7 +140,13 @@ pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
     view.connect_map(paint);
 
     let page = tabs.append(&scroller);
-    page.set_title("Terminal");
+    page.set_title(
+        match shell {
+            Shell::Local(_) => "Terminal".to_string(),
+            Shell::Remote { host, .. } => host.clone(),
+        }
+        .as_str(),
+    );
     page.set_icon(Some(&gio::ThemedIcon::new("utilities-terminal-symbolic")));
     // A tab appended to a visible pane is mapped already, so the signal above has been and gone.
     if view.is_mapped() {
@@ -144,12 +164,17 @@ pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
         }
     ));
 
-    let shell = shell();
-    let named = shell.clone();
+    let (cwd, argv) = match shell {
+        Shell::Local(cwd) => (Some(cwd.clone()), vec![user_shell()]),
+        // ssh decides where it lands, and a cwd on this machine means nothing to it.
+        Shell::Remote { argv, .. } => (None, argv.clone()),
+    };
+    let named = argv.join(" ");
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
     view.spawn_async(
         vte4::PtyFlags::DEFAULT,
-        cwd.to_str(),
-        &[&shell],
+        cwd.as_deref().and_then(Path::to_str),
+        &args,
         &[],
         glib::SpawnFlags::DEFAULT,
         || {},
@@ -396,7 +421,7 @@ fn monospace() -> pango::FontDescription {
 
 /// ponytail: `$SHELL` or `/bin/sh`. vte4 0.10 does not bind `vte_get_user_shell`, which is what
 /// would read the password database when the variable is unset.
-fn shell() -> String {
+fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 

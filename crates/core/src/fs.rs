@@ -49,7 +49,7 @@ pub fn read_note(path: &Path) -> io::Result<(String, Etag)> {
 pub const MAX_TEXT: u64 = 16 * 1024 * 1024;
 
 /// What a file turned out to be when we tried to open it as text.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Read {
     Text(Text),
     Binary { size: u64 },
@@ -57,7 +57,7 @@ pub enum Read {
 }
 
 /// A file that decoded as text, together with what had to be changed to get there.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Text {
     pub text: String,
     pub etag: Etag,
