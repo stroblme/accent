@@ -257,10 +257,11 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
-        // The vault worker is no longer the only writer: [`Index::set_git_ignored`] writes from
+        // The vault worker is no longer the only writer: [`Index::set_excluded`] writes from
         // whichever thread the git refresh landed on. Without a timeout, a refresh arriving
         // during a reconcile would fail with SQLITE_BUSY and the exclusion would silently not
-        // apply until the next one.
+        // apply until the next one. This alone is not enough: see [`Index::write_tx`] for the
+        // transaction shape without which the handler this installs is never called.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // [`search`] cuts its snippet inside the query, so the folding it shares with the marking
         // has to be reachable from SQL. Deterministic and innocuous: it is a pure function of its
@@ -299,6 +300,22 @@ impl Index {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Every write transaction in this file, and `BEGIN IMMEDIATE` rather than rusqlite's default
+    /// `BEGIN DEFERRED` because the busy timeout above only works this way.
+    ///
+    /// A deferred transaction takes its write lock on the first statement that needs one. When
+    /// that statement follows a read — [`upsert`] looks up `content_hash` before it writes — the
+    /// transaction is already holding a read snapshot, and promoting it while another connection
+    /// holds the write lock is a deadlock SQLite refuses to wait on: it returns `SQLITE_BUSY`
+    /// straight away and never calls the busy handler. That is the "database is locked" the
+    /// indexer reported on every save while the git refresh wrote the ignore set on another
+    /// thread. Taking the lock up front makes the same collision a wait of a few microseconds.
+    fn write_tx(&mut self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
     }
 }
 
@@ -391,7 +408,7 @@ impl Index {
         let total = jobs.len();
 
         if !removed.is_empty() {
-            let tx = self.conn.transaction()?;
+            let tx = self.write_tx()?;
             for id in &removed {
                 delete_file_rows(&tx, *id)?;
             }
@@ -400,7 +417,7 @@ impl Index {
 
         let mut done = 0usize;
         for chunk in jobs.chunks(BATCH) {
-            let tx = self.conn.transaction()?;
+            let tx = self.write_tx()?;
             for job in chunk {
                 upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
                 done += 1;
@@ -415,7 +432,7 @@ impl Index {
 
         if dirty {
             // Aliases are a handful of rows; rewriting them beats diffing them.
-            let tx = self.conn.transaction()?;
+            let tx = self.write_tx()?;
             tx.execute("DELETE FROM aliases", [])?;
             for a in &scan.aliases {
                 tx.prepare_cached(
@@ -472,7 +489,7 @@ impl Index {
             rows.collect::<rusqlite::Result<_>>()?
         };
 
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         tx.execute("UPDATE links SET resolved_file = NULL", [])?;
         let mut resolved = 0usize;
         {
@@ -488,21 +505,23 @@ impl Index {
         Ok(resolved)
     }
 
-    /// Record what git ignores, so a query can leave it out.
+    /// Record what search leaves out, so a query can leave it out.
     ///
-    /// `entries` is git's own answer (`Panel::ignored`, vault-relative): a wholly ignored
-    /// directory arrives as **one** entry with a trailing slash rather than a row per file inside
-    /// it, which is why matching the entry and its subtree is enough and why this is tens of
-    /// statements rather than thousands. The prefix test is a range on the `rel_path` unique
-    /// index, the same shape [`remove_file_batched`](Self::remove_file_batched) uses, because a
-    /// `LIKE` would fall back to a full scan under SQLite's default case-insensitive `LIKE`.
+    /// `entries` is git's own answer (`Panel::ignored`, vault-relative) plus whatever the user
+    /// named in `[search] exclude`: one set, because they answer the same question and a query
+    /// has one column to read. A wholly ignored directory arrives from git as **one** entry with
+    /// a trailing slash rather than a row per file inside it, which is why matching the entry and
+    /// its subtree is enough and why this is tens of statements rather than thousands. The prefix
+    /// test is a range on the `rel_path` unique index, the same shape
+    /// [`remove_file_batched`](Self::remove_file_batched) uses, because a `LIKE` would fall back
+    /// to a full scan under SQLite's default case-insensitive `LIKE`.
     ///
-    /// One transaction, and the whole column is cleared first: a path that stopped being ignored
+    /// One transaction, and the whole column is cleared first: a path that stopped being excluded
     /// has no entry to carry the news, so the set is replaced rather than merged. An empty
-    /// `entries` therefore un-ignores everything, which is exactly right for a vault whose
+    /// `entries` therefore un-excludes everything, which is exactly right for a vault whose
     /// repository went away.
-    pub fn set_git_ignored(&mut self, entries: &[String]) -> Result<()> {
-        let tx = self.conn.transaction()?;
+    pub fn set_excluded(&mut self, entries: &[String]) -> Result<()> {
+        let tx = self.write_tx()?;
         tx.execute(
             "UPDATE files SET git_ignored = 0 WHERE git_ignored <> 0",
             [],
@@ -575,7 +594,7 @@ impl Index {
         }
 
         let existing_id = existing.map(|(id, ..)| id);
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         upsert(&tx, &meta, existing_id, &mut ReconcileStats::default())?;
         tx.commit()?;
         Ok(match existing_id {
@@ -613,7 +632,7 @@ impl Index {
             return Ok(0);
         }
 
-        let tx = self.conn.transaction()?;
+        let tx = self.write_tx()?;
         for id in &ids {
             delete_file_rows(&tx, *id)?;
         }
@@ -1000,10 +1019,17 @@ impl Index {
     /// times the body. bm25 is negative in SQLite, so ascending is best-first, and the weights
     /// follow the `notes_fts` column order (body, title).
     ///
-    /// Weight 10 was measured on the 3.6k notes of `testvault/`: searching a note's own title
-    /// puts that note first for 47 of 60 sampled notes, against 2 of 60 with the title
-    /// unweighted. Raising it to 20 buys one more note and costs a lot: three quarters of an
-    /// ordinary body search's top ten then come from a title word rather than the body.
+    /// Weight 10, re-derived on the corpus it now ranks — 21 360 documents, 3 653 notes and
+    /// 17 707 other text bodies. Sweeping 0/1/2/5/10/20/40 over 60 sampled notes and six
+    /// ordinary queries: an *exact* title query puts its note first 59 times in 60 at every
+    /// weight, including 0, because the equality clause above decides that and not bm25. What
+    /// the weight still buys is a *partial* title — the note's title with its first word
+    /// dropped — and there it saturates at 10: the note is in the top ten 5, 13, 16, 23, 26,
+    /// 26, 27 times as the weight rises, so 20 buys nothing and 40 buys one. The cost keeps
+    /// rising past it: 56 of the six top tens' 60 rows already come from a title word at 10,
+    /// and all 60 at 20. Not one non-markdown document enters a top ten at any weight, so the
+    /// 17 707 that joined the corpus do not bear on this at all.
+    ///
     /// The snippet is cut here rather than by FTS5's `snippet()`, and the ranking runs in a
     /// subquery so only the rows that survive it are quoted at all. Both are about the same
     /// measurement: on the 3.6k-note `testvault/` a one-character query took 2.4 s and a
@@ -1458,6 +1484,44 @@ mod tests {
 
     fn open(db: &tempfile::TempDir) -> Index {
         Index::open(&db.path().join("i.db")).unwrap()
+    }
+
+    /// The `!BUG` this file's `write_tx` exists for: an index write that collides with another
+    /// connection's must **wait** for it, not fail. Before `BEGIN IMMEDIATE` this returned
+    /// `SQLITE_BUSY` in under 2 ms, because `upsert` reads `content_hash` before it writes and
+    /// SQLite will not let a busy handler block a read-to-write promotion.
+    #[test]
+    fn a_write_waits_for_another_writer_instead_of_reporting_a_locked_database() {
+        let (vault, db) = fixture();
+        let path = db.path().join("i.db");
+        let mut ix = Index::open(&path).unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // Another connection holds the write lock for a while, as the git refresh does when it
+        // records the ignore set on its own thread.
+        let held = std::time::Duration::from_millis(300);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let other = std::thread::spawn(move || {
+            let mut ix = Index::open(&path).unwrap();
+            let tx = ix.write_tx().unwrap();
+            tx.execute("UPDATE files SET git_ignored = 0", []).unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(held);
+            tx.commit().unwrap();
+        });
+        ready_rx.recv().unwrap();
+
+        fs::write(vault.path().join("a.md"), "# Alpha\nrewritten\n").unwrap();
+        let t = Instant::now();
+        let change = ix.update_file_batched(vault.path(), "a.md");
+        let waited = t.elapsed();
+        other.join().unwrap();
+
+        assert!(change.is_ok(), "{change:?}");
+        assert!(
+            waited >= held / 2,
+            "it did not wait for the other writer: {waited:?}"
+        );
     }
 
     #[test]
@@ -2264,7 +2328,7 @@ mod tests {
         let (vault, db) = ignore_fixture();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
-        ix.set_git_ignored(&["paper/main.aux".to_string()]).unwrap();
+        ix.set_excluded(&["paper/main.aux".to_string()]).unwrap();
 
         assert_eq!(hits(&ix, false), ["notes/a.md", "paper/main.tex"]);
         assert_eq!(
@@ -2295,7 +2359,7 @@ mod tests {
         fs::write(vault.path().join("notes/b.tex"), "zorblat\n").unwrap();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
-        ix.set_git_ignored(&["notes/".to_string()]).unwrap();
+        ix.set_excluded(&["notes/".to_string()]).unwrap();
 
         assert_eq!(
             hits(&ix, false),
@@ -2313,10 +2377,10 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         assert_eq!(hits(&ix, false).len(), 3);
-        ix.set_git_ignored(&["paper/main.aux".to_string()]).unwrap();
+        ix.set_excluded(&["paper/main.aux".to_string()]).unwrap();
         assert_eq!(hits(&ix, false).len(), 2);
         // The set is replaced, not merged: a file that stopped being ignored comes back.
-        ix.set_git_ignored(&[]).unwrap();
+        ix.set_excluded(&[]).unwrap();
         assert_eq!(hits(&ix, false).len(), 3);
     }
 

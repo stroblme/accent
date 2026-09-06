@@ -28,6 +28,15 @@ const FIND_OPTIONS: webkit6::FindOptions =
 /// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
 const FIND_LIMIT: u32 = 500;
 
+/// Tracing target for what the page's own JavaScript says, so
+/// `RUST_LOG=accent::preview=debug accent <vault>` gives the preview's console and nothing else.
+/// Its own target for the reason `accent::saves` has one: the answer is a handful of lines.
+const PREVIEW: &str = "accent::preview";
+
+/// The name the page posts its console through; spelled again inside [`CONSOLE_SCRIPT`], which is
+/// a JavaScript literal and cannot interpolate a Rust constant.
+const LOG_HANDLER: &str = "accentLog";
+
 /// WebKit content-blocker rules: refuse every load, then re-allow our own scheme. `decide_policy`
 /// only sees navigations, so without this a note could still reach the network through a
 /// subresource — an `<img>` tracking pixel in raw HTML being the obvious one.
@@ -46,8 +55,34 @@ window.__accentScrollToLine = function (line) {
     if (parseInt(marks[i].getAttribute('data-line'), 10) > line) { break; }
     found = marks[i];
   }
-  if (found) { (found.parentElement || found).scrollIntoView({ block: 'start' }); }
+  // At or above the first block *is* the top of the document, and scrolling that block into view
+  // is not the same thing: it takes the page's own top padding and the block's margin off screen,
+  // so a note whose cursor is on line 1 would open already scrolled past its own beginning.
+  if (!found || found === marks[0]) { return window.scrollTo(0, 0); }
+  (found.parentElement || found).scrollIntoView({ block: 'start' });
 };
+"#;
+
+/// Relay the page's own errors back into this process.
+///
+/// WebKit's `enable-write-console-messages-to-stdout` writes on the *web process's* stdout, which
+/// a normal session never sees, so a script message handler is the only route home. `console.error`
+/// is wrapped rather than replaced, so anything watching from a web inspector still sees it.
+const CONSOLE_SCRIPT: &str = r#"
+(function () {
+  var post = function (kind, text) {
+    try { window.webkit.messageHandlers.accentLog.postMessage(kind + '\t' + text); } catch (e) {}
+  };
+  window.onerror = function (msg, src, line, col) { post('error', msg + ' (' + line + ':' + col + ')'); };
+  window.addEventListener('unhandledrejection', function (e) { post('error', 'unhandled rejection: ' + e.reason); });
+  ['error', 'warn'].forEach(function (level) {
+    var inner = console[level];
+    console[level] = function () {
+      post(level, Array.prototype.join.call(arguments, ' '));
+      inner.apply(console, arguments);
+    };
+  });
+})();
 "#;
 
 /// Mermaid plus the bootstrap that draws the diagrams, injected only into a note that has one.
@@ -107,6 +142,15 @@ struct Inner {
     /// What the find bar is looking for, kept because every re-render reloads the page and
     /// WebKit's find dies with it.
     query: RefCell<Option<String>>,
+    /// Matches WebKit last counted, and which of them the reader is on (1-based, 0 for none).
+    /// `WebKitFindController` reports a total and never a position, so the position is ours to
+    /// keep: [`Inner::refind`] starts every fresh search from the top, and the two step methods
+    /// walk it the same way WebKit walks the page.
+    total: Cell<u32>,
+    at: Cell<u32>,
+    /// Where the readout goes, called with the label rather than the numbers so the bar does not
+    /// have to know how a preview counts.
+    report: RefCell<Option<Report>>,
 }
 
 impl Inner {
@@ -116,7 +160,7 @@ impl Inner {
             None,
             None,
             gio::Cancellable::NONE,
-            |_| (),
+            report_js,
         );
     }
 
@@ -132,9 +176,39 @@ impl Inner {
         ) else {
             return;
         };
+        // WebKit searches forward from whatever is selected, so a query changed after the reader
+        // has stepped a few matches would land somewhere in the middle and there would be no
+        // saying where. Dropping the selection first makes every fresh search land on match one,
+        // which is what lets the counter say "1 of 12" and mean it. Fire and forget: the script
+        // and the find both go to the web process over the same connection, in this order.
+        self.view.evaluate_javascript(
+            "window.getSelection().removeAllRanges()",
+            None,
+            None,
+            gio::Cancellable::NONE,
+            report_js,
+        );
         // Counting first is the order WebKit's own MiniBrowser uses; `search` reports no total.
         finder.count_matches(text, FIND_OPTIONS.bits(), FIND_LIMIT);
         finder.search(text, FIND_OPTIONS.bits(), FIND_LIMIT);
+    }
+
+    /// Move the counter one match on and say so.
+    fn step(&self, forward: bool) {
+        self.at
+            .set(stepped(self.at.get(), self.total.get(), forward));
+        self.say();
+    }
+
+    fn say(&self) {
+        let label = match self.query.borrow().as_deref() {
+            Some(text) if !text.is_empty() => matches_label(self.at.get(), self.total.get()),
+            // Nothing asked is not "No results"; the editor's readout is blank there too.
+            _ => String::new(),
+        };
+        if let Some(report) = self.report.borrow().as_ref() {
+            report(&label);
+        }
     }
 
     /// Add or drop the mermaid script. It is 3.4 MB of JavaScript to parse, so a note without a
@@ -161,10 +235,47 @@ impl Inner {
     }
 }
 
+/// What one of our own `evaluate_javascript` calls reported. An error thrown inside an injected
+/// user script reaches `window.onerror` as a bare "Script error." — WebKit scrubs it, the script
+/// not being the document's own — so the calls this file makes are logged where the detail is.
+fn report_js(result: Result<webkit6::javascriptcore::Value, glib::Error>) {
+    if let Err(e) = result {
+        tracing::warn!(target: PREVIEW, "{e}");
+    }
+}
+
+/// One match on from `at` (1-based), wrapping at either end because [`FIND_OPTIONS`] tells WebKit
+/// to wrap. 0 in, 0 out: nothing found is nowhere to step.
+fn stepped(at: u32, total: u32, forward: bool) -> u32 {
+    match (total, forward) {
+        (0, _) => 0,
+        (total, true) => at % total + 1,
+        (total, false) if at <= 1 => total,
+        (_, false) => at - 1,
+    }
+}
+
+/// "3 of 12", the way the editor and the PDF reader both say it.
+///
+/// `at` is 1-based, 0 meaning nothing is selected. A total that reaches [`FIND_LIMIT`] is a floor
+/// rather than a count — WebKit stops looking there — so the position goes with it: "7 of 500" on
+/// a page holding nine hundred matches would be wrong in both halves.
+fn matches_label(at: u32, total: u32) -> String {
+    match (at, total) {
+        (_, 0) => "No results".to_string(),
+        (_, n) if n >= FIND_LIMIT => format!("{n}+ matches"),
+        (0, n) => format!("{n} matches"),
+        (at, n) => format!("{at} of {n}"),
+    }
+}
+
 /// What the preview is allowed to read: a vault-relative path in, a file on *this* machine out,
 /// `None` when there is none. Every window passes `Vault::fetch`, which is the file itself for a
 /// local vault and a copy fetched over ssh for a remote one — so a call can block on the network.
 type Resolve = dyn Fn(&str) -> Option<PathBuf> + Send + Sync;
+
+/// Where the find readout goes; see [`Preview::connect_found`].
+type Report = Box<dyn Fn(&str)>;
 
 pub struct Preview {
     inner: Rc<Inner>,
@@ -214,6 +325,7 @@ impl Preview {
             &[],
             &[],
         ));
+        install_console(&content);
         block_network(&content);
 
         let view = webkit6::WebView::builder()
@@ -233,6 +345,9 @@ impl Preview {
             loaded: Cell::new(false),
             pending: Cell::new(None),
             query: RefCell::new(None),
+            total: Cell::new(0),
+            at: Cell::new(0),
+            report: RefCell::new(None),
         });
 
         inner.view.connect_load_changed(glib::clone!(
@@ -372,28 +487,76 @@ impl Preview {
     pub fn find_next(&self) {
         if let Some(finder) = self.inner.view.find_controller() {
             finder.search_next();
+            self.inner.step(true);
         }
     }
 
     pub fn find_previous(&self) {
         if let Some(finder) = self.inner.view.find_controller() {
             finder.search_previous();
+            self.inner.step(false);
         }
     }
 
     pub fn find_clear(&self) {
         *self.inner.query.borrow_mut() = None;
+        self.inner.total.set(0);
+        self.inner.at.set(0);
+        self.inner.say();
         if let Some(finder) = self.inner.view.find_controller() {
             finder.search_finish();
         }
     }
 
-    /// Called with the number of matches after every [`Preview::find`].
-    pub fn connect_found(&self, f: impl Fn(u32) + 'static) {
-        if let Some(finder) = self.inner.view.find_controller() {
-            finder.connect_counted_matches(move |_, count| f(count));
-        }
+    /// Called with the readout — "3 of 12", "No results" — after a search and after every step.
+    pub fn connect_found(&self, f: impl Fn(&str) + 'static) {
+        *self.inner.report.borrow_mut() = Some(Box::new(f));
+        let Some(finder) = self.inner.view.find_controller() else {
+            return;
+        };
+        finder.connect_counted_matches(glib::clone!(
+            #[weak(rename_to = inner)]
+            self.inner,
+            move |_, count| {
+                inner.total.set(count);
+                // Every count is preceded by a search that starts from the top, so the reader is
+                // on the first match whenever there is one.
+                inner.at.set((count > 0) as u32);
+                inner.say();
+            }
+        ));
     }
+}
+
+// ------------------------------------------------------------------------------------- console
+
+/// Hand the page a way to report its own JavaScript errors, and log what comes back.
+///
+/// An error in [`SCROLL_SCRIPT`] or in the mermaid bootstrap is otherwise entirely silent:
+/// `set_enable_write_console_messages_to_stdout` writes on the web process's stdout and produced
+/// nothing here. An uncaught error is a `warn!` because it means a feature of the pane is not
+/// working; `console.warn`/`console.error` are `debug!` because a vendored library is entitled to
+/// grumble — mermaid says nothing at all about a fence it cannot parse, which is how this was
+/// checked.
+fn install_console(content: &webkit6::UserContentManager) {
+    if !content.register_script_message_handler(LOG_HANDLER, None) {
+        return tracing::warn!(target: PREVIEW, "no console relay: {LOG_HANDLER} is taken");
+    }
+    content.connect_script_message_received(Some(LOG_HANDLER), |_, value| {
+        let message = value.to_str();
+        match message.split_once('\t') {
+            Some(("error", text)) => tracing::warn!(target: PREVIEW, "{text}"),
+            Some((level, text)) => tracing::debug!(target: PREVIEW, "{level}: {text}"),
+            None => tracing::debug!(target: PREVIEW, "{message}"),
+        }
+    });
+    content.add_script(&webkit6::UserScript::new(
+        CONSOLE_SCRIPT,
+        webkit6::UserContentInjectedFrames::TopFrame,
+        webkit6::UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    ));
 }
 
 // ------------------------------------------------------------------------------- network policy
@@ -634,6 +797,11 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
          ul, ol {{ padding-left: 1.4em; }}\n\
          a {{ color: {accent}; text-decoration: underline; }}\n\
          img {{ max-width: 100%; height: auto; }}\n\
+         /* A display formula's box is its ink: unlike a line of prose it carries none of the\n\
+            half-leading `line-height: 1.6` gives, so two of them would sit closer together than\n\
+            two paragraphs, and two in one paragraph would touch. 1.2em is what a heading takes\n\
+            above itself, and it is in `em` so it follows the document font. */\n\
+         math[display=\"block\"] {{ margin: 1.2em 0; }}\n\
          code, pre, .math {{ font-family: monospace; font-size: 0.92em; }}\n\
          code {{ background: {surface}; border-radius: 4px; padding: 0.1em 0.3em; }}\n\
          pre {{ background: {surface}; border-radius: 6px; padding: 12px; overflow-x: auto; }}\n\
@@ -783,6 +951,28 @@ mod tests {
             Some(("open", "100%%zz".to_string()))
         );
         assert_eq!(accent_uri("https://example.com/x"), None);
+    }
+
+    #[test]
+    fn matches_label_says_where_the_reader_is() {
+        assert_eq!(matches_label(0, 0), "No results");
+        assert_eq!(matches_label(1, 1), "1 of 1");
+        assert_eq!(matches_label(3, 12), "3 of 12");
+        // Before WebKit has answered, or after a step with nothing to step through.
+        assert_eq!(matches_label(0, 12), "12 matches");
+        // Past WebKit's own ceiling the total is a floor, so no position is claimed.
+        assert_eq!(matches_label(1, FIND_LIMIT), "500+ matches");
+    }
+
+    #[test]
+    fn stepping_wraps_at_both_ends() {
+        assert_eq!(stepped(1, 3, true), 2);
+        assert_eq!(stepped(3, 3, true), 1);
+        assert_eq!(stepped(2, 3, false), 1);
+        assert_eq!(stepped(1, 3, false), 3);
+        // Nothing found: both directions stay at nothing.
+        assert_eq!(stepped(0, 0, true), 0);
+        assert_eq!(stepped(0, 0, false), 0);
     }
 
     #[test]

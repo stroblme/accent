@@ -480,12 +480,22 @@ impl Vault {
         }
     }
 
+    /// [`Local::grep_unindexed`], and nothing at all when there is no room for a row.
+    ///
+    /// The Search pane fills its row budget from the index first and asks here for the remainder,
+    /// so a query common enough to fill it asks for zero rows — which is most of what a query
+    /// looks like while it is being typed. The walk costs 18 ms of the 55 ms this call takes on
+    /// 10 000 dependency files, and a round trip on a remote vault, for an answer that can only
+    /// be empty.
     pub fn grep_unindexed(
         &self,
         query: &str,
         options: Options,
         limit: usize,
     ) -> Result<Vec<Match>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         match &self.backend {
             Backend::Local(v) => v.grep_unindexed(&search::pattern(query, options)?, limit),
             Backend::Remote(r) => r
@@ -529,11 +539,11 @@ impl Vault {
         )
     }
 
-    pub fn set_git_ignored(&self, entries: &[String]) -> Result<()> {
+    pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
         ask!(
             self,
-            |v: &Local| v.set_git_ignored(entries),
-            "set_git_ignored",
+            |v: &Local| v.set_excluded(entries),
+            "set_excluded",
             json!([entries])
         )
     }
@@ -562,6 +572,20 @@ impl Vault {
 
     pub fn conflicts(&self) -> Result<Vec<(String, String)>> {
         ask!(self, |v: &Local| v.conflicts(), "conflicts", json!([]))
+    }
+
+    /// Which vault file an embed names, or `None` when nothing answers to it.
+    ///
+    /// `![[img.png]]` is written the way a wikilink is, so a basename on its own has to be found
+    /// the way `[[note]]` is found — through the index, which knows the file lives in
+    /// `Attachments/`. The path as written wins whenever it is really there, so an embed that
+    /// spells the whole path never takes a second look. Here rather than in the preview because
+    /// nothing about it is the desktop's: the same embeds render on Android.
+    pub fn asset(&self, rel: &str) -> Option<String> {
+        if self.exists(rel) {
+            return Some(rel.to_string());
+        }
+        self.resolve_link(rel).ok().flatten()
     }
 
     pub fn conflicts_of(&self, rel: &str) -> Result<Vec<String>> {
@@ -745,6 +769,7 @@ impl Local {
             watcher: None,
             symlinks: Vec::new(),
             seen_conflicts: BTreeSet::new(),
+            reported: BTreeSet::new(),
             git_dirs: Vec::new(),
         };
         let handle = std::thread::Builder::new()
@@ -1287,13 +1312,15 @@ impl Local {
         self.index().file_paths(include_ignored)
     }
 
-    /// Hand the index what git ignores, so every later query can leave it out.
+    /// Hand the index what search leaves out, so every later query can leave it out.
     ///
-    /// Called from the git refresh, which is the one place in the app that has already asked git.
-    /// This is the only write that does not go through the vault worker; the connections carry a
-    /// busy timeout so a reconcile in flight costs a wait rather than a lost update.
-    pub fn set_git_ignored(&self, entries: &[String]) -> Result<()> {
-        self.index().set_git_ignored(entries)
+    /// Called from the git refresh, which is the one place in the app that has already asked git
+    /// and where the `[search] exclude` list joins git's answer. This is the only write that does
+    /// not go through the vault worker, so it takes the write lock against the worker's; both
+    /// sides `BEGIN IMMEDIATE` (`Index::write_tx`), which is what turns that collision into a
+    /// wait rather than "database is locked".
+    pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
+        self.index().set_excluded(entries)
     }
 
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
@@ -1415,6 +1442,9 @@ struct Worker {
     symlinks: Vec<(PathBuf, String)>,
     /// Conflict copies the UI has already been offered, so a rescan never repeats one.
     seen_conflicts: BTreeSet<String>,
+    /// Failures the UI has already been told about, so a recurring one is said once. See
+    /// [`Worker::fail`].
+    reported: BTreeSet<String>,
     /// Every watched repository's git directory, absolute. A change under one of these is news
     /// for the git pane and nothing else: `.git` is not indexed and must never be.
     git_dirs: Vec<PathBuf>,
@@ -1718,10 +1748,20 @@ impl Worker {
         }
     }
 
-    /// Never kill the thread over one bad file: log it, tell the UI, carry on.
-    fn fail(&self, what: &str, e: impl std::fmt::Display) {
-        tracing::warn!("{what}: {e:#}");
-        self.emit(Event::Error(format!("{what}: {e:#}")));
+    /// Never kill the thread over one bad file: log every failure, tell the UI about each
+    /// distinct one once, carry on.
+    ///
+    /// Everything reported here is index maintenance the user cannot act on, and it is driven by
+    /// their typing: an autosave that failed to index raises the same message on the next
+    /// keystroke, and the next. DESIGN.md's toast rule is "a thing that happened and is over",
+    /// which a failure that repeats per save is not — the same reason a synced vault's conflict
+    /// copies became one count instead of a wall of toasts.
+    fn fail(&mut self, what: &str, e: impl std::fmt::Display) {
+        let message = format!("{what}: {e:#}");
+        tracing::warn!("{message}");
+        if self.reported.insert(message.clone()) {
+            self.emit(Event::Error(message));
+        }
     }
 
     fn emit(&self, event: Event) {
@@ -2341,6 +2381,27 @@ mod tests {
             Some("Sub/Meeting Notes.md")
         );
         assert_eq!(f.vault.resolve_link("nothing here").unwrap(), None);
+    }
+
+    #[test]
+    fn an_asset_is_found_by_its_basename() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Attachments/img.png", "not really a png");
+        f.write("Note.md", "![[img.png]]\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        // What the preview is handed for `![[img.png]]`: a basename, and the file is elsewhere.
+        assert_eq!(
+            f.vault.asset("img.png").as_deref(),
+            Some("Attachments/img.png")
+        );
+        // A path that is really there is taken as written.
+        assert_eq!(
+            f.vault.asset("Attachments/img.png").as_deref(),
+            Some("Attachments/img.png")
+        );
+        assert_eq!(f.vault.asset("nowhere.png"), None);
     }
 
     #[test]

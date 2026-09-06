@@ -12,6 +12,7 @@
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// The class `main::install_chrome_css` paints the drop hint with.
@@ -19,6 +20,42 @@ const ZONE: &str = "accent-drop-zone";
 /// How much of a pane's width or height each edge zone claims. A quarter is enough to aim at
 /// without swallowing the middle, which is the far commoner drop.
 const EDGE: f64 = 0.25;
+
+/// What `AdwTabView` keeps of its own chords. Four are taken away: `Ctrl+Tab` and
+/// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
+/// they were last used rather than along the bar, and `Ctrl+Home` / `Ctrl+End` go back to
+/// GtkSourceView, whose document start and end they are on DESIGN.md's never-bind list. What is
+/// left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab, and `Alt+1`
+/// to `Alt+9` — is libadwaita's and stays there, being chords no action of ours wants.
+fn shortcuts() -> adw::TabViewShortcuts {
+    adw::TabViewShortcuts::ALL_SHORTCUTS.difference(
+        adw::TabViewShortcuts::CONTROL_TAB
+            | adw::TabViewShortcuts::CONTROL_SHIFT_TAB
+            | adw::TabViewShortcuts::CONTROL_HOME
+            | adw::TabViewShortcuts::CONTROL_END,
+    )
+}
+
+/// The order `Ctrl+Tab` walks and a close falls back to: `history` filtered down to the pages
+/// that are still here, then any page that has never been selected, in the order the bar shows
+/// them.
+///
+/// Pure, so both of the things it decides — which tab a close lands on and which tab a step of
+/// `Ctrl+Tab` lands on — are testable with no display.
+pub fn recent_order<T: Clone + PartialEq>(history: &[T], live: &[T]) -> Vec<T> {
+    let mut order: Vec<T> = history
+        .iter()
+        .filter(|p| live.contains(p))
+        .cloned()
+        .collect();
+    let rest: Vec<T> = live
+        .iter()
+        .filter(|p| !order.contains(p))
+        .cloned()
+        .collect();
+    order.extend(rest);
+    order
+}
 
 /// Which side of a pane a new pane goes on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -97,12 +134,22 @@ pub struct Pane {
     /// zone never moves the widget the pointer coordinates are measured against.
     shade: gtk::Box,
     pub drop: gtk::DropTarget,
+    /// This pane's tabs in the order they were last selected, most recent first.
+    ///
+    /// Pruned against the pane's live pages on every read, which is what lets a tab dragged into
+    /// another pane or another window need no bookkeeping of its own: it simply stops being one
+    /// of this pane's pages, and joins the other pane's history the moment it is selected there.
+    history: RefCell<Vec<adw::TabPage>>,
+    /// The preview tab, if this pane has one: the tab a single click in the sidebar or a followed
+    /// link opened, which the next such open replaces instead of piling up beside it.
+    preview: RefCell<Option<adw::TabPage>>,
 }
 
 impl Pane {
     pub fn new(menu: &gio::Menu) -> Rc<Pane> {
         let tabs = adw::TabView::builder().hexpand(true).vexpand(true).build();
         tabs.set_menu_model(Some(menu));
+        tabs.set_shortcuts(shortcuts());
         let bar = adw::TabBar::builder().view(&tabs).build();
         // The bar used to be one of the toolbar view's top bars, which draw flat on their own.
         // Inside the document column it needs `.inline` to stop painting a header-bar background
@@ -143,6 +190,8 @@ impl Pane {
             hint,
             shade,
             drop,
+            history: RefCell::new(Vec::new()),
+            preview: RefCell::new(None),
         })
     }
 
@@ -158,12 +207,118 @@ impl Pane {
         )
     }
 
-    /// Whether `page` is one of this pane's.
-    pub fn has(&self, page: &adw::TabPage) -> bool {
+    /// This pane's pages, in the order the bar shows them.
+    pub fn pages(&self) -> Vec<adw::TabPage> {
         let pages = self.tabs.pages();
         (0..pages.n_items())
             .filter_map(|i| pages.item(i))
-            .any(|item| item.downcast_ref::<adw::TabPage>() == Some(page))
+            .filter_map(|item| item.downcast::<adw::TabPage>().ok())
+            .collect()
+    }
+
+    /// Whether `page` is one of this pane's.
+    pub fn has(&self, page: &adw::TabPage) -> bool {
+        self.pages().contains(page)
+    }
+
+    // --- most recently used ----------------------------------------------------------------
+
+    /// This pane's tabs, the one selected most recently first.
+    pub fn recent(&self) -> Vec<adw::TabPage> {
+        recent_order(&self.history.borrow(), &self.pages())
+    }
+
+    /// Remember that `page` was just selected. Pruning happens here too, so a page that has left
+    /// the pane is out of the history by the next question anyone asks of it.
+    pub fn touch(&self, page: &adw::TabPage) {
+        let mut order = self.recent();
+        order.retain(|p| p != page);
+        order.insert(0, page.clone());
+        *self.history.borrow_mut() = order;
+    }
+
+    /// Which tab to show once `page` goes: the most recently used one that is left.
+    pub fn survivor(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
+        self.recent().into_iter().find(|p| p != page)
+    }
+
+    /// One step of `Ctrl+Tab`: the next most recently used tab, or going back, the least recently
+    /// used one.
+    ///
+    /// ponytail: the step is taken and the history reordered at once, so a second press forward
+    /// comes back rather than going two tabs deep. The alternative is VS Code's modal overlay,
+    /// held while Ctrl is down and committed on release; that is a lot of machinery for a chord
+    /// whose common use is switching between the last two notes, which this does. Going back
+    /// walks the whole history one tab per press, because the least recently used tab is the one
+    /// step behind the front of a list that rotates.
+    pub fn step(&self, forward: bool) -> Option<adw::TabPage> {
+        let order = self.recent();
+        match forward {
+            true => order.get(1).cloned(),
+            false => order.last().cloned(),
+        }
+    }
+
+    // --- preview tabs ----------------------------------------------------------------------
+
+    /// The tab that is only being looked at, if this pane still holds it. A tab dragged into
+    /// another pane leaves the slot naming a page that is no longer here, and that is the whole
+    /// of "moving a tab makes it a real one".
+    pub fn preview(&self) -> Option<adw::TabPage> {
+        let page = self.preview.borrow().clone()?;
+        self.has(&page).then_some(page)
+    }
+
+    /// Make `page` this pane's preview, and hand back whichever tab it replaces.
+    pub fn set_preview(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
+        let old = self.preview();
+        *self.preview.borrow_mut() = Some(page.clone());
+        old.filter(|old| old != page)
+    }
+
+    /// `page` is a real tab now: it was edited, or its own tab was double-clicked.
+    pub fn keep(&self, page: &adw::TabPage) {
+        let mut slot = self.preview.borrow_mut();
+        if slot.as_ref() == Some(page) {
+            *slot = None;
+        }
+    }
+
+    /// Call `f` when one of this pane's tabs is double-clicked, with the page that was clicked.
+    ///
+    /// `AdwTabBox` claims the press for its own selection and drag, and a claimed sequence cancels
+    /// gestures but not raw event controllers — the lesson [`crate::paned`] records — so this is a
+    /// capture-phase `GtkEventControllerLegacy` like that one, and it never swallows the event.
+    /// The page is the pane's selected one, because the first press of the pair has already
+    /// selected whichever tab it landed on.
+    pub fn on_tab_double_click(self: &Rc<Self>, f: impl Fn(&adw::TabPage) + 'static) {
+        let controller = gtk::EventControllerLegacy::new();
+        controller.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let last: RefCell<Option<crate::paned::Click>> = RefCell::new(None);
+        controller.connect_event(glib::clone!(
+            #[weak(rename_to = pane)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, event| {
+                if let Some(now) = primary_press(event) {
+                    let settings = pane.bar.settings();
+                    let within_ms = u32::try_from(settings.gtk_double_click_time()).unwrap_or(400);
+                    let within_px = f64::from(settings.gtk_double_click_distance());
+                    if let Some(first) = last.replace(Some(now))
+                        && crate::paned::is_double(first, now, within_ms, within_px)
+                    {
+                        // A third press starts a new pair rather than promoting again.
+                        *last.borrow_mut() = None;
+                        if let Some(page) = pane.tabs.selected_page() {
+                            f(&page);
+                        }
+                    }
+                }
+                glib::Propagation::Proceed
+            }
+        ));
+        self.bar.add_controller(controller);
     }
 
     /// Take the drop sheet in or out of the picture. It stays mapped either way and only stops
@@ -197,6 +352,24 @@ impl Pane {
         self.shade.add_css_class(ZONE);
         self.shade.set_visible(true);
     }
+}
+
+/// A primary-button press, in the coordinates the raw event carries. Both presses of a pair are
+/// measured in the same frame, so unlike [`crate::paned`] there is no surface transform to undo.
+fn primary_press(event: &gdk::Event) -> Option<crate::paned::Click> {
+    if event.event_type() != gdk::EventType::ButtonPress {
+        return None;
+    }
+    let button = event.downcast_ref::<gdk::ButtonEvent>()?;
+    if button.button() != gdk::BUTTON_PRIMARY {
+        return None;
+    }
+    let (x, y) = event.position()?;
+    Some(crate::paned::Click {
+        x,
+        y,
+        time: event.time(),
+    })
 }
 
 /// Put `new` beside `pane` on `side`, by replacing `pane` in its parent with a paned holding
@@ -288,6 +461,47 @@ mod tests {
     #[test]
     fn an_unallocated_pane_has_no_edges() {
         assert_eq!(zone(0.0, 0.0, 0.0, 0.0), Zone::Here);
+    }
+
+    /// What `Pane::step` does, over three tabs: forward is one off the front of the order and
+    /// back is one off the end.
+    fn step<'a>(order: &[&'a str], forward: bool) -> Option<&'a str> {
+        let order = recent_order(order, &["A", "B", "C"]);
+        match forward {
+            true => order.get(1).copied(),
+            false => order.last().copied(),
+        }
+    }
+
+    /// NOTEPAD's own example: tabs A, B and C, A opened first, then a jump to C. Closing C shows
+    /// A, where the reader was before it, not the neighbour B that `AdwTabView` would pick.
+    #[test]
+    fn a_close_falls_back_to_the_last_tab_used() {
+        let history = ["C", "A", "B"];
+        let order = recent_order(&history, &["A", "B", "C"]);
+        assert_eq!(order, ["C", "A", "B"]);
+        assert_eq!(order.iter().find(|p| **p != "C"), Some(&"A"));
+    }
+
+    #[test]
+    fn a_tab_never_selected_still_cycles() {
+        // Restored from a session: only the active note has ever been selected, and the rest keep
+        // the order the bar shows them in rather than dropping out of the cycle.
+        assert_eq!(recent_order(&["C"], &["A", "B", "C"]), ["C", "A", "B"]);
+        assert_eq!(recent_order::<&str>(&[], &["A", "B"]), ["A", "B"]);
+        // A tab that has left the pane is not in the order, whatever the history still says.
+        assert_eq!(recent_order(&["Z", "B"], &["A", "B"]), ["B", "A"]);
+    }
+
+    #[test]
+    fn ctrl_tab_steps_one_off_the_front_and_back_one_off_the_end() {
+        // Forward is the tab used before this one, which is the switch between two notes.
+        assert_eq!(step(&["C", "A", "B"], true), Some("A"));
+        // Back is the least recently used, so repeated presses walk the whole history.
+        assert_eq!(step(&["C", "A", "B"], false), Some("B"));
+        // With two tabs both directions are the other one, and with one there is nowhere to go.
+        assert_eq!(recent_order(&["A", "B"], &["A", "B"]).get(1), Some(&"B"));
+        assert_eq!(recent_order(&["A"], &["A"]).get(1), None);
     }
 
     #[test]

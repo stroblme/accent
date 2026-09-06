@@ -8,7 +8,7 @@
 //! pdfium is serialised behind one process-wide lock (see `accent_core::pdf`), so one thread per
 //! document is not a limitation we could lift by adding more.
 
-use crate::pdfview::{self, Anchor, PdfView, PdfZoom, Reply, TileKey, Want};
+use crate::pdfview::{self, Anchor, PdfView, PdfZoom, Reply, Span, TileKey, Want};
 use accent_core::pdf::{self, LinkTarget, PdfDoc};
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -25,6 +25,9 @@ const HISTORY: usize = 100;
 /// of a portrait page at [`pdfview::LOWRES_W`], which is a heading and the lines under it: a
 /// whole page shrunk to a popover says nothing a reader can read.
 const BAND: i32 = 96;
+
+/// The action group the selection menu's one item names, inserted on the tab's own host box.
+const GROUP: &str = "pdfsel";
 
 /// What the render thread is asked for.
 enum Request {
@@ -45,6 +48,9 @@ enum Request {
     Search {
         query: u64,
         text: String,
+        /// The first page still to look at. A query the reader interrupted comes back with this
+        /// moved on, so it finishes the document instead of stopping where it was pushed aside.
+        from: usize,
     },
     Reload,
 }
@@ -54,9 +60,6 @@ pub use accent_core::config::PdfPlace as Place;
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
-
-/// A drag over one page, as the two page points it ran between.
-type Drag = (usize, (f32, f32), (f32, f32));
 
 /// The Ctrl-hover link preview currently on screen.
 struct Preview {
@@ -108,8 +111,9 @@ pub struct PdfTab {
     outline: RefCell<Vec<pdf::Outline>>,
     /// The link preview on screen, if the pointer is on a link with Ctrl held.
     preview: RefCell<Option<Preview>>,
-    /// A drag that arrived before the page's glyphs did, to answer when they land.
-    pending_select: Cell<Option<Drag>>,
+    /// A drag that arrived before the glyphs of every page it covers did, to answer when the
+    /// last of them lands.
+    pending_select: Cell<Option<Span>>,
     /// Where the session says this document was left, until the first page sizes arrive and it
     /// can be applied. `None` afterwards, so a reload keeps the reader where they are instead.
     pending: Cell<Option<Place>>,
@@ -212,6 +216,7 @@ pub fn open(
     tab.wire(&thumbs);
     tab.wire_keys();
     tab.wire_preview();
+    tab.wire_menu();
 
     // Nothing about the document is known yet, and deliberately so: opening it and measuring its
     // pages is pdfium work, which for a thousand-page file is most of a second. The tab goes up
@@ -379,6 +384,7 @@ impl PdfTab {
             self.ask(Request::Search {
                 query: self.query.get(),
                 text: text.to_string(),
+                from: 0,
             });
         }
         self.emit(&self.on_matches);
@@ -575,7 +581,7 @@ impl PdfTab {
         view.connect_select(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, page, from, to| tab.selected_between(page, from, to)
+            move |_, span| tab.selected_between(span)
         ));
         view.connect_motion(glib::clone!(
             #[weak(rename_to = tab)]
@@ -730,7 +736,7 @@ impl PdfTab {
     /// per pointer event.
     fn fill_band(self: &Rc<Self>, page: usize, top: Option<f32>) {
         let dark = self.view.dark();
-        let ready = self.view.cache().borrow().lowres(page as u32, dark);
+        let ready = self.view.cache().borrow_mut().lowres(page as u32, dark);
         let Some(texture) = ready else {
             return self.ask(Request::Tiles {
                 scale: 1.0,
@@ -759,6 +765,70 @@ impl PdfTab {
         let picture = gtk::Picture::for_paintable(&strip);
         picture.set_size_request(strip.width(), strip.height());
         band.set_child(Some(&picture));
+    }
+
+    /// The selection's own menu, on a secondary click over the page.
+    ///
+    /// Copy alone, in a section of its own like the shell's clipboard section next door. Turning
+    /// a selection into a highlight or a link into a note belongs to Phase 8 (ROADMAP.md, PDF
+    /// annotations), which is what `pdf::selection_link` is already waiting there for.
+    ///
+    /// The action is the tab's own rather than a `win.` one, so it lives and dies with the tab
+    /// and needs nothing from the window.
+    fn wire_menu(self: &Rc<Self>) {
+        let group = gio::SimpleActionGroup::new();
+        let copy = gio::SimpleAction::new("copy", None);
+        copy.connect_activate(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _| tab.copy_selection()
+        ));
+        group.add_action(&copy);
+        self.host.insert_action_group(GROUP, Some(&group));
+
+        let secondary = gtk::GestureClick::builder()
+            .button(gtk::gdk::BUTTON_SECONDARY)
+            .build();
+        secondary.connect_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, x, y| tab.selection_menu(x, y)
+        ));
+        self.view.add_controller(secondary);
+    }
+
+    /// Put the menu under the pointer. Nothing selected is nothing to offer, so the click does
+    /// nothing at all rather than showing a menu of one dead item.
+    fn selection_menu(&self, x: f64, y: f64) {
+        if self.selected.borrow().is_empty() {
+            return;
+        }
+        let menu = gio::Menu::new();
+        menu.append(Some("Copy"), Some(&format!("{GROUP}.copy")));
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        // Parented to the box rather than to the view, and pointed at the box's own coordinates:
+        // a popover hung off a widget with a `size_allocate` of its own never re-presents and
+        // freezes at its first-frame size (DESIGN.md, States).
+        let at = gtk::graphene::Point::new(x as f32, y as f32);
+        let at = self.view.compute_point(&self.host, &at).unwrap_or(at);
+        popover.set_parent(&self.host);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+            at.x() as i32,
+            at.y() as i32,
+            1,
+            1,
+        )));
+        // A popover parented by hand stays parented until it is unparented by hand — but not
+        // while it is closing. `closed` is emitted from inside the item's own `clicked`, and an
+        // unparented widget has no path to the action group on the host, so unparenting there
+        // would drop the Copy the click had just asked for, exactly as it dropped the status
+        // bar's Fit Page. The idle runs once the click is over.
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
     }
 
     /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own.
@@ -799,38 +869,84 @@ impl PdfTab {
         self.view.add_controller(keys);
     }
 
-    /// A drag across a page selected the text between two points on it.
+    /// A drag selected the text between two points, which may be on different pages.
     ///
-    /// The glyphs are fetched the first time a page is dragged on and kept afterwards, so the
-    /// first drag on a page may land a moment late and every one after it is immediate.
-    fn selected_between(self: &Rc<Self>, page: usize, from: (f32, f32), to: (f32, f32)) {
-        if self.glyphs.borrow().contains_key(&page) {
+    /// The glyphs are fetched the first time a page is dragged over and kept afterwards, so the
+    /// first drag onto a page may land a moment late and every one after it is immediate. A drag
+    /// that has crossed a page break wants every page it covers, and is answered as soon as it
+    /// has them all.
+    fn selected_between(self: &Rc<Self>, span: Span) {
+        let missing: Vec<usize> = {
+            let glyphs = self.glyphs.borrow();
+            pages_of(span)
+                .filter(|page| !glyphs.contains_key(page))
+                .collect()
+        };
+        if missing.is_empty() {
             self.pending_select.set(None);
-            return self.select(page, from, to);
+            return self.select(span);
         }
-        self.pending_select.set(Some((page, from, to)));
-        self.ask(Request::Text(page));
+        // A drag reports on every motion event, so only pages the drag did not already cover are
+        // asked for: nothing drops a `Text` request, so the first ask is always answered.
+        let asked = self.pending_select.replace(Some(span));
+        for page in missing {
+            if asked.is_none_or(|before| !pages_of(before).contains(&page)) {
+                self.ask(Request::Text(page));
+            }
+        }
     }
 
-    /// Mark every glyph between the two points and remember the text they spell.
-    fn select(&self, page: usize, from: (f32, f32), to: (f32, f32)) {
+    /// Mark every glyph between the two ends of the drag and remember the text they spell.
+    ///
+    /// The two ends are put in document order first, so a drag pulled upwards reads the same way
+    /// down as one pulled down. Each page in between contributes all of its glyphs, and the two
+    /// at the ends contribute from or up to the glyph nearest the pointer.
+    fn select(&self, span: Span) {
         let glyphs = self.glyphs.borrow();
-        let Some(glyphs) = glyphs.get(&page) else {
-            return;
+        let end_of = |(page, at): (usize, (f32, f32))| {
+            glyphs
+                .get(&page)
+                .and_then(|g| Some((page, nearest(g, at)?)))
         };
-        let (Some(a), Some(b)) = (nearest(glyphs, from), nearest(glyphs, to)) else {
+        let (Some(a), Some(b)) = (end_of(span.from), end_of(span.to)) else {
             return;
         };
         let (start, end) = (a.min(b), a.max(b));
-        let picked = &glyphs[start..=end];
-        *self.selected.borrow_mut() = picked.iter().map(|g| g.ch).collect();
-        // A glyph with no box of its own — a space between words — would paint as a dot.
-        let boxes: Vec<pdf::Rect> = picked
-            .iter()
-            .map(|g| g.rect)
-            .filter(|r| r.width() > 0.0 && r.height() > 0.0)
-            .collect();
-        self.view.set_selection(Some((page, boxes)));
+        let mut text = String::new();
+        let mut boxes = Vec::new();
+        for page in start.0..=end.0 {
+            let Some(page_glyphs) = glyphs.get(&page) else {
+                return;
+            };
+            let lo = match page == start.0 {
+                true => start.1,
+                false => 0,
+            };
+            let hi = match page == end.0 {
+                true => end.1,
+                false => page_glyphs.len().saturating_sub(1),
+            };
+            let Some(picked) = page_glyphs.get(lo..=hi) else {
+                continue;
+            };
+            // A page break reads as a line break, which is what pasting a passage that runs over
+            // one should give.
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.extend(picked.iter().map(|g| g.ch));
+            // A glyph with no box of its own — a space between words — would paint as a dot.
+            boxes.push((
+                page,
+                picked
+                    .iter()
+                    .map(|g| g.rect)
+                    .filter(|r| r.width() > 0.0 && r.height() > 0.0)
+                    .collect(),
+            ));
+        }
+        *self.selected.borrow_mut() = text;
+        self.view.set_selection(boxes);
     }
 
     /// Drop the selection, on a click that is not a drag.
@@ -839,7 +955,7 @@ impl PdfTab {
             return;
         }
         self.selected.borrow_mut().clear();
-        self.view.set_selection(None);
+        self.view.set_selection(Vec::new());
     }
 
     /// A click on the page: follow a link if there is one under it.
@@ -881,11 +997,19 @@ impl PdfTab {
             Reply::Text(page, glyphs) => {
                 self.glyphs.borrow_mut().insert(page, glyphs);
                 // The drag that asked for them is usually still going, so answer it now rather
-                // than making the user drag again.
-                let pending = self.pending_select.get();
-                if let Some((at, from, to)) = pending.filter(|(at, _, _)| *at == page) {
-                    self.select(page, from, to);
-                    let _ = at;
+                // than making the user drag again. A drag across a page break waits for the last
+                // page it covers: `select` needs all of them to know where the middle ones end.
+                let waiting = self
+                    .pending_select
+                    .get()
+                    .filter(|span| pages_of(*span).contains(&page));
+                if let Some(span) = waiting {
+                    let have = self.glyphs.borrow();
+                    if pages_of(span).all(|at| have.contains_key(&at)) {
+                        drop(have);
+                        self.pending_select.set(None);
+                        self.select(span);
+                    }
                 }
             }
             Reply::Outline(outline) => {
@@ -977,6 +1101,11 @@ fn crop(texture: &gtk::gdk::MemoryTexture, top: i32, height: i32) -> gtk::gdk::M
     )
 }
 
+/// Every page a drag covers, in document order however the drag was pulled.
+fn pages_of(span: Span) -> std::ops::RangeInclusive<usize> {
+    span.from.0.min(span.to.0)..=span.from.0.max(span.to.0)
+}
+
 /// The glyph nearest a point on the page, which is the one a drag means to start or end on.
 ///
 /// A hit inside a glyph's own box wins outright; otherwise the closest box by the distance from
@@ -1009,12 +1138,16 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 
 /// The render thread.
 ///
-/// One request at a time, with one twist: before every tile it drains the queue, so a batch that
-/// has been overtaken by a scroll is abandoned rather than rendered into a viewport nobody is
-/// looking at any more. Only a newer batch abandons it — the queue is a stack, and a link or a
-/// search that arrives mid-batch is answered first and the rest of the tiles resume after it.
-/// Dropping them instead leaves a page blurry for good: the widget asks again only when what it
-/// wants changes, and a tile nobody rendered is still wanted.
+/// One request at a time, with one twist: before every tile and every searched page it drains the
+/// queue, so a batch that has been overtaken is put aside rather than finished into a viewport
+/// nobody is looking at any more. Only a request of the same kind abandons it — see
+/// [`interrupt`] — and the queue is a stack, so the newest work is always what runs next and
+/// what is put aside resumes after it.
+///
+/// Dropping an interrupted batch instead loses it for good. Nothing re-asks: the widget sends a
+/// list of tiles again only when that list changes, and the tab sends a query again only when the
+/// text does, so a tile nobody rendered stayed blurry and a search pushed aside reported the
+/// matches of the pages it had reached and no more.
 fn render_loop(
     mut doc: PdfDoc,
     path: PathBuf,
@@ -1036,15 +1169,13 @@ fn render_loop(
                     while at < wants.len() {
                         match rx.try_recv() {
                             Ok(newer) => {
-                                if !matches!(newer, Request::Tiles { .. }) {
-                                    queue.push(Request::Tiles {
-                                        scale,
-                                        dark,
-                                        theme,
-                                        wants: wants[at..].to_vec(),
-                                    });
-                                }
-                                queue.push(newer);
+                                let rest = Request::Tiles {
+                                    scale,
+                                    dark,
+                                    theme,
+                                    wants: wants[at..].to_vec(),
+                                };
+                                interrupt(&mut queue, rest, newer);
                                 break;
                             }
                             Err(TryRecvError::Disconnected) => return,
@@ -1069,24 +1200,40 @@ fn render_loop(
                         send(&view, Reply::Outline(outline));
                     }
                 }
-                Request::Search { query, text } => {
-                    for page in 0..doc.page_count() {
-                        // Between pages rather than between matches: loading a page's text is
-                        // the expensive part and is not worth abandoning halfway.
+                Request::Search { query, text, from } => {
+                    let pages = doc.page_count();
+                    let mut at = from;
+                    while at < pages {
+                        // Between pages, and no finer: pdfium loads a page's text whole
+                        // (`FPDFText_LoadPage`) and the search cursor runs over that, so one page
+                        // is the smallest unit there is to stop at. Measured on a 500-page A4
+                        // document, that is 0.5 ms typical and 1.6 ms at worst — well inside a
+                        // frame, so a tile asked for mid-query waits no longer than that.
                         match rx.try_recv() {
                             Ok(newer) => {
-                                queue.push(newer);
+                                let rest = Request::Search {
+                                    query,
+                                    text,
+                                    from: at,
+                                };
+                                interrupt(&mut queue, rest, newer);
                                 break;
                             }
                             Err(TryRecvError::Disconnected) => return,
                             Err(TryRecvError::Empty) => {}
                         }
-                        match doc.search(page, &text) {
-                            Ok(hits) if !hits.is_empty() => {
-                                send(&view, Reply::Found { query, page, hits })
-                            }
+                        match doc.search(at, &text) {
+                            Ok(hits) if !hits.is_empty() => send(
+                                &view,
+                                Reply::Found {
+                                    query,
+                                    page: at,
+                                    hits,
+                                },
+                            ),
                             _ => {}
                         }
+                        at += 1;
                     }
                 }
                 Request::Reload => {
@@ -1103,6 +1250,27 @@ fn render_loop(
             }
         }
     }
+}
+
+/// Put `newer` at the top of the queue, and `rest` — what the interrupted batch has left to do —
+/// under it or not at all.
+///
+/// Only a request of the same kind takes a batch over: a newer viewport makes the old tiles
+/// pointless, and a newer query makes the old query's remaining pages pointless. It also drops
+/// any older remainder of that kind still waiting further down, which is the one a batch put
+/// aside earlier left there. Anything else — a link, a page's glyphs, an outline, a reload — is a
+/// short detour, and the batch resumes once it is done.
+fn interrupt(queue: &mut Vec<Request>, rest: Request, newer: Request) {
+    match same_kind(&rest, &newer) {
+        false => queue.push(rest),
+        true => queue.retain(|waiting| !same_kind(waiting, &newer)),
+    }
+    queue.push(newer);
+}
+
+/// Whether two requests are the same kind of work, whatever they are for.
+fn same_kind(a: &Request, b: &Request) -> bool {
+    std::mem::discriminant(a) == std::mem::discriminant(b)
 }
 
 /// Render one wanted tile, or the low-resolution stand-in for a whole page.
@@ -1183,7 +1351,46 @@ fn send(view: &glib::SendWeakRef<PdfView>, reply: Reply) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, band_offset};
+    use super::{BAND, Request, band_offset, interrupt};
+
+    fn search(query: u64, from: usize) -> Request {
+        Request::Search {
+            query,
+            text: "q".to_string(),
+            from,
+        }
+    }
+
+    /// A batch pushed aside by a detour comes back; one pushed aside by its own kind does not,
+    /// and takes any older remainder of that kind with it.
+    #[test]
+    fn only_the_same_kind_of_request_abandons_a_batch() {
+        let mut queue = vec![search(1, 40)];
+        // A page's glyphs are a detour: the query that was running resumes after them.
+        interrupt(&mut queue, search(2, 10), Request::Text(3));
+        assert!(matches!(queue.pop(), Some(Request::Text(3))));
+        assert!(matches!(
+            queue.pop(),
+            Some(Request::Search {
+                query: 2,
+                from: 10,
+                ..
+            })
+        ));
+        // A newer query replaces the one running and the older one still waiting under it.
+        let mut queue = vec![search(1, 40), Request::Outline];
+        interrupt(&mut queue, search(2, 10), search(3, 0));
+        assert!(matches!(
+            queue.pop(),
+            Some(Request::Search {
+                query: 3,
+                from: 0,
+                ..
+            })
+        ));
+        assert!(matches!(queue.pop(), Some(Request::Outline)));
+        assert!(queue.is_empty());
+    }
 
     /// The band follows the destination but never runs off either end of the page.
     #[test]

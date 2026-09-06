@@ -316,16 +316,8 @@ impl Bar {
         self.matches.set_text(&tab.matches_label());
     }
 
-    /// The number of matches in the preview, reported by WebKit after a search.
-    pub fn set_matches(&self, count: u32) {
-        self.set_matches_text(&match count {
-            0 => "No results".to_string(),
-            n => format!("{n} matches"),
-        });
-    }
-
-    /// The same readout, said in the caller's own words. The PDF reader counts its matches
-    /// itself and can say "3 of 12", which a plain count cannot.
+    /// The readout, said in the caller's own words: the PDF reader and the preview both count
+    /// their own matches and say "3 of 12", which the bar has no way to work out for them.
     pub fn set_matches_text(&self, text: &str) {
         self.matches.set_text(text);
     }
