@@ -326,12 +326,29 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
-        // `accent --terminal` is accent as a terminal: a window with no vault holding one shell.
-        // A second one joins that window as another tab, the way a second loose file does.
+        // `accent --terminal [dir]` is accent as a terminal: a window with no vault holding one
+        // shell. A second one joins that window as another tab, the way a second loose file does.
         if args.iter().any(|a| a == "--terminal" || a == "-t") {
+            let cwd = terminal_cwd(&args).and_then(|arg| {
+                // Resolved against the invoking process's directory, as a vault path is.
+                let path = command_line.create_file_for_arg(arg).path()?;
+                match path.canonicalize() {
+                    Ok(dir) if dir.is_dir() => Some(dir),
+                    // A file is not taken as its parent: which directory was meant is a guess,
+                    // and a shell in the wrong one is worse than a shell at home that says so.
+                    Ok(other) => {
+                        eprintln!("not a folder, opening at home: {}", other.display());
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("cannot open {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
             if let Some(app) = self.loose_window(gtk_app) {
                 app.window.present();
-                app.open_terminal();
+                app.open_terminal_at(cwd);
             }
             return glib::ExitCode::SUCCESS;
         }
@@ -630,6 +647,16 @@ impl Shell {
         }
         self.add_window(gtk_app, None, None)
     }
+}
+
+/// Where `accent --terminal` was pointed: the first argument that is not one of the flags, or
+/// `None` for the bare form. Pure, so the parsing is a test rather than a manual run; whether the
+/// path is a directory is the caller's question, because only it can resolve one.
+fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
+    args.iter()
+        .skip(1)
+        .map(|arg| arg.as_os_str())
+        .find(|arg| !matches!(arg.to_str(), Some("--terminal" | "-t" | "--new-window")))
 }
 
 /// Hand a page back to the window it was dragged out of, and say there why.
@@ -2727,12 +2754,19 @@ impl App {
     /// A shell in a new tab of the active pane, at the vault root — the directory everything else
     /// in the window is measured from. A window with no vault opens one at home.
     fn open_terminal(self: &Rc<Self>) {
+        self.open_terminal_at(None);
+    }
+
+    /// The same, at a directory of the caller's choosing: `accent --terminal <dir>` is the only
+    /// one that has one, so `win.terminal` keeps going through `open_terminal` and the action,
+    /// the menu and the palette entry are all untouched.
+    fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         let n = self.terminals.get() + 1;
         self.terminals.set(n);
-        let cwd = match self.vault() {
+        let cwd = cwd.unwrap_or_else(|| match self.vault() {
             Some(vault) => vault.root().to_path_buf(),
             None => glib::home_dir(),
-        };
+        });
         let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
         fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
@@ -5150,6 +5184,27 @@ mod tests {
                 .iter()
                 .any(|(a, k)| *a == "win.save" && k == "<Control><Shift>s")
         );
+    }
+
+    #[test]
+    fn the_terminal_flag_takes_the_first_argument_that_is_not_a_flag() {
+        let args = |v: &[&str]| -> Vec<std::ffi::OsString> {
+            v.iter().map(std::ffi::OsString::from).collect()
+        };
+        let cwd = |v: &[&str]| terminal_cwd(&args(v)).map(|p| p.to_string_lossy().into_owned());
+
+        assert_eq!(
+            cwd(&["accent", "--terminal", "/tmp"]).as_deref(),
+            Some("/tmp")
+        );
+        // Order does not matter, and the short spelling is the same flag.
+        assert_eq!(cwd(&["accent", "/tmp", "-t"]).as_deref(), Some("/tmp"));
+        // The bare form has no directory to offer, so the window decides.
+        assert_eq!(cwd(&["accent", "--terminal"]), None);
+        // argv[0] is the program, never the path.
+        assert_eq!(cwd(&["accent"]), None);
+        // The other flag a command line can carry is not a path either.
+        assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
     }
 
     #[test]
