@@ -24,8 +24,18 @@ pub const LOWRES_W: i32 = 256;
 /// Between pages, and around the column. The 12 of DESIGN.md's spacing scale.
 const GAP: f32 = 12.0;
 
-/// Texture bytes held before the least recently used are dropped.
+/// Tile bytes held before the least recently used are dropped.
 const BUDGET: usize = 256 << 20;
+
+/// The same for the low-resolution stand-ins, which used to be kept for the life of the tab: at
+/// 370 KB each (256 x 362 x 4 for A4) a 500-page document strip-scrolled from end to end held
+/// 177 MB of them, and twice that once the reader had seen it in both light and dark.
+///
+/// A quarter of [`BUDGET`], which is about 180 A4 pages. The most that can be on screen at once
+/// is far less: the reading view paints one viewport of prefetch either side of the one being
+/// read, which at the 10 % minimum zoom and a 2 000 px-tall viewport is 48 pages, and the strip
+/// beside it another 20. Eviction therefore never reaches a page either view is painting.
+const LOWRES_BUDGET: usize = 64 << 20;
 
 /// Points to CSS pixels at zoom 1.0. A PDF point is 1/72 inch and a CSS pixel 1/96.
 const PT_TO_PX: f32 = 96.0 / 72.0;
@@ -96,6 +106,16 @@ impl Anchor {
     }
 }
 
+/// The two ends of a drag, each a page and a point on it in that page's own points.
+///
+/// The two need not be the same page, and `to` may be earlier in the document than `from`: a
+/// drag runs in whichever direction the reader pulls it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Span {
+    pub from: (usize, (f32, f32)),
+    pub to: (usize, (f32, f32)),
+}
+
 /// One tile of one page at one scale, in one colour scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey {
@@ -107,15 +127,19 @@ pub struct TileKey {
     pub dark: bool,
 }
 
-/// Textures already rendered, dropped least-recently-used first once they outgrow [`BUDGET`].
+/// Textures already rendered, dropped least-recently-used first once they outgrow their budget.
+///
+/// Two maps and two budgets, because the two kinds of texture are wanted for different lengths of
+/// time: a tile is one square of one page at one zoom and is stale the moment the zoom changes,
+/// while a stand-in is a whole page at a fixed size and stays useful at every zoom.
 #[derive(Default)]
 pub struct Cache {
     tiles: HashMap<TileKey, (gdk::MemoryTexture, u64)>,
     /// One whole-page thumbnail per page and theme, which is what a page shows before its tiles
-    /// arrive and what the thumbnail strip paints. Never evicted: they are small and always
-    /// wanted.
-    lowres: HashMap<(u32, bool), gdk::MemoryTexture>,
+    /// arrive and what the thumbnail strip paints, under [`LOWRES_BUDGET`].
+    lowres: HashMap<(u32, bool), (gdk::MemoryTexture, u64)>,
     bytes: usize,
+    lowres_bytes: usize,
     tick: u64,
 }
 
@@ -134,40 +158,81 @@ impl Cache {
             let _ = old;
         }
         self.bytes += bytes;
-        self.evict();
+        self.bytes -= drop_oldest(&mut self.tiles, self.bytes, BUDGET);
     }
 
-    pub fn lowres(&self, page: u32, dark: bool) -> Option<gdk::MemoryTexture> {
-        self.lowres.get(&(page, dark)).cloned()
+    /// Takes `&mut self` so that painting a page counts as using its stand-in: eviction is by
+    /// least recently *painted*, which is what keeps what is on screen off the list.
+    pub fn lowres(&mut self, page: u32, dark: bool) -> Option<gdk::MemoryTexture> {
+        self.tick += 1;
+        let tick = self.tick;
+        let (texture, used) = self.lowres.get_mut(&(page, dark))?;
+        *used = tick;
+        Some(texture.clone())
     }
 
     pub fn insert_lowres(&mut self, page: u32, dark: bool, texture: gdk::MemoryTexture) {
-        self.lowres.insert((page, dark), texture);
+        self.tick += 1;
+        self.lowres_bytes += (texture.width() * texture.height() * 4) as usize;
+        if let Some((old, _)) = self.lowres.insert((page, dark), (texture, self.tick)) {
+            self.lowres_bytes -= (old.width() * old.height() * 4) as usize;
+        }
+        self.lowres_bytes -= drop_oldest(&mut self.lowres, self.lowres_bytes, LOWRES_BUDGET);
     }
 
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.lowres.clear();
         self.bytes = 0;
+        self.lowres_bytes = 0;
     }
+}
 
-    /// Drop the oldest tiles until the cache is comfortably under budget, so eviction happens in
-    /// batches rather than on every single insert once it is full.
-    fn evict(&mut self) {
-        if self.bytes <= BUDGET {
-            return;
-        }
-        let mut ages: Vec<(u64, TileKey)> = self.tiles.iter().map(|(k, (_, t))| (*t, *k)).collect();
-        ages.sort_unstable_by_key(|(tick, _)| *tick);
-        for (_, key) in ages {
-            if self.bytes * 4 <= BUDGET * 3 {
-                break;
-            }
-            if let Some((texture, _)) = self.tiles.remove(&key) {
-                self.bytes -= (texture.width() * texture.height() * 4) as usize;
-            }
+/// Drop the least recently used entries of `map` until it is comfortably under `budget`, and
+/// report how many bytes that freed.
+fn drop_oldest<K: Copy + Eq + std::hash::Hash>(
+    map: &mut HashMap<K, (gdk::MemoryTexture, u64)>,
+    bytes: usize,
+    budget: usize,
+) -> usize {
+    let used = map
+        .iter()
+        .map(|(key, (texture, tick))| (*tick, bytes_of(texture), *key))
+        .collect();
+    let mut freed = 0;
+    for key in overflowing(used, bytes, budget) {
+        if let Some((texture, _)) = map.remove(&key) {
+            freed += bytes_of(&texture);
         }
     }
+    freed
+}
+
+/// Which entries a cache of `bytes` has to give up to come back comfortably under `budget`:
+/// the least recently used first, down to three quarters of it rather than to the line, so
+/// eviction happens in batches rather than on every insert once the cache is full.
+///
+/// `used` is every entry as its tick, its size and its key. Kept apart from the textures so the
+/// policy can be checked without a display.
+fn overflowing<K: Copy>(mut used: Vec<(u64, usize, K)>, bytes: usize, budget: usize) -> Vec<K> {
+    if bytes <= budget {
+        return Vec::new();
+    }
+    used.sort_unstable_by_key(|(tick, _, _)| *tick);
+    let mut left = bytes;
+    let mut out = Vec::new();
+    for (_, size, key) in used {
+        if left * 4 <= budget * 3 {
+            break;
+        }
+        left -= size;
+        out.push(key);
+    }
+    out
+}
+
+fn bytes_of(texture: &gdk::MemoryTexture) -> usize {
+    (texture.width() * texture.height() * 4) as usize
 }
 
 /// A tile the widget wants and does not have. `u16::MAX` in both axes means the whole page at
@@ -518,14 +583,16 @@ impl PdfView {
         self.queue_draw();
     }
 
-    /// The boxes of the selected glyphs, in page points, on one page.
-    pub fn set_selection(&self, selection: Option<(usize, Vec<accent_core::pdf::Rect>)>) {
+    /// The boxes of the selected glyphs, in page points, per page: one entry for a selection
+    /// inside a page, one per page for a drag that ran across a page break.
+    pub fn set_selection(&self, selection: Vec<(usize, Vec<accent_core::pdf::Rect>)>) {
         *self.imp().selection.borrow_mut() = selection;
         self.queue_draw();
     }
 
-    /// Called with the page points a drag started and ended on, when both are on one page.
-    pub fn connect_select(&self, f: impl Fn(&PdfView, usize, (f32, f32), (f32, f32)) + 'static) {
+    /// Called with the page and the point a drag started and ended on, which need not be the
+    /// same page.
+    pub fn connect_select(&self, f: impl Fn(&PdfView, Span) + 'static) {
         *self.imp().on_select.borrow_mut() = Some(Box::new(f));
     }
 
@@ -604,22 +671,35 @@ impl PdfView {
         ))
     }
 
-    /// Report the page points a drag covers, when both ends are on the same page.
-    ///
-    /// ponytail: one page at a time. Selecting across a page break needs the glyphs of every
-    /// page between the two, which is a second lookup and a second set of rectangles; the day
-    /// that is asked for, this is where it goes.
+    /// Report the two ends of a drag, each as a page and a point on it.
     fn select_between(&self, x0: f64, y0: f64, x1: f64, y1: f64) {
-        let (Some(from), Some(to)) = (self.page_point(x0, y0), self.page_point(x1, y1)) else {
+        let (Some(from), Some(to)) = (
+            self.nearest_page_point(x0, y0),
+            self.nearest_page_point(x1, y1),
+        ) else {
             return;
         };
-        if from.0 != to.0 {
-            return;
-        }
         let handler = self.imp().on_select.borrow();
         if let Some(f) = handler.as_ref() {
-            f(self, from.0, (from.1, from.2), (to.1, to.2));
+            f(self, Span { from, to });
         }
+    }
+
+    /// Like [`PdfView::page_point`], but for a point that is off the paper: the gap between two
+    /// pages, or the margin beside one.
+    ///
+    /// A drag has to keep working there, and it does not need clamping to do so — the page's own
+    /// coordinates simply run negative or past its height, and picking the glyph nearest such a
+    /// point is what a drag off the bottom of a page means anyway.
+    fn nearest_page_point(&self, x: f64, y: f64) -> Option<(usize, (f32, f32))> {
+        let (cx, cy) = self.content_at(x, y);
+        let layout = self.imp().layout.borrow();
+        let page = page_at(&layout, f64::from(cy));
+        let rect = layout.pages.get(page)?;
+        Some((
+            page,
+            ((cx - rect.x) / layout.scale, (cy - rect.y) / layout.scale),
+        ))
     }
 
     fn content_at(&self, x: f64, y: f64) -> (f32, f32) {
@@ -690,7 +770,7 @@ mod imp {
     type Page = Box<dyn Fn(usize)>;
     type Zoomed = Box<dyn Fn()>;
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
-    type OnSelect = Box<dyn Fn(&super::PdfView, usize, (f32, f32), (f32, f32))>;
+    type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
 
     #[derive(glib::Properties)]
@@ -715,8 +795,8 @@ mod imp {
         pub dark: Cell<bool>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
-        /// The selected glyphs' boxes, and which page they are on.
-        pub selection: RefCell<Option<(usize, Vec<accent_core::pdf::Rect>)>>,
+        /// The selected glyphs' boxes, per page the selection covers.
+        pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
         pub drag_from: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
@@ -758,7 +838,7 @@ mod imp {
                 dark: Cell::new(false),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
-                selection: RefCell::new(None),
+                selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
@@ -997,7 +1077,7 @@ mod imp {
                 snapshot.append_color(&paper(dark), &bounds);
 
                 let page = index as u32;
-                let low = cache.borrow().lowres(page, dark);
+                let low = cache.borrow_mut().lowres(page, dark);
                 let mut missing = false;
                 if !thumbnails {
                     let device_w = (rect.w * sf as f32).round() as i32;
@@ -1063,7 +1143,7 @@ mod imp {
                     );
                 }
 
-                if let Some((_, boxes)) = selection.as_ref().filter(|(at, _)| *at == index) {
+                if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
                     let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
                     for glyph in boxes {
                         snapshot.append_color(
@@ -1269,5 +1349,20 @@ mod tests {
         };
         assert_eq!(anchor.clamped(4).page, 3);
         assert_eq!(anchor.clamped(4).v, 0.25);
+    }
+
+    /// Ten entries of 10 bytes against a budget of 100: nothing goes until the eleventh, and then
+    /// enough of the oldest go at once to leave room for three more.
+    #[test]
+    fn eviction_drops_the_least_recently_used_in_batches() {
+        let entries =
+            |n: u64| -> Vec<(u64, usize, u64)> { (0..n).map(|tick| (tick, 10, tick)).collect() };
+        assert!(overflowing(entries(10), 100, 100).is_empty());
+        // 110 down to 75 or less: four of the ten, oldest first.
+        assert_eq!(overflowing(entries(11), 110, 100), vec![0, 1, 2, 3]);
+        // Freshly painted pages sort last, so they are the ones eviction never reaches.
+        let mut used = entries(11);
+        used[0].0 = 99;
+        assert!(!overflowing(used, 110, 100).contains(&0));
     }
 }
