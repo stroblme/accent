@@ -6,7 +6,7 @@
 //! The caller reads on its own connection and never waits for the worker, which is what keeps a
 //! UI thread free while the vault is being indexed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -546,6 +546,51 @@ impl Vault {
         include_ignored: bool,
     ) -> Result<(Vec<Match>, usize)> {
         self.searcher().grep(re, limit, include_ignored)
+    }
+
+    /// The same exact search over the files the index does not hold at all: those under a
+    /// dependency tree, a `node_modules` or a `target/` the walk deliberately never entered.
+    ///
+    /// This is the second half of the Search pane's All toggle. The first half drops the
+    /// git-ignored exclusion, which is a column in the index; this one reaches what was never
+    /// indexed, and it can only be a walk. Everything already in the index is skipped by path, so
+    /// no file is greped twice, and the walk stops as soon as `limit` matches are in hand.
+    ///
+    /// It reads from disk on the caller's thread — the sidebar's search worker — so the index
+    /// lock is released before the first file is opened. `.git` and `.trash` stay unreachable,
+    /// and so does a symlinked repository's own gitignored build output: that is somebody else's
+    /// build tree, and leaving it out is what keeps a per-query walk affordable.
+    ///
+    /// ponytail: the walk runs per query, with no cache, for as long as All is on.
+    pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+        // Collected before the walk: the guard must not be held across file I/O.
+        let known: HashSet<String> = self.searcher().file_paths(true)?.into_iter().collect();
+        let opts = walk::ScanOptions {
+            include_skipped: true,
+            skip_dependency_trees: false,
+            // Inside the vault, what git ignores is already indexed, so the walk can skip it and
+            // the `known` test would have dropped it anyway.
+            vault_gitignore: true,
+            target_gitignore: true,
+            ..walk::ScanOptions::default()
+        };
+        let (mut out, mut total) = (Vec::new(), 0usize);
+        for f in walk::scan(&self.root, &opts).files {
+            if out.len() >= limit {
+                break;
+            }
+            if f.kind == FileKind::Dir || known.contains(&f.rel_path) {
+                continue;
+            }
+            match fs::read_text(&f.canonical) {
+                Ok(fs::Read::Text(t)) if !t.lossy => {
+                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut out, &mut total);
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!("grep skipped {}: {e}", f.rel_path),
+            }
+        }
+        Ok((out, total))
     }
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
@@ -1402,6 +1447,30 @@ mod tests {
         assert!(
             poll_until(|| f.vault.grep(&re, 10, false).unwrap().1 == 0, BUDGET),
             "the rewrites must reach the index without a rescan"
+        );
+    }
+
+    /// The other half of All: a tree the index never walked is greped from disk, and a file the
+    /// index does hold is not greped twice.
+    #[test]
+    fn grep_unindexed_reaches_the_trees_the_walk_skipped() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "zorblat in a note\n");
+        std::fs::create_dir_all(f.vault.root().join("node_modules")).unwrap();
+        f.write("node_modules/dep.js", "// zorblat\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let re = search::pattern("zorblat", Options::default()).unwrap();
+        // The index never walked node_modules, so its own grep cannot see the dependency.
+        assert_eq!(f.vault.grep(&re, 10, true).unwrap().1, 1);
+
+        let (hits, total) = f.vault.grep_unindexed(&re, 10).unwrap();
+        assert_eq!(total, 1, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "node_modules/dep.js");
+        assert!(
+            !hits.iter().any(|h| h.rel_path == "a.md"),
+            "an indexed note must not be greped a second time: {hits:?}"
         );
     }
 

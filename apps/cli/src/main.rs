@@ -30,7 +30,7 @@ struct Common {
     #[arg(long)]
     db: Option<PathBuf>,
     /// Also honour .gitignore inside the vault tree (off by default: vaults often
-    /// gitignore *.md). .accentignore is always honoured.
+    /// gitignore *.md).
     #[arg(long)]
     vault_gitignore: bool,
     /// Do not honour .gitignore inside directory-symlink targets (on by default, so that

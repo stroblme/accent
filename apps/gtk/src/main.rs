@@ -3728,7 +3728,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                         vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default(),
                     ),
                     sidebar::Query::Grep { re, all } => {
-                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                        let (mut hits, mut total) =
+                            vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                        // What the index holds first, because that is what it can count; with
+                        // All on, the trees it was never asked to hold get whatever room is left.
+                        if all {
+                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
+                            let (rest, more) = vault.grep_unindexed(&re, room).unwrap_or_default();
+                            hits.extend(rest);
+                            total += more;
+                        }
                         sidebar::Answer::Grep(hits, total)
                     }
                 }
