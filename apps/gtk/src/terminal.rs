@@ -5,11 +5,13 @@
 //! and no terminal-shaped hole in the layout — a shell at the bottom of the window is a pane split
 //! downwards, which is the same gesture that puts a note there.
 //!
-//! A focused shell owns the keyboard, so the window's accelerators would otherwise be unreachable
-//! from inside it and half of them would be eaten by the shell. The rule is that every `Ctrl+Shift`
-//! chord in the action table, plus the ones that move between tabs and the three zoom chords, is
-//! claimed here and forwarded to the window; everything else belongs to the shell, `Ctrl+C` and
-//! `Ctrl+K` included.
+//! A focused shell owns the keyboard, and it wins by default: the window keeps only Close Tab
+//! (`Ctrl+W`), New Terminal, the three zoom chords, Fullscreen and the `Ctrl+Shift` half of the
+//! action table, and everything else — `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R` and the
+//! rest of readline — reaches the shell. The window is where that happens, not here: GTK
+//! dispatches a window's application accelerators ahead of the VTE, so nothing a controller on
+//! this widget claims can beat them, and `main::apply_accels` unbinds the rest of the table for
+//! as long as a terminal has the focus (`main::reserved`, `has_focus`).
 
 use std::path::Path;
 use std::rc::Rc;
@@ -39,9 +41,6 @@ pub struct Term {
     key: String,
     pub page: adw::TabPage,
     pub view: vte4::Terminal,
-    /// The window chords a focused shell hands back. Refilled by `App::apply_accels`, so a rebind
-    /// moves what is forwarded along with it.
-    pub forwarded: gtk::ShortcutController,
 }
 
 impl Term {
@@ -86,6 +85,13 @@ impl Term {
     pub fn paste(&self) {
         self.view.paste_clipboard();
     }
+}
+
+/// Whether the keyboard is in a shell right now. `vte4::Terminal` is a leaf widget, so its own
+/// focus is the whole question, and `App::apply_accels` narrows the window's accelerators on the
+/// answer.
+pub fn has_focus(window: &adw::ApplicationWindow) -> bool {
+    gtk::prelude::GtkWindowExt::focus(window).is_some_and(|w| w.is::<vte4::Terminal>())
 }
 
 /// Open a shell in `cwd` as a tab of `tabs`.
@@ -145,18 +151,10 @@ pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
         },
     );
 
-    let forwarded = gtk::ShortcutController::new();
-    forwarded.set_propagation_phase(gtk::PropagationPhase::Capture);
-    view.add_controller(forwarded.clone());
     install_keys(&view, tabs);
     install_links(&view);
 
-    Rc::new(Term {
-        key,
-        page,
-        view,
-        forwarded,
-    })
+    Rc::new(Term { key, page, view })
 }
 
 /// The shell exited: hand the terminal back so the caller can close its tab.

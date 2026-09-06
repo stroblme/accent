@@ -814,8 +814,12 @@ struct App {
     recent_notes: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
-    /// rebind has to rebuild it: see [`fill_shortcuts`].
+    /// rebind has to rebuild it: see [`fill_captured`].
     captured: gtk::ShortcutController,
+    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
+    /// Only a change is worth acting on: focus moves on every click, and the rebuild is sixty
+    /// `set_accels_for_action` calls.
+    shell_keys: Cell<bool>,
 }
 
 impl App {
@@ -2793,7 +2797,6 @@ impl App {
             None => glib::home_dir(),
         });
         let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
-        fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -3123,14 +3126,24 @@ impl App {
     /// Push the accelerators in force into the application and rebuild the four captured chords.
     /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
     /// them a config change touched.
+    ///
+    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
+    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
+    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
+    /// the same rule as the default it replaced.
     fn apply_accels(&self) {
         let Some(gtk_app) = self.window.application() else {
             return;
         };
         let config = self.config.borrow();
+        let shell = terminal::has_focus(&self.window);
         for (action, _, _) in ACTIONS {
             let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
+            let accels: Vec<&str> = accels
+                .iter()
+                .map(String::as_str)
+                .filter(|accel| !shell || reserved(action, accel))
+                .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
         let captured: Vec<(&str, String)> = CAPTURED
@@ -3142,12 +3155,6 @@ impl App {
             })
             .collect();
         fill_captured(&self.captured, &captured);
-        let forwarded = forwarded(&config);
-        for doc in self.docs() {
-            if let Some(term) = doc.terminal() {
-                fill_shortcuts(&term.forwarded, &forwarded);
-            }
-        }
     }
 
     /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
@@ -3700,6 +3707,7 @@ fn build_window(
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
+        shell_keys: Cell::new(false),
     });
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
@@ -4587,37 +4595,37 @@ const CAPTURED: &[&str] = &[
     "win.toggle-comment",
 ];
 
-/// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus opening a shell, closing one and the three zoom chords.
+/// The chords the window keeps while a shell has the keyboard. Everything else in [`ACTIONS`]
+/// goes to the shell: a terminal that answers only half of readline is not a terminal.
 ///
-/// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
-/// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
-/// Backspace` still do that, which is why this is the chord to give up. The zoom chords are the
-/// same trade: a terminal has a zoom of its own now, so `Ctrl+plus` / `Ctrl+minus` / `Ctrl+0` have
-/// to reach it, and readline loses them.
+/// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
+/// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
+/// unbinding it in `App::apply_accels` is what lets the key through. The reserved set is small
+/// and each entry earns its place:
+///
+/// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
+///   the one budgeted cost: readline loses delete-word, and `Alt+Backspace` still does it.
+/// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
+///   scale one have to be reachable from inside one.
+/// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
+///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
+/// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
+///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
+///   the palette's second spelling and Replace in Notes.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
-/// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
+/// the config is not recognised; `gtk::accelerator_parse` would settle it but needs an initialised
 /// GTK, which the tests do not have.
-fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
-    ACTIONS
-        .iter()
-        .flat_map(|(action, _, _)| {
-            accels_for(config, action)
-                .into_iter()
-                .map(move |accel| (*action, accel))
-        })
-        .filter(|(action, accel)| {
-            matches!(
-                *action,
-                "win.terminal"
-                    | "win.close-tab"
-                    | "win.zoom-in"
-                    | "win.zoom-out"
-                    | "win.zoom-reset"
-            ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
-        })
-        .collect()
+fn reserved(action: &str, accel: &str) -> bool {
+    matches!(
+        action,
+        "win.close-tab"
+            | "win.terminal"
+            | "win.zoom-in"
+            | "win.zoom-out"
+            | "win.zoom-reset"
+            | "win.fullscreen"
+    ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
 }
 
 fn clear(controller: &gtk::ShortcutController) {
@@ -4658,20 +4666,6 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
     }
 }
 
-/// Refill a capture controller from the accelerators in force. Cleared first, so a rebind that
-/// moves a chord away from one of these does not leave the old one claimed.
-fn fill_shortcuts(controller: &gtk::ShortcutController, bindings: &[(&str, String)]) {
-    clear(controller);
-    for (action, accel) in bindings {
-        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(accel) {
-            controller.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            ));
-        }
-    }
-}
-
 fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
@@ -4694,6 +4688,20 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
         .set_propagation_phase(gtk::PropagationPhase::Capture);
     app.window.add_controller(app.captured.clone());
     app.apply_accels();
+
+    // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
+    // crosses into or out of a terminal. `focus-widget` is the one signal that hears every way
+    // that happens: a click, a tab switch, a dialog, `Ctrl+J` itself.
+    app.window.connect_focus_widget_notify(glib::clone!(
+        #[weak]
+        app,
+        move |window| {
+            let shell = terminal::has_focus(window);
+            if shell != app.shell_keys.replace(shell) {
+                app.apply_accels();
+            }
+        }
+    ));
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -5172,46 +5180,59 @@ mod tests {
         }
     }
 
-    /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
-    /// action listed first. The table is the only place that can go wrong, and it is pure data.
+    /// The reserved set is what a focused shell does not get, and it is pure data: everything
+    /// else in the table is unbound for as long as a terminal has the keyboard.
     #[test]
-    fn a_shell_hands_back_the_ctrl_shift_chords_and_the_toggle() {
-        let config = Config::default();
-        let forwarded = forwarded(&config);
-        let has =
-            |action: &str, accel: &str| forwarded.iter().any(|(a, k)| *a == action && k == accel);
-        // Claimed: opening and closing a shell, and every Ctrl+Shift chord in the table.
-        assert!(has("win.terminal", "<Control>j"));
-        assert!(has("win.close-tab", "<Control>w"));
-        assert!(has("win.new-folder", "<Control><Shift>n"));
-        // Copy and paste came the same way once they stopped being callbacks on the shell.
-        assert!(has("win.terminal-copy", "<Control><Shift>c"));
-        assert!(has("win.terminal-paste", "<Control><Shift>v"));
-        // And the zoom chords, because a terminal has a zoom of its own to reach. Every spelling
-        // of them, or Ctrl+= would zoom the shell while Ctrl+plus went to readline.
-        assert!(has("win.zoom-in", "<Control>plus"));
-        assert!(has("win.zoom-in", "<Control>equal"));
-        assert!(has("win.zoom-in", "<Control>KP_Add"));
-        assert!(has("win.zoom-out", "<Control>minus"));
-        assert!(has("win.zoom-reset", "<Control>0"));
-        // Left to the shell: plain Ctrl, and anything without Control at all.
-        assert!(!has("win.save", "<Control>s"));
-        assert!(!has("win.find-previous", "<Shift>F3"));
+    fn a_focused_shell_keeps_everything_but_the_reserved_set() {
+        // Kept: closing a tab, opening a shell, scaling one, leaving fullscreen, and every
+        // Ctrl+Shift chord in the table — Copy and Paste in Terminal among them.
+        assert!(reserved("win.close-tab", "<Control>w"));
+        assert!(reserved("win.terminal", "<Control>j"));
+        assert!(reserved("win.fullscreen", "F11"));
+        assert!(reserved("win.new-folder", "<Control><Shift>n"));
+        assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
+        assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
+        // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
+        // to readline.
+        for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
+            assert!(reserved("win.zoom-in", accel));
+        }
+        assert!(reserved("win.zoom-out", "<Control>minus"));
+        assert!(reserved("win.zoom-reset", "<Control>0"));
+        // The shell's: plain Ctrl, function keys, and the chords readline reaches for most.
+        for (action, accel) in [
+            ("win.save", "<Control>s"),
+            ("win.duplicate-line", "<Control>d"),
+            ("win.toggle-comment", "<Control>k"),
+            ("win.delete-line", "<Control>l"),
+            ("win.palette-files", "<Control>e"),
+            ("win.palette-commands", "<Control>p"),
+            ("win.find-previous", "<Shift>F3"),
+            ("win.menu", "F10"),
+        ] {
+            assert!(!reserved(action, accel), "{action} eats {accel}");
+        }
     }
 
+    /// A rebound chord follows the same rule as the default it replaced, because the filter reads
+    /// the spelling in force rather than the table's.
     #[test]
-    fn a_rebound_chord_moves_what_the_shell_hands_back() {
+    fn a_rebound_chord_follows_the_same_rule() {
         let mut config = Config::default();
         config.shortcuts.insert(
             "win.save".to_string(),
             vec!["<Control><Shift>s".to_string()],
         );
-        let forwarded = forwarded(&config);
-        assert!(
-            forwarded
-                .iter()
-                .any(|(a, k)| *a == "win.save" && k == "<Control><Shift>s")
-        );
+        for accel in accels_for(&config, "win.save") {
+            assert!(reserved("win.save", &accel));
+        }
+        // The other direction: Close Tab moved off Ctrl+W is still Close Tab, and still reserved.
+        config
+            .shortcuts
+            .insert("win.close-tab".to_string(), vec!["<Control>y".to_string()]);
+        for accel in accels_for(&config, "win.close-tab") {
+            assert!(reserved("win.close-tab", &accel));
+        }
     }
 
     #[test]
