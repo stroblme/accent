@@ -84,6 +84,12 @@ pub struct Heading {
     pub text: String,
 }
 
+/// The one set of parser options, shared by [`analyze`] and [`to_html`] so the preview cannot
+/// disagree with the highlighting about what a note says.
+///
+/// `ENABLE_HEADING_ATTRIBUTES` is deliberately absent: pulldown-cmark 0.13.4 panics on some
+/// setext headings while parsing an attribute block, and `{#custom-id}` after a heading is a
+/// pulldown-cmark extension nothing here uses. It renders as literal text instead.
 fn options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
@@ -92,7 +98,6 @@ fn options() -> Options {
         | Options::ENABLE_MATH
         | Options::ENABLE_WIKILINKS
         | Options::ENABLE_YAML_STYLE_METADATA_BLOCKS
-        | Options::ENABLE_HEADING_ATTRIBUTES
 }
 
 /// A link being built while its inner text events stream past.
@@ -1397,6 +1402,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A hyphen, a space, `[`, a space, `]`, a space, a backslash, a newline, a tab, a hyphen:
+    /// ten bytes that made pulldown-cmark slice `6..5` inside its heading-attribute block while
+    /// looking at the setext heading the tab-indented `-` opens. Dropping
+    /// `Options::ENABLE_HEADING_ATTRIBUTES` is what keeps it out of that code; a note holding
+    /// these bytes used to take the window down.
+    #[test]
+    fn a_backslash_before_a_tabbed_setext_rule_does_not_panic() {
+        let doc = "- [ ] \\\n\t-";
+        assert_eq!(doc.len(), 10);
+        analyze(doc);
+        to_html(doc);
     }
 
     #[test]
