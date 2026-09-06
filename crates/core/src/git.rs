@@ -537,6 +537,51 @@ fn parse_submodule(line: &str) -> Option<Submodule> {
 
 // -------------------------------------------------------------- read and write
 
+/// What one commit changed: a status letter and a path per file.
+///
+/// `-m --first-parent` is what makes a merge answer at all — plain `git show` prints nothing for
+/// one, and `-m` alone prints a diff against every parent in turn. A root commit needs no special
+/// case: every file in it comes back as `A`.
+pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Error> {
+    let out = run(
+        &repo.root,
+        &[
+            "show",
+            "--format=",
+            "--name-status",
+            "-z",
+            "-m",
+            "--first-parent",
+            oid,
+        ],
+        None,
+        true,
+    )?;
+    Ok(parse_name_status(&out))
+}
+
+/// Parse `--name-status -z`: a status token, then its path — except a rename or a copy, whose
+/// token is followed by *two* paths. That is the same trap [`parse_status`] handles for porcelain
+/// records, and it gets the same answer: the new path is the one the row is about.
+pub fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
+    let mut files = Vec::new();
+    let mut tokens = bytes.split(|b| *b == 0).filter(|t| !t.is_empty());
+    while let Some(token) = tokens.next() {
+        let Some(letter) = String::from_utf8_lossy(token).chars().next() else {
+            continue;
+        };
+        let Some(path) = tokens.next() else {
+            break;
+        };
+        let path = match letter {
+            'R' | 'C' => tokens.next().unwrap_or(path),
+            _ => path,
+        };
+        files.push((letter, String::from_utf8_lossy(path).into_owned()));
+    }
+    files
+}
+
 /// The bytes of `path` at `rev`, or `None` when that revision has no such file.
 ///
 /// An empty `rev` means the index, which is what the diff view compares a staged change against.
@@ -690,6 +735,12 @@ mod tests {
     fn commit_all(dir: &Path, message: &str) {
         ok(dir, &["add", "-A"]);
         ok(dir, &["commit", "-m", message]);
+    }
+
+    fn head(dir: &Path) -> String {
+        String::from_utf8_lossy(&sh(dir, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string()
     }
 
     fn open(dir: &Path) -> Repo {
@@ -1125,6 +1176,51 @@ mod tests {
         write_file(dir, "a.md", "clobbered\n");
         discard(&repo, &["a.md"]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn changed_files_reads_a_commit_a_root_a_merge_and_a_rename() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        write_file(dir, "b.md", "b\n");
+        commit_all(dir, "root");
+        let root = head(dir);
+        write_file(dir, "a.md", "two\n");
+        commit_all(dir, "second");
+        let second = head(dir);
+        ok(dir, &["mv", "a.md", "renamed.md"]);
+        commit_all(dir, "rename");
+        let rename = head(dir);
+        ok(dir, &["checkout", "-q", "-b", "side", &root]);
+        write_file(dir, "c.md", "c\n");
+        commit_all(dir, "side");
+        ok(dir, &["checkout", "-q", "main"]);
+        ok(dir, &["merge", "-q", "--no-ff", "side", "-m", "merge"]);
+        let merge = head(dir);
+
+        let repo = open(dir);
+        let files = |oid: &str| changed_files(&repo, oid).unwrap();
+        assert_eq!(
+            files(&root),
+            [('A', "a.md".to_string()), ('A', "b.md".to_string())],
+            "a root commit adds everything in it"
+        );
+        assert_eq!(files(&second), [('M', "a.md".to_string())]);
+        assert_eq!(
+            files(&rename),
+            [('R', "renamed.md".to_string())],
+            "a rename is one row, under the name it now has"
+        );
+        assert_eq!(
+            files(&merge),
+            [('A', "c.md".to_string())],
+            "a merge shows its first-parent diff"
+        );
     }
 
     #[test]

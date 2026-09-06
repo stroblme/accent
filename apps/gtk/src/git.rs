@@ -83,6 +83,23 @@ enum Row {
     Submodule(Submodule),
 }
 
+/// One line of the history list. A flat store with two kinds rather than a `GtkTreeListModel`:
+/// the log is spliced wholesale on every refresh anyway, so a tree model would only add a
+/// create-child-model closure and a placeholder state to keep in step with it.
+#[derive(Clone)]
+enum LogItem {
+    Commit(LogRow),
+    /// A file the commit above it changed, shown while that commit is expanded.
+    File {
+        /// The commit the file belongs to, and its first parent — `None` on a root commit, whose
+        /// files have nothing on the left to compare against.
+        oid: String,
+        parent: Option<String>,
+        letter: char,
+        path: String,
+    },
+}
+
 /// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
 /// it is replaced at the same moment and a reader wants a consistent set.
 #[derive(Default)]
@@ -130,6 +147,9 @@ pub struct Panel {
     /// Set while the repository list is being replaced, so the chooser's own notify does not read
     /// the splice as the user picking a repository.
     syncing: Cell<bool>,
+    /// The commit whose file list is open, if any. One at a time: a second expansion closes the
+    /// first, and a refresh closes them all.
+    expanded: RefCell<Option<String>>,
     monitors: RefCell<Vec<gio::FileMonitor>>,
 }
 
@@ -305,6 +325,7 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(false),
             syncing: Cell::new(false),
+            expanded: RefCell::new(None),
             monitors: RefCell::new(Vec::new()),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
@@ -460,6 +481,24 @@ impl Panel {
             }
         });
         view.set_factory(Some(&factory));
+
+        // The same one-click rule as the changes list and the tree: a commit opens its file list,
+        // a file in it opens its diff.
+        view.set_single_click_activate(true);
+        let weak = Rc::downgrade(self);
+        view.connect_activate(move |view, position| {
+            let (Some(panel), Some(item)) =
+                (weak.upgrade(), log_at(view.model().as_ref(), position))
+            else {
+                return;
+            };
+            match item {
+                LogItem::Commit(row) => panel.toggle(&row.commit),
+                LogItem::File {
+                    oid, parent, path, ..
+                } => panel.compare(&path, &path, Sides::Commit { oid, parent }),
+            }
+        });
     }
 
     // --- refresh ------------------------------------------------------------------------------
@@ -608,15 +647,87 @@ impl Panel {
     /// unchanged: [`git::lanes`] is one forward pass, so a Load More can only append, and
     /// appending leaves the reader where they were instead of scrolling back to the top.
     fn fill_log(&self, commits: Vec<Commit>, keep: usize) {
+        self.collapse();
         let rows = git::lanes(commits);
         let keep = keep.min(rows.len()) as u32;
         let items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
             .iter()
             .cloned()
-            .map(glib::BoxedAnyObject::new)
+            .map(|row| glib::BoxedAnyObject::new(LogItem::Commit(row)))
             .collect();
         self.log
             .splice(keep, self.log.n_items().saturating_sub(keep), &items);
+    }
+
+    /// Take away whatever file list is open. The file rows of one commit are contiguous, and only
+    /// one commit is ever expanded, so this is a single splice.
+    fn collapse(&self) {
+        self.expanded.replace(None);
+        let mut start = None;
+        let mut n = 0;
+        for i in 0..self.log.n_items() {
+            if matches!(log_at_index(&self.log, i), Some(LogItem::File { .. })) {
+                start.get_or_insert(i);
+                n += 1;
+            }
+        }
+        if let Some(start) = start {
+            self.log.splice(start, n, &[] as &[glib::BoxedAnyObject]);
+        }
+    }
+
+    /// Show, or hide again, the files one commit changed.
+    fn toggle(self: &Rc<Self>, commit: &Commit) {
+        let was = self.expanded.borrow().clone();
+        self.collapse();
+        if was.as_deref() == Some(commit.id.as_str()) {
+            return;
+        }
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        self.expanded.replace(Some(commit.id.clone()));
+        let (oid, parent) = (commit.id.clone(), commit.parents.first().cloned());
+        let panel = self.clone();
+        glib::spawn_future_local(async move {
+            let query = oid.clone();
+            let files = gio::spawn_blocking(move || git::changed_files(&repo, &query)).await;
+            let files = match files {
+                Ok(Ok(files)) => files,
+                Ok(Err(e)) => return tracing::debug!("git show --name-status: {e}"),
+                Err(_) => return tracing::warn!("the git worker panicked"),
+            };
+            // A refresh, or another commit, may have landed while git was answering.
+            if panel.expanded.borrow().as_deref() != Some(oid.as_str()) {
+                return;
+            }
+            let Some(at) = panel.row_of_commit(&oid) else {
+                return;
+            };
+            let rows: Vec<glib::BoxedAnyObject> = files
+                .into_iter()
+                .map(|(letter, path)| {
+                    glib::BoxedAnyObject::new(LogItem::File {
+                        oid: oid.clone(),
+                        parent: parent.clone(),
+                        letter,
+                        path,
+                    })
+                })
+                .collect();
+            panel.log.splice(at + 1, 0, &rows);
+        });
+    }
+
+    /// Where a commit sits in the log store, or `None` if it has since been spliced away.
+    fn row_of_commit(&self, oid: &str) -> Option<u32> {
+        (0..self.log.n_items()).find(|i| {
+            matches!(log_at_index(&self.log, *i), Some(LogItem::Commit(row)) if row.commit.id == oid)
+        })
     }
 
     fn load_more(self: &Rc<Self>) {
@@ -646,7 +757,9 @@ impl Panel {
                 state.commits.extend(page);
                 state.commits.clone()
             };
-            panel.fill_log(commits, panel.log.n_items() as usize);
+            // `skip` is how many commit rows the store already had, which after the collapse
+            // inside `fill_log` is exactly how many of them stay.
+            panel.fill_log(commits, skip);
         });
     }
 
@@ -828,14 +941,14 @@ impl Panel {
         match section {
             // A conflict is resolved in the file, not in a diff of two sides that both lost.
             Section::Conflicts => (self.hooks.open)(key),
-            Section::Staged => self.compare(entry, key, Sides::Staged),
-            Section::Changes => self.compare(entry, key, Sides::Worktree),
+            Section::Staged => self.compare(&entry.path, key, Sides::Staged),
+            Section::Changes => self.compare(&entry.path, key, Sides::Worktree),
         }
     }
 
     /// Open the comparison a row stands for. Both sides are read in one worker hop, because two
     /// would show the file mid-write if it changed between them.
-    fn compare(self: &Rc<Self>, entry: &Entry, key: &str, sides: Sides) {
+    fn compare(self: &Rc<Self>, rel: &str, key: &str, sides: Sides) {
         let repo = {
             let state = self.state.borrow();
             match state.repos.get(state.selected) {
@@ -843,18 +956,23 @@ impl Panel {
                 None => return,
             }
         };
-        let (rel, key) = (entry.path.clone(), key.to_string());
-        let name = split_name(&entry.path).1.to_string();
+        let (rel, key) = (rel.to_string(), key.to_string());
+        let name = split_name(&rel).1.to_string();
         let path = repo.root.join(&rel);
+        let (left_title, right_title, tag) = (sides.left_title(), sides.right_title(), sides.tag());
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let read = gio::spawn_blocking(move || {
-                // "" is the index; a side git has no file for is a new or deleted file, and the
-                // empty string is exactly the right thing to diff against.
-                let left = side(git::show(&repo, sides.left_rev(), &rel));
-                let right = match sides {
+                // A side git has no file for is a new or deleted file, and an empty string is
+                // exactly the right thing to diff against.
+                let left = match sides.left_rev() {
+                    Some(rev) => side(git::show(&repo, rev, &rel)),
+                    None => Vec::new(),
+                };
+                let right = match &sides {
                     Sides::Staged => side(git::show(&repo, "", &rel)),
                     Sides::Worktree => std::fs::read(&path).unwrap_or_default(),
+                    Sides::Commit { oid, .. } => side(git::show(&repo, oid, &rel)),
                 };
                 (left, right)
             })
@@ -869,14 +987,14 @@ impl Panel {
             }
             let left = String::from_utf8_lossy(&left).into_owned();
             let right = String::from_utf8_lossy(&right).into_owned();
-            let title = format!("{name} ({})", sides.right_title());
+            let title = format!("{name} ({right_title})");
             let (body, _) = crate::diff::view(
-                (&format!("{name} ({})", sides.left_title()), &left),
+                (&format!("{name} ({left_title})"), &left),
                 (&title, &right),
                 &accent_core::diff::lines(&left, &right),
                 false,
             );
-            (panel.hooks.open_diff)(&format!("diff:{}:{key}", sides.tag()), &title, &body);
+            (panel.hooks.open_diff)(&format!("diff:{tag}:{key}"), &title, &body);
         });
     }
 
@@ -974,44 +1092,60 @@ impl Panel {
 }
 
 /// Which two things a row's diff compares.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Sides {
     /// HEAD against the index: what this commit would add.
     Staged,
     /// The index against the file on disk: what is not staged yet.
     Worktree,
+    /// One commit against its first parent, which is what a file under an expanded history row
+    /// shows. `parent` is `None` on a root commit, whose left side is simply empty.
+    Commit { oid: String, parent: Option<String> },
 }
 
 impl Sides {
-    fn left_rev(self) -> &'static str {
+    /// The revision the left pane reads, `None` meaning there is nothing on that side at all.
+    fn left_rev(&self) -> Option<&str> {
         match self {
-            Sides::Staged => "HEAD",
-            Sides::Worktree => "",
+            Sides::Staged => Some("HEAD"),
+            Sides::Worktree => Some(""),
+            Sides::Commit { parent, .. } => parent.as_deref(),
         }
     }
 
-    fn left_title(self) -> &'static str {
+    fn left_title(&self) -> String {
         match self {
-            Sides::Staged => "HEAD",
-            Sides::Worktree => "Index",
+            Sides::Staged => "HEAD".to_string(),
+            Sides::Worktree => "Index".to_string(),
+            Sides::Commit { parent, .. } => match parent {
+                Some(parent) => short(parent),
+                None => "Nothing".to_string(),
+            },
         }
     }
 
-    fn right_title(self) -> &'static str {
+    fn right_title(&self) -> String {
         match self {
-            Sides::Staged => "Index",
-            Sides::Worktree => "Working Tree",
+            Sides::Staged => "Index".to_string(),
+            Sides::Worktree => "Working Tree".to_string(),
+            Sides::Commit { oid, .. } => short(oid),
         }
     }
 
-    /// What keys the tab, so the two comparisons of one file are two tabs and asking twice
-    /// reveals the one already open.
-    fn tag(self) -> &'static str {
+    /// What keys the tab, so the comparisons of one file are a tab each and asking twice reveals
+    /// the one already open.
+    fn tag(&self) -> String {
         match self {
-            Sides::Staged => "index",
-            Sides::Worktree => "worktree",
+            Sides::Staged => "index".to_string(),
+            Sides::Worktree => "worktree".to_string(),
+            Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
         }
     }
+}
+
+/// An object name as git abbreviates it in the log.
+fn short(oid: &str) -> String {
+    oid.chars().take(7).collect()
 }
 
 // --- the worker's half --------------------------------------------------------------------------
@@ -1069,6 +1203,37 @@ fn side(read: Result<Option<Vec<u8>>, git::Error>) -> Vec<u8> {
 
 // --- widgets ------------------------------------------------------------------------------------
 
+/// The line one changed file is shown on — status letter, name, directory — in the changes list
+/// and under an expanded history row alike. Whatever comes after the directory, the changes list's
+/// action buttons, is appended by the caller, and the binders find all four by sibling order.
+fn file_line() -> gtk::Box {
+    let letter = gtk::Label::builder().width_chars(1).build();
+    for class in ["dim-label", "numeric", "monospace"] {
+        letter.add_css_class(class);
+    }
+    let name = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
+    let dir = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(pango::EllipsizeMode::Start)
+        .build();
+    dir.add_css_class("dim-label");
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for child in [
+        letter.upcast_ref::<gtk::Widget>(),
+        name.upcast_ref(),
+        dir.upcast_ref(),
+    ] {
+        row.append(child);
+    }
+    row
+}
+
 /// One changes row: a header layout and an entry layout in a stack, so a recycled row can be
 /// either. The buttons hold the `GtkListItem` rather than the row's data, because the data is
 /// replaced under them every time the row is reused.
@@ -1106,21 +1271,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     header.append(&title);
     header.append(&all);
 
-    let letter = gtk::Label::builder().width_chars(1).build();
-    for class in ["dim-label", "numeric", "monospace"] {
-        letter.add_css_class(class);
-    }
-    let name = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
-    let dir = gtk::Label::builder()
-        .xalign(0.0)
-        .hexpand(true)
-        .ellipsize(pango::EllipsizeMode::Start)
-        .build();
-    dir.add_css_class("dim-label");
+    let entry = file_line();
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("git-actions");
@@ -1150,15 +1301,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         actions.append(&button);
     }
 
-    let entry = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    for child in [
-        letter.upcast_ref::<gtk::Widget>(),
-        name.upcast_ref(),
-        dir.upcast_ref(),
-        actions.upcast_ref(),
-    ] {
-        entry.append(child);
-    }
+    entry.append(&actions);
 
     // Not homogeneous: the header's button is taller than an entry row, and every row taking that
     // height would turn the list into a ladder.
@@ -1268,7 +1411,7 @@ fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)>
 }
 
 /// One log row: the graph on the left, the summary and its author on the right.
-fn log_row(item: &gtk::ListItem) -> gtk::Box {
+fn log_row(item: &gtk::ListItem) -> gtk::Stack {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
     // graph of the commit that used to be in it.
@@ -1276,7 +1419,7 @@ fn log_row(item: &gtk::ListItem) -> gtk::Box {
         #[weak]
         item,
         move |_, cr, _, height| {
-            if let Some(row) = log_of(&item) {
+            if let Some(LogItem::Commit(row)) = log_of(&item) {
                 draw_lanes(cr, &row, height as f64);
             }
         }
@@ -1317,19 +1460,65 @@ fn log_row(item: &gtk::ListItem) -> gtk::Box {
     text.append(&line);
     text.append(&meta);
 
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.append(&area);
-    row.append(&text);
-    row
+    let commit = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    commit.append(&area);
+    commit.append(&text);
+
+    // A file of the expanded commit, indented past the graph so it reads as belonging above it.
+    let file = file_line();
+    file.set_margin_start(LANE * 2);
+    file.set_margin_top(2);
+    file.set_margin_bottom(2);
+
+    // Not homogeneous, for the reason `change_row` gives: a commit row is two lines tall and a
+    // file row one, and every row taking the taller of the two would be a ladder.
+    let stack = gtk::Stack::builder()
+        .hhomogeneous(false)
+        .vhomogeneous(false)
+        .build();
+    stack.add_named(&commit, Some("commit"));
+    stack.add_named(&file, Some("file"));
+    stack
 }
 
 fn bind_log(item: &gtk::ListItem) {
-    let (Some(root), Some(row)) = (item.child().and_downcast::<gtk::Box>(), log_of(item)) else {
+    let (Some(stack), Some(item_row)) = (item.child().and_downcast::<gtk::Stack>(), log_of(item))
+    else {
         return;
     };
+    let (Some(commit), Some(file)) = (
+        stack.child_by_name("commit").and_downcast::<gtk::Box>(),
+        stack.child_by_name("file").and_downcast::<gtk::Box>(),
+    ) else {
+        return;
+    };
+
+    let row = match item_row {
+        LogItem::Commit(row) => row,
+        LogItem::File { letter, path, .. } => {
+            stack.set_visible_child_name("file");
+            let (Some(mark), Some(dir)) = (
+                file.first_child().and_downcast::<gtk::Label>(),
+                file.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            let Some(name) = mark.next_sibling().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            mark.set_text(&letter.to_string());
+            let (directory, base) = split_name(&path);
+            name.set_text(base);
+            dir.set_text(directory);
+            stack.set_tooltip_text(Some(&path));
+            return;
+        }
+    };
+
+    stack.set_visible_child_name("commit");
     let (Some(area), Some(text)) = (
-        root.first_child().and_downcast::<gtk::DrawingArea>(),
-        root.last_child().and_downcast::<gtk::Box>(),
+        commit.first_child().and_downcast::<gtk::DrawingArea>(),
+        commit.last_child().and_downcast::<gtk::Box>(),
     ) else {
         return;
     };
@@ -1356,7 +1545,7 @@ fn bind_log(item: &gtk::ListItem) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    root.set_tooltip_text(Some(&row.commit.id));
+    stack.set_tooltip_text(Some(&row.commit.id));
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -1512,11 +1701,31 @@ fn row_of(item: &gtk::ListItem) -> Option<Row> {
     )
 }
 
-fn log_of(item: &gtk::ListItem) -> Option<LogRow> {
+fn log_of(item: &gtk::ListItem) -> Option<LogItem> {
     Some(
         item.item()
             .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<LogRow>()
+            .borrow::<LogItem>()
+            .clone(),
+    )
+}
+
+fn log_at(model: Option<&gtk::SelectionModel>, position: u32) -> Option<LogItem> {
+    Some(
+        model?
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()?
+            .borrow::<LogItem>()
+            .clone(),
+    )
+}
+
+fn log_at_index(store: &gio::ListStore, position: u32) -> Option<LogItem> {
+    Some(
+        store
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()?
+            .borrow::<LogItem>()
             .clone(),
     )
 }
