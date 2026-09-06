@@ -8,7 +8,7 @@
 //! Ignore files differ inside and outside the vault, so the walk runs in two kinds of pass.
 //! The **vault tree** honours no ignore file at all, only the skip lists below: a notes vault
 //! routinely gitignores `*.md` on purpose, and that must not hide the user's notes. What git
-//! ignores is left out of *queries* instead ([`crate::index::Index::set_git_ignored`]), which is
+//! ignores is left out of *queries* instead ([`crate::index::Index::set_excluded`]), which is
 //! the only place it can be done without the walk having to guess. A **symlink target** is
 //! somebody else's tree — usually a code repo — so it honours its own `.gitignore`/`.ignore`,
 //! which is what keeps `.venv`, `target` and friends out.

@@ -462,7 +462,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "backlinks" => any(vault.backlinks(&arg::<String>(p, 0)?)),
         "note_paths" => any(vault.note_paths()),
         "file_paths" => any(vault.file_paths(arg(p, 0)?)),
-        "set_git_ignored" => any(vault.set_git_ignored(&paths(0)?)),
+        "set_excluded" => any(vault.set_excluded(&paths(0)?)),
         "recent_notes" => any(vault.recent_notes(arg(p, 0)?)),
         "headings" => any(vault.headings(&arg::<String>(p, 0)?)),
         "resolve_link" => any(vault.resolve_link(&arg::<String>(p, 0)?)),
