@@ -6,7 +6,7 @@
 //! dispatcher opens all of them and the session, rename, close and theme paths have a single
 //! list to walk.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -20,6 +20,9 @@ use crate::terminal::Term;
 pub struct Viewer {
     key: RefCell<String>,
     pub page: adw::TabPage,
+    /// How far the document is zoomed, `None` while it is fitted to the window. Only an image
+    /// has one: a status page and a diff draw at a size nobody chose.
+    pub zoom: Cell<Option<f64>>,
 }
 
 impl Viewer {
@@ -27,6 +30,7 @@ impl Viewer {
         Rc::new(Viewer {
             key: RefCell::new(key.to_string()),
             page,
+            zoom: Cell::new(None),
         })
     }
 
