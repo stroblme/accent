@@ -139,6 +139,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
+    ("win.git-sync", "Sync", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // The PDF reader. Back and forward take the chords a browser uses for the same idea;
     // the rest live in the palette, where they are found by name rather than by chord.
@@ -2542,6 +2543,18 @@ impl App {
                     git.focus_commit();
                 }
             }
+            // The pane's own button and the status bar's branch are this one action, so whichever
+            // is pressed, the repository synced is the one the active document sits in and the
+            // pane's selection ends up on it.
+            "git-sync" => {
+                if let Some(git) = self.git.get() {
+                    let key = self
+                        .active_doc()
+                        .filter(|d| !d.is_transient())
+                        .map(|d| d.key());
+                    git.sync(key.as_deref());
+                }
+            }
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -4828,11 +4841,12 @@ thread_local! {
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
 /// contents in the same band whatever the interface font makes of their height.
-/// `.accent-zoom` does the same job for the status bar: Adwaita gives a button a 24 px minimum and
-/// 5 px of padding either side, a box is as tall as its tallest child however that child is
-/// aligned, and so the zoom readout appearing lifted the bar from 29 px to 46 px. Dropping the
-/// minimum and the vertical padding puts the button on the caption's own line height, and it stays
-/// a button rather than becoming a label, so the reset click, the focus ring and the tooltip stay.
+/// `.accent-bar-button` does the same job for the status bar's two controls, the branch readout
+/// and the zoom one: Adwaita gives a button a 24 px minimum and 5 px of padding either side, a box
+/// is as tall as its tallest child however that child is aligned, and so either of them appearing
+/// lifted the bar from 29 px to 46 px. Dropping the minimum and the vertical padding puts them on
+/// the caption's own line height, and they stay buttons rather than becoming labels, so the click,
+/// the focus ring and the tooltip stay.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -4871,7 +4885,7 @@ fn install_chrome_css() {
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
-             .accent-zoom {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

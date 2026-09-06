@@ -111,11 +111,12 @@ pub struct Panel {
     chooser: gtk::DropDown,
     branch: gtk::Label,
     counts: gtk::Label,
-    pull: gtk::Button,
-    push: gtk::Button,
+    sync: gtk::Button,
     message: gtk::TextView,
     placeholder: gtk::Label,
     commit: gtk::Button,
+    /// The message box and its button, hidden together when there is nothing to commit.
+    commit_box: gtk::Box,
     divider: gtk::Paned,
     changes: gio::ListStore,
     log: gio::ListStore,
@@ -138,6 +139,12 @@ impl Panel {
         let chooser = gtk::DropDown::builder()
             .model(&names)
             .visible(false)
+            // A repository is named after its directory, and the button's default label asks for
+            // the whole name however long it is: measured at 345 px for a 43-character one, which
+            // is the sidebar's real floor whenever a vault has more than one repository. The
+            // button ellipsizes; the popup list keeps the names whole, having room for them.
+            .factory(&name_factory(true))
+            .list_factory(&name_factory(false))
             .build();
 
         let branch = gtk::Label::builder()
@@ -149,20 +156,31 @@ impl Panel {
         let counts = gtk::Label::new(None);
         counts.add_css_class("dim-label");
         counts.add_css_class("numeric");
-        // Plain arrows, not the network glyphs: `network-receive` and `network-transmit` are the
-        // same pair of arrows with a different one emphasised, which at 16 px is no difference at
-        // all. Down is what comes to you and up is what leaves, which is the whole distinction.
-        let pull = icon_button("go-down-symbolic", "Pull");
-        let push = icon_button("go-up-symbolic", "Push");
-        let refresh = icon_button("view-refresh-symbolic", "Refresh");
+        // One button, both halves, and the counts inside it: nothing in the app fetches, so a
+        // behind count is only as fresh as the last sync and cannot decide whether to pull.
+        // Three buttons was also what stopped the sidebar shrinking — the branch row measured
+        // 186 px of minimum width with them and 105 with one.
+        let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        arrows.append(&counts);
+        arrows.append(&gtk::Image::from_icon_name(
+            "network-transmit-receive-symbolic",
+        ));
+        let sync = gtk::Button::builder()
+            .child(&arrows)
+            .valign(gtk::Align::Center)
+            .build();
+        sync.add_css_class("flat");
+        // The "No Repository" page's own button: `git init` in a vault with no repository writes
+        // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
+        let check = gtk::Button::builder()
+            .label("Check Again")
+            .halign(gtk::Align::Center)
+            .build();
+        check.add_css_class("pill");
 
         let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        for child in [branch.upcast_ref::<gtk::Widget>(), counts.upcast_ref()] {
-            branch_row.append(child);
-        }
-        for button in [&pull, &push, &refresh] {
-            branch_row.append(button);
-        }
+        branch_row.append(&branch);
+        branch_row.append(&sync);
 
         // The message box is a card so it reads as somewhere to type rather than as a label, and
         // it scrolls rather than growing: a long commit message must not push the lists away.
@@ -200,9 +218,11 @@ impl Panel {
             .sensitive(false)
             .build();
         commit.add_css_class("suggested-action");
+        // The button leads: it belongs with the branch row above it, where the pane's actions
+        // are, rather than below a box that grows as it is typed into.
         let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        commit_box.append(&overlay);
         commit_box.append(&commit);
+        commit_box.append(&overlay);
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
         let changes_view = gtk::ListView::new(
@@ -259,7 +279,7 @@ impl Panel {
         column.append(&divider);
 
         let stack = gtk::Stack::builder().vexpand(true).build();
-        stack.add_named(&empty_page(), Some("empty"));
+        stack.add_named(&empty_page(&check), Some("empty"));
         stack.add_named(&column, Some("repo"));
         stack.set_visible_child_name("empty");
 
@@ -271,11 +291,11 @@ impl Panel {
             chooser,
             branch,
             counts,
-            pull,
-            push,
+            sync,
             message,
             placeholder,
             commit,
+            commit_box,
             divider,
             changes,
             log,
@@ -289,7 +309,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&refresh);
+        panel.wire_header(&check);
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
@@ -326,26 +346,9 @@ impl Panel {
 
     // --- wiring -------------------------------------------------------------------------------
 
-    fn wire_header(self: &Rc<Self>, refresh: &gtk::Button) {
-        on_click(self, &self.pull, |panel| {
-            let hold = panel.pull.clone();
-            panel.command("Pull", Some(hold), |repo| {
-                git::pull(repo).map(|transcript| {
-                    tracing::debug!("git pull: {transcript}");
-                    "Pulled".to_string()
-                })
-            });
-        });
-        on_click(self, &self.push, |panel| {
-            let hold = panel.push.clone();
-            panel.command("Push", Some(hold), |repo| {
-                git::push(repo).map(|transcript| {
-                    tracing::debug!("git push: {transcript}");
-                    "Pushed".to_string()
-                })
-            });
-        });
-        on_click(self, refresh, |panel| panel.refresh());
+    fn wire_header(self: &Rc<Self>, check: &gtk::Button) {
+        on_click(self, &self.sync, |panel| panel.sync(None));
+        on_click(self, check, |panel| panel.refresh());
         on_click(self, &self.more, |panel| panel.load_more());
 
         let weak = Rc::downgrade(self);
@@ -545,6 +548,17 @@ impl Panel {
                 self.counts.set_text("");
             }
         }
+        // Without an upstream every click answers "There is no tracking information", so the
+        // button says so up front instead.
+        let upstream = fetched
+            .statuses
+            .get(selected)
+            .and_then(|s| s.branch.upstream.clone());
+        self.sync.set_sensitive(upstream.is_some());
+        self.sync.set_tooltip_text(Some(&match &upstream {
+            Some(name) => format!("Sync with {name}"),
+            None => "This branch has no upstream to sync with".to_string(),
+        }));
         self.more.set_visible(fetched.commits.len() >= PAGE);
         self.fill_log(fetched.commits.clone(), 0);
 
@@ -687,9 +701,35 @@ impl Panel {
         if message.trim().is_empty() {
             return;
         }
+        // Nothing staged means "commit what changed", which is `git commit -a`: every tracked
+        // file goes in and an untracked one stays untracked, as VS Code's smart commit does.
+        let all = !self.to_commit().0;
         self.message.buffer().set_text("");
         self.command("Commit", None, move |repo| {
-            git::commit(repo, &message).map(|id| format!("Committed {id}"))
+            git::commit(repo, &message, all).map(|id| format!("Committed {id}"))
+        });
+    }
+
+    /// Pull and then push the repository `key` sits in, or the selected one where `key` names no
+    /// repository. The pane's selection follows, so the status bar's branch and the pane never
+    /// end up talking about two different repositories.
+    pub fn sync(self: &Rc<Self>, key: Option<&str>) {
+        let index = {
+            let state = self.state.borrow();
+            key.and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+                .unwrap_or(state.selected)
+        };
+        if self.state.borrow().selected != index {
+            self.state.borrow_mut().selected = index;
+            // The notify this fires is the same one a user's pick fires, refresh included.
+            self.chooser.set_selected(index as u32);
+        }
+        let hold = self.sync.clone();
+        self.command("Sync", Some(hold), |repo| {
+            git::sync(repo).map(|transcript| {
+                tracing::debug!("git sync: {transcript}");
+                "Synced".to_string()
+            })
         });
     }
 
@@ -848,19 +888,29 @@ impl Panel {
         buffer.text(&start, &end, false).to_string()
     }
 
-    /// The placeholder and the Commit button both follow the box and the index.
+    /// What the selected repository has to commit: whether anything is in the index, and whether
+    /// there is anything at all — index or worktree — for a `git commit -a` to take.
+    fn to_commit(&self) -> (bool, bool) {
+        let state = self.state.borrow();
+        let Some(status) = state.statuses.get(state.selected) else {
+            return (false, false);
+        };
+        let staged = status.staged().next().is_some();
+        (staged, staged || status.changes().next().is_some())
+    }
+
+    /// The placeholder, the Commit button and whether the box is there at all.
     fn sync_commit(&self) {
         let message = self.message_text();
         self.placeholder.set_visible(message.is_empty());
-        let staged = {
-            let state = self.state.borrow();
-            state
-                .statuses
-                .get(state.selected)
-                .is_some_and(|status| status.staged().next().is_some())
-        };
+        let anything = self.to_commit().1;
         self.commit
-            .set_sensitive(staged && !message.trim().is_empty());
+            .set_sensitive(anything && !message.trim().is_empty());
+        // A clean tree has nothing to say, so the box goes — but never out from under a message
+        // being written: a refresh fires on every save, and one of those would take it away
+        // mid-sentence.
+        self.commit_box
+            .set_visible(anything || !message.is_empty() || self.message.has_focus());
     }
 }
 
@@ -1232,7 +1282,11 @@ fn log_row(item: &gtk::ListItem) -> gtk::Box {
         }
     ));
 
-    let refs = gtk::Label::new(None);
+    // Ellipsized like every other name in the pane: a decoration is as long as the branch it
+    // names, and without this a long branch is the sidebar's floor.
+    let refs = gtk::Label::builder()
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
     for class in ["caption", "dim-label"] {
         refs.add_css_class(class);
     }
@@ -1360,16 +1414,47 @@ fn lane_width(row: &LogRow) -> i32 {
     (widest as i32 + 1) * LANE + LANE
 }
 
-fn empty_page() -> adw::StatusPage {
+/// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
+/// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
+/// monitor is watching yet, so nothing would ever tell the pane to look again.
+fn empty_page(check: &gtk::Button) -> adw::StatusPage {
     let page = adw::StatusPage::builder()
         .icon_name("network-transmit-receive-symbolic")
         .title("No Repository")
         .description("Run git init in the terminal to start one.")
+        .child(check)
         .vexpand(true)
         .build();
     // Without this the icon alone takes 128 px of a 200 px column (DESIGN.md, States).
     page.add_css_class("compact");
     page
+}
+
+/// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
+/// and whole where it does not.
+fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let label = gtk::Label::builder().xalign(0.0).build();
+        if ellipsize {
+            label.set_ellipsize(pango::EllipsizeMode::End);
+        }
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            item.set_child(Some(&label));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        if let (Some(label), Some(name)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<gtk::StringObject>(),
+        ) {
+            label.set_text(&name.string());
+        }
+    });
+    factory
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {

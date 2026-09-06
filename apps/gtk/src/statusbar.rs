@@ -16,7 +16,9 @@ use gtk::prelude::*;
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
-    branch: gtk::Label,
+    /// The branch readout, which is also the Sync control.
+    branch: gtk::Button,
+    branch_label: gtk::Label,
     kind: gtk::Label,
     words: gtk::Label,
     /// The zoom readout, which is also the control that resets it.
@@ -34,29 +36,17 @@ impl Bar {
         row.set_margin_bottom(6);
 
         let progress = label(false);
-        let branch = label(false);
+        // The branch is the Sync control as well as the readout: it names the repository the
+        // document sits in, and clicking it pulls and pushes that one (DESIGN.md, Layout map).
+        let branch_label = label(true);
+        let branch = bar_button(&branch_label, "win.git-sync", "Sync");
         let kind = label(false);
         let words = label(true);
 
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
-        // and Fit Width for a PDF. Flat and label-only, so it reads as the rest of the bar rather
-        // than as a button parked in it.
-        //
-        // `accent-zoom` is what keeps the bar one height. A button's minimum is 24 px plus 5 px of
-        // padding either side, and a box is as tall as its tallest child whatever its alignment,
-        // so a readout appearing pushed the bar from 29 px to 46 px. The class pins the button to
-        // the caption's own line height; it stays a button, so it keeps its focus, its role and
-        // its tooltip.
+        // and Fit Width for a PDF.
         let zoom_label = label(true);
-        let zoom = gtk::Button::builder()
-            .child(&zoom_label)
-            .action_name("win.zoom-reset")
-            .tooltip_text("Reset Zoom")
-            .valign(gtk::Align::Center)
-            .visible(false)
-            .build();
-        zoom.add_css_class("flat");
-        zoom.add_css_class("accent-zoom");
+        let zoom = bar_button(&zoom_label, "win.zoom-reset", "Reset Zoom");
 
         row.append(&progress);
         row.append(&branch);
@@ -71,6 +61,7 @@ impl Bar {
             row,
             progress,
             branch,
+            branch_label,
             kind,
             words,
             zoom,
@@ -89,7 +80,8 @@ impl Bar {
 
     /// The branch of the repository holding the active document, "main ↑1 ↓2".
     pub fn set_branch(&self, branch: Option<&str>) {
-        set(&self.branch, branch);
+        set(&self.branch_label, branch);
+        self.branch.set_visible(branch.is_some());
     }
 
     /// What the file is: "Markdown", "PDF", or "Rust · UTF-8 · LF" for code.
@@ -111,6 +103,26 @@ impl Bar {
     pub fn zoom(&self) -> &gtk::Widget {
         self.zoom.upcast_ref()
     }
+}
+
+/// A readout that is also a control: flat and label-only, so it reads as the rest of the bar
+/// rather than as a button parked in it.
+///
+/// `.accent-bar-button` is what keeps the bar one height. A button's minimum is 24 px plus 5 px of
+/// padding either side, and a box is as tall as its tallest child whatever its alignment, so one
+/// of these appearing pushed the bar from 29 px to 46 px. The class pins it to the caption's own
+/// line height; it stays a button, so it keeps its focus, its role and its tooltip.
+fn bar_button(label: &gtk::Label, action: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .child(label)
+        .action_name(action)
+        .tooltip_text(tooltip)
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class("accent-bar-button");
+    button
 }
 
 fn label(numeric: bool) -> gtk::Label {
