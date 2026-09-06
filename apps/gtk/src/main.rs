@@ -2969,7 +2969,7 @@ impl App {
                 move || {
                     vault
                         .as_ref()
-                        .and_then(|v| v.file_paths().ok())
+                        .and_then(|v| v.file_paths(false).ok())
                         .unwrap_or_default()
                 }
             }),
@@ -3692,11 +3692,12 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             search: Arc::new({
                 let vault = vault.clone();
                 move |query| match query {
-                    sidebar::Query::Fts(text) => {
-                        sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
-                    }
+                    sidebar::Query::Fts(text) => sidebar::Answer::Fts(
+                        vault.search(&text, SEARCH_LIMIT, false).unwrap_or_default(),
+                    ),
                     sidebar::Query::Grep { re } => {
-                        let (hits, total) = vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
+                        let (hits, total) =
+                            vault.grep(&re, SEARCH_LIMIT, false).unwrap_or_default();
                         sidebar::Answer::Grep(hits, total)
                     }
                 }

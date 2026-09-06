@@ -525,13 +525,27 @@ impl Vault {
     }
 
     /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.searcher().search(query, limit)
+    ///
+    /// `include_ignored` is the sidebar's All toggle: off, what git ignores is left out of the
+    /// results; on, it is put back. A note is in either way.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        self.searcher().search(query, limit, include_ignored)
     }
 
     /// Exact search: one row per match of `re`, capped at `limit`, plus the total match count.
-    pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
-        self.searcher().grep(re, limit)
+    /// `include_ignored` means what it does in [`search`](Self::search).
+    pub fn grep(
+        &self,
+        re: &Regex,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<(Vec<Match>, usize)> {
+        self.searcher().grep(re, limit, include_ignored)
     }
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
@@ -553,8 +567,21 @@ impl Vault {
     /// Every file the app can open, notes first: what the palette's switcher lists, now that a
     /// tab is not necessarily a note. [`note_paths`](Self::note_paths) stays markdown-only,
     /// because `[[` completion may only offer notes.
-    pub fn file_paths(&self) -> Result<Vec<String>> {
-        self.index().file_paths()
+    ///
+    /// The palette has no All toggle of its own, so it asks with `include_ignored` false and the
+    /// build output stays out of Go to File. The tree still lists an ignored file, dimmed, which
+    /// is the way to open one.
+    pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
+        self.index().file_paths(include_ignored)
+    }
+
+    /// Hand the index what git ignores, so every later query can leave it out.
+    ///
+    /// Called from the git refresh, which is the one place in the app that has already asked git.
+    /// This is the only write that does not go through the vault worker; the connections carry a
+    /// busy timeout so a reconcile in flight costs a wait rather than a lost update.
+    pub fn set_git_ignored(&self, entries: &[String]) -> Result<()> {
+        self.index().set_git_ignored(entries)
     }
 
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
@@ -1181,7 +1208,7 @@ mod tests {
             "an external edit must reach the UI"
         );
         assert!(poll_until(
-            || !f.vault.search("kumquat", 10).unwrap().is_empty(),
+            || !f.vault.search("kumquat", 10, false).unwrap().is_empty(),
             BUDGET
         ));
     }
@@ -1256,7 +1283,7 @@ mod tests {
         assert_eq!(saved, Etag::of(&f.vault.root().join("Note.md")).unwrap());
 
         assert!(poll_until(
-            || !f.vault.search("quokka", 10).unwrap().is_empty(),
+            || !f.vault.search("quokka", 10, false).unwrap().is_empty(),
             BUDGET
         ));
         // Well past the watcher's 300 ms debounce, so the echo of our own save has been and gone.
@@ -1315,7 +1342,7 @@ mod tests {
         assert_eq!(f.vault.conflicts_of("Note.md").unwrap(), [CONFLICT]);
         assert!(f.vault.conflicts_of("Other.md").unwrap().is_empty());
         assert!(
-            f.vault.search("wombat", 10).unwrap().is_empty(),
+            f.vault.search("wombat", 10, false).unwrap().is_empty(),
             "a conflict copy is never a note"
         );
     }
@@ -1362,7 +1389,7 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let re = search::pattern("colour", Options::default()).unwrap();
-        assert_eq!(f.vault.grep(&re, 10).unwrap().1, 3);
+        assert_eq!(f.vault.grep(&re, 10, false).unwrap().1, 3);
 
         let report = f.vault.replace_all(&re, "color", true).unwrap();
         assert_eq!(report.rewritten, ["a.md", "sub/b.md"]);
@@ -1373,7 +1400,7 @@ mod tests {
         assert_eq!(f.read("c.md"), "nothing here\n");
 
         assert!(
-            poll_until(|| f.vault.grep(&re, 10).unwrap().1 == 0, BUDGET),
+            poll_until(|| f.vault.grep(&re, 10, false).unwrap().1 == 0, BUDGET),
             "the rewrites must reach the index without a rescan"
         );
     }
@@ -1388,7 +1415,7 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let re = search::pattern("zorblat", Options::default()).unwrap();
-        let (hits, total) = f.vault.grep(&re, 10).unwrap();
+        let (hits, total) = f.vault.grep(&re, 10, false).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
@@ -1692,7 +1719,7 @@ mod tests {
             names(&f.vault.list_dir("a/c").unwrap()),
             ["a/c/sub", "a/c/note.md"]
         );
-        assert!(!f.vault.search("kumquat", 10).unwrap().is_empty());
+        assert!(!f.vault.search("kumquat", 10, false).unwrap().is_empty());
     }
 
     /// A Syncthing pull is one batch of files; the links in all of them still have to resolve.

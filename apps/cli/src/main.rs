@@ -212,7 +212,9 @@ fn main() -> Result<()> {
             limit,
         } => {
             let ix = common.open()?;
-            for h in ix.search(&query.join(" "), limit)? {
+            // Everything, always: the CLI is a diagnostic tool with no All toggle to offer, and
+            // the ignore set is only ever written by the desktop app's git refresh.
+            for h in ix.search(&query.join(" "), limit, true)? {
                 println!("{}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
             }
         }
