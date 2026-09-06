@@ -16,7 +16,16 @@ use std::time::Instant;
 use crate::search::Regex;
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 6;
+/// Biggest non-markdown file whose text goes into the index.
+///
+/// Deliberately far stricter than [`crate::fs::MAX_TEXT`] (16 MiB), which is the cap on what a
+/// tab will *open*: opening a 15 MiB generated file is something the user asked for once, while
+/// indexing it is something the vault pays for on every reconcile, in database size and in the
+/// FTS terms every later query has to merge. Measured on `testvault/`: none of its 17 700
+/// non-note text files reach 1 MiB, so the cap costs nothing a real vault would notice. A note
+/// is never subject to it — markdown is read whatever its size.
+const MAX_INDEXED_BODY: u64 = 1024 * 1024;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 const BATCH: usize = 500;
@@ -37,7 +46,11 @@ CREATE TABLE files(
     size         INTEGER NOT NULL,
     kind         INTEGER NOT NULL,
     title        TEXT,
-    content_hash BLOB
+    content_hash BLOB,
+    -- Written by the git refresh, not by the walk: the vault tree is walked whatever the
+    -- ignore files say (hiding the user's notes is never right), and this is what lets a
+    -- query leave the build output out again without the walk having to guess.
+    git_ignored  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
 CREATE TABLE links(
@@ -243,6 +256,11 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // The vault worker is no longer the only writer: [`Index::set_git_ignored`] writes from
+        // whichever thread the git refresh landed on. Without a timeout, a refresh arriving
+        // during a reconcile would fail with SQLITE_BUSY and the exclusion would silently not
+        // apply until the next one.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let has_files: bool = conn
@@ -453,6 +471,43 @@ impl Index {
         Ok(resolved)
     }
 
+    /// Record what git ignores, so a query can leave it out.
+    ///
+    /// `entries` is git's own answer (`Panel::ignored`, vault-relative): a wholly ignored
+    /// directory arrives as **one** entry with a trailing slash rather than a row per file inside
+    /// it, which is why matching the entry and its subtree is enough and why this is tens of
+    /// statements rather than thousands. The prefix test is a range on the `rel_path` unique
+    /// index, the same shape [`remove_file_batched`](Self::remove_file_batched) uses, because a
+    /// `LIKE` would fall back to a full scan under SQLite's default case-insensitive `LIKE`.
+    ///
+    /// One transaction, and the whole column is cleared first: a path that stopped being ignored
+    /// has no entry to carry the news, so the set is replaced rather than merged. An empty
+    /// `entries` therefore un-ignores everything, which is exactly right for a vault whose
+    /// repository went away.
+    pub fn set_git_ignored(&mut self, entries: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE files SET git_ignored = 0 WHERE git_ignored <> 0",
+            [],
+        )?;
+        {
+            let mut st = tx.prepare_cached(
+                "UPDATE files SET git_ignored = 1
+                  WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
+            )?;
+            for entry in entries {
+                let base = entry.trim_end_matches('/');
+                if base.is_empty() {
+                    continue;
+                }
+                // `'0'` is the byte after `'/'`, so `[base/, base0)` is exactly the subtree.
+                st.execute(params![base, format!("{base}/"), format!("{base}0")])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Bring one path in line with the disk. This is the watcher's entry point: the caller turns a
     /// filesystem event into a vault-relative path and lets the index decide what it means.
     ///
@@ -648,11 +703,21 @@ fn upsert(
     existing_id: Option<i64>,
     stats: &mut ReconcileStats,
 ) -> Result<i64> {
-    // ponytail: only markdown is read and hashed. PDFs and binaries are cheap
-    // `(mtime, size, ino)` rows here; the `pdf` feature will add text extraction
-    // and can reuse the same hash column when it does.
-    let (hash, text) = if f.kind == FileKind::Markdown {
-        match std::fs::read(&f.canonical) {
+    // A note is read whole and hashed raw. Everything else that decodes as text under
+    // [`MAX_INDEXED_BODY`] is read through `fs::read_text`, which brings the NUL sniff, the CRLF
+    // normalisation and the `lossy` flag with it; a lossy decode is dropped because its byte
+    // offsets would no longer point at what is on disk. PDFs and binaries stay cheap
+    // `(mtime, size, ino)` rows; the `pdf` feature will add text extraction and can reuse the
+    // same hash column when it does.
+    //
+    // The two branches hash different bytes — a note's raw file, a text file's normalised text.
+    // That is safe and deliberate: a hash is only ever compared against an earlier hash of the
+    // same file by the same branch, never across kinds, so the two need not agree.
+    //
+    // The size test uses the stat the walk already took rather than letting `read_text` pull a
+    // 15 MiB file into memory only for the cap to throw it away.
+    let (hash, text) = match f.kind {
+        FileKind::Markdown => match std::fs::read(&f.canonical) {
             Ok(bytes) => {
                 stats.bytes_read += bytes.len() as u64;
                 let h = blake3::hash(&bytes);
@@ -660,9 +725,16 @@ fn upsert(
             }
             // Vanished or unreadable mid-walk: keep the stat row, drop the content.
             Err(_) => (None, None),
-        }
-    } else {
-        (None, None)
+        },
+        FileKind::Other if f.size <= MAX_INDEXED_BODY => match crate::fs::read_text(&f.canonical) {
+            Ok(crate::fs::Read::Text(t)) if !t.lossy => {
+                stats.bytes_read += t.text.len() as u64;
+                let h = blake3::hash(t.text.as_bytes());
+                (Some(h), Some(t.text))
+            }
+            _ => (None, None),
+        },
+        _ => (None, None),
     };
 
     // Syncthing preserves origin mtimes, so mtime alone lies both ways; the hash is
@@ -695,7 +767,13 @@ fn upsert(
         return Ok(id);
     }
 
-    let analysis = text.as_deref().map(markdown::analyze);
+    // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
+    // heading, so nothing but a note reaches the analyser; the `file_stem` fallback below is what
+    // gives every other file a title.
+    let analysis = match f.kind {
+        FileKind::Markdown => text.as_deref().map(markdown::analyze),
+        _ => None,
+    };
     let title = analysis
         .as_ref()
         .and_then(|a| a.title.clone())
@@ -735,7 +813,7 @@ fn upsert(
         stats.added += 1;
     }
 
-    if let (Some(a), Some(body)) = (analysis.as_ref(), text.as_ref()) {
+    if let Some(a) = analysis.as_ref() {
         for l in &a.links {
             tx.prepare_cached(
                 "INSERT INTO links(src_file, target, resolved_file, kind, anchor, byte_start, byte_end)
@@ -760,6 +838,8 @@ fn upsert(
             )?
             .execute(params![id, h.level as i64, h.text, h.range.start as i64])?;
         }
+    }
+    if let Some(body) = text.as_ref() {
         // Explicit delete + insert: REPLACE would only fire the FTS delete trigger
         // with recursive_triggers on.
         tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
@@ -849,29 +929,25 @@ impl Index {
     /// [`note_paths`](Self::note_paths), which stays markdown-only because wikilink completion may
     /// only ever offer notes. Directories are not files to open and conflict copies are reached
     /// through the resolve UI, so neither is listed.
-    pub fn file_paths(&self) -> Result<Vec<String>> {
+    ///
+    /// Git-ignored files are left out unless `include_ignored`, but **a note is never left out**:
+    /// a vault that gitignores its own markdown is the ordinary case, not the exception. The file
+    /// tree is the escape hatch either way — it lists an ignored file, dimmed.
+    pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind IN (?1, ?2, ?3)
-             ORDER BY kind <> ?1, rel_path COLLATE NOCASE",
+            "SELECT rel_path FROM files
+              WHERE kind IN (?1, ?2, ?3) AND (?4 OR git_ignored = 0 OR kind = ?1)
+              ORDER BY kind <> ?1, rel_path COLLATE NOCASE",
         )?;
         let rows = st.query_map(
             params![
                 FileKind::Markdown.as_i64(),
                 FileKind::Pdf.as_i64(),
                 FileKind::Other.as_i64(),
+                include_ignored,
             ],
             |r| r.get(0),
         )?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// The files the index knows a name for and nothing else: only markdown is read and hashed,
-    /// so these rows carry no body a query could look at. The façade greps them from disk.
-    pub fn other_paths(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
-        )?;
-        let rows = st.query_map([FileKind::Other.as_i64()], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -893,8 +969,14 @@ impl Index {
         Ok(st.query_row([rel_path], file_row).optional()?)
     }
 
-    /// Full-text search over note titles and bodies. Conflict/PDF/binary files are never in
-    /// `notes`.
+    /// Full-text search over the titles and bodies the index holds: every note, plus every other
+    /// file that decoded as text under [`MAX_INDEXED_BODY`]. Directories, PDFs, conflict copies
+    /// and binaries have no `notes` row and so can never be a hit.
+    ///
+    /// Git-ignored files are left out unless `include_ignored` — but never a note, whatever
+    /// ignores it. The exclusion sits **inside** the ranking subquery, ahead of its `LIMIT`:
+    /// filtering the capped rows afterwards would answer "No Results" on a vault where the build
+    /// output happens to rank above the source it was built from.
     ///
     /// Ranking is "the note you named, then the notes that are about it": a title equal to the
     /// query, ignoring case, comes first, and the rest go by `bm25` with the title weighted ten
@@ -912,7 +994,12 @@ impl Index {
     /// match positions from the term index, which for a prefix term means merging the doclist of
     /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
     /// same window with `instr` over the body the index already stores costs a tenth of that.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
         let q = fts_query(query);
         if q.is_empty() {
             return Ok(Vec::new());
@@ -923,7 +1010,7 @@ impl Index {
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
              WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
                  SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
-                  WHERE notes_fts MATCH ?1
+                  WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6)
                   ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
                   LIMIT ?3)
              ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
@@ -937,7 +1024,14 @@ impl Index {
             .cloned()
             .unwrap_or_default();
         let rows = st.query_map(
-            params![q, query.trim(), limit as i64, window.to_ascii_lowercase()],
+            params![
+                q,
+                query.trim(),
+                limit as i64,
+                window.to_ascii_lowercase(),
+                include_ignored,
+                FileKind::Markdown.as_i64(),
+            ],
             |r| {
                 let body: String = r.get(2)?;
                 Ok(SearchHit {
@@ -950,16 +1044,23 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every hit of `re` in a note body, in `rel_path` order: at most `limit` of them, plus the
-    /// total the scan saw, so a truncated list can still say how much a Replace All would touch.
+    /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
+    /// the total the scan saw, so a truncated list can still say how much a Replace All would
+    /// touch.
     ///
-    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which notes
+    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
     /// are about this", regexes answer "where exactly does this text occur". The bodies are
-    /// already in the index, so no note is read from disk, and the statement streams them one row
-    /// at a time rather than materialising the whole vault's text.
-    pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+    /// already in the index, so nothing is read from disk, and the statement streams them one row
+    /// at a time rather than materialising the whole vault's text. `include_ignored` means the
+    /// same as it does there, and so does the note escape.
+    pub fn grep(
+        &self,
+        re: &Regex,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<(Vec<Match>, usize)> {
         let mut st = self.conn.prepare_cached(GREP_SQL)?;
-        let mut rows = st.query([])?;
+        let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
         let (mut out, mut total) = (Vec::new(), 0usize);
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
@@ -985,9 +1086,10 @@ impl Index {
     /// Every hit of `re` in one body, appended to `out` and counted in `total`.
     ///
     /// Lifted out of [`grep`](Self::grep) so the façade can run the same matching over files the
-    /// index holds no body for — only markdown reaches the `notes` table — and hand the sidebar
-    /// rows it cannot tell apart from a note's. It touches neither the index nor the disk: the
-    /// caller supplies the text and says where it came from.
+    /// index holds no body for — one too large for [`MAX_INDEXED_BODY`], or one under a tree the
+    /// walk never entered — and hand the sidebar rows it cannot tell apart from a note's. It
+    /// touches neither the index nor the disk: the caller supplies the text and says where it
+    /// came from.
     ///
     /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
     /// it, so a truncated list can still say how much a Replace All would touch.
@@ -1037,9 +1139,13 @@ impl Index {
 
     /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
     /// replace has to visit every file, not only the ones the sidebar had room to list.
+    ///
+    /// Markdown only, unlike [`grep`](Self::grep), which now reaches every indexed body: Replace
+    /// All is Replace in Notes, and rewriting a source file from a notes app is not what the
+    /// button offers.
     pub fn grep_paths(&self, re: &Regex) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(GREP_SQL)?;
-        let mut rows = st.query([])?;
+        let mut st = self.conn.prepare_cached(GREP_NOTES_SQL)?;
+        let mut rows = st.query([FileKind::Markdown.as_i64()])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
@@ -1123,10 +1229,21 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     })
 }
 
-/// Every note's path, title and text, for the two regex scans. Ordered so both agree on which
-/// matches a capped list drops.
+/// Every indexed path, title and text, for the sidebar's regex scan. Ordered so a capped list
+/// and an uncapped one agree on which matches they drop.
+///
+/// `?1` drops the git-ignored exclusion, `?2` is [`FileKind::Markdown`] — the escape that keeps a
+/// note in the results whatever ignores it.
 const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
      FROM notes n JOIN files f ON f.id = n.file_id
+     WHERE ?1 OR f.git_ignored = 0 OR f.kind = ?2
+     ORDER BY f.rel_path";
+
+/// [`GREP_SQL`] narrowed to markdown (`?1` is [`FileKind::Markdown`]), for the one caller that
+/// rewrites what it finds.
+const GREP_NOTES_SQL: &str = "SELECT f.rel_path, f.title, n.body
+     FROM notes n JOIN files f ON f.id = n.file_id
+     WHERE f.kind = ?1
      ORDER BY f.rel_path";
 
 /// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
@@ -1336,16 +1453,20 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        let hits = ix.search("ferris", 10).unwrap();
+        let hits = ix.search("ferris", 10, false).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "sub/Beta.md");
         assert!(hits[0].snippet.contains("ferris"), "{:?}", hits[0].snippet);
 
         // Conflicts are stored but never searchable.
-        assert!(ix.search("conflicted", 10).unwrap().is_empty());
+        assert!(ix.search("conflicted", 10, false).unwrap().is_empty());
         // Garbage in must not be a SQL/FTS syntax error.
-        assert!(ix.search("\"unbalanced AND *", 10).unwrap().is_empty());
-        assert!(ix.search("", 10).unwrap().is_empty());
+        assert!(
+            ix.search("\"unbalanced AND *", 10, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(ix.search("", 10, false).unwrap().is_empty());
     }
 
     #[test]
@@ -1374,7 +1495,7 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
-        let (hits, total) = ix.grep(&re, 10).unwrap();
+        let (hits, total) = ix.grep(&re, 10, false).unwrap();
         assert_eq!(total, 4, "three in a.md, one in sub/Beta.md: {hits:?}");
         assert_eq!(hits.len(), 4);
         assert_eq!(hits[0].rel_path, "a.md");
@@ -1386,7 +1507,7 @@ mod tests {
         assert_eq!(&body[hits[2].offset..hits[2].offset + 6], "ferris");
 
         // The cap truncates the list but not the count a Replace All is measured against.
-        let (few, total) = ix.grep(&re, 2).unwrap();
+        let (few, total) = ix.grep(&re, 2, false).unwrap();
         assert_eq!((few.len(), total), (2, 4));
         assert_eq!(ix.grep_paths(&re).unwrap(), ["a.md", "sub/Beta.md"]);
     }
@@ -1433,12 +1554,12 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        let hits = ix.search("Quantum Coherence Ledger", 10).unwrap();
+        let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
         assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
 
         // Case and stray whitespace must not lose the exact-title match.
-        let hits = ix.search("  quantum COHERENCE ledger ", 10).unwrap();
+        let hits = ix.search("  quantum COHERENCE ledger ", 10, false).unwrap();
         assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
     }
 
@@ -1449,7 +1570,7 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         // Not the whole title, so only the bm25 title weight can decide this one.
-        let hits = ix.search("coherence ledger", 10).unwrap();
+        let hits = ix.search("coherence ledger", 10, false).unwrap();
         assert_eq!(hits.len(), 2, "{hits:?}");
         assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
     }
@@ -1473,10 +1594,10 @@ mod tests {
         );
 
         assert_eq!(
-            ix.search("Photon Budget", 10).unwrap()[0].rel_path,
+            ix.search("Photon Budget", 10, false).unwrap()[0].rel_path,
             "target.md"
         );
-        let hits = ix.search("Quantum Coherence Ledger", 10).unwrap();
+        let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
         assert_eq!(
             hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
             ["spam.md"],
@@ -1504,7 +1625,7 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        let hits = ix.search("kryptonite", 10).unwrap();
+        let hits = ix.search("kryptonite", 10, false).unwrap();
         assert_eq!(hits.len(), 1, "the title must be searchable: {hits:?}");
         assert!(
             hits[0].snippet.starts_with("plain prose"),
@@ -1530,8 +1651,11 @@ mod tests {
         .unwrap();
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        assert!(ix.search("ferris", 10).unwrap().is_empty(), "stale FTS row");
-        assert_eq!(ix.search("crabs", 10).unwrap().len(), 1);
+        assert!(
+            ix.search("ferris", 10, false).unwrap().is_empty(),
+            "stale FTS row"
+        );
+        assert_eq!(ix.search("crabs", 10, false).unwrap().len(), 1);
     }
 
     #[test]
@@ -1721,8 +1845,11 @@ mod tests {
             ix.update_file(vault.path(), "sub/Beta.md").unwrap(),
             Change::Updated(FileKind::Markdown)
         );
-        assert!(ix.search("ferris", 10).unwrap().is_empty(), "stale FTS row");
-        assert_eq!(ix.search("crabs", 10).unwrap().len(), 1);
+        assert!(
+            ix.search("ferris", 10, false).unwrap().is_empty(),
+            "stale FTS row"
+        );
+        assert_eq!(ix.search("crabs", 10, false).unwrap().len(), 1);
     }
 
     #[test]
@@ -1757,7 +1884,7 @@ mod tests {
         assert_eq!(ix.remove_file("sub").unwrap(), 2);
         assert!(ix.get_file("sub").unwrap().is_none());
         assert!(ix.get_file("sub/Beta.md").unwrap().is_none());
-        assert!(ix.search("ferris", 10).unwrap().is_empty());
+        assert!(ix.search("ferris", 10, false).unwrap().is_empty());
         assert_eq!(
             ix.unresolved_links().unwrap(),
             vec![("a.md".to_string(), "Beta".to_string())]
@@ -1952,9 +2079,159 @@ mod tests {
         // Notes first, then everything else by path. The `sub` directory and the conflict copy
         // are in neither list.
         assert_eq!(
-            ix.file_paths().unwrap(),
+            ix.file_paths(false).unwrap(),
             vec!["a.md", "sub/Beta.md", "c.pdf", "tool.py"]
         );
-        assert_eq!(ix.other_paths().unwrap(), vec!["tool.py"]);
+    }
+
+    /// A vault of one note, one source file and one build artefact, all holding the same token.
+    fn ignore_fixture() -> (tempfile::TempDir, tempfile::TempDir) {
+        let vault = tempfile::tempdir().unwrap();
+        fs::create_dir(vault.path().join("notes")).unwrap();
+        fs::create_dir(vault.path().join("paper")).unwrap();
+        fs::write(vault.path().join("notes/a.md"), "# A\nzorblat\n").unwrap();
+        fs::write(vault.path().join("paper/main.tex"), "\\title{zorblat}\n").unwrap();
+        fs::write(vault.path().join("paper/main.aux"), "\\relax zorblat\n").unwrap();
+        (vault, tempfile::tempdir().unwrap())
+    }
+
+    fn hits(ix: &Index, include_ignored: bool) -> Vec<String> {
+        let mut out: Vec<String> = ix
+            .search("zorblat", 10, include_ignored)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.rel_path)
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// One ignored file is left out of both query paths, and put back on request.
+    #[test]
+    fn git_ignored_files_are_left_out_of_search_and_grep() {
+        let (vault, db) = ignore_fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        ix.set_git_ignored(&["paper/main.aux".to_string()]).unwrap();
+
+        assert_eq!(hits(&ix, false), ["notes/a.md", "paper/main.tex"]);
+        assert_eq!(
+            hits(&ix, true),
+            ["notes/a.md", "paper/main.aux", "paper/main.tex"]
+        );
+
+        let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
+        assert_eq!(ix.grep(&re, 10, false).unwrap().1, 2);
+        assert_eq!(ix.grep(&re, 10, true).unwrap().1, 3);
+
+        // Go to File follows the default; the tree is the escape hatch, not a toggle here.
+        assert_eq!(
+            ix.file_paths(false).unwrap(),
+            ["notes/a.md", "paper/main.tex"]
+        );
+        assert_eq!(ix.file_paths(true).unwrap().len(), 3);
+    }
+
+    /// Git reports a wholly ignored tree as one trailing-slash entry, and the note under it must
+    /// survive: `walk.rs`'s rule that hiding the user's notes is never right, one layer down.
+    #[test]
+    fn a_wholly_ignored_directory_hides_everything_under_it_but_the_notes() {
+        let (vault, db) = ignore_fixture();
+        fs::write(vault.path().join("notes/b.tex"), "zorblat\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        ix.set_git_ignored(&["notes/".to_string()]).unwrap();
+
+        assert_eq!(
+            hits(&ix, false),
+            ["notes/a.md", "paper/main.aux", "paper/main.tex"],
+            "the note under the ignored directory stays, the .tex beside it goes"
+        );
+        assert_eq!(hits(&ix, true).len(), 4);
+    }
+
+    /// A vault with no repository at all: nothing is ignored, so nothing is filtered.
+    #[test]
+    fn an_empty_ignore_set_filters_nothing() {
+        let (vault, db) = ignore_fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        assert_eq!(hits(&ix, false).len(), 3);
+        ix.set_git_ignored(&["paper/main.aux".to_string()]).unwrap();
+        assert_eq!(hits(&ix, false).len(), 2);
+        // The set is replaced, not merged: a file that stopped being ignored comes back.
+        ix.set_git_ignored(&[]).unwrap();
+        assert_eq!(hits(&ix, false).len(), 3);
+    }
+
+    /// A text file that is not a note is searchable, a huge or binary one is not, and none of
+    /// them is analysed as markdown.
+    #[test]
+    fn non_markdown_text_is_indexed_within_the_cap() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("tool.py"),
+            "# zorblat helper\nimport os  # not #atag\n",
+        )
+        .unwrap();
+        fs::write(vault.path().join("big.txt"), "zorblat\n".repeat(300_000)).unwrap();
+        fs::write(vault.path().join("bin.dat"), b"\0zorblat\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        assert!(vault.path().join("big.txt").metadata().unwrap().len() > MAX_INDEXED_BODY);
+
+        // Both query paths reach the source file with no change of their own.
+        let hits = ix.search("zorblat", 10, false).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["tool.py"],
+            "{hits:?}"
+        );
+        let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
+        let (matches, total) = ix.grep(&re, 10, false).unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(matches[0].rel_path, "tool.py");
+
+        // Over the cap and binary: a stat row each, and nothing to match against.
+        let body_count = |rel: &str| -> i64 {
+            ix.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM notes n JOIN files f ON f.id = n.file_id
+                     WHERE f.rel_path = ?1",
+                    [rel],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(body_count("tool.py"), 1);
+        assert_eq!(body_count("big.txt"), 0, "over MAX_INDEXED_BODY");
+        assert_eq!(body_count("bin.dat"), 0, "a NUL byte is not text");
+        assert!(
+            ix.get_file("big.txt").unwrap().is_some(),
+            "still a file row"
+        );
+        assert!(
+            ix.get_file("bin.dat").unwrap().is_some(),
+            "still a file row"
+        );
+
+        // The markdown analyser never sees it: `#` is a comment, not a tag or a heading.
+        assert!(ix.headings("tool.py").unwrap().is_empty());
+        assert!(
+            !ix.tags().unwrap().iter().any(|(t, _)| t == "atag"),
+            "{:?}",
+            ix.tags().unwrap()
+        );
+        assert_eq!(
+            ix.get_file("tool.py").unwrap().unwrap().title.as_deref(),
+            Some("tool"),
+            "the file stem is the title fallback"
+        );
+
+        // Replace All stays notes-only: `a` is in all three bodies, only the notes come back.
+        let re = crate::search::pattern("a", crate::search::Options::default()).unwrap();
+        assert_eq!(ix.grep_paths(&re).unwrap(), vec!["a.md", "sub/Beta.md"]);
     }
 }

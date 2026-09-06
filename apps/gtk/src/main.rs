@@ -143,6 +143,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.sidebar", "Toggle Sidebar", &["F9"]),
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
+    // No chord: it is the Search pane's own All button, and the palette is how a command with
+    // no chord is found.
+    ("win.search-all", "Search Ignored Files", &[]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
@@ -2573,6 +2576,12 @@ impl App {
                     sidebar.show_replace();
                 }
             }
+            "search-all" => {
+                self.sidebar_column.set_visible(true);
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.toggle_search_all();
+                }
+            }
             "pane-tags" => self.show_pane("tags"),
             "pane-git" => {
                 self.show_pane("git");
@@ -2780,7 +2789,7 @@ impl App {
 
     /// A git refresh landed. The single place the window reacts to one, so everything that has to
     /// follow the repository is added here rather than wired into the pane.
-    fn on_git_changed(&self) {
+    fn on_git_changed(self: &Rc<Self>) {
         let (Some(sidebar), Some(git)) = (self.sidebar.get(), self.git.get()) else {
             return;
         };
@@ -2793,6 +2802,27 @@ impl App {
         }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(git.ignored());
+        }
+        // The same set the tree dims its rows with, handed to the index so every query can leave
+        // it out. It is a few thousand `UPDATE`s on a large vault, so it goes to a worker thread;
+        // a search already on screen is asked again once it lands, because its answer changed
+        // without the box being touched.
+        if let Some(vault) = self.vault.clone() {
+            let ignored: Vec<String> = git.ignored().into_iter().collect();
+            let weak = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let written = gio::spawn_blocking(move || vault.set_git_ignored(&ignored)).await;
+                match written {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return tracing::warn!("recording the git ignore set: {e}"),
+                    Err(_) => return tracing::warn!("the ignore-set writer panicked"),
+                }
+                if let Some(app) = weak.upgrade()
+                    && let Some(sidebar) = app.sidebar.get()
+                {
+                    sidebar.requery_search();
+                }
+            });
         }
         self.sync_branch();
         // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
@@ -2967,9 +2997,11 @@ impl App {
             load_files: Box::new({
                 let vault = self.vault.clone();
                 move || {
+                    // Never widened: Go to File has no All toggle, and the tree is where an
+                    // ignored file is reached, dimmed but listed.
                     vault
                         .as_ref()
-                        .and_then(|v| v.file_paths().ok())
+                        .and_then(|v| v.file_paths(false).ok())
                         .unwrap_or_default()
                 }
             }),
@@ -3692,17 +3724,17 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             search: Arc::new({
                 let vault = vault.clone();
                 move |query| match query {
-                    sidebar::Query::Fts(text) => {
-                        sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
-                    }
-                    sidebar::Query::Grep { re, files } => {
+                    sidebar::Query::Fts(text, all) => sidebar::Answer::Fts(
+                        vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default(),
+                    ),
+                    sidebar::Query::Grep { re, all } => {
                         let (mut hits, mut total) =
-                            vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
-                        // Notes first, because they are what the index can rank and count; the
-                        // rest is read from disk with whatever room is left in the list.
-                        if files {
+                            vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                        // What the index holds first, because that is what it can count; with
+                        // All on, the trees it was never asked to hold get whatever room is left.
+                        if all {
                             let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                            let (rest, more) = vault.grep_files(&re, room).unwrap_or_default();
+                            let (rest, more) = vault.grep_unindexed(&re, room).unwrap_or_default();
                             hits.extend(rest);
                             total += more;
                         }

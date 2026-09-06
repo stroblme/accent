@@ -30,7 +30,7 @@ struct Common {
     #[arg(long)]
     db: Option<PathBuf>,
     /// Also honour .gitignore inside the vault tree (off by default: vaults often
-    /// gitignore *.md). .accentignore is always honoured.
+    /// gitignore *.md).
     #[arg(long)]
     vault_gitignore: bool,
     /// Do not honour .gitignore inside directory-symlink targets (on by default, so that
@@ -212,7 +212,9 @@ fn main() -> Result<()> {
             limit,
         } => {
             let ix = common.open()?;
-            for h in ix.search(&query.join(" "), limit)? {
+            // Everything, always: the CLI is a diagnostic tool with no All toggle to offer, and
+            // the ignore set is only ever written by the desktop app's git refresh.
+            for h in ix.search(&query.join(" "), limit, true)? {
                 println!("{}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
             }
         }

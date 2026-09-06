@@ -107,7 +107,7 @@ impl Watcher {
                 dir_count,
                 budget = inotify_budget(),
                 "vault uses more than 80% of the inotify watch budget; falling back to 2s polling. \
-                 Exclude folders with .accentignore, or raise the budget with: \
+                 Move dependency trees out of the vault, or raise the budget with: \
                  sudo sysctl -w fs.inotify.max_user_watches=524288"
             );
             let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));

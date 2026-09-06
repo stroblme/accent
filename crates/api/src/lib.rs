@@ -6,7 +6,7 @@
 //! The caller reads on its own connection and never waits for the worker, which is what keeps a
 //! UI thread free while the vault is being indexed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -525,47 +525,69 @@ impl Vault {
     }
 
     /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
-    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        self.searcher().search(query, limit)
+    ///
+    /// `include_ignored` is the sidebar's All toggle: off, what git ignores is left out of the
+    /// results; on, it is put back. A note is in either way.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        self.searcher().search(query, limit, include_ignored)
     }
 
     /// Exact search: one row per match of `re`, capped at `limit`, plus the total match count.
-    pub fn grep(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
-        self.searcher().grep(re, limit)
+    /// `include_ignored` means what it does in [`search`](Self::search).
+    pub fn grep(
+        &self,
+        re: &Regex,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<(Vec<Match>, usize)> {
+        self.searcher().grep(re, limit, include_ignored)
     }
 
-    /// The same exact search over the files the index stores no body for: only markdown is read
-    /// and hashed, so a `.py` or a `.toml` has nothing in the index to match against.
+    /// The same exact search over the files the index does not hold at all: those under a
+    /// dependency tree, a `node_modules` or a `target/` the walk deliberately never entered.
     ///
-    /// Deliberately separate from [`grep`](Self::grep) rather than folded into it: this one reads
-    /// from disk on the caller's thread — the sidebar's search worker — so the index lock is
-    /// released before the first file is opened, and it stops at `limit` instead of scanning on
-    /// to a full count. The returned total therefore says how many matches were seen on the way
-    /// to filling the list, not how many the vault holds.
+    /// This is the second half of the Search pane's All toggle. The first half drops the
+    /// git-ignored exclusion, which is a column in the index; this one reaches what was never
+    /// indexed, and it can only be a walk. Everything already in the index is skipped by path, so
+    /// no file is greped twice, and the walk stops as soon as `limit` matches are in hand.
     ///
-    /// Images and the archive and media containers are skipped unopened; `fs::read_text`'s NUL
-    /// sniff catches the rest. A lossily decoded file is dropped because its match offsets would
-    /// no longer point at the bytes on disk.
-    pub fn grep_files(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
-        // Collected before the first read: the guard must not be held across file I/O.
-        let paths = self.searcher().other_paths()?;
+    /// It reads from disk on the caller's thread — the sidebar's search worker — so the index
+    /// lock is released before the first file is opened. `.git` and `.trash` stay unreachable,
+    /// and so does a symlinked repository's own gitignored build output: that is somebody else's
+    /// build tree, and leaving it out is what keeps a per-query walk affordable.
+    ///
+    /// ponytail: the walk runs per query, with no cache, for as long as All is on.
+    pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+        // Collected before the walk: the guard must not be held across file I/O.
+        let known: HashSet<String> = self.searcher().file_paths(true)?.into_iter().collect();
+        let opts = walk::ScanOptions {
+            include_skipped: true,
+            skip_dependency_trees: false,
+            // Inside the vault, what git ignores is already indexed, so the walk can skip it and
+            // the `known` test would have dropped it anyway.
+            vault_gitignore: true,
+            target_gitignore: true,
+            ..walk::ScanOptions::default()
+        };
         let (mut out, mut total) = (Vec::new(), 0usize);
-        for rel in paths {
+        for f in walk::scan(&self.root, &opts).files {
             if out.len() >= limit {
                 break;
             }
-            if is_binary_name(&rel) {
+            if f.kind == FileKind::Dir || known.contains(&f.rel_path) {
                 continue;
             }
-            let Ok(path) = self.resolve(&rel) else {
-                continue;
-            };
-            match fs::read_text(&path) {
+            match fs::read_text(&f.canonical) {
                 Ok(fs::Read::Text(t)) if !t.lossy => {
-                    Index::matches_in(&rel, None, &t.text, re, limit, &mut out, &mut total);
+                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut out, &mut total);
                 }
                 Ok(_) => {}
-                Err(e) => tracing::debug!("grep skipped {rel}: {e}"),
+                Err(e) => tracing::debug!("grep skipped {}: {e}", f.rel_path),
             }
         }
         Ok((out, total))
@@ -590,8 +612,21 @@ impl Vault {
     /// Every file the app can open, notes first: what the palette's switcher lists, now that a
     /// tab is not necessarily a note. [`note_paths`](Self::note_paths) stays markdown-only,
     /// because `[[` completion may only offer notes.
-    pub fn file_paths(&self) -> Result<Vec<String>> {
-        self.index().file_paths()
+    ///
+    /// The palette has no All toggle of its own, so it asks with `include_ignored` false and the
+    /// build output stays out of Go to File. The tree still lists an ignored file, dimmed, which
+    /// is the way to open one.
+    pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
+        self.index().file_paths(include_ignored)
+    }
+
+    /// Hand the index what git ignores, so every later query can leave it out.
+    ///
+    /// Called from the git refresh, which is the one place in the app that has already asked git.
+    /// This is the only write that does not go through the vault worker; the connections carry a
+    /// busy timeout so a reconcile in flight costs a wait rather than a lost update.
+    pub fn set_git_ignored(&self, entries: &[String]) -> Result<()> {
+        self.index().set_git_ignored(entries)
     }
 
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
@@ -1079,20 +1114,6 @@ fn outside(rel: &str) -> io::Error {
     )
 }
 
-/// Archive and media containers: certainly not text, and typically the largest files in a vault,
-/// so [`Vault::grep_files`] is better off never opening them than reading megabytes to find a NUL.
-const BINARY_EXT: [&str; 10] = [
-    "zip", "gz", "xz", "zst", "tar", "mp3", "mp4", "mkv", "wav", "ogg",
-];
-
-/// Whether the name alone says a file is not worth opening as text.
-fn is_binary_name(rel: &str) -> bool {
-    markdown::is_image(rel)
-        || rel
-            .rsplit_once('.')
-            .is_some_and(|(_, e)| BINARY_EXT.contains(&e.to_ascii_lowercase().as_str()))
-}
-
 /// A directory with something in it, which is what a moved-in tree looks like.
 fn has_children(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some())
@@ -1232,7 +1253,7 @@ mod tests {
             "an external edit must reach the UI"
         );
         assert!(poll_until(
-            || !f.vault.search("kumquat", 10).unwrap().is_empty(),
+            || !f.vault.search("kumquat", 10, false).unwrap().is_empty(),
             BUDGET
         ));
     }
@@ -1307,7 +1328,7 @@ mod tests {
         assert_eq!(saved, Etag::of(&f.vault.root().join("Note.md")).unwrap());
 
         assert!(poll_until(
-            || !f.vault.search("quokka", 10).unwrap().is_empty(),
+            || !f.vault.search("quokka", 10, false).unwrap().is_empty(),
             BUDGET
         ));
         // Well past the watcher's 300 ms debounce, so the echo of our own save has been and gone.
@@ -1366,7 +1387,7 @@ mod tests {
         assert_eq!(f.vault.conflicts_of("Note.md").unwrap(), [CONFLICT]);
         assert!(f.vault.conflicts_of("Other.md").unwrap().is_empty());
         assert!(
-            f.vault.search("wombat", 10).unwrap().is_empty(),
+            f.vault.search("wombat", 10, false).unwrap().is_empty(),
             "a conflict copy is never a note"
         );
     }
@@ -1413,7 +1434,7 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let re = search::pattern("colour", Options::default()).unwrap();
-        assert_eq!(f.vault.grep(&re, 10).unwrap().1, 3);
+        assert_eq!(f.vault.grep(&re, 10, false).unwrap().1, 3);
 
         let report = f.vault.replace_all(&re, "color", true).unwrap();
         assert_eq!(report.rewritten, ["a.md", "sub/b.md"]);
@@ -1424,13 +1445,38 @@ mod tests {
         assert_eq!(f.read("c.md"), "nothing here\n");
 
         assert!(
-            poll_until(|| f.vault.grep(&re, 10).unwrap().1 == 0, BUDGET),
+            poll_until(|| f.vault.grep(&re, 10, false).unwrap().1 == 0, BUDGET),
             "the rewrites must reach the index without a rescan"
         );
     }
 
+    /// The other half of All: a tree the index never walked is greped from disk, and a file the
+    /// index does hold is not greped twice.
     #[test]
-    fn grep_files_finds_text_outside_notes() {
+    fn grep_unindexed_reaches_the_trees_the_walk_skipped() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "zorblat in a note\n");
+        std::fs::create_dir_all(f.vault.root().join("node_modules")).unwrap();
+        f.write("node_modules/dep.js", "// zorblat\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let re = search::pattern("zorblat", Options::default()).unwrap();
+        // The index never walked node_modules, so its own grep cannot see the dependency.
+        assert_eq!(f.vault.grep(&re, 10, true).unwrap().1, 1);
+
+        let (hits, total) = f.vault.grep_unindexed(&re, 10).unwrap();
+        assert_eq!(total, 1, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "node_modules/dep.js");
+        assert!(
+            !hits.iter().any(|h| h.rel_path == "a.md"),
+            "an indexed note must not be greped a second time: {hits:?}"
+        );
+    }
+
+    /// Bodies outside the notes are in the index now, so the one grep reaches them.
+    #[test]
+    fn grep_reaches_text_outside_notes() {
         let f = Fixture::open(VaultConfig::default());
         f.write("tool.py", "import os\nprint('zorblat')\n");
         f.write("bin.dat", "\0zorblat\n");
@@ -1438,14 +1484,11 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let re = search::pattern("zorblat", Options::default()).unwrap();
-        let (hits, total) = f.vault.grep_files(&re, 10).unwrap();
+        let (hits, total) = f.vault.grep(&re, 10, false).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
         assert_eq!(total, 1, "the NUL byte keeps bin.dat out");
-
-        // Neither file is a note, so the indexed grep sees nothing at all.
-        assert_eq!(f.vault.grep(&re, 10).unwrap().1, 0);
     }
 
     /// Only regex mode expands `$1`; a literal replacement is written as typed.
@@ -1745,7 +1788,7 @@ mod tests {
             names(&f.vault.list_dir("a/c").unwrap()),
             ["a/c/sub", "a/c/note.md"]
         );
-        assert!(!f.vault.search("kumquat", 10).unwrap().is_empty());
+        assert!(!f.vault.search("kumquat", 10, false).unwrap().is_empty());
     }
 
     /// A Syncthing pull is one batch of files; the links in all of them still have to resolve.
