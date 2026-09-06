@@ -30,8 +30,10 @@ const BUDGET: usize = 256 << 20;
 /// Points to CSS pixels at zoom 1.0. A PDF point is 1/72 inch and a CSS pixel 1/96.
 const PT_TO_PX: f32 = 96.0 / 72.0;
 
-const MIN_SCALE: f64 = 0.1;
-const MAX_SCALE: f64 = 8.0;
+/// What a page may be zoomed between, and what an image tab borrows: 10 % is a letter page
+/// about 80 px wide, and past 800 % one page is more tiles than the budget holds.
+pub const MIN_SCALE: f64 = 0.1;
+pub const MAX_SCALE: f64 = 8.0;
 
 /// How the page is sized to the window. Defined in core, because the session remembers it.
 pub use accent_core::config::PdfZoom;
@@ -248,18 +250,55 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
     }
 }
 
-/// One zoom step in or out from `from`, as a fixed scale. The arithmetic is the document's, so
-/// a page steps in the same tenths a note does however far a fit mode left it from one.
-pub fn stepped(from: f32, out: bool) -> PdfZoom {
-    PdfZoom::Scale(
-        crate::stepped_zoom(f64::from(from) / f64::from(PT_TO_PX), out).clamp(MIN_SCALE, MAX_SCALE),
-    )
+/// One zoom step in or out from the zoom `from`. The arithmetic is the document's, so a page
+/// steps in the same tenths a note does however far a fit mode left it from one.
+///
+/// `from` is a zoom, not a layout scale: reading the step back out of [`Layout::scale`] means
+/// dividing an `f32` by [`PT_TO_PX`], and past 230 % the drift that leaves is larger than
+/// [`crate::stepped_zoom`]'s epsilon, so the next tenth is the one the page is already at and
+/// the zoom stops moving.
+pub fn stepped(from: f64, out: bool) -> PdfZoom {
+    PdfZoom::Scale(crate::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
 }
 
 /// A scale clamped to what is worth rendering: below the floor nothing is legible, above the
 /// ceiling one page is hundreds of megabytes of tiles.
 pub fn clamp_scale(scale: f32) -> f32 {
     scale.clamp((MIN_SCALE as f32) * PT_TO_PX, (MAX_SCALE as f32) * PT_TO_PX)
+}
+
+/// The content offset `(x, y)` as a reading position: which page the top-left of the viewport is
+/// in, and how far into it.
+pub fn anchor_at(layout: &Layout, x: f64, y: f64) -> Anchor {
+    // A pixel down, so an offset resting exactly on a page's top edge is that page rather than
+    // the gap above it.
+    let page = page_at(layout, y + 1.0);
+    match layout.pages.get(page) {
+        Some(rect) => Anchor {
+            page,
+            u: ((x - f64::from(rect.x)) / f64::from(rect.w.max(1.0))) as f32,
+            v: ((y - f64::from(rect.y)) / f64::from(rect.h.max(1.0))) as f32,
+        },
+        None => Anchor::default(),
+    }
+}
+
+/// Where a reading position sits in the content, or `None` for a page this layout has not got.
+pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
+    let rect = layout.pages.get(anchor.page)?;
+    Some((
+        f64::from(rect.x + anchor.u * rect.w),
+        f64::from(rect.y + anchor.v * rect.h),
+    ))
+}
+
+/// Which page a content coordinate falls in, or the nearest one above it.
+fn page_at(layout: &Layout, y: f64) -> usize {
+    layout
+        .pages
+        .iter()
+        .rposition(|rect| f64::from(rect.y) <= y)
+        .unwrap_or(0)
 }
 
 glib::wrapper! {
@@ -318,17 +357,20 @@ impl PdfView {
         if self.imp().zoom.get() == zoom {
             return;
         }
-        let anchor = self.anchor();
         self.imp().zoom.set(zoom);
         self.relayout();
-        self.scroll_to(anchor);
         self.zoomed();
     }
 
     /// Zoom one step, keeping whatever is under `at` (a widget coordinate) where it is.
     pub fn zoom_step(&self, out: bool, at: Option<(f64, f64)>) {
-        let scale = self.imp().layout.borrow().scale;
-        self.zoom_around(stepped(scale, out), at);
+        let from = match self.imp().zoom.get() {
+            // Exact, so a step never has to be read back out of the laid-out `f32` scale.
+            PdfZoom::Scale(zoom) => zoom,
+            // A fit mode has no percentage of its own: step from wherever it left the page.
+            _ => f64::from(self.imp().layout.borrow().scale) / f64::from(PT_TO_PX),
+        };
+        self.zoom_around(stepped(from, out), at);
     }
 
     fn zoom_around(&self, zoom: PdfZoom, at: Option<(f64, f64)>) {
@@ -489,30 +531,21 @@ impl PdfView {
 
     /// Where the reader is now.
     pub fn anchor(&self) -> Anchor {
-        let layout = self.imp().layout.borrow();
         let (x, y) = self.scroll_offset();
-        let page = self.page_at(y + 1.0);
-        match layout.pages.get(page) {
-            Some(rect) => Anchor {
-                page,
-                u: ((x - f64::from(rect.x)) / f64::from(rect.w.max(1.0))) as f32,
-                v: ((y - f64::from(rect.y)) / f64::from(rect.h.max(1.0))) as f32,
-            },
-            None => Anchor::default(),
-        }
+        anchor_at(&self.imp().layout.borrow(), x, y)
     }
 
     /// Put the reader back where `anchor` says.
     pub fn scroll_to(&self, anchor: Anchor) {
-        let layout = self.imp().layout.borrow().clone();
-        let Some(rect) = layout.pages.get(anchor.page) else {
+        let at = offset_of(&self.imp().layout.borrow(), anchor);
+        let Some((x, y)) = at else {
             return;
         };
         if let Some(hadj) = self.hadjustment() {
-            hadj.set_value(f64::from(rect.x + anchor.u * rect.w));
+            hadj.set_value(x);
         }
         if let Some(vadj) = self.vadjustment() {
-            vadj.set_value(f64::from(rect.y + anchor.v * rect.h));
+            vadj.set_value(y);
         }
     }
 
@@ -552,17 +585,7 @@ impl PdfView {
     pub fn current_page(&self) -> usize {
         let (_, y) = self.scroll_offset();
         let middle = y + self.vadjustment().map_or(0.0, |a| a.page_size()) / 2.0;
-        self.page_at(middle)
-    }
-
-    /// Which page a content coordinate falls in, or the nearest one above it.
-    fn page_at(&self, y: f64) -> usize {
-        let layout = self.imp().layout.borrow();
-        layout
-            .pages
-            .iter()
-            .rposition(|rect| f64::from(rect.y) <= y)
-            .unwrap_or(0)
+        page_at(&self.imp().layout.borrow(), middle)
     }
 
     /// Turn a widget coordinate into a page and a point on it.
@@ -620,6 +643,10 @@ impl PdfView {
     }
 
     /// Recompute the layout for the current size and zoom, and tell the scrollbars.
+    ///
+    /// The reading position is kept across the recompute, because it is the one thing the raw
+    /// scroll offset cannot carry: a resize or a zoom moves every page, so the same number of
+    /// pixels down the content is a different place in the document.
     fn relayout(&self) {
         let (w, h) = (self.width(), self.height());
         if w <= 1 || h <= 1 {
@@ -629,12 +656,18 @@ impl PdfView {
         if sizes.is_empty() {
             return;
         }
+        // Nothing to keep before the first layout: the offset is zero and page one is where the
+        // reader is anyway.
+        let anchor = (!self.imp().layout.borrow().pages.is_empty()).then(|| self.anchor());
         let scale = clamp_scale(fit_scale(&sizes, self.imp().zoom.get(), w as f32, h as f32));
         let layout = layout(&sizes, scale, w as f32);
         let (width, height) = (f64::from(layout.width), f64::from(layout.height));
         *self.imp().layout.borrow_mut() = layout;
         configure(self.hadjustment(), width, f64::from(w));
         configure(self.vadjustment(), height, f64::from(h));
+        if let Some(anchor) = anchor {
+            self.scroll_to(anchor);
+        }
         self.queue_draw();
     }
 }
@@ -689,6 +722,11 @@ mod imp {
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
+        /// The scale and colour scheme [`Self::asked`] was for. Every event that makes the tiles
+        /// on screen the wrong ones without changing *which* tiles are wanted goes through here
+        /// — a zoom step, a fit mode, a resize, a theme change, entering presentation mode — and
+        /// without it the page keeps painting its blurry stand-in and never asks again.
+        pub asked_for: Cell<(u32, bool)>,
         pub page: Cell<usize>,
         pub pointer: Cell<(f64, f64)>,
         /// The fraction of a wheel notch a smooth-scroll device has sent so far.
@@ -724,6 +762,7 @@ mod imp {
                 drag_from: Cell::new(None),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
+                asked_for: Cell::new((0, false)),
                 page: Cell::new(0),
                 pointer: Cell::new((0.0, 0.0)),
                 scroll_accum: Cell::new(0.0),
@@ -1063,8 +1102,13 @@ mod imp {
             snapshot.restore();
 
             // Asked for once per change, not once per frame: a scroll that reveals nothing new
-            // must not re-send the same list.
-            if !wanted.is_empty() && *self.asked.borrow() != wanted {
+            // must not re-send the same list. The scale and the scheme are part of "the same",
+            // because the same tiles at another one are a different render.
+            let stamp = (scale_milli, dark);
+            if !wanted.is_empty()
+                && (self.asked_for.get() != stamp || *self.asked.borrow() != wanted)
+            {
+                self.asked_for.set(stamp);
                 *self.asked.borrow_mut() = wanted.clone();
                 let handler = self.on_wants.borrow();
                 if let Some(f) = handler.as_ref() {
@@ -1145,23 +1189,68 @@ mod tests {
         assert!(width > scale);
     }
 
+    fn scale(zoom: PdfZoom) -> f64 {
+        let PdfZoom::Scale(zoom) = zoom else {
+            panic!("a step is always a fixed scale")
+        };
+        zoom
+    }
+
     #[test]
     fn zoom_steps_in_tenths_and_clamps() {
-        let scale = |z| {
-            let PdfZoom::Scale(z) = z else {
-                panic!("a step is always a fixed scale")
-            };
-            z
-        };
-        let at = fit_scale(&letter(1), PdfZoom::Scale(1.0), 100.0, 100.0);
-        assert_eq!(scale(stepped(at, false)), 1.1);
-        assert_eq!(scale(stepped(at, true)), 0.9);
+        assert_eq!(scale(stepped(1.0, false)), 1.1);
+        assert_eq!(scale(stepped(1.0, true)), 0.9);
         // A page fitted to the window sits off a tenth: the next one, not a tenth further.
-        let fitted = fit_scale(&letter(1), PdfZoom::Scale(1.37), 100.0, 100.0);
-        assert_eq!(scale(stepped(fitted, false)), 1.4);
-        assert_eq!(scale(stepped(fitted, true)), 1.3);
+        assert_eq!(scale(stepped(1.37, false)), 1.4);
+        assert_eq!(scale(stepped(1.37, true)), 1.3);
         assert_eq!(clamp_scale(1000.0), 8.0 * PT_TO_PX);
         assert_eq!(clamp_scale(0.0), 0.1 * PT_TO_PX);
+    }
+
+    #[test]
+    fn a_step_reaches_both_ends_of_the_range_without_sticking() {
+        // Stepping used to be read back out of the laid-out `f32` scale, where past 230 % the
+        // rounding made every step land on the zoom the page was already at.
+        assert_eq!(scale(stepped(2.3, false)), 2.4);
+        let mut zoom = MIN_SCALE;
+        for _ in 0..200 {
+            let next = scale(stepped(zoom, false));
+            assert!(next > zoom || next == MAX_SCALE, "stuck at {zoom}");
+            zoom = next;
+        }
+        assert_eq!(zoom, MAX_SCALE);
+        for _ in 0..200 {
+            let next = scale(stepped(zoom, true));
+            assert!(next < zoom || next == MIN_SCALE, "stuck at {zoom}");
+            zoom = next;
+        }
+        assert_eq!(zoom, MIN_SCALE);
+    }
+
+    #[test]
+    fn an_anchor_is_the_same_place_after_a_resize() {
+        let sizes = letter(5);
+        let fit = |width: f32| {
+            layout(
+                &sizes,
+                fit_scale(&sizes, PdfZoom::FitWidth, width, 700.0),
+                width,
+            )
+        };
+        let (wide, narrow) = (fit(1000.0), fit(500.0));
+        let anchor = Anchor {
+            page: 2,
+            u: 0.0,
+            v: 1.0 / 3.0,
+        };
+        let (_, was) = offset_of(&wide, anchor).unwrap();
+        let (_, now) = offset_of(&narrow, anchor).unwrap();
+        // Half the column is half the height, so the raw offset means something else entirely:
+        // it lands two pages further down. The anchor is what survives the resize.
+        assert!(now < was);
+        assert_eq!(anchor_at(&narrow, 0.0, now).page, anchor.page);
+        assert!((anchor_at(&narrow, 0.0, now).v - anchor.v).abs() < 1e-4);
+        assert_ne!(anchor_at(&narrow, 0.0, was).page, anchor.page);
     }
 
     #[test]

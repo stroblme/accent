@@ -32,6 +32,16 @@ const LANE: i32 = 12;
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
+/// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
+/// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
+const SYNC_ICON: &str = "mail-send-receive-symbolic";
+
+/// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
+/// default interface font. A commit message is a subject, a blank line and a body, so one line is
+/// the wrong resting size and unbounded growth would push the changes and the history off the pane.
+const MESSAGE_MAX_HEIGHT: i32 = 160;
+
 /// What the pane needs from the window, as closures rather than a handle: this module knows
 /// nothing about tabs or the vault tree. Every one of them holds the window weakly, or the pane
 /// would keep a closed window alive for the life of the process.
@@ -52,6 +62,9 @@ pub struct Hooks {
     pub trash: Box<dyn Fn(&str)>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
+    /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
+    /// landing and costs an index write: this fires twice per sync and must stay cheap.
+    pub syncing: Box<dyn Fn(bool)>,
 }
 
 /// Which list a row belongs to, which is what decides the letter it shows, the buttons it offers
@@ -147,6 +160,9 @@ pub struct Panel {
     /// Set while the repository list is being replaced, so the chooser's own notify does not read
     /// the splice as the user picking a repository.
     syncing: Cell<bool>,
+    /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
+    /// filled: this is the transfer the status bar spins for.
+    sync_busy: Cell<bool>,
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh closes them all.
     expanded: RefCell<Option<String>>,
@@ -181,9 +197,7 @@ impl Panel {
         // 186 px of minimum width with them and 105 with one.
         let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         arrows.append(&counts);
-        arrows.append(&gtk::Image::from_icon_name(
-            "network-transmit-receive-symbolic",
-        ));
+        arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
         let sync = gtk::Button::builder()
             .child(&arrows)
             .valign(gtk::Align::Center)
@@ -202,19 +216,27 @@ impl Panel {
         branch_row.append(&sync);
 
         // The message box is a card so it reads as somewhere to type rather than as a label, and
-        // it scrolls rather than growing: a long commit message must not push the lists away.
+        // it grows with what is in it: one line while the message is a subject, taller as a body
+        // is written, and scrolling once it reaches [`MESSAGE_MAX_HEIGHT`], because past that it
+        // would push the changes and the history off the pane. The scroller does the growing on
+        // its own — `propagate-natural-height` asks the view how tall it wants to be and
+        // `max-content-height` is the cap — so nothing here measures text.
+        //
+        // The margins are the 9 px Adwaita gives `entry` either side of its text, so the box has
+        // the same inset as the search field rather than a tighter one of its own.
         let message = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
-            .left_margin(6)
-            .right_margin(6)
-            .top_margin(6)
-            .bottom_margin(6)
+            .left_margin(9)
+            .right_margin(9)
+            .top_margin(9)
+            .bottom_margin(9)
             .build();
         message.add_css_class("card");
         let message_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .height_request(72)
+            .propagate_natural_height(true)
+            .max_content_height(MESSAGE_MAX_HEIGHT)
             .child(&message)
             .build();
         // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
@@ -223,8 +245,8 @@ impl Panel {
             .label("Commit message")
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
-            .margin_start(6)
-            .margin_top(6)
+            .margin_start(9)
+            .margin_top(9)
             .can_target(false)
             .build();
         placeholder.add_css_class("dim-label");
@@ -237,10 +259,15 @@ impl Panel {
             .sensitive(false)
             .build();
         commit.add_css_class("suggested-action");
-        // The button leads: it belongs with the branch row above it, where the pane's actions
-        // are, rather than below a box that grows as it is typed into.
+        // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
+        // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
+        // changes and the history, and a message box that now grows needs that room. Trailing
+        // edge, which is where GNOME puts the affirmative action. It is hidden and shown with the
+        // box below it, so a clean tree still shows neither.
+        branch_row.append(&commit);
+        // Nothing but the message box now, kept as its own container so the whole thing is hidden
+        // and shown in one call.
         let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        commit_box.append(&commit);
         commit_box.append(&overlay);
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -324,6 +351,7 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(false),
             syncing: Cell::new(false),
+            sync_busy: Cell::new(false),
             expanded: RefCell::new(None),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
@@ -738,7 +766,9 @@ impl Panel {
     // --- commands -----------------------------------------------------------------------------
 
     /// Run one git command on the selected repository off the main thread, say what happened, and
-    /// refresh. `hold` goes insensitive while the job runs, which is what a transfer needs.
+    /// refresh. `hold` goes insensitive while the job runs, which is what a transfer needs; it is
+    /// also what marks the job as one the user is waiting on, so [`Hooks::syncing`] runs with it
+    /// and the status bar can spin for the same span.
     ///
     /// A failure gets a dialog rather than a toast: what git puts on stderr is the whole answer to
     /// "why did the push not go", and it is too long and too important to let scroll past.
@@ -757,6 +787,8 @@ impl Panel {
         };
         if let Some(button) = &hold {
             button.set_sensitive(false);
+            self.sync_busy.set(true);
+            (self.hooks.syncing)(true);
         }
         let panel = self.clone();
         let vault = self.hooks.vault.clone();
@@ -764,6 +796,8 @@ impl Panel {
             let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
             if let Some(button) = &hold {
                 button.set_sensitive(true);
+                panel.sync_busy.set(false);
+                (panel.hooks.syncing)(false);
             }
             match done {
                 Ok(Ok(message)) => (panel.hooks.toast)(&message),
@@ -802,6 +836,11 @@ impl Panel {
     /// repository. The pane's selection follows, so the status bar's branch and the pane never
     /// end up talking about two different repositories.
     pub fn sync(self: &Rc<Self>, key: Option<&str>) {
+        // One at a time. The pane's own button is insensitive for the duration, but the status
+        // bar's branch is a second surface on the same action and stays clickable.
+        if self.sync_busy.get() {
+            return;
+        }
         let index = {
             let state = self.state.borrow();
             key.and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
@@ -1014,9 +1053,11 @@ impl Panel {
             .set_sensitive(anything && !message.trim().is_empty());
         // A clean tree has nothing to say, so the box goes — but never out from under a message
         // being written: a refresh fires on every save, and one of those would take it away
-        // mid-sentence.
-        self.commit_box
-            .set_visible(anything || !message.is_empty() || self.message.has_focus());
+        // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
+        // rather than by being in the same container.
+        let show = anything || !message.is_empty() || self.message.has_focus();
+        self.commit_box.set_visible(show);
+        self.commit.set_visible(show);
     }
 }
 
@@ -1597,7 +1638,7 @@ fn lane_width(row: &LogRow) -> i32 {
 /// monitor is watching yet, so nothing would ever tell the pane to look again.
 fn empty_page(check: &gtk::Button) -> adw::StatusPage {
     let page = adw::StatusPage::builder()
-        .icon_name("network-transmit-receive-symbolic")
+        .icon_name(SYNC_ICON)
         .title("No Repository")
         .description("Run git init in the terminal to start one.")
         .child(check)

@@ -19,6 +19,9 @@ pub struct Bar {
     /// The branch readout, which is also the Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
+    /// Shown over the branch name while a sync runs. Over rather than beside it, and the name is
+    /// faded rather than hidden, so the bar never changes width mid-sync.
+    branch_spinner: adw::Spinner,
     kind: gtk::Label,
     words: gtk::Label,
     /// The zoom readout, which is also the control that resets it.
@@ -39,7 +42,17 @@ impl Bar {
         // The branch is the Sync control as well as the readout: it names the repository the
         // document sits in, and clicking it pulls and pushes that one (DESIGN.md, Layout map).
         let branch_label = label(true);
-        let branch = bar_button(&branch_label, "win.git-sync", "Sync");
+        // The overlay does not measure the spinner (GtkOverlay's default), so the button is as
+        // wide as the branch name alone whether or not a sync is running.
+        let branch_spinner = adw::Spinner::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .can_target(false)
+            .visible(false)
+            .build();
+        let branch_body = gtk::Overlay::builder().child(&branch_label).build();
+        branch_body.add_overlay(&branch_spinner);
+        let branch = bar_button(&branch_body, "win.git-sync", "Sync");
         let kind = label(false);
         let words = label(true);
 
@@ -62,6 +75,7 @@ impl Bar {
             progress,
             branch,
             branch_label,
+            branch_spinner,
             kind,
             words,
             zoom,
@@ -82,6 +96,13 @@ impl Bar {
     pub fn set_branch(&self, branch: Option<&str>) {
         set(&self.branch_label, branch);
         self.branch.set_visible(branch.is_some());
+    }
+
+    /// Whether a sync is running. The branch name fades and a spinner turns in its place; the
+    /// label keeps its allocation, so nothing in the bar moves.
+    pub fn set_syncing(&self, on: bool) {
+        self.branch_spinner.set_visible(on);
+        self.branch_label.set_opacity(if on { 0.0 } else { 1.0 });
     }
 
     /// What the file is: "Markdown", "PDF", or "Rust · UTF-8 · LF" for code.
@@ -112,9 +133,9 @@ impl Bar {
 /// padding either side, and a box is as tall as its tallest child whatever its alignment, so one
 /// of these appearing pushed the bar from 29 px to 46 px. The class pins it to the caption's own
 /// line height; it stays a button, so it keeps its focus, its role and its tooltip.
-fn bar_button(label: &gtk::Label, action: &str, tooltip: &str) -> gtk::Button {
+fn bar_button(child: &impl IsA<gtk::Widget>, action: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
-        .child(label)
+        .child(child)
         .action_name(action)
         .tooltip_text(tooltip)
         .valign(gtk::Align::Center)

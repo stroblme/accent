@@ -1390,7 +1390,24 @@ impl App {
             .vexpand(true)
             .child(&picture)
             .build();
-        self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+        // On the scroller rather than the picture: while the image is fitted it is smaller than
+        // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
+        // phase, ahead of the scroller's own controller, as everywhere else.
+        let viewer = Rc::downgrade(&image);
+        zoom_on_wheel(
+            &scroller,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| {
+                    if let Some(image) = viewer.upgrade() {
+                        app.zoom_image(&image, Some(out));
+                    }
+                }
+            ),
+        );
     }
 
     /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
@@ -1464,18 +1481,18 @@ impl App {
         key: &str,
         child: &impl IsA<gtk::Widget>,
         icon: &str,
-    ) {
+    ) -> Rc<doc::Viewer> {
         let page = self.tabs().append(child);
         page.set_title(doc::file_name(key));
         page.set_tooltip(&fileops::display_path(&self.root(), key));
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
-        self.docs
-            .borrow_mut()
-            .push(wrap(doc::Viewer::new(key, page.clone())));
+        let viewer = doc::Viewer::new(key, page.clone());
+        self.docs.borrow_mut().push(wrap(viewer.clone()));
         self.tabs().set_selected_page(&page);
         self.sync_active();
         self.save_session_soon();
+        viewer
     }
 
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
@@ -2951,11 +2968,12 @@ impl App {
 
     /// One of the three zoom chords, dispatched to whatever the active tab is.
     ///
-    /// A PDF fits its pages, a shell scales its own font and a document scales the display-wide
-    /// one; the other three tab kinds draw at a size nobody chose, so the chords do nothing there.
-    /// It is matched in the same shape as [`App::sync_status`] and [`App::refresh_zoom`] on
-    /// purpose: what the chords reach and what the readout says have to be the same list, or the
-    /// bar says 120 % over something drawn at its own size.
+    /// A PDF fits its pages, an image is given a size of its own, a shell scales its own font and
+    /// a document scales the display-wide one; a status page and a diff draw at a size nobody
+    /// chose, so the chords do nothing there. It is matched in the same shape as
+    /// [`App::sync_status`] and [`App::refresh_zoom`] on purpose: what the chords reach and what
+    /// the readout says have to be the same list, or the bar says 120 % over something drawn at
+    /// its own size.
     fn zoom_action(self: &Rc<Self>, name: &str) {
         // Reset is 100 % for anything counted in percentages, and Fit Width for a PDF, which is
         // what a page was fitted to before anyone zoomed it.
@@ -2975,8 +2993,34 @@ impl App {
                 self.refresh_zoom();
             }
             Some(Doc::Text(_)) => self.set_zoom(stepped(self.zoom.get())),
-            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
+            Some(Doc::Image(image)) => self.zoom_image(
+                &image,
+                match name {
+                    "zoom-in" => Some(false),
+                    "zoom-out" => Some(true),
+                    _ => None,
+                },
+            ),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
         }
+    }
+
+    /// Step an image's zoom, or, with `None`, put it back to fitting the window.
+    ///
+    /// Reset is the fit, which is how the tab opened, and is what a PDF's Fit Width is. The step
+    /// is taken from the tab's own zoom rather than from the size it asked the picture for: a
+    /// pixel width is a whole number, and a zoom read back out of one lands short of the tenth it
+    /// was, which is enough for the next step to be the zoom the image is already at.
+    fn zoom_image(self: &Rc<Self>, image: &doc::Viewer, out: Option<bool>) {
+        let Some(picture) = picture_of(&image.page) else {
+            return;
+        };
+        let zoom = out.zip(image_zoom(image, &picture)).map(|(out, from)| {
+            stepped_zoom(from, out).clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE)
+        });
+        image.zoom.set(zoom);
+        set_image_zoom(&picture, zoom);
+        self.refresh_zoom();
     }
 
     /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the
@@ -3198,11 +3242,11 @@ impl App {
     ///
     /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
     /// saying nothing is going on; the same for a shell at its own size. A PDF always shows one:
-    /// fitting is a zoom too, and it is what clicking the readout goes back to. An image, a status
-    /// page and a diff show nothing at all, because no zoom reaches them — the readout used to
-    /// fall through to the window's document zoom and say "120 %" over a picture drawn at its own
-    /// size. It matches the same six variants [`App::zoom_action`] does, so the readout and the
-    /// chords cannot disagree.
+    /// fitting is a zoom too, and it is what clicking the readout goes back to. So does an image,
+    /// for the same reason. A status page and a diff show nothing at all, because no zoom reaches
+    /// them — the readout used to fall through to the window's document zoom and say "120 %" over
+    /// a picture drawn at its own size. It matches the same six variants [`App::zoom_action`]
+    /// does, so the readout and the chords cannot disagree.
     fn refresh_zoom(&self) {
         let label = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
@@ -3211,7 +3255,8 @@ impl App {
                 let zoom = self.zoom.get();
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }
-            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
+            Some(Doc::Image(image)) => Some(image_zoom_label(&image)),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -3477,6 +3522,13 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.restyle();
         }
+        // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
+        // though the system's dark state, and with it the notify handler, never moved.
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.restyle();
+            }
+        }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
         }
@@ -3662,13 +3714,72 @@ impl App {
     }
 }
 
+/// What an image is drawn at: its own zoom, or the scale the window fitted it to.
+fn image_zoom(image: &doc::Viewer, picture: &gtk::Picture) -> Option<f64> {
+    if let Some(zoom) = image.zoom.get() {
+        return Some(zoom);
+    }
+    let paintable = picture.paintable()?;
+    let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // Fitted: `ScaleDown` takes whichever axis binds and never enlarges.
+    let fitted = (f64::from(picture.width()) / f64::from(w))
+        .min(f64::from(picture.height()) / f64::from(h))
+        .min(1.0);
+    Some(fitted)
+}
+
+/// The status bar's readout for an image, in the shape a PDF's is: what it is fitted to, or the
+/// percentage it is at.
+fn image_zoom_label(image: &doc::Viewer) -> String {
+    match image.zoom.get() {
+        Some(zoom) => format!("{} %", (zoom * 100.0).round() as i32),
+        None => "Fit".to_string(),
+    }
+}
+
+/// Draw an image at `zoom`, or fitted to the window when there is none.
+///
+/// A zoomed picture is centred and asks for its exact size, so the scroller scrolls it once it
+/// is larger than the viewport and does not stretch it while it is smaller.
+fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
+    let size = zoom.and_then(|zoom| {
+        let paintable = picture.paintable()?;
+        let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
+        (w > 0 && h > 0).then(|| ((f64::from(w) * zoom) as i32, (f64::from(h) * zoom) as i32))
+    });
+    match size {
+        Some((w, h)) => {
+            picture.set_content_fit(gtk::ContentFit::Contain);
+            picture.set_halign(gtk::Align::Center);
+            picture.set_valign(gtk::Align::Center);
+            picture.set_size_request(w, h);
+        }
+        None => {
+            picture.set_content_fit(gtk::ContentFit::ScaleDown);
+            picture.set_halign(gtk::Align::Fill);
+            picture.set_valign(gtk::Align::Fill);
+            picture.set_size_request(-1, -1);
+        }
+    }
+}
+
 /// The `GtkPicture` inside a page built by [`App::open_image`].
+///
+/// Through the viewport: a picture is not a `GtkScrollable`, so the scroller puts one in between,
+/// and the `child` property hands that back rather than what was put in it.
 fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
-    page.child()
+    let child = page
+        .child()
         .downcast::<gtk::ScrolledWindow>()
         .ok()?
-        .child()
-        .and_downcast::<gtk::Picture>()
+        .child()?;
+    match child.downcast::<gtk::Viewport>() {
+        Ok(viewport) => viewport.child().and_downcast(),
+        Err(child) => child.downcast().ok(),
+    }
 }
 
 /// Which editor a text file gets. Only CSV is special: its columns are coloured instead of it
@@ -4187,7 +4298,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, trash, changed) = (
+    let (toast, open, diff, trash, changed, syncing) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -4220,6 +4332,11 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         changed: Box::new(move || {
             if let Some(app) = changed.upgrade() {
                 app.on_git_changed();
+            }
+        }),
+        syncing: Box::new(move |on| {
+            if let Some(app) = syncing.upgrade() {
+                app.statusbar.set_syncing(on);
             }
         }),
     })
@@ -5312,7 +5429,9 @@ fn install_document_font() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&editor::font_css(
         &editor::default_font(),
-        "textview.accent-doc",
+        // The label too: the editor's sticky block title is a line of the document, and a tab at
+        // the default zoom has no `#accent-doc-N` rule of its own for it to pick the face up from.
+        "textview.accent-doc, label.accent-doc",
         1.0,
     ));
     // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
@@ -5366,6 +5485,13 @@ thread_local! {
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
 //
+// A handle under the pointer takes the accent colour without changing size, so it says it can be
+// dragged before it is. `box-shadow: none` is what makes it visible at all: Adwaita draws the line
+// as a 1 px inset shadow over a transparent background, and on a 1 px handle that shadow covers
+// the whole allocation, so a background colour alone would never show. The dragging rule above
+// paints 3 px, of which the shadow still covers one; the hover rule follows it, so a handle being
+// dragged is the same colour as one being aimed at and only the width changes.
+//
 // ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
 // by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
 // outline or a negative margin, was measured: it only ever reaches the side rendered before the
@@ -5391,6 +5517,8 @@ fn install_chrome_css() {
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
+             paned > separator:hover {{ box-shadow: none; \
+               background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
