@@ -27,14 +27,14 @@
      inkscape:pageshadow="2"
      inkscape:zoom="0.49497475"
      inkscape:cx="267.69042"
-     inkscape:cy="518.20825"
+     inkscape:cy="517.1981"
      inkscape:document-units="mm"
      inkscape:showpageshadow="2"
-     inkscape:pagecheckerboard="0"
+     inkscape:pagecheckerboard="false"
      inkscape:deskcolor="#d1d1d1"
      showguides="true"
-     inkscape:window-width="1920"
-     inkscape:window-height="1132"
+     inkscape:window-width="2560"
+     inkscape:window-height="1403"
      inkscape:window-x="0"
      inkscape:window-y="0"
      inkscape:window-maximized="1"
@@ -107,6 +107,15 @@
       </cc:Work>
     </rdf:RDF>
   </metadata>
+  <rect
+     style="fill:#ffffff;stroke:none;stroke-width:25.239;stroke-linecap:round;stroke-linejoin:round"
+     id="rect1"
+     width="256"
+     height="256"
+     x="0"
+     y="0"
+     rx="2.6458333"
+     ry="2.6458333" />
   <path
      style="fill:none;fill-opacity:1;stroke:#2a2a2a;stroke-width:25.9898;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:normal"
      d="M 239.12444,29.581929 71.118901,71.351273 29.349558,239.35685 197.3551,197.58751 Z"

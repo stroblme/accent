@@ -17,7 +17,7 @@ use gtk::{gdk, gio, pango};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -58,8 +58,13 @@ impl Item {
 
 /// Where the three modes get their rows. The two loaders are called at most once per dialog.
 pub struct Sources {
-    /// Shown in file mode until the first keystroke; never matched against.
+    /// Shown in file mode until the first keystroke; never matched against. It is the window's
+    /// own list followed by the index's modification-time one, which is a browse page rather than
+    /// use order — a file a sync or a checkout touched is not a file the user opened.
     pub recent: Vec<String>,
+    /// What this window opened, newest first. This is the recency a typed query is ranked by, so
+    /// it holds nothing but the user's own moves.
+    pub mru: Vec<String>,
     pub load_files: Box<dyn Fn() -> Vec<String>>,
     pub commands: Vec<Item>,
     pub load_tags: Box<dyn Fn() -> Vec<String>>,
@@ -67,6 +72,9 @@ pub struct Sources {
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
 }
+
+/// Something [`cache`] fills in at most once and hands out by handle for the life of the dialog.
+type Cached<T> = Rc<RefCell<Option<Rc<T>>>>;
 
 /// Bind `action` to `accels`, or to its default when they are `None`; yields what is in force.
 pub type Rebind = dyn Fn(&str, Option<Vec<String>>) -> Vec<String>;
@@ -125,10 +133,16 @@ fn split_note(rel: &str) -> (&str, &str) {
 /// This is `Pattern::match_list` with the index kept instead of the string, so the caller can map a
 /// hit back to the [`Item`] it came from. Ties keep corpus order, as nucleo's stable sort does.
 ///
-/// `recent` is either empty or one entry per haystack, holding how recently it was used. Anything
-/// used before and matching at all leads, in use order, and the rest follow by score: a command
-/// run twice is what the user means by that half-typed query, however well something else scores.
-/// This is VS Code's quick-open behaviour.
+/// A haystack whose *last segment* matches leads, because a query is nearly always the name of
+/// the thing and only rarely the folder it sits in: for "tes", `test.md` comes before `tes/t.md`.
+/// The whole path is still matched — it is what lets a folder narrow a search — it just sorts
+/// below. A haystack with no delimiter is its own last segment, so command and tag mode are
+/// unaffected.
+///
+/// `recent` is either empty or one entry per haystack, holding how recently it was used. Inside
+/// each of the two tiers anything used before leads, in use order, and the rest follow by score: a
+/// command run twice is what the user means by that half-typed query, however well something else
+/// scores. This is VS Code's quick-open behaviour.
 fn rank(
     haystacks: &[String],
     recent: &[Option<usize>],
@@ -137,39 +151,61 @@ fn rank(
 ) -> Vec<usize> {
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
     let mut buf = Vec::new();
-    let mut hits: Vec<(usize, u32)> = haystacks
+    // (index, score against the last segment, score against the whole path).
+    let mut hits: Vec<(usize, Option<u32>, u32)> = haystacks
         .iter()
         .enumerate()
         .filter_map(|(i, h)| {
-            pattern
-                .score(Utf32Str::new(h, &mut buf), matcher)
-                .map(|score| (i, score))
+            let path = pattern.score(Utf32Str::new(h, &mut buf), matcher)?;
+            let name = &h[h.rfind('/').map_or(0, |at| at + 1)..];
+            // Scoring the whole path again when it has no folder in it would give the same number.
+            let base = match name.len() == h.len() {
+                true => Some(path),
+                false => pattern.score(Utf32Str::new(name, &mut buf), matcher),
+            };
+            Some((i, base, path))
         })
         .collect();
     let used = |i: usize| recent.get(i).copied().flatten().unwrap_or(usize::MAX);
     hits.sort_by(|a, b| {
-        used(a.0)
-            .cmp(&used(b.0))
+        a.1.is_none()
+            .cmp(&b.1.is_none())
+            .then(used(a.0).cmp(&used(b.0)))
             .then(b.1.cmp(&a.1))
+            .then(b.2.cmp(&a.2))
             .then(a.0.cmp(&b.0))
     });
-    hits.into_iter().take(MAX_RESULTS).map(|(i, _)| i).collect()
+    hits.into_iter()
+        .take(MAX_RESULTS)
+        .map(|(i, _, _)| i)
+        .collect()
 }
 
 /// Corpus for one mode, loaded at most once.
 ///
 /// `load` reaches into the index and must never run while `slot` is borrowed, so this borrows,
 /// clones the handle and drops before calling.
-fn cache(
-    slot: &RefCell<Option<Rc<Vec<String>>>>,
-    load: &dyn Fn() -> Vec<String>,
-) -> Rc<Vec<String>> {
+fn cache<T>(slot: &Cached<T>, load: &dyn Fn() -> T) -> Rc<T> {
     let cached = slot.borrow().clone();
     cached.unwrap_or_else(|| {
         let loaded = Rc::new(load());
         *slot.borrow_mut() = Some(loaded.clone());
         loaded
     })
+}
+
+/// Where each of `corpus` sits in `mru`, for [`rank`]'s recency tiebreak. A map rather than a
+/// scan per path: the corpus is every file in the vault and this runs once per dialog.
+fn places(corpus: &[String], mru: &[String]) -> Vec<Option<usize>> {
+    let at: HashMap<&str, usize> = mru
+        .iter()
+        .enumerate()
+        .map(|(i, rel)| (rel.as_str(), i))
+        .collect();
+    corpus
+        .iter()
+        .map(|rel| at.get(rel.as_str()).copied())
+        .collect()
 }
 
 /// "<Control>p" -> "Ctrl+P", spelled the way this GTK build spells it.
@@ -408,12 +444,14 @@ pub fn present(
 ) {
     let Sources {
         recent,
+        mru,
         load_files,
         commands,
         load_tags,
         on_rebind,
     } = sources;
     let recent = Rc::new(recent);
+    let mru = Rc::new(mru);
     // Behind a cell because a rebind rewrites one row's accelerators without closing the dialog.
     let commands: Rc<RefCell<Vec<Rc<Item>>>> =
         Rc::new(RefCell::new(commands.into_iter().map(Rc::new).collect()));
@@ -436,8 +474,12 @@ pub fn present(
     );
     let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
     // Filled on first use, then reused for the life of the dialog.
-    let notes: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
-    let tags: Rc<RefCell<Option<Rc<Vec<String>>>>> = Rc::new(RefCell::new(None));
+    let notes: Cached<Vec<String>> = Rc::new(RefCell::new(None));
+    let tags: Cached<Vec<String>> = Rc::new(RefCell::new(None));
+    // Where each file sits in the window's most-recent list. Cached with the corpus it indexes:
+    // it is one pass over every path in the vault, and the corpus does not change while the
+    // dialog is up.
+    let note_recent: Cached<Vec<Option<usize>>> = Rc::new(RefCell::new(None));
     let matcher = Rc::new(RefCell::new(Matcher::new(Config::DEFAULT)));
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -505,6 +547,7 @@ pub fn present(
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, notes, tags) = (recent.clone(), notes.clone(), tags.clone());
+        let (mru, note_recent) = (mru.clone(), note_recent.clone());
         let (commands, command_text, command_recent, matcher) = (
             commands.clone(),
             command_text.clone(),
@@ -525,9 +568,10 @@ pub fn present(
                     .collect(),
                 Mode::Files => {
                     let corpus = cache(&notes, &load_files);
+                    let used = cache(&note_recent, &|| places(&corpus, &mru));
                     let mut m = matcher.borrow_mut();
                     m.config = Config::DEFAULT.match_paths();
-                    rank(&corpus, &[], query, &mut m)
+                    rank(&corpus, &used, query, &mut m)
                         .into_iter()
                         .map(|i| Rc::new(Item::File(corpus[i].clone())))
                         .collect()
@@ -857,6 +901,28 @@ mod tests {
         );
         // Recency never rescues a non-match.
         assert!(rank(&corpus, &[Some(0), Some(1)], "zzzz", &mut m).is_empty());
+    }
+
+    #[test]
+    fn rank_puts_a_filename_match_above_a_path_match() {
+        let corpus = vec!["tes/t.md".to_string(), "test.md".to_string()];
+        let mut m = Matcher::new(Config::DEFAULT.match_paths());
+        assert_eq!(rank(&corpus, &[], "tes", &mut m), vec![1, 0]);
+    }
+
+    #[test]
+    fn rank_prefers_a_filename_over_a_recent_folder() {
+        let corpus = vec!["tes/t.md".to_string(), "test.md".to_string()];
+        let mut m = Matcher::new(Config::DEFAULT.match_paths());
+        // Recency orders the files whose name matches; it does not promote one whose folder does.
+        assert_eq!(rank(&corpus, &[Some(0), None], "tes", &mut m), vec![1, 0]);
+    }
+
+    #[test]
+    fn rank_leads_with_the_recent_file_when_both_names_match() {
+        let corpus = vec!["a/test.md".to_string(), "b/test.md".to_string()];
+        let mut m = Matcher::new(Config::DEFAULT.match_paths());
+        assert_eq!(rank(&corpus, &[None, Some(0)], "test", &mut m), vec![1, 0]);
     }
 
     fn command(action: &str, accels: &[&str]) -> Rc<Item> {
