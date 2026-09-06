@@ -14,7 +14,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled", "functions"] }
 ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.6"

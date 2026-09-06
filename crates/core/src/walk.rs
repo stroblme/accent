@@ -6,10 +6,12 @@
 //! `(dev, ino)` so the same inode reached by two paths yields one [`FileMeta`] plus an alias.
 //!
 //! Ignore files differ inside and outside the vault, so the walk runs in two kinds of pass.
-//! The **vault tree** honours only `.accentignore` (plus the hard-skip list): a notes vault
-//! routinely gitignores `*.md` on purpose, and that must not hide the user's notes. A
-//! **symlink target** is somebody else's tree — usually a code repo — so it honours its own
-//! `.gitignore`/`.ignore` as well, which is what keeps `.venv`, `target` and friends out.
+//! The **vault tree** honours no ignore file at all, only the skip lists below: a notes vault
+//! routinely gitignores `*.md` on purpose, and that must not hide the user's notes. What git
+//! ignores is left out of *queries* instead ([`crate::index::Index::set_git_ignored`]), which is
+//! the only place it can be done without the walk having to guess. A **symlink target** is
+//! somebody else's tree — usually a code repo — so it honours its own `.gitignore`/`.ignore`,
+//! which is what keeps `.venv`, `target` and friends out.
 //! Each pass therefore walks with `follow_links(false)` and hands accepted directory symlinks
 //! back as new passes; nested symlinks under a target obey exactly the same rules.
 //!
@@ -29,14 +31,20 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
-/// Directory names never worth indexing, whatever the ignore files say.
+/// Directory names the walk refuses whatever the options say.
+///
+/// `.git` is the repository's own storage, which the app reads through git rather than as files,
+/// and `.trash` is what the user already threw away. Neither is reachable even with
+/// [`ScanOptions::include_skipped`]: a search widened to "everything" still means everything in
+/// the vault, not its plumbing.
+const ALWAYS_SKIP_DIRS: &[&str] = &[".git", ".trash"];
+
+/// Dependency trees that plant no marker file, skipped by name unless the caller asks for them.
 ///
 /// Deliberately short: matching dependency trees by name is whack-a-mole, so anything that
 /// plants a marker file is caught by [`is_dependency_tree`] instead. These are the trees that
 /// plant none.
-const HARD_SKIP_DIRS: &[&str] = &[
-    ".git",
-    ".trash",
+const SKIP_DIRS: &[&str] = &[
     "node_modules",
     "__pycache__",
     ".mypy_cache",
@@ -153,7 +161,6 @@ pub struct ScanOptions {
     pub follow_links: bool,
     /// Honour `.gitignore`/`.ignore` *inside the vault tree*. Off by default: vaults are
     /// commonly git repos that ignore `*.md`, and hiding the user's notes is never right.
-    /// `.accentignore` is always honoured.
     pub vault_gitignore: bool,
     /// Honour `.gitignore`/`.ignore` inside directory-symlink targets. On by default: those
     /// are external trees (code repos) whose build output nobody wants in a note index.
@@ -162,10 +169,13 @@ pub struct ScanOptions {
     /// measured on the author's machine is 105 456 files in 12 390 directories, which is both
     /// an index nobody wants and 9 % of the kernel's inotify watch budget.
     ///
-    /// ponytail: no positive escape hatch in the app yet — `.accentignore` can only take more
-    /// away. If someone really keeps notes under a `CACHEDIR.TAG`, this becomes a per-vault
+    /// ponytail: if someone really keeps notes under a `CACHEDIR.TAG`, this becomes a per-vault
     /// preference; until then `accent-cli --index-dependency-trees` is the way back.
     pub skip_dependency_trees: bool,
+    /// Walk [`SKIP_DIRS`] and marked dependency trees anyway. Off by default, and never turned on
+    /// for the index: this is the Search pane's All toggle reaching, for one query, the trees the
+    /// index deliberately does not hold. [`ALWAYS_SKIP_DIRS`] is not opened by it.
+    pub include_skipped: bool,
     /// 0 = one thread per core.
     pub threads: usize,
     pub max_depth: Option<usize>,
@@ -178,6 +188,7 @@ impl Default for ScanOptions {
             vault_gitignore: false,
             target_gitignore: true,
             skip_dependency_trees: true,
+            include_skipped: false,
             threads: 0,
             max_depth: None,
         }
@@ -193,9 +204,12 @@ pub struct ScanResult {
     pub skipped: Vec<Skipped>,
 }
 
-/// Names the walk refuses at any depth, whatever the ignore files say.
-fn never_walked(name: &str) -> bool {
-    HARD_SKIP_DIRS.contains(&name) || crate::fs::is_syncthing_temp(name)
+/// Names the walk refuses at any depth, whatever the ignore files say. `include_skipped` opens
+/// [`SKIP_DIRS`] but never [`ALWAYS_SKIP_DIRS`].
+fn never_walked(name: &str, include_skipped: bool) -> bool {
+    ALWAYS_SKIP_DIRS.contains(&name)
+        || crate::fs::is_syncthing_temp(name)
+        || (!include_skipped && SKIP_DIRS.contains(&name))
 }
 
 /// Classify by file name. Conflict wins over extension: `Note.sync-conflict-….md` is not a note.
@@ -238,7 +252,9 @@ fn file_meta(rel_path: String, path: &Path, meta: &std::fs::Metadata) -> FileMet
 /// exactly what the walk refused.
 pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    if rel.split('/').any(never_walked) || name.starts_with(".accent-") {
+    // Always the strict rule: the watcher must agree with the index's own walk, and the All
+    // toggle never feeds the watcher, so the two cannot drift apart.
+    if rel.split('/').any(|part| never_walked(part, false)) || name.starts_with(".accent-") {
         return Ok(None);
     }
     // Every directory from the root down, the path itself included: a marker anywhere on the way
@@ -368,7 +384,6 @@ fn walk_pass(
         .ignore(pass.gitignore)
         .require_git(false) // targets are repos, but the vault usually is not
         .max_depth(opts.max_depth)
-        .add_custom_ignore_filename(".accentignore") // always honoured, everywhere
         .threads(if opts.threads == 0 {
             std::thread::available_parallelism().map_or(4, |n| n.get())
         } else {
@@ -383,7 +398,8 @@ fn walk_pass(
         let walk_root = pass.root.clone();
         let prefix = pass.prefix.clone();
         let follow_links = opts.follow_links;
-        let skip_deps = opts.skip_dependency_trees;
+        let skip_deps = opts.skip_dependency_trees && !opts.include_skipped;
+        let include_skipped = opts.include_skipped;
         Box::new(move |result| {
             let entry = match result {
                 Ok(e) => e,
@@ -395,7 +411,7 @@ fn walk_pass(
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
 
-            if entry.depth() > 0 && never_walked(&name) {
+            if entry.depth() > 0 && never_walked(&name, include_skipped) {
                 return WalkState::Skip;
             }
             // Depth 0 is the walk root — the vault the user opened, or a symlink target they
@@ -672,9 +688,8 @@ mod tests {
         fs::write(vault.path().join("node_modules/y.md"), "y").unwrap();
         fs::create_dir(vault.path().join(".obsidian")).unwrap();
         fs::write(vault.path().join(".obsidian/app.json"), "{}").unwrap();
-        fs::write(vault.path().join(".accentignore"), "secret/\n").unwrap();
-        fs::create_dir(vault.path().join("secret")).unwrap();
-        fs::write(vault.path().join("secret/s.md"), "s").unwrap();
+        fs::create_dir(vault.path().join(".trash")).unwrap();
+        fs::write(vault.path().join(".trash/t.md"), "t").unwrap();
 
         let r = scan(vault.path(), &ScanOptions::default());
         let paths = rels(&r);
@@ -683,7 +698,7 @@ mod tests {
             !paths.iter().any(|p| p.starts_with("node_modules/")),
             "{paths:?}"
         );
-        assert!(!paths.iter().any(|p| p.starts_with("secret")), "{paths:?}");
+        assert!(!paths.iter().any(|p| p.starts_with(".trash")), "{paths:?}");
         assert!(paths.contains(&".obsidian/app.json"), "{paths:?}");
     }
 
@@ -742,20 +757,59 @@ mod tests {
         );
     }
 
-    /// `.accentignore` is the negative direction and keeps working inside a tree that the marker
-    /// rule leaves alone.
+    /// What the Search pane's All toggle reaches, and what it still cannot: every skipped tree
+    /// opens, `.git` and `.trash` do not.
     #[test]
-    fn accentignore_still_wins_where_no_marker_applies() {
+    fn include_skipped_opens_every_tree_but_the_two_that_are_never_ours() {
         let vault = tempfile::tempdir().unwrap();
-        fs::write(vault.path().join(".accentignore"), "build/\n").unwrap();
-        fs::create_dir_all(vault.path().join("build")).unwrap();
-        fs::write(vault.path().join("build/out.md"), "out").unwrap();
-        fs::create_dir_all(vault.path().join("__pycache__")).unwrap();
-        fs::write(vault.path().join("__pycache__/m.pyc"), "c").unwrap();
+        fs::create_dir_all(vault.path().join("node_modules")).unwrap();
+        fs::write(vault.path().join("node_modules/dep.js"), "js").unwrap();
+        fs::create_dir_all(vault.path().join("target")).unwrap();
+        fs::write(vault.path().join("target/CACHEDIR.TAG"), "x").unwrap();
+        fs::write(vault.path().join("target/out.txt"), "out").unwrap();
+        fs::create_dir_all(vault.path().join(".git")).unwrap();
+        fs::write(vault.path().join(".git/config"), "c").unwrap();
+        fs::create_dir_all(vault.path().join(".trash")).unwrap();
+        fs::write(vault.path().join(".trash/x.md"), "x").unwrap();
+        // A symlinked code repo, which is the one pass that honours a `.gitignore`.
+        let ext = tempfile::tempdir().unwrap();
+        fs::write(ext.path().join(".gitignore"), "build/\n").unwrap();
+        fs::create_dir_all(ext.path().join("build")).unwrap();
+        fs::write(ext.path().join("build/o.js"), "o").unwrap();
+        std::os::unix::fs::symlink(ext.path(), vault.path().join("code")).unwrap();
         fs::write(vault.path().join("n.md"), "n").unwrap();
 
-        let r = scan(vault.path(), &ScanOptions::default());
-        assert_eq!(rels(&r), vec![".accentignore", "n.md"]);
+        let default_scan = scan(vault.path(), &ScanOptions::default());
+        let tight = rels(&default_scan);
+        for skipped in ["node_modules/dep.js", "target/out.txt", "code/build/o.js"] {
+            assert!(
+                !tight.contains(&skipped),
+                "{skipped} is in the index's walk"
+            );
+        }
+
+        // Everything open. `Vault::grep_unindexed` keeps `target_gitignore` on, so a symlinked
+        // repo's own build output stays out even with All; that is somebody else's build tree,
+        // and leaving it out is what keeps a per-query walk affordable.
+        let loose = ScanOptions {
+            include_skipped: true,
+            target_gitignore: false,
+            skip_dependency_trees: false,
+            ..ScanOptions::default()
+        };
+        let loose_scan = scan(vault.path(), &loose);
+        let paths = rels(&loose_scan);
+        for wanted in ["node_modules/dep.js", "target/out.txt", "code/build/o.js"] {
+            assert!(paths.contains(&wanted), "{wanted} missing from {paths:?}");
+        }
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".git")),
+            "the repository's own storage is never ours: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.starts_with(".trash")),
+            "what the user threw away stays thrown away: {paths:?}"
+        );
     }
 
     #[test]

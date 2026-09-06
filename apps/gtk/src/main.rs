@@ -86,6 +86,19 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     ("win.terminal", "New Terminal", &["<Control>j"]),
+    // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
+    // can be named by the terminal's own context menu. Both spellings carry Control and Shift, so
+    // `forwarded` hands them back from a focused shell without being told to.
+    (
+        "win.terminal-copy",
+        "Copy in Terminal",
+        &["<Control><Shift>c"],
+    ),
+    (
+        "win.terminal-paste",
+        "Paste in Terminal",
+        &["<Control><Shift>v"],
+    ),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
@@ -143,6 +156,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.sidebar", "Toggle Sidebar", &["F9"]),
     ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
+    // No chord: it is the Search pane's own All button, and the palette is how a command with
+    // no chord is found.
+    ("win.search-all", "Search Ignored Files", &[]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
@@ -323,12 +339,29 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
-        // `accent --terminal` is accent as a terminal: a window with no vault holding one shell.
-        // A second one joins that window as another tab, the way a second loose file does.
+        // `accent --terminal [dir]` is accent as a terminal: a window with no vault holding one
+        // shell. A second one joins that window as another tab, the way a second loose file does.
         if args.iter().any(|a| a == "--terminal" || a == "-t") {
+            let cwd = terminal_cwd(&args).and_then(|arg| {
+                // Resolved against the invoking process's directory, as a vault path is.
+                let path = command_line.create_file_for_arg(arg).path()?;
+                match path.canonicalize() {
+                    Ok(dir) if dir.is_dir() => Some(dir),
+                    // A file is not taken as its parent: which directory was meant is a guess,
+                    // and a shell in the wrong one is worse than a shell at home that says so.
+                    Ok(other) => {
+                        eprintln!("not a folder, opening at home: {}", other.display());
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("cannot open {}: {e}", path.display());
+                        None
+                    }
+                }
+            });
             if let Some(app) = self.loose_window(gtk_app) {
                 app.window.present();
-                app.open_terminal();
+                app.open_terminal_at(cwd);
             }
             return glib::ExitCode::SUCCESS;
         }
@@ -629,6 +662,16 @@ impl Shell {
     }
 }
 
+/// Where `accent --terminal` was pointed: the first argument that is not one of the flags, or
+/// `None` for the bare form. Pure, so the parsing is a test rather than a manual run; whether the
+/// path is a directory is the caller's question, because only it can resolve one.
+fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
+    args.iter()
+        .skip(1)
+        .map(|arg| arg.as_os_str())
+        .find(|arg| !matches!(arg.to_str(), Some("--terminal" | "-t" | "--new-window")))
+}
+
 /// Hand a page back to the window it was dragged out of, and say there why.
 ///
 /// The pane it left may have closed itself behind it, so it goes to whichever pane that window is
@@ -771,8 +814,12 @@ struct App {
     recent_notes: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
-    /// rebind has to rebuild it: see [`fill_shortcuts`].
+    /// rebind has to rebuild it: see [`fill_captured`].
     captured: gtk::ShortcutController,
+    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
+    /// Only a change is worth acting on: focus moves on every click, and the rebuild is sixty
+    /// `set_accels_for_action` calls.
+    shell_keys: Cell<bool>,
 }
 
 impl App {
@@ -1318,26 +1365,49 @@ impl App {
     /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
     ///
     /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
-    /// would come back as a changed-on-disk banner instead of a replacement.
-    fn replace_in_notes(self: &Rc<Self>, re: &accent_api::Regex, replacement: &str, literal: bool) {
-        let Some(vault) = self.vault() else {
+    /// would come back as a changed-on-disk banner instead of a replacement. That part is the
+    /// main loop's, and so is the reload afterwards; the rewrite between them is not. It is a
+    /// read, a substitution and an fsync per note — 1.9 s across 245 notes and 35 s across 3.3k
+    /// of them, measured on the generated vault — so it goes to a worker thread and `done` hands
+    /// the sidebar back its pane when it lands.
+    fn replace_in_notes(
+        self: &Rc<Self>,
+        re: accent_api::Regex,
+        replacement: String,
+        literal: bool,
+        done: Box<dyn FnOnce()>,
+    ) {
+        let Some(vault) = self.vault().cloned() else {
+            done();
             return self.needs_vault("replace across notes");
         };
-        let Some(ops) = self.ops() else { return };
+        let Some(ops) = self.ops().cloned() else {
+            done();
+            return;
+        };
         let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
         (ops.flush)(&open);
-        match vault.replace_all(re, replacement, literal) {
-            Ok(report) => {
-                let unsaved = (ops.reload)(&report.rewritten);
-                self.toast(&replace_message(
-                    report.matches,
-                    report.rewritten.len(),
-                    report.failed.len(),
-                    unsaved,
-                ));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let outcome =
+                gio::spawn_blocking(move || vault.replace_all(&re, &replacement, literal)).await;
+            if let Some(app) = weak.upgrade() {
+                match outcome {
+                    Ok(Ok(report)) => {
+                        let unsaved = (ops.reload)(&report.rewritten);
+                        app.toast(&replace_message(
+                            report.matches,
+                            report.rewritten.len(),
+                            report.failed.len(),
+                            unsaved,
+                        ));
+                    }
+                    Ok(Err(e)) => app.toast(&format!("Cannot replace: {e:#}")),
+                    Err(_) => tracing::warn!("the replace worker panicked"),
+                }
             }
-            Err(e) => self.toast(&format!("Cannot replace: {e:#}")),
-        }
+            done();
+        });
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
@@ -2448,6 +2518,18 @@ impl App {
                 }
             }
             "terminal" => self.open_terminal(),
+            // Nothing to do over any other tab: the editor and the PDF have their own copy, and a
+            // paste into a document is GtkTextView's.
+            "terminal-copy" => {
+                if let Some(Doc::Terminal(term)) = self.active_doc() {
+                    term.copy();
+                }
+            }
+            "terminal-paste" => {
+                if let Some(Doc::Terminal(term)) = self.active_doc() {
+                    term.paste();
+                }
+            }
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -2571,6 +2653,12 @@ impl App {
                 self.sidebar_column.set_visible(true);
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.show_replace();
+                }
+            }
+            "search-all" => {
+                self.sidebar_column.set_visible(true);
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.toggle_search_all();
                 }
             }
             "pane-tags" => self.show_pane("tags"),
@@ -2718,14 +2806,20 @@ impl App {
     /// A shell in a new tab of the active pane, at the vault root — the directory everything else
     /// in the window is measured from. A window with no vault opens one at home.
     fn open_terminal(self: &Rc<Self>) {
+        self.open_terminal_at(None);
+    }
+
+    /// The same, at a directory of the caller's choosing: `accent --terminal <dir>` is the only
+    /// one that has one, so `win.terminal` keeps going through `open_terminal` and the action,
+    /// the menu and the palette entry are all untouched.
+    fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         let n = self.terminals.get() + 1;
         self.terminals.set(n);
-        let cwd = match self.vault() {
+        let cwd = cwd.unwrap_or_else(|| match self.vault() {
             Some(vault) => vault.root().to_path_buf(),
             None => glib::home_dir(),
-        };
+        });
         let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
-        fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -2780,7 +2874,7 @@ impl App {
 
     /// A git refresh landed. The single place the window reacts to one, so everything that has to
     /// follow the repository is added here rather than wired into the pane.
-    fn on_git_changed(&self) {
+    fn on_git_changed(self: &Rc<Self>) {
         let (Some(sidebar), Some(git)) = (self.sidebar.get(), self.git.get()) else {
             return;
         };
@@ -2793,6 +2887,27 @@ impl App {
         }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(git.ignored());
+        }
+        // The same set the tree dims its rows with, handed to the index so every query can leave
+        // it out. It is a few thousand `UPDATE`s on a large vault, so it goes to a worker thread;
+        // a search already on screen is asked again once it lands, because its answer changed
+        // without the box being touched.
+        if let Some(vault) = self.vault.clone() {
+            let ignored: Vec<String> = git.ignored().into_iter().collect();
+            let weak = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let written = gio::spawn_blocking(move || vault.set_git_ignored(&ignored)).await;
+                match written {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => return tracing::warn!("recording the git ignore set: {e}"),
+                    Err(_) => return tracing::warn!("the ignore-set writer panicked"),
+                }
+                if let Some(app) = weak.upgrade()
+                    && let Some(sidebar) = app.sidebar.get()
+                {
+                    sidebar.requery_search();
+                }
+            });
         }
         self.sync_branch();
         // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
@@ -2967,9 +3082,11 @@ impl App {
             load_files: Box::new({
                 let vault = self.vault.clone();
                 move || {
+                    // Never widened: Go to File has no All toggle, and the tree is where an
+                    // ignored file is reached, dimmed but listed.
                     vault
                         .as_ref()
-                        .and_then(|v| v.file_paths().ok())
+                        .and_then(|v| v.file_paths(false).ok())
                         .unwrap_or_default()
                 }
             }),
@@ -3032,14 +3149,24 @@ impl App {
     /// Push the accelerators in force into the application and rebuild the four captured chords.
     /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
     /// them a config change touched.
+    ///
+    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
+    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
+    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
+    /// the same rule as the default it replaced.
     fn apply_accels(&self) {
         let Some(gtk_app) = self.window.application() else {
             return;
         };
         let config = self.config.borrow();
+        let shell = terminal::has_focus(&self.window);
         for (action, _, _) in ACTIONS {
             let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels.iter().map(String::as_str).collect();
+            let accels: Vec<&str> = accels
+                .iter()
+                .map(String::as_str)
+                .filter(|accel| !shell || reserved(action, accel))
+                .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
         let captured: Vec<(&str, String)> = CAPTURED
@@ -3051,12 +3178,6 @@ impl App {
             })
             .collect();
         fill_captured(&self.captured, &captured);
-        let forwarded = forwarded(&config);
-        for doc in self.docs() {
-            if let Some(term) = doc.terminal() {
-                fill_shortcuts(&term.forwarded, &forwarded);
-            }
-        }
     }
 
     /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
@@ -3609,6 +3730,7 @@ fn build_window(
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
+        shell_keys: Cell::new(false),
     });
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
@@ -3686,52 +3808,58 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let files = tree.widget().clone();
     let _ = app.tree.set(tree);
 
-    let data =
-        sidebar::Data {
-            // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
-            search: Arc::new({
-                let vault = vault.clone();
-                move |query| match query {
-                    sidebar::Query::Fts(text) => {
-                        sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT).unwrap_or_default())
-                    }
-                    sidebar::Query::Grep { re, files } => {
-                        let (mut hits, mut total) =
-                            vault.grep(&re, SEARCH_LIMIT).unwrap_or_default();
-                        // Notes first, because they are what the index can rank and count; the
-                        // rest is read from disk with whatever room is left in the list.
-                        if files {
-                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                            let (rest, more) = vault.grep_files(&re, room).unwrap_or_default();
-                            hits.extend(rest);
-                            total += more;
-                        }
-                        sidebar::Answer::Grep(hits, total)
-                    }
+    let data = sidebar::Data {
+        // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
+        search: Arc::new({
+            let vault = vault.clone();
+            move |query| match query {
+                sidebar::Query::Fts(text, all) => {
+                    sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default())
                 }
-            }),
-            replace_all: Box::new(glib::clone!(
-                #[weak]
-                app,
-                move |re: &accent_api::Regex, replacement: &str, literal: bool| app
-                    .replace_in_notes(re, replacement, literal)
-            )),
-            tags: Box::new({
-                let vault = vault.clone();
-                move || vault.tags().unwrap_or_default()
-            }),
-            files_with_tag: Box::new({
-                let vault = vault.clone();
-                move |tag| {
-                    vault
-                        .files_with_tag(tag)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|f| f.rel_path)
-                        .collect()
+                sidebar::Query::Grep { re, all } => {
+                    // `total` is what Replace All would rewrite, not how many rows there are:
+                    // the walked trees below add rows and nothing to it, and neither does a
+                    // source file the index holds a body for. The button promises edits.
+                    let (mut hits, total) = vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                    // What the index holds first, because that is what it can count; with
+                    // All on, the trees it was never asked to hold get whatever room is left.
+                    if all {
+                        let room = SEARCH_LIMIT.saturating_sub(hits.len());
+                        hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
+                    }
+                    sidebar::Answer::Grep(hits, total)
                 }
-            }),
-        };
+            }
+        }),
+        replace_all: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |re: accent_api::Regex,
+                  replacement: String,
+                  literal: bool,
+                  done: Box<dyn FnOnce()>| app.replace_in_notes(
+                re,
+                replacement,
+                literal,
+                done
+            )
+        )),
+        tags: Box::new({
+            let vault = vault.clone();
+            move || vault.tags().unwrap_or_default()
+        }),
+        files_with_tag: Box::new({
+            let vault = vault.clone();
+            move |tag| {
+                vault
+                    .files_with_tag(tag)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.rel_path)
+                    .collect()
+            }
+        }),
+    };
     let git = build_git(app, vault);
     adopt_sidebar(
         app,
@@ -4496,37 +4624,37 @@ const CAPTURED: &[&str] = &[
     "win.toggle-comment",
 ];
 
-/// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus opening a shell, closing one and the three zoom chords.
+/// The chords the window keeps while a shell has the keyboard. Everything else in [`ACTIONS`]
+/// goes to the shell: a terminal that answers only half of readline is not a terminal.
 ///
-/// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
-/// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
-/// Backspace` still do that, which is why this is the chord to give up. The zoom chords are the
-/// same trade: a terminal has a zoom of its own now, so `Ctrl+plus` / `Ctrl+minus` / `Ctrl+0` have
-/// to reach it, and readline loses them.
+/// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
+/// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
+/// unbinding it in `App::apply_accels` is what lets the key through. The reserved set is small
+/// and each entry earns its place:
+///
+/// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
+///   the one budgeted cost: readline loses delete-word, and `Alt+Backspace` still does it.
+/// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
+///   scale one have to be reachable from inside one.
+/// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
+///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
+/// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
+///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
+///   the palette's second spelling and Replace in Notes.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
-/// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
+/// the config is not recognised; `gtk::accelerator_parse` would settle it but needs an initialised
 /// GTK, which the tests do not have.
-fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
-    ACTIONS
-        .iter()
-        .flat_map(|(action, _, _)| {
-            accels_for(config, action)
-                .into_iter()
-                .map(move |accel| (*action, accel))
-        })
-        .filter(|(action, accel)| {
-            matches!(
-                *action,
-                "win.terminal"
-                    | "win.close-tab"
-                    | "win.zoom-in"
-                    | "win.zoom-out"
-                    | "win.zoom-reset"
-            ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
-        })
-        .collect()
+fn reserved(action: &str, accel: &str) -> bool {
+    matches!(
+        action,
+        "win.close-tab"
+            | "win.terminal"
+            | "win.zoom-in"
+            | "win.zoom-out"
+            | "win.zoom-reset"
+            | "win.fullscreen"
+    ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
 }
 
 fn clear(controller: &gtk::ShortcutController) {
@@ -4567,20 +4695,6 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
     }
 }
 
-/// Refill a capture controller from the accelerators in force. Cleared first, so a rebind that
-/// moves a chord away from one of these does not leave the old one claimed.
-fn fill_shortcuts(controller: &gtk::ShortcutController, bindings: &[(&str, String)]) {
-    clear(controller);
-    for (action, accel) in bindings {
-        if let Some(trigger) = gtk::ShortcutTrigger::parse_string(accel) {
-            controller.add_shortcut(gtk::Shortcut::new(
-                Some(trigger),
-                Some(gtk::NamedAction::new(action)),
-            ));
-        }
-    }
-}
-
 fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
@@ -4603,6 +4717,20 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
         .set_propagation_phase(gtk::PropagationPhase::Capture);
     app.window.add_controller(app.captured.clone());
     app.apply_accels();
+
+    // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
+    // crosses into or out of a terminal. `focus-widget` is the one signal that hears every way
+    // that happens: a click, a tab switch, a dialog, `Ctrl+J` itself.
+    app.window.connect_focus_widget_notify(glib::clone!(
+        #[weak]
+        app,
+        move |window| {
+            let shell = terminal::has_focus(window);
+            if shell != app.shell_keys.replace(shell) {
+                app.apply_accels();
+            }
+        }
+    ));
 
     // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
     // down without emitting `close-request`, which is where unsaved buffers get written and where
@@ -5081,43 +5209,80 @@ mod tests {
         }
     }
 
-    /// `set_accels_for_action` is last-writer-wins, so a chord claimed twice silently unbinds the
-    /// action listed first. The table is the only place that can go wrong, and it is pure data.
+    /// The reserved set is what a focused shell does not get, and it is pure data: everything
+    /// else in the table is unbound for as long as a terminal has the keyboard.
     #[test]
-    fn a_shell_hands_back_the_ctrl_shift_chords_and_the_toggle() {
-        let config = Config::default();
-        let forwarded = forwarded(&config);
-        let has =
-            |action: &str, accel: &str| forwarded.iter().any(|(a, k)| *a == action && k == accel);
-        // Claimed: opening and closing a shell, and every Ctrl+Shift chord in the table.
-        assert!(has("win.terminal", "<Control>j"));
-        assert!(has("win.close-tab", "<Control>w"));
-        assert!(has("win.new-folder", "<Control><Shift>n"));
-        // And the zoom chords, because a terminal has a zoom of its own to reach. Every spelling
-        // of them, or Ctrl+= would zoom the shell while Ctrl+plus went to readline.
-        assert!(has("win.zoom-in", "<Control>plus"));
-        assert!(has("win.zoom-in", "<Control>equal"));
-        assert!(has("win.zoom-in", "<Control>KP_Add"));
-        assert!(has("win.zoom-out", "<Control>minus"));
-        assert!(has("win.zoom-reset", "<Control>0"));
-        // Left to the shell: plain Ctrl, and anything without Control at all.
-        assert!(!has("win.save", "<Control>s"));
-        assert!(!has("win.find-previous", "<Shift>F3"));
+    fn a_focused_shell_keeps_everything_but_the_reserved_set() {
+        // Kept: closing a tab, opening a shell, scaling one, leaving fullscreen, and every
+        // Ctrl+Shift chord in the table — Copy and Paste in Terminal among them.
+        assert!(reserved("win.close-tab", "<Control>w"));
+        assert!(reserved("win.terminal", "<Control>j"));
+        assert!(reserved("win.fullscreen", "F11"));
+        assert!(reserved("win.new-folder", "<Control><Shift>n"));
+        assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
+        assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
+        // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
+        // to readline.
+        for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
+            assert!(reserved("win.zoom-in", accel));
+        }
+        assert!(reserved("win.zoom-out", "<Control>minus"));
+        assert!(reserved("win.zoom-reset", "<Control>0"));
+        // The shell's: plain Ctrl, function keys, and the chords readline reaches for most.
+        for (action, accel) in [
+            ("win.save", "<Control>s"),
+            ("win.duplicate-line", "<Control>d"),
+            ("win.toggle-comment", "<Control>k"),
+            ("win.delete-line", "<Control>l"),
+            ("win.palette-files", "<Control>e"),
+            ("win.palette-commands", "<Control>p"),
+            ("win.find-previous", "<Shift>F3"),
+            ("win.menu", "F10"),
+        ] {
+            assert!(!reserved(action, accel), "{action} eats {accel}");
+        }
     }
 
+    /// A rebound chord follows the same rule as the default it replaced, because the filter reads
+    /// the spelling in force rather than the table's.
     #[test]
-    fn a_rebound_chord_moves_what_the_shell_hands_back() {
+    fn a_rebound_chord_follows_the_same_rule() {
         let mut config = Config::default();
         config.shortcuts.insert(
             "win.save".to_string(),
             vec!["<Control><Shift>s".to_string()],
         );
-        let forwarded = forwarded(&config);
-        assert!(
-            forwarded
-                .iter()
-                .any(|(a, k)| *a == "win.save" && k == "<Control><Shift>s")
+        for accel in accels_for(&config, "win.save") {
+            assert!(reserved("win.save", &accel));
+        }
+        // The other direction: Close Tab moved off Ctrl+W is still Close Tab, and still reserved.
+        config
+            .shortcuts
+            .insert("win.close-tab".to_string(), vec!["<Control>y".to_string()]);
+        for accel in accels_for(&config, "win.close-tab") {
+            assert!(reserved("win.close-tab", &accel));
+        }
+    }
+
+    #[test]
+    fn the_terminal_flag_takes_the_first_argument_that_is_not_a_flag() {
+        let args = |v: &[&str]| -> Vec<std::ffi::OsString> {
+            v.iter().map(std::ffi::OsString::from).collect()
+        };
+        let cwd = |v: &[&str]| terminal_cwd(&args(v)).map(|p| p.to_string_lossy().into_owned());
+
+        assert_eq!(
+            cwd(&["accent", "--terminal", "/tmp"]).as_deref(),
+            Some("/tmp")
         );
+        // Order does not matter, and the short spelling is the same flag.
+        assert_eq!(cwd(&["accent", "/tmp", "-t"]).as_deref(), Some("/tmp"));
+        // The bare form has no directory to offer, so the window decides.
+        assert_eq!(cwd(&["accent", "--terminal"]), None);
+        // argv[0] is the program, never the path.
+        assert_eq!(cwd(&["accent"]), None);
+        // The other flag a command line can carry is not a path either.
+        assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
     }
 
     #[test]

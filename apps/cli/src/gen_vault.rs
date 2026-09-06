@@ -1032,13 +1032,6 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     g.mkdir(".stfolder")?;
     g.write(".stignore", b"(?d).DS_Store\n(?d)Thumbs.db\n.trash\n")?;
     g.write(
-        ".accentignore",
-        b"# accent honours only this file inside the vault (never .gitignore).\n\
-          # The in-vault .venv needs no line here: its pyvenv.cfg marker keeps it out.\n\
-          # Uncomment to drop something the marker rules do not cover:\n\
-          # Archive/\n",
-    )?;
-    g.write(
         "Notes-PHD/thesis/.gitignore",
         b"# accent must ignore this file inside the vault: the notes below are real notes.\n*.md\nreferences\n",
     )?;
@@ -1449,7 +1442,6 @@ mod tests {
             2
         );
         assert!(names.iter().any(|n| n == ".stignore"));
-        assert!(names.iter().any(|n| n == ".accentignore"));
         assert!(names.iter().any(|n| n == ".stfolder"));
         for link in [
             "Submissions/proj-a/code",
