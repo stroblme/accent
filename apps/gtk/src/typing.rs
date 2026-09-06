@@ -97,6 +97,42 @@ pub fn continuation(line: &str) -> Option<Continue> {
     None
 }
 
+/// The column a wrapped line lines up behind: the characters at the head of `line` that a reader
+/// takes for its gutter — the indent, and the list, task or quote marker that opens the line
+/// together with the space after it. 0 where the line opens neither, which is most prose.
+///
+/// The markers are [`continuation`]'s and are read the same way. What differs is that this
+/// measures the marker the line already carries rather than writing the next one, so `9)` is the
+/// three columns it takes and not the four `10)` would.
+///
+/// Indent, bullet, digits and `>` are all ASCII, so the byte count is the character count.
+pub fn wrap_column(line: &str) -> usize {
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    indent + marker_width(&line[indent..])
+}
+
+/// The width of the list or quote marker `rest` opens with, the spaces after it included, or 0
+/// where it opens with none. A task item's `[ ]` is content and not marker: the request is that a
+/// wrap lines up under the line's first character, which is the bracket.
+fn marker_width(rest: &str) -> usize {
+    let head = if rest.starts_with(['>', '-', '*', '+']) {
+        1
+    } else {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 || !rest[digits..].starts_with(['.', ')']) {
+            return 0;
+        }
+        digits + 1
+    };
+    let spaces = rest[head..].len() - rest[head..].trim_start_matches(' ').len();
+    // A marker is only a marker with a space behind it — `-no space` is a word. `>` is the
+    // exception `continuation` also makes: `>quoted` is a quote all the same.
+    match spaces > 0 || rest.starts_with('>') {
+        true => head + spaces,
+        false => 0,
+    }
+}
+
 /// The text of a task item after its `[ ]`, or `None` when `body` does not start with one.
 fn task_body(body: &str) -> Option<&str> {
     let rest = body.strip_prefix('[')?;
@@ -402,6 +438,40 @@ mod tests {
         assert_eq!(inserts("1. first"), "2. ");
         assert_eq!(inserts("9) ninth"), "10) ");
         assert_eq!(inserts("  12. twelfth"), "  13. ");
+    }
+
+    /// What a wrapped line hangs behind. The general rule and not a list-only one: an indented
+    /// continuation line has no marker and still wraps under its own indent.
+    #[test]
+    fn a_wrapped_line_hangs_behind_its_own_gutter() {
+        assert_eq!(wrap_column("- item"), 2);
+        assert_eq!(wrap_column("* item"), 2);
+        assert_eq!(wrap_column("1. first"), 3);
+        assert_eq!(
+            wrap_column("9) ninth"),
+            3,
+            "the marker it has, not the next one"
+        );
+        assert_eq!(wrap_column("12. twelfth"), 4);
+        assert_eq!(wrap_column("  - nested"), 4, "the indent counts");
+        assert_eq!(
+            wrap_column("  - [ ] task"),
+            4,
+            "the box is content, not marker"
+        );
+        assert_eq!(wrap_column("> quoted"), 2);
+        assert_eq!(wrap_column(">quoted"), 1, "a quote needs no space");
+        assert_eq!(wrap_column("    continued"), 4, "a plain indent hangs too");
+        for line in [
+            "",
+            "plain text",
+            "# Head",
+            "-no space",
+            "*emphasis*",
+            "1.no",
+        ] {
+            assert_eq!(wrap_column(line), 0, "{line:?}");
+        }
     }
 
     #[test]

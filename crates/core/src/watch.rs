@@ -34,6 +34,11 @@ pub enum VaultEvent {
     },
     /// A `*.sync-conflict-*` file appeared; the UI can offer a merge.
     ConflictAppeared(PathBuf),
+    /// Something moved inside a repository's own directory: a commit, a checkout, a stage.
+    ///
+    /// Never a vault file — `.git` is the one tree the walk refuses to enter — so this exists to
+    /// keep the two apart. Only the git directories the caller asked to watch produce it.
+    Git(PathBuf),
     /// Events were dropped (queue overflow or watcher error): re-walk the vault.
     Rescan,
 }
@@ -146,11 +151,16 @@ fn watch_all<T: notify::Watcher, C: FileIdCache>(
     Ok(())
 }
 
-/// Paths we never report: git internals, Syncthing's in-flight downloads, and the temporaries
+/// A path inside a repository's own directory.
+fn in_git(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".git")
+}
+
+/// Paths we never report as vault files: git internals, Syncthing's in-flight downloads, and the temporaries
 /// [`crate::fs::write_note`] renames into place: a save of ours must reach the UI as one event
 /// for the note, never as a stray `.accent-` file.
 fn ignored(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == ".git")
+    in_git(path)
         || path
             .file_name()
             .and_then(|n| n.to_str())
@@ -174,6 +184,12 @@ fn appeared(path: &Path) -> VaultEvent {
 fn classify(ev: &notify::Event) -> Vec<VaultEvent> {
     if ev.need_rescan() {
         return vec![VaultEvent::Rescan];
+    }
+    // A repository's innards, before the vault rules get a chance to drop them. What happened in
+    // there does not matter — a commit touches a dozen files under `.git` and the answer to all
+    // of them is the same one refresh — so the kind of change is not carried.
+    if let Some(path) = ev.paths.iter().find(|p| in_git(p)) {
+        return vec![VaultEvent::Git(path.clone())];
     }
     let live: Vec<&PathBuf> = ev.paths.iter().filter(|p| !ignored(p)).collect();
 
@@ -247,13 +263,35 @@ mod tests {
             VaultEvent::Changed(p)
             | VaultEvent::Removed(p)
             | VaultEvent::ConflictAppeared(p)
-            | VaultEvent::Renamed { to: p, .. } => p.file_name() == Some(name),
+            | VaultEvent::Renamed { to: p, .. }
+            | VaultEvent::Git(p) => p.file_name() == Some(name),
             VaultEvent::Rescan => false,
         })
     }
 
     fn start(root: &Path) -> (Watcher, Receiver<VaultEvent>) {
         start_with(root, &[])
+    }
+
+    /// `.git` is never a vault file, but it is not nothing either: watched on purpose, it is the
+    /// only way a commit made in a terminal reaches the app.
+    #[test]
+    fn a_watched_git_directory_reports_as_git_and_not_as_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        let (_w, rx) = start_with(dir.path(), std::slice::from_ref(&git));
+
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let events = drain(&rx, Duration::from_secs(5));
+        assert!(
+            events.iter().any(|e| matches!(e, VaultEvent::Git(_))),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, VaultEvent::Changed(_))),
+            "a git write must never look like a note: {events:?}"
+        );
     }
 
     fn start_with(root: &Path, dirs: &[PathBuf]) -> (Watcher, Receiver<VaultEvent>) {
@@ -429,12 +467,14 @@ mod tests {
             )),
             vec![VaultEvent::Changed(p("/v/N.md"))]
         );
-        assert!(
+        // Git's own files are their own kind, never a vault file: `.git` is watched on purpose
+        // now, and one refresh is the answer to everything that happens in there.
+        assert_eq!(
             classify(&ev(
                 EventKind::Modify(ModifyKind::Data(DataChange::Content)),
                 vec![p("/v/.git/index")]
-            ))
-            .is_empty()
+            )),
+            vec![VaultEvent::Git(p("/v/.git/index"))]
         );
         assert!(
             classify(&ev(

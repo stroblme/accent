@@ -5,8 +5,10 @@
 //! worker thread reconciles and watches in the background. The window is never blocked, and every
 //! change the vault reports arrives here as an [`Event`].
 
+mod askpass;
 mod comment;
 mod completion;
+mod connect;
 mod diff;
 mod doc;
 mod editor;
@@ -31,7 +33,7 @@ mod theme;
 mod tree;
 mod typing;
 
-use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
+use accent_api::{Config, Etag, Event, SaveError, Session, Vault, ssh};
 use accent_core::config::PdfZoom;
 use accent_core::index::Phase;
 use accent_core::markdown::{Link, LinkKind};
@@ -84,6 +86,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
+    ("win.upload", "Upload Files…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     ("win.terminal", "New Terminal", &["<Control>j"]),
     // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
@@ -204,6 +207,10 @@ fn ms() -> u128 {
 }
 
 fn main() -> glib::ExitCode {
+    // ssh spawns accent as its own askpass helper; that process only answers the question.
+    if let Some(code) = askpass::maybe_run() {
+        return code;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -376,12 +383,19 @@ impl Shell {
             // Launched with no folder: pick up the vault this window was last opened on, and only
             // fall back to the start screen when there is none or it has gone away.
             let last = self.config.borrow().recent_vaults.first().cloned();
-            match last.filter(|path| path.is_dir()) {
+            match last.filter(|path| path.is_dir() || ssh::is_remote_path(path)) {
                 Some(root) => self.open_vault(gtk_app, root, None),
                 None => self.start_screen(gtk_app),
             }
             return glib::ExitCode::SUCCESS;
         };
+        // An address rather than a path, and `create_file_for_arg` would answer a URI whose
+        // `path()` is `None` — "cannot resolve" for something perfectly openable.
+        if let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) {
+            let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
+            self.open_vault(gtk_app, PathBuf::from(address), note);
+            return glib::ExitCode::SUCCESS;
+        }
         // Resolved against the *invoking* process's directory, not this one's: a second
         // `accent notes/x.md` is forwarded here by the single instance, whose cwd is its own.
         let path = match command_line.create_file_for_arg(arg).path() {
@@ -436,23 +450,41 @@ impl Shell {
             window.present();
             return;
         }
-        let window = start::present(gtk_app, self.config.clone(), {
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |root| {
-                shell.open_vault(&gtk_app, root, None);
-                // The start window has done its job. It is reached through the shell rather than
-                // captured, which is what keeps the closure it lives in out of its own cycle.
-                if let Some(window) = shell.start.upgrade() {
-                    window.close();
+        let window = start::present(
+            gtk_app,
+            self.config.clone(),
+            {
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |root| {
+                    shell.open_vault(&gtk_app, root, None);
+                    // The start window has done its job. It is reached through the shell rather than
+                    // captured, which is what keeps the closure it lives in out of its own cycle.
+                    if let Some(window) = shell.start.upgrade() {
+                        window.close();
+                    }
                 }
-            }
-        });
+            },
+            {
+                // An address rather than a directory, and that is the whole difference: a remote
+                // vault is opened, keyed and remembered exactly as a local one is.
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |address: String| {
+                    shell.open_vault(&gtk_app, PathBuf::from(address), None);
+                    if let Some(window) = shell.start.upgrade() {
+                        window.close();
+                    }
+                }
+            },
+        );
         self.start.set(Some(&window));
     }
 
     /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
     /// than opening a second one on the same index, session and watcher. New Window lands on the
     /// start screen instead, where a vault without a window yet is picked.
+    ///
+    /// `root` is what the vault is keyed by: a directory, or an `ssh://` address for one on
+    /// another machine. The two are one list, one rule and one window each.
     fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -738,6 +770,13 @@ struct Presenting {
 
 // ----------------------------------------------------------------------------------- app state
 
+/// What the palette lists, kept warm so the dialog never waits on the vault.
+#[derive(Default)]
+struct Corpus {
+    files: Rc<Vec<String>>,
+    tags: Rc<Vec<String>>,
+}
+
 struct App {
     /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
     /// no index, no watcher, no session, and every tab keyed by an absolute path.
@@ -756,6 +795,13 @@ struct App {
     active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// Raised across the window when a remote vault stops answering, with a way back. A banner
+    /// rather than a toast because it is a state that persists and needs a decision, and one
+    /// across the window rather than per tab because it is every tab that is affected.
+    connection: adw::Banner,
+    /// How far a remote vault has got in coming up, across the top of the document column. Only
+    /// a remote vault's window puts it in the layout at all.
+    connect: connect::Bar,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
     /// The bar along the bottom of the editor column: progress, branch, file type, word count.
@@ -778,6 +824,10 @@ struct App {
     preview: RefCell<Option<preview::Preview>>,
     /// Numbers the shells this window has opened, so each tab has a key of its own.
     terminals: Cell<usize>,
+    /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
+    /// background rather than asked for when the dialog opens: on a remote vault that question
+    /// costs a round trip, and the palette is a thing that has to appear instantly.
+    corpus: RefCell<Corpus>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
@@ -833,8 +883,30 @@ impl App {
     ///
     /// ponytail: a window with no vault answers `/`, which is never seen: every key such a window
     /// holds is absolute, and joining an absolute path onto any root gives the path back.
-    fn root(&self) -> &Path {
-        self.vault.as_ref().map_or(Path::new("/"), |v| v.root())
+    fn root(&self) -> PathBuf {
+        self.vault
+            .as_ref()
+            .map_or_else(|| PathBuf::from("/"), |v| v.root())
+    }
+
+    /// The machine this window's vault is on, or "" when it is this one. In the subtitle
+    /// whatever is open, because "which machine am I editing on" is not a question a window
+    /// should ever leave to the tab that happens to be selected.
+    fn host(&self) -> String {
+        self.vault()
+            .and_then(|v| v.remote().map(|r| r.url().host.clone()))
+            .unwrap_or_default()
+    }
+
+    /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
+    /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
+    fn show_connection_banner(&self, why: &str) {
+        self.connection.set_title(why);
+        self.connection.set_revealed(true);
+    }
+
+    fn hide_connection_banner(&self) {
+        self.connection.set_revealed(false);
     }
 
     /// Say why something needs a folder open, for the actions that do.
@@ -1036,6 +1108,12 @@ impl App {
         self.active_doc()?.tab().cloned()
     }
 
+    /// What the active tab is showing, for the background answers that must not land on a tab the
+    /// user has since moved away from.
+    fn active_key(&self) -> Option<String> {
+        Some(self.active_doc()?.key())
+    }
+
     fn active_doc(&self) -> Option<Doc> {
         let page = self.tabs().selected_page()?;
         self.doc_for_page(&page)
@@ -1133,8 +1211,44 @@ impl App {
     }
 
     /// A text file in an editor tab, unless its bytes say it is not one after all.
+    ///
+    /// The read happens on a worker thread, so opening a note on a remote vault does not hold the
+    /// window for the round trip — measured at ~60 ms to the host this was developed against,
+    /// which is four frames. Locally it lands in the same turn of the loop and nothing changes.
     fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour) {
-        let text = match accent_core::fs::read_text(path) {
+        // A loose file has no vault to ask, so it still reads its own absolute path.
+        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let (key, path) = (key.to_string(), path.to_path_buf());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking({
+                let key = key.clone();
+                move || match vault {
+                    Some(vault) => vault.read_text(&key),
+                    None => accent_core::fs::read_text(&path),
+                }
+            })
+            .await;
+            let Some(app) = weak.upgrade() else { return };
+            // Two clicks on the same row while the first read was in flight: the tab exists now.
+            if app.doc_for(&key).is_some() {
+                return;
+            }
+            match read {
+                Ok(read) => app.adopt_text(&key, read, flavour),
+                Err(_) => tracing::warn!("the reader panicked on {key}"),
+            }
+        });
+    }
+
+    /// What [`open_text`](Self::open_text) does once the bytes are in hand.
+    fn adopt_text(
+        self: &Rc<Self>,
+        key: &str,
+        read: std::io::Result<accent_core::fs::Read>,
+        flavour: Flavour,
+    ) {
+        let text = match read {
             Ok(accent_core::fs::Read::Text(text)) => text,
             Ok(accent_core::fs::Read::Binary { size }) => {
                 return self.open_status(
@@ -1147,10 +1261,13 @@ impl App {
                 return self.open_status(
                     key,
                     "File Too Large",
+                    // The file's size goes through `human`, which is decimal because that is what
+                    // GNOME shows in Files. The cap does not: it is `16 * 1024 * 1024`, and
+                    // decimal units render that as "16.8 MB", which is not the number anyone set.
                     &format!(
-                        "{} is over the {} accent will read into an editor.",
+                        "{} is over the {} MiB accent will read into an editor.",
                         human(size),
-                        human(accent_core::fs::MAX_TEXT)
+                        accent_core::fs::MAX_TEXT / (1024 * 1024)
                     ),
                 );
             }
@@ -1158,7 +1275,7 @@ impl App {
         };
         let prefs = self.prefs();
         let tab = editor::open(
-            self.root(),
+            &self.root(),
             key,
             text,
             flavour,
@@ -1199,11 +1316,12 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
         let pdf = pdftab::open(
-            path,
+            &path,
             key,
             doc::file_name(key),
-            &fileops::display_path(self.root(), key),
+            &fileops::display_path(&self.root(), key),
             &self.tabs(),
             place,
         );
@@ -1261,7 +1379,10 @@ impl App {
 
     /// An image, in a tab that only looks at it.
     fn open_image(self: &Rc<Self>, key: &str, path: &Path) {
-        let picture = gtk::Picture::for_filename(path);
+        // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
+        // widget needs real bytes, and the protocol deliberately carries none.
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
+        let picture = gtk::Picture::for_filename(&path);
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
         picture.set_can_shrink(true);
         let scroller = gtk::ScrolledWindow::builder()
@@ -1269,7 +1390,41 @@ impl App {
             .vexpand(true)
             .child(&picture)
             .build();
-        self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+        // On the scroller rather than the picture: while the image is fitted it is smaller than
+        // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
+        // phase, ahead of the scroller's own controller, as everywhere else.
+        let viewer = Rc::downgrade(&image);
+        zoom_on_wheel(
+            &scroller,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| {
+                    if let Some(image) = viewer.upgrade() {
+                        app.zoom_image(&image, Some(out));
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
+    /// else: the PDF engine, an image, the preview's assets.
+    ///
+    /// ponytail: on a remote vault this downloads on the main thread, so a large PDF holds the
+    /// window for as long as the transfer takes. Move it to a worker thread with the opening
+    /// status the PDF tab already shows if that ever bites.
+    fn local_copy(&self, key: &str) -> Option<PathBuf> {
+        let vault = self.vault()?;
+        match vault.fetch(key) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("fetching {key}: {e}");
+                None
+            }
+        }
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
@@ -1326,18 +1481,18 @@ impl App {
         key: &str,
         child: &impl IsA<gtk::Widget>,
         icon: &str,
-    ) {
+    ) -> Rc<doc::Viewer> {
         let page = self.tabs().append(child);
         page.set_title(doc::file_name(key));
-        page.set_tooltip(&fileops::display_path(self.root(), key));
+        page.set_tooltip(&fileops::display_path(&self.root(), key));
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
-        self.docs
-            .borrow_mut()
-            .push(wrap(doc::Viewer::new(key, page.clone())));
+        let viewer = doc::Viewer::new(key, page.clone());
+        self.docs.borrow_mut().push(wrap(viewer.clone()));
         self.tabs().set_selected_page(&page);
         self.sync_active();
         self.save_session_soon();
+        viewer
     }
 
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
@@ -1372,7 +1527,8 @@ impl App {
     /// the sidebar back its pane when it lands.
     fn replace_in_notes(
         self: &Rc<Self>,
-        re: accent_api::Regex,
+        query: String,
+        options: accent_api::Options,
         replacement: String,
         literal: bool,
         done: Box<dyn FnOnce()>,
@@ -1389,8 +1545,10 @@ impl App {
         (ops.flush)(&open);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let outcome =
-                gio::spawn_blocking(move || vault.replace_all(&re, &replacement, literal)).await;
+            let outcome = gio::spawn_blocking(move || {
+                vault.replace_all(&query, options, &replacement, literal)
+            })
+            .await;
             if let Some(app) = weak.upgrade() {
                 match outcome {
                     Ok(Ok(report)) => {
@@ -1435,13 +1593,16 @@ impl App {
             return path.is_file().then(|| (key.to_string(), path));
         }
         // A window with no vault has nothing to be relative to, so only absolute keys open.
-        let path = self.vault()?.resolve(key).ok()?;
-        if !path.exists() {
+        let vault = self.vault()?;
+        let path = vault.resolve(key).ok()?;
+        // Asked of the vault rather than of this machine: on a remote one the path is the host's
+        // and `exists()` here would answer about a file that was never meant to be here.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
+        if !vault.exists(&key) {
             return None;
         }
         // Normalised, so `./a.md` and `a.md` are one tab rather than two.
-        let key = path.strip_prefix(self.root()).ok()?.to_str()?;
-        Some((key.to_string(), path))
+        Some((key, path))
     }
 
     /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one
@@ -1556,7 +1717,7 @@ impl App {
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
         let Some(doc) = self.active_doc() else {
-            self.title.set_subtitle("");
+            self.title.set_subtitle(&self.host());
             if let Some(sidebar) = self.sidebar.get() {
                 sidebar.set_backlinks(&[]);
             }
@@ -1569,25 +1730,51 @@ impl App {
             true => self.title.set_subtitle(&doc.page().title()),
             false => {
                 self.note_used(&key);
-                self.title.set_subtitle(&match doc.is_loose() {
-                    true => fileops::display_path(self.root(), &key),
+                let where_ = match doc.is_loose() {
+                    true => fileops::display_path(&self.root(), &key),
                     false => key.clone(),
+                };
+                // On a remote vault the path alone is ambiguous — the same note path exists on
+                // this machine too — so the host is named with it, every time.
+                self.title.set_subtitle(&match self.host().is_empty() {
+                    true => where_,
+                    false => format!("{where_} — {}", self.host()),
                 });
             }
         }
         // Backlinks and the preview are about notes. A source file, an image or a status page
         // leaves both empty rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
+        // Off the main loop: one round trip on a remote vault is ~60 ms here, and this runs on
+        // every tab switch. The pane is emptied at once so it never shows the last note's
+        // backlinks while the new note's are still coming.
         if let Some(sidebar) = self.sidebar.get() {
-            let mut sources: Vec<String> = Vec::new();
-            if let Some(vault) = self.vault().filter(|_| note.is_some()) {
-                for link in vault.backlinks(&key).unwrap_or_default() {
+            sidebar.set_backlinks(&[]);
+        }
+        if let Some(vault) = self.vault().filter(|_| note.is_some()).cloned() {
+            let (key, weak) = (key.clone(), Rc::downgrade(self));
+            glib::spawn_future_local(async move {
+                let found = gio::spawn_blocking({
+                    let key = key.clone();
+                    move || vault.backlinks(&key).unwrap_or_default()
+                })
+                .await;
+                let Some(app) = weak.upgrade() else { return };
+                // The user may have moved on while we were asking; a stale answer must not
+                // replace the pane the current tab put there.
+                if app.active_key().as_deref() != Some(&key) {
+                    return;
+                }
+                let mut sources: Vec<String> = Vec::new();
+                for link in found.unwrap_or_default() {
                     if !sources.contains(&link.src_rel_path) {
                         sources.push(link.src_rel_path);
                     }
                 }
-            }
-            sidebar.set_backlinks(&sources);
+                if let Some(sidebar) = app.sidebar.get() {
+                    sidebar.set_backlinks(&sources);
+                }
+            });
         }
         self.sync_status();
         self.sync_outline();
@@ -1756,7 +1943,11 @@ impl App {
     /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
     /// the user was asked, and has to reload whatever the etag says.
     fn file_changed(&self, tab: &Rc<Tab>) {
-        let (ours, disk) = (tab.etag.get(), Etag::of(&tab.path()).ok());
+        let disk = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.stat(&tab.rel()).ok().flatten(),
+            None => Etag::of(&tab.path()).ok(),
+        };
+        let ours = tab.etag.get();
         tracing::debug!(
             target: SAVES,
             rel = %tab.rel(),
@@ -1916,7 +2107,11 @@ impl App {
     /// The unsaved buffer against the file underneath it, in the conflict resolver.
     fn compare_with_disk(self: &Rc<Self>, tab: &Rc<Tab>) {
         let rel = tab.rel();
-        let Ok((disk, _)) = accent_core::fs::read_note(&tab.path()) else {
+        let read = match self.vault().filter(|_| !doc::is_loose_key(&rel)) {
+            Some(vault) => vault.read(&rel).map(|(text, _)| text),
+            None => accent_core::fs::read_note(&tab.path()).map(|(text, _)| text),
+        };
+        let Ok(disk) = read else {
             return self.toast(&format!("Cannot read {rel} from disk"));
         };
         let mine = tab.text();
@@ -2014,6 +2209,7 @@ impl App {
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.mark_tags_dirty();
                 }
+                self.refresh_corpus();
                 self.sync_active();
                 // Conflicts on notes nobody has open have no banner to appear on, so the toast
                 // that is already there says how many are waiting in the vault.
@@ -2097,15 +2293,40 @@ impl App {
                 for doc in self.docs() {
                     let key = doc.key();
                     if key == from {
-                        doc.retarget(self.root(), &to);
+                        doc.retarget(&self.root(), &to);
                     } else if let Some(rest) = key.strip_prefix(&prefix) {
-                        doc.retarget(self.root(), &format!("{to}/{rest}"));
+                        doc.retarget(&self.root(), &format!("{to}/{rest}"));
                     }
                 }
                 accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
+            // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
+            // asks git what changed; nothing else in the window is affected.
+            Event::GitChanged => {
+                if let Some(git) = self.git.get() {
+                    git.schedule_refresh();
+                }
+            }
+            // A remote vault is still coming up. It reads as the same wait as indexing, because
+            // that is what it is: the window is open and the files are not there yet.
+            // The bar carries the one step that can measure itself, the upload, and pulses
+            // through the rest; the text says which step it is.
+            Event::Connecting { what, fraction } => {
+                self.statusbar.set_progress(Some(&format!("{what}…")));
+                self.connect.show(fraction);
+            }
+            Event::Connected => {
+                self.statusbar.set_progress(None);
+                self.connect.hide();
+                self.hide_connection_banner();
+            }
+            Event::Disconnected(why) => {
+                self.statusbar.set_progress(None);
+                self.connect.hide();
+                self.show_connection_banner(&why);
+            }
             Event::Error(message) => self.toast(&message),
         }
     }
@@ -2326,8 +2547,27 @@ impl App {
         if self.preview.borrow().is_some() {
             return;
         }
+        // The preview's assets come through the vault, so a note's images load whether the file
+        // is on this disk or on a host. A window with no vault has only absolute keys, which the
+        // resolver hands straight back.
+        let vault = self.vault().cloned();
+        let root = self.root();
         let preview = preview::Preview::new(
-            self.root().to_path_buf(),
+            move |rel: &str| match &vault {
+                // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
+                // cannot see is a symlink *inside* the vault pointing outside it, and the answer
+                // here is handed to a WebView, so that is worth one `canonicalize`: a note
+                // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
+                Some(vault) => vault.fetch(rel).ok().filter(|path| {
+                    match (path.canonicalize(), vault.root().canonicalize()) {
+                        (Ok(real), Ok(root)) => real.starts_with(root),
+                        // A remote vault's copy lives in the cache, not under the root, and the
+                        // host already refused anything that escapes it there.
+                        _ => vault.is_remote(),
+                    }
+                }),
+                None => Some(root.join(rel)),
+            },
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -2515,6 +2755,19 @@ impl App {
             "new-folder" => {
                 if let Some(ops) = self.need_ops("create a folder") {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
+                }
+            }
+            // The one way to upload into the vault root: the tree has no row for it, so the
+            // folder's own context menu cannot offer it and this reads the selection the way
+            // New Folder does.
+            "upload" => {
+                if let Some(ops) = self.need_ops("upload files") {
+                    match ops.vault.is_remote() {
+                        true => fileops::upload(ops, &self.selected_dir().unwrap_or_default()),
+                        // Listed for every vault, because the palette shows all of ACTIONS, so
+                        // the local one says why nothing opened rather than doing nothing.
+                        false => self.toast("This vault is already on this machine"),
+                    }
                 }
             }
             "terminal" => self.open_terminal(),
@@ -2715,11 +2968,12 @@ impl App {
 
     /// One of the three zoom chords, dispatched to whatever the active tab is.
     ///
-    /// A PDF fits its pages, a shell scales its own font and a document scales the display-wide
-    /// one; the other three tab kinds draw at a size nobody chose, so the chords do nothing there.
-    /// It is matched in the same shape as [`App::sync_status`] and [`App::refresh_zoom`] on
-    /// purpose: what the chords reach and what the readout says have to be the same list, or the
-    /// bar says 120 % over something drawn at its own size.
+    /// A PDF fits its pages, an image is given a size of its own, a shell scales its own font and
+    /// a document scales the display-wide one; a status page and a diff draw at a size nobody
+    /// chose, so the chords do nothing there. It is matched in the same shape as
+    /// [`App::sync_status`] and [`App::refresh_zoom`] on purpose: what the chords reach and what
+    /// the readout says have to be the same list, or the bar says 120 % over something drawn at
+    /// its own size.
     fn zoom_action(self: &Rc<Self>, name: &str) {
         // Reset is 100 % for anything counted in percentages, and Fit Width for a PDF, which is
         // what a page was fitted to before anyone zoomed it.
@@ -2739,8 +2993,34 @@ impl App {
                 self.refresh_zoom();
             }
             Some(Doc::Text(_)) => self.set_zoom(stepped(self.zoom.get())),
-            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
+            Some(Doc::Image(image)) => self.zoom_image(
+                &image,
+                match name {
+                    "zoom-in" => Some(false),
+                    "zoom-out" => Some(true),
+                    _ => None,
+                },
+            ),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
         }
+    }
+
+    /// Step an image's zoom, or, with `None`, put it back to fitting the window.
+    ///
+    /// Reset is the fit, which is how the tab opened, and is what a PDF's Fit Width is. The step
+    /// is taken from the tab's own zoom rather than from the size it asked the picture for: a
+    /// pixel width is a whole number, and a zoom read back out of one lands short of the tenth it
+    /// was, which is enough for the next step to be the zoom the image is already at.
+    fn zoom_image(self: &Rc<Self>, image: &doc::Viewer, out: Option<bool>) {
+        let Some(picture) = picture_of(&image.page) else {
+            return;
+        };
+        let zoom = out.zip(image_zoom(image, &picture)).map(|(out, from)| {
+            stepped_zoom(from, out).clamp(pdfview::MIN_SCALE, pdfview::MAX_SCALE)
+        });
+        image.zoom.set(zoom);
+        set_image_zoom(&picture, zoom);
+        self.refresh_zoom();
     }
 
     /// Zoom is the document's, never the chrome's: DESIGN.md leaves the interface font to the
@@ -2815,11 +3095,19 @@ impl App {
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         let n = self.terminals.get() + 1;
         self.terminals.set(n);
-        let cwd = cwd.unwrap_or_else(|| match self.vault() {
-            Some(vault) => vault.root().to_path_buf(),
-            None => glib::home_dir(),
-        });
-        let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
+        // A remote vault's shell opens on the remote, unless the caller named a directory here:
+        // `accent --terminal <dir>` means this machine whatever window it lands in.
+        let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
+            (None, Some(remote)) => terminal::Shell::Remote {
+                argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
+                host: remote.url().host.clone(),
+            },
+            _ => terminal::Shell::Local(cwd.unwrap_or_else(|| match self.vault() {
+                Some(vault) => vault.root(),
+                None => glib::home_dir(),
+            })),
+        };
+        let term = terminal::open(&self.tabs(), &shell, terminal::key(n));
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -2954,11 +3242,11 @@ impl App {
     ///
     /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
     /// saying nothing is going on; the same for a shell at its own size. A PDF always shows one:
-    /// fitting is a zoom too, and it is what clicking the readout goes back to. An image, a status
-    /// page and a diff show nothing at all, because no zoom reaches them — the readout used to
-    /// fall through to the window's document zoom and say "120 %" over a picture drawn at its own
-    /// size. It matches the same six variants [`App::zoom_action`] does, so the readout and the
-    /// chords cannot disagree.
+    /// fitting is a zoom too, and it is what clicking the readout goes back to. So does an image,
+    /// for the same reason. A status page and a diff show nothing at all, because no zoom reaches
+    /// them — the readout used to fall through to the window's document zoom and say "120 %" over
+    /// a picture drawn at its own size. It matches the same six variants [`App::zoom_action`]
+    /// does, so the readout and the chords cannot disagree.
     fn refresh_zoom(&self) {
         let label = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
@@ -2967,7 +3255,8 @@ impl App {
                 let zoom = self.zoom.get();
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }
-            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
+            Some(Doc::Image(image)) => Some(image_zoom_label(&image)),
+            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -3059,7 +3348,40 @@ impl App {
         }
     }
 
+    /// Re-read what the palette lists, off the main loop. Cheap enough to do on every reconcile
+    /// and every time the dialog opens, which is what keeps the answer both instant and current.
+    fn refresh_corpus(self: &Rc<Self>) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let loaded = gio::spawn_blocking(move || {
+                (
+                    // Never widened: Go to File has no All toggle, and the tree is where an
+                    // ignored file is reached, dimmed but listed.
+                    vault.file_paths(false).unwrap_or_default(),
+                    vault
+                        .tags()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await;
+            if let (Some(app), Ok((files, tags))) = (weak.upgrade(), loaded) {
+                *app.corpus.borrow_mut() = Corpus {
+                    files: Rc::new(files),
+                    tags: Rc::new(tags),
+                };
+            }
+        });
+    }
+
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
+        // For the next time it opens; this one uses what is already there.
+        self.refresh_corpus();
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mru = self.recent_notes.borrow().clone();
@@ -3080,15 +3402,8 @@ impl App {
             mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
             load_files: Box::new({
-                let vault = self.vault.clone();
-                move || {
-                    // Never widened: Go to File has no All toggle, and the tree is where an
-                    // ignored file is reached, dimmed but listed.
-                    vault
-                        .as_ref()
-                        .and_then(|v| v.file_paths(false).ok())
-                        .unwrap_or_default()
-                }
+                let corpus = self.corpus.borrow().files.clone();
+                move || corpus.as_ref().clone()
             }),
             commands: ACTIONS
                 .iter()
@@ -3100,16 +3415,8 @@ impl App {
                 })
                 .collect(),
             load_tags: Box::new({
-                let vault = self.vault.clone();
-                move || {
-                    vault
-                        .as_ref()
-                        .and_then(|v| v.tags().ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(tag, _)| tag)
-                        .collect()
-                }
+                let corpus = self.corpus.borrow().tags.clone();
+                move || corpus.as_ref().clone()
             }),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
@@ -3201,7 +3508,7 @@ impl App {
     /// or a re-read from disk can have changed.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
-            vault.set_config(config.vault(self.root()));
+            vault.set_config(config.vault(&self.root()));
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
@@ -3214,6 +3521,13 @@ impl App {
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
             tab.restyle();
+        }
+        // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
+        // though the system's dark state, and with it the notify handler, never moved.
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.restyle();
+            }
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
@@ -3400,13 +3714,72 @@ impl App {
     }
 }
 
+/// What an image is drawn at: its own zoom, or the scale the window fitted it to.
+fn image_zoom(image: &doc::Viewer, picture: &gtk::Picture) -> Option<f64> {
+    if let Some(zoom) = image.zoom.get() {
+        return Some(zoom);
+    }
+    let paintable = picture.paintable()?;
+    let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    // Fitted: `ScaleDown` takes whichever axis binds and never enlarges.
+    let fitted = (f64::from(picture.width()) / f64::from(w))
+        .min(f64::from(picture.height()) / f64::from(h))
+        .min(1.0);
+    Some(fitted)
+}
+
+/// The status bar's readout for an image, in the shape a PDF's is: what it is fitted to, or the
+/// percentage it is at.
+fn image_zoom_label(image: &doc::Viewer) -> String {
+    match image.zoom.get() {
+        Some(zoom) => format!("{} %", (zoom * 100.0).round() as i32),
+        None => "Fit".to_string(),
+    }
+}
+
+/// Draw an image at `zoom`, or fitted to the window when there is none.
+///
+/// A zoomed picture is centred and asks for its exact size, so the scroller scrolls it once it
+/// is larger than the viewport and does not stretch it while it is smaller.
+fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
+    let size = zoom.and_then(|zoom| {
+        let paintable = picture.paintable()?;
+        let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
+        (w > 0 && h > 0).then(|| ((f64::from(w) * zoom) as i32, (f64::from(h) * zoom) as i32))
+    });
+    match size {
+        Some((w, h)) => {
+            picture.set_content_fit(gtk::ContentFit::Contain);
+            picture.set_halign(gtk::Align::Center);
+            picture.set_valign(gtk::Align::Center);
+            picture.set_size_request(w, h);
+        }
+        None => {
+            picture.set_content_fit(gtk::ContentFit::ScaleDown);
+            picture.set_halign(gtk::Align::Fill);
+            picture.set_valign(gtk::Align::Fill);
+            picture.set_size_request(-1, -1);
+        }
+    }
+}
+
 /// The `GtkPicture` inside a page built by [`App::open_image`].
+///
+/// Through the viewport: a picture is not a `GtkScrollable`, so the scroller puts one in between,
+/// and the `child` property hands that back rather than what was put in it.
 fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
-    page.child()
+    let child = page
+        .child()
         .downcast::<gtk::ScrolledWindow>()
         .ok()?
-        .child()
-        .and_downcast::<gtk::Picture>()
+        .child()?;
+    match child.downcast::<gtk::Viewport>() {
+        Ok(viewport) => viewport.child().and_downcast(),
+        Err(child) => child.downcast().ok(),
+    }
 }
 
 /// Which editor a text file gets. Only CSV is special: its columns are coloured instead of it
@@ -3519,11 +3892,17 @@ fn build_window(
     theme::apply(shell.config.borrow().theme);
 
     // No root is a window opened on a file: no index to build, no watcher to run, and nothing
-    // to add to the recent-vaults list.
+    // to add to the recent-vaults list. A root that is an `ssh://` address is a vault on another
+    // machine — it opens the same way and returns just as fast, because the connection is made on
+    // a thread and reports itself through the events like the indexing does.
     let (vault, events) = match &root {
         Some(root) => {
             let vault_config = shell.config.borrow().vault(root);
-            match Vault::open(root, vault_config) {
+            let opened = match ssh::is_remote_path(root) {
+                true => Vault::open_remote(&root.to_string_lossy(), vault_config),
+                false => Vault::open(root, vault_config),
+            };
+            match opened {
                 Ok((vault, events)) => (Some(Arc::new(vault)), Some(events)),
                 Err(e) => {
                     eprintln!("cannot open {}: {e:#}", root.display());
@@ -3548,9 +3927,18 @@ fn build_window(
             .unwrap_or_else(|| root.display().to_string()),
         None => "Accent".to_string(),
     };
-    let title = adw::WindowTitle::new(&vault_name, "");
+    // A remote window says which machine it is on, under the vault's name. Nothing else in the
+    // chrome differs: it is the same vault, and the point is that it behaves like one.
+    let host = root
+        .as_deref()
+        .and_then(|r| ssh::parse(&r.to_string_lossy()).ok())
+        .map(|url| url.host)
+        .unwrap_or_default();
+    let title = adw::WindowTitle::new(&vault_name, &host);
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
+    // Hidden until something goes wrong with a connection, which for a local vault is never.
+    let connection = adw::Banner::builder().button_label("Reconnect").build();
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
     // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
     // would slide it away instead if that ever reads as a jump.
@@ -3560,7 +3948,7 @@ fn build_window(
     let placeholder = adw::StatusPage::builder()
         .icon_name("text-x-generic-symbolic")
         .title("No Note Open")
-        .description("Pick one in the sidebar, or press Ctrl+P to search.")
+        .description("Pick one in the sidebar, or press Ctrl+E to go to a file.")
         .build();
     // The panes hang off a bin, so a split can swap the whole arrangement for a `GtkPaned` the
     // same way it swaps one branch of it (`panes::split`).
@@ -3649,7 +4037,16 @@ fn build_window(
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
     let find = find::Bar::new();
+    // A first connection to a remote host is the window becoming usable, not a list being
+    // replaced, so its bar spans the document column rather than sitting in the status bar
+    // beside the text (DESIGN.md, Loading). The text stays in the status bar either way. Only a
+    // remote vault puts the widget in the layout: a local one is connected from the moment it
+    // opens, so there is nothing to draw and no height to reserve.
+    let connect = connect::Bar::new();
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    if vault.as_ref().is_some_and(|v| v.is_remote()) {
+        editor_column.append(connect.widget());
+    }
     editor_column.append(find.widget());
     editor_column.append(&toasts);
 
@@ -3657,6 +4054,7 @@ fn build_window(
     // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&connection);
     // A bottom bar rather than a row inside the content: presentation mode takes it away with the
     // header for one line, and the find bar and the terminal panel stack above it.
     toolbar.add_bottom_bar(statusbar.widget());
@@ -3699,6 +4097,9 @@ fn build_window(
         active_pane: RefCell::new(first.clone()),
         title,
         toasts,
+        connection,
+        connect,
+        corpus: RefCell::new(Corpus::default()),
         find,
         statusbar,
         docs: RefCell::new(Vec::new()),
@@ -3816,33 +4217,56 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 sidebar::Query::Fts(text, all) => {
                     sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default())
                 }
-                sidebar::Query::Grep { re, all } => {
+                sidebar::Query::Grep { text, options, all } => {
                     // `total` is what Replace All would rewrite, not how many rows there are:
                     // the walked trees below add rows and nothing to it, and neither does a
                     // source file the index holds a body for. The button promises edits.
-                    let (mut hits, total) = vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                    let (mut hits, total) = vault
+                        .grep(&text, options, SEARCH_LIMIT, all)
+                        .unwrap_or_default();
                     // What the index holds first, because that is what it can count; with
                     // All on, the trees it was never asked to hold get whatever room is left.
                     if all {
                         let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                        hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
+                        hits.extend(
+                            vault
+                                .grep_unindexed(&text, options, room)
+                                .unwrap_or_default(),
+                        );
                     }
                     sidebar::Answer::Grep(hits, total)
+                }
+            }
+        }),
+        // Port forwarding is ssh's, over the master that is already open: nothing is spawned and
+        // nothing is kept but the list the pane shows.
+        add_forward: Box::new({
+            let vault = vault.clone();
+            move |local, remote| match vault.remote() {
+                Some(r) => r.forward(local, remote),
+                None => Err("this vault is not remote".to_string()),
+            }
+        }),
+        remove_forward: Box::new({
+            let vault = vault.clone();
+            move |local, remote| {
+                if let Some(r) = vault.remote()
+                    && let Err(e) = r.cancel_forward(local, remote)
+                {
+                    tracing::warn!("cancelling the forward {local} -> {remote}: {e}");
                 }
             }
         }),
         replace_all: Box::new(glib::clone!(
             #[weak]
             app,
-            move |re: accent_api::Regex,
+            move |query: String,
+                  options: accent_api::Options,
                   replacement: String,
                   literal: bool,
-                  done: Box<dyn FnOnce()>| app.replace_in_notes(
-                re,
-                replacement,
-                literal,
-                done
-            )
+                  done: Box<dyn FnOnce()>| {
+                app.replace_in_notes(query, options, replacement, literal, done)
+            }
         )),
         tags: Box::new({
             let vault = vault.clone();
@@ -3874,7 +4298,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, trash, changed) = (
+    let (toast, open, diff, trash, changed, syncing) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -3909,6 +4334,11 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 app.on_git_changed();
             }
         }),
+        syncing: Box::new(move |on| {
+            if let Some(app) = syncing.upgrade() {
+                app.statusbar.set_syncing(on);
+            }
+        }),
     })
 }
 
@@ -3936,6 +4366,9 @@ fn adopt_sidebar(
     // in the main header, and the tree starts level with the tab bar. `AdwHeaderBar` centres a
     // title widget, and the header-to-header size group already keeps the two bands equal, so the
     // switcher needs neither a box around it nor a size group of its own.
+    // A remote vault is the only one with ports to forward, and that is settled when the window
+    // is built rather than discovered later, so unlike the Git pane this needs no refresh to say.
+    pane.set_ports_visible(app.vault().is_some_and(|v| v.is_remote()));
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes dim rather than hide while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
@@ -4775,7 +5208,13 @@ fn label_of_owned(action: &str) -> Option<&'static str> {
 fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
-        ["win.new-note", "win.new-folder", "win.save"].as_slice(),
+        [
+            "win.new-note",
+            "win.new-folder",
+            "win.open-file",
+            "win.save",
+        ]
+        .as_slice(),
         ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
         ["win.preferences", "win.about"].as_slice(),
         // What leaves the vault, in the order of how much it takes with it.
@@ -4990,7 +5429,9 @@ fn install_document_font() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&editor::font_css(
         &editor::default_font(),
-        "textview.accent-doc",
+        // The label too: the editor's sticky block title is a line of the document, and a tab at
+        // the default zoom has no `#accent-doc-N` rule of its own for it to pick the face up from.
+        "textview.accent-doc, label.accent-doc",
         1.0,
     ));
     // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
@@ -5035,10 +5476,21 @@ thread_local! {
 /// theme's view colours instead of the scheme's grey, and the completion popup takes the
 /// popover's. The scheme itself stays: dropping it takes the find bar's match highlight with it.
 /// On the `text` node only `color` is ours, because GtkSourceView pins that node's background to
-/// transparent at maximum priority; the background therefore goes on the `textview` node.
+/// transparent at maximum priority; the background therefore goes on the `textview` node. The
+/// gutter is the same correction one node over: a scheme's `line-numbers` style carries a
+/// background of its own, and Solarized's is a shade off its text background (`base2` on `base3`,
+/// `base02` on `base03`), so the line numbers sat in a stripe beside the page. Adwaita happens to
+/// paint the two the same, which is why only Solarized showed it.
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
+//
+// A handle under the pointer takes the accent colour without changing size, so it says it can be
+// dragged before it is. `box-shadow: none` is what makes it visible at all: Adwaita draws the line
+// as a 1 px inset shadow over a transparent background, and on a 1 px handle that shadow covers
+// the whole allocation, so a background colour alone would never show. The dragging rule above
+// paints 3 px, of which the shadow still covers one; the hover rule follows it, so a handle being
+// dragged is the same colour as one being aimed at and only the width changes.
 //
 // ponytail: `paned.dragging` widens the handle from 1 px to 3 px, which moves the pane beside it
 // by 2 px for the length of the drag. Drawing outside the 1 px allocation instead, with an
@@ -5065,12 +5517,15 @@ fn install_chrome_css() {
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
+             paned > separator:hover {{ box-shadow: none; \
+               background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
+             textview border gutter {{ background-color: var(--view-bg-color); }} \
              GtkSourceAssistant.completion {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); min-width: 240px; \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \

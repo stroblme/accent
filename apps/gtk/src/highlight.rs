@@ -1,5 +1,6 @@
 //! Editor styling: core `Span`s and CSV `Cell`s (byte ranges) -> `gtk::TextTag`s on the buffer.
 
+use crate::typing;
 use accent_core::csv;
 use accent_core::markdown::{self, Style};
 use gtk::prelude::*;
@@ -78,6 +79,19 @@ fn tag_name(style: Style) -> &'static str {
 /// them, so the two lists cannot drift apart unnoticed.
 const HEADING_SCALES: [f64; 6] = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0];
 
+/// How far a wrapped line's hanging indent follows its own gutter. One paragraph tag per content
+/// column, because a `GtkTextTag`'s indent is a number of pixels and cannot be a function of the
+/// line it lands on; a line indented deeper than this hangs at this column instead, so its wraps
+/// still line up under something rather than under nothing.
+const WRAP_COLUMNS: usize = 12;
+
+/// The hanging-wrap tags, one per content column and indexed by it. Named after the column they
+/// carry so the two cannot drift; [`hang`] gives each one its width.
+const WRAP_TAGS: [&str; WRAP_COLUMNS] = [
+    "wrap1", "wrap2", "wrap3", "wrap4", "wrap5", "wrap6", "wrap7", "wrap8", "wrap9", "wrap10",
+    "wrap11", "wrap12",
+];
+
 const TAG_NAMES: &[&str] = &[
     "h1",
     "h2",
@@ -122,6 +136,13 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
         table.add(&t);
         t
     };
+    // Paragraph tags with nothing visual of their own: `hang` gives them the indent that lines a
+    // wrapped line up behind its own marker. Added before the heading tags below, because a tag
+    // added later to the table outranks an earlier one and both of these set `indent` — so an
+    // indented ATX heading keeps the hang that pulls its `#` markers out.
+    for name in WRAP_TAGS {
+        tag(name);
+    }
     for (name, scale) in [("h1", 1.6), ("h2", 1.4), ("h3", 1.2), ("h4", 1.1)] {
         let t = tag(name);
         t.set_scale(scale);
@@ -194,7 +215,7 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
-    for name in TAG_NAMES {
+    for name in TAG_NAMES.iter().chain(WRAP_TAGS.iter()) {
         buffer.remove_tag_by_name(name, &start, &end);
     }
     let analysis = markdown::analyze(&text);
@@ -208,6 +229,20 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
         {
             buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
         }
+    }
+    // Line by line rather than from the spans: a plain indented line carries no span of its own,
+    // and a list marker's span stops short of the space behind it that the text starts after.
+    for (n, line) in text.lines().enumerate() {
+        let column = typing::wrap_column(line).min(WRAP_COLUMNS);
+        if column == 0 {
+            continue;
+        }
+        let Some(s) = buffer.iter_at_line(n as i32) else {
+            continue;
+        };
+        let mut e = s;
+        e.forward_to_line_end();
+        buffer.apply_tag_by_name(WRAP_TAGS[column - 1], &s, &e);
     }
     analysis
 }
@@ -254,6 +289,20 @@ pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         let width = layout.pixel_size().0;
         tag.set_left_margin((gutter - width).max(0));
         tag.set_indent(-width.min(gutter));
+    }
+    // The wrapped-line indents, the same hanging trick with the left margin left alone: the first
+    // line stays where it was and only the wraps step in, behind the line's own indent and list
+    // marker. One character's advance times the column, which is exact in the monospaced face a
+    // note is written in (`editor::DEFAULT_FAMILY`) and an average in a proportional one.
+    let em = view
+        .pango_context()
+        .metrics(None, None)
+        .approximate_char_width()
+        / pango::SCALE;
+    for (column, name) in WRAP_TAGS.iter().enumerate() {
+        if let Some(tag) = table.lookup(name) {
+            tag.set_indent(-em * (column as i32 + 1));
+        }
     }
 }
 
@@ -408,6 +457,15 @@ mod tests {
         assert!(!is_atx("#", 0));
         assert!(!is_atx("#tag", 0));
         assert!(is_atx("### Deep", 0));
+    }
+
+    /// The wrap tags are indexed by the column they carry, so a typo in the list would silently
+    /// hang a line at the wrong depth.
+    #[test]
+    fn the_wrap_tags_are_named_after_their_columns() {
+        for (i, name) in WRAP_TAGS.iter().enumerate() {
+            assert_eq!(*name, format!("wrap{}", i + 1));
+        }
     }
 
     /// The span offsets we feed to the buffer must land on real character boundaries for a note

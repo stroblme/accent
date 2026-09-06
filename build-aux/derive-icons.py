@@ -68,7 +68,10 @@ def stroke_to_path(master: Path, into: Path) -> list[tuple[str, str]]:
     subprocess.run(
         [
             "inkscape",
-            "--actions=select-all;object-stroke-to-path;"
+            # `object-to-path` first, because `flatten` only reads <path>: the master's
+            # background is a <rect>, and without this pass it is silently dropped and the
+            # scalable icon comes out with no background at all.
+            "--actions=select-all;object-to-path;object-stroke-to-path;"
             f"export-filename:{into};export-plain-svg;export-overwrite;export-do",
             str(master),
         ],

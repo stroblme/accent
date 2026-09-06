@@ -93,6 +93,9 @@ pub struct PdfTab {
     future: RefCell<Vec<Anchor>>,
     /// Colours inverted against the system's choice, for a document that renders badly either way.
     inverted: Cell<bool>,
+    /// The palette the cached tiles were rendered in, so a theme change can tell that they are
+    /// of the old one. See [`PdfTab::restyle`].
+    theme: Cell<pdf::Theme>,
     /// The document could not be opened, so it is not opening either.
     failed: Cell<bool>,
     /// The zoom to restore when presentation mode ends.
@@ -176,6 +179,7 @@ pub fn open(
         history: RefCell::new(Vec::new()),
         future: RefCell::new(Vec::new()),
         inverted: Cell::new(false),
+        theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
         failed: Cell::new(false),
         presenting: Cell::new(None),
         pending: Cell::new(Some(place)),
@@ -250,8 +254,18 @@ impl PdfTab {
     }
 
     /// Follow the system's light/dark choice, unless this document has been inverted by hand.
+    ///
+    /// A page is rendered in the theme's colours rather than recoloured afterwards, so every
+    /// texture in the cache belongs to one palette. Switching between two themes of the same
+    /// darkness — Adwaita to Solarized — leaves `dark` alone and every cached tile wrong, which
+    /// is why the palette itself is what is compared here.
     pub fn restyle(&self) {
         let dark = adw::StyleManager::default().is_dark() != self.inverted.get();
+        let theme = theme_of(dark);
+        if self.theme.replace(theme) != theme {
+            self.view.forget_textures();
+            self.thumbs.forget_textures();
+        }
         self.view.set_dark(dark);
         self.thumbs.set_dark(dark);
     }
@@ -997,7 +1011,10 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 ///
 /// One request at a time, with one twist: before every tile it drains the queue, so a batch that
 /// has been overtaken by a scroll is abandoned rather than rendered into a viewport nobody is
-/// looking at any more.
+/// looking at any more. Only a newer batch abandons it — the queue is a stack, and a link or a
+/// search that arrives mid-batch is answered first and the rest of the tiles resume after it.
+/// Dropping them instead leaves a page blurry for good: the widget asks again only when what it
+/// wants changes, and a tile nobody rendered is still wanted.
 fn render_loop(
     mut doc: PdfDoc,
     path: PathBuf,
@@ -1006,8 +1023,8 @@ fn render_loop(
 ) {
     // The channel closing is the tab going away, which is the only way this thread ends.
     while let Ok(first) = rx.recv() {
-        let mut request = Some(first);
-        while let Some(current) = request.take() {
+        let mut queue = vec![first];
+        while let Some(current) = queue.pop() {
             match current {
                 Request::Tiles {
                     scale,
@@ -1015,17 +1032,26 @@ fn render_loop(
                     theme,
                     wants,
                 } => {
-                    for want in wants {
-                        // Anything newer wins: the viewport it was for has moved.
+                    let mut at = 0;
+                    while at < wants.len() {
                         match rx.try_recv() {
                             Ok(newer) => {
-                                request = Some(newer);
+                                if !matches!(newer, Request::Tiles { .. }) {
+                                    queue.push(Request::Tiles {
+                                        scale,
+                                        dark,
+                                        theme,
+                                        wants: wants[at..].to_vec(),
+                                    });
+                                }
+                                queue.push(newer);
                                 break;
                             }
                             Err(TryRecvError::Disconnected) => return,
                             Err(TryRecvError::Empty) => {}
                         }
-                        render_want(&doc, &view, scale, dark, theme, want);
+                        render_want(&doc, &view, scale, dark, theme, wants[at]);
+                        at += 1;
                     }
                 }
                 Request::Links(page) => {
@@ -1049,7 +1075,7 @@ fn render_loop(
                         // the expensive part and is not worth abandoning halfway.
                         match rx.try_recv() {
                             Ok(newer) => {
-                                request = Some(newer);
+                                queue.push(newer);
                                 break;
                             }
                             Err(TryRecvError::Disconnected) => return,

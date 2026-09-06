@@ -7,10 +7,11 @@
 
 use regex::RegexBuilder;
 pub use regex::{Error, NoExpand, Regex};
+use serde::{Deserialize, Serialize};
 
 /// What the search box's three toggles say. All off is a case-insensitive literal, which is what
 /// a plain query means everywhere else in the app.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Options {
     pub case: bool,
     pub word: bool,

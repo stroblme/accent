@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use accent_api::Vault;
-use accent_api::git::{self, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
+use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
@@ -31,6 +31,16 @@ const LANE: i32 = 12;
 /// How long the pane waits after being poked before asking git again. Long enough that a burst of
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
+/// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
+/// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
+const SYNC_ICON: &str = "mail-send-receive-symbolic";
+
+/// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
+/// default interface font. A commit message is a subject, a blank line and a body, so one line is
+/// the wrong resting size and unbounded growth would push the changes and the history off the pane.
+const MESSAGE_MAX_HEIGHT: i32 = 160;
 
 /// What the pane needs from the window, as closures rather than a handle: this module knows
 /// nothing about tabs or the vault tree. Every one of them holds the window weakly, or the pane
@@ -52,6 +62,9 @@ pub struct Hooks {
     pub trash: Box<dyn Fn(&str)>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
+    /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
+    /// landing and costs an index write: this fires twice per sync and must stay cheap.
+    pub syncing: Box<dyn Fn(bool)>,
 }
 
 /// Which list a row belongs to, which is what decides the letter it shows, the buttons it offers
@@ -147,10 +160,12 @@ pub struct Panel {
     /// Set while the repository list is being replaced, so the chooser's own notify does not read
     /// the splice as the user picking a repository.
     syncing: Cell<bool>,
+    /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
+    /// filled: this is the transfer the status bar spins for.
+    sync_busy: Cell<bool>,
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh closes them all.
     expanded: RefCell<Option<String>>,
-    monitors: RefCell<Vec<gio::FileMonitor>>,
 }
 
 impl Panel {
@@ -182,9 +197,7 @@ impl Panel {
         // 186 px of minimum width with them and 105 with one.
         let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         arrows.append(&counts);
-        arrows.append(&gtk::Image::from_icon_name(
-            "network-transmit-receive-symbolic",
-        ));
+        arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
         let sync = gtk::Button::builder()
             .child(&arrows)
             .valign(gtk::Align::Center)
@@ -203,19 +216,27 @@ impl Panel {
         branch_row.append(&sync);
 
         // The message box is a card so it reads as somewhere to type rather than as a label, and
-        // it scrolls rather than growing: a long commit message must not push the lists away.
+        // it grows with what is in it: one line while the message is a subject, taller as a body
+        // is written, and scrolling once it reaches [`MESSAGE_MAX_HEIGHT`], because past that it
+        // would push the changes and the history off the pane. The scroller does the growing on
+        // its own — `propagate-natural-height` asks the view how tall it wants to be and
+        // `max-content-height` is the cap — so nothing here measures text.
+        //
+        // The margins are the 9 px Adwaita gives `entry` either side of its text, so the box has
+        // the same inset as the search field rather than a tighter one of its own.
         let message = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
-            .left_margin(6)
-            .right_margin(6)
-            .top_margin(6)
-            .bottom_margin(6)
+            .left_margin(9)
+            .right_margin(9)
+            .top_margin(9)
+            .bottom_margin(9)
             .build();
         message.add_css_class("card");
         let message_scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .height_request(72)
+            .propagate_natural_height(true)
+            .max_content_height(MESSAGE_MAX_HEIGHT)
             .child(&message)
             .build();
         // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
@@ -224,8 +245,8 @@ impl Panel {
             .label("Commit message")
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
-            .margin_start(6)
-            .margin_top(6)
+            .margin_start(9)
+            .margin_top(9)
             .can_target(false)
             .build();
         placeholder.add_css_class("dim-label");
@@ -238,10 +259,15 @@ impl Panel {
             .sensitive(false)
             .build();
         commit.add_css_class("suggested-action");
-        // The button leads: it belongs with the branch row above it, where the pane's actions
-        // are, rather than below a box that grows as it is typed into.
+        // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
+        // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
+        // changes and the history, and a message box that now grows needs that room. Trailing
+        // edge, which is where GNOME puts the affirmative action. It is hidden and shown with the
+        // box below it, so a clean tree still shows neither.
+        branch_row.append(&commit);
+        // Nothing but the message box now, kept as its own container so the whole thing is hidden
+        // and shown in one call.
         let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        commit_box.append(&commit);
         commit_box.append(&overlay);
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -325,8 +351,8 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(false),
             syncing: Cell::new(false),
+            sync_busy: Cell::new(false),
             expanded: RefCell::new(None),
-            monitors: RefCell::new(Vec::new()),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
@@ -534,7 +560,6 @@ impl Panel {
             let selected = clamp(self.state.borrow().selected, fetched.repos.len());
             self.state.borrow_mut().selected = selected;
             self.chooser.set_selected(selected as u32);
-            self.rebuild_monitors(&fetched.repos);
             self.syncing.set(false);
         }
         self.chooser.set_visible(fetched.repos.len() > 1);
@@ -559,13 +584,13 @@ impl Panel {
                 status
                     .ignored
                     .iter()
-                    .map(|path| ignored_key(self.hooks.vault.root(), repo, path))
+                    .map(|path| ignored_key(&self.hooks.vault.root(), repo, path))
             })
             .collect();
 
         let rows = match fetched.statuses.get(selected) {
             Some(status) => rows_of(status, &fetched.submodules, &|path| {
-                vault_key(self.hooks.vault.root(), &fetched.repos[selected], path)
+                vault_key(&self.hooks.vault.root(), &fetched.repos[selected], path)
             }),
             None => Vec::new(),
         };
@@ -614,33 +639,6 @@ impl Panel {
         }
         self.sync_commit();
         (self.hooks.changed)();
-    }
-
-    /// Watch each repository's git directory and its local branches: a commit, a checkout or a
-    /// stage from the terminal all land in one of the two, and the pane follows without polling.
-    fn rebuild_monitors(self: &Rc<Self>, repos: &[Repo]) {
-        let mut monitors = Vec::new();
-        for repo in repos {
-            for dir in [repo.git_dir.clone(), repo.git_dir.join("refs/heads")] {
-                let monitor = gio::File::for_path(&dir)
-                    .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE);
-                let monitor = match monitor {
-                    Ok(monitor) => monitor,
-                    Err(e) => {
-                        tracing::debug!("watching {}: {e}", dir.display());
-                        continue;
-                    }
-                };
-                let weak = Rc::downgrade(self);
-                monitor.connect_changed(move |_, _, _, _| {
-                    if let Some(panel) = weak.upgrade() {
-                        panel.schedule_refresh();
-                    }
-                });
-                monitors.push(monitor);
-            }
-        }
-        *self.monitors.borrow_mut() = monitors;
     }
 
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
@@ -695,7 +693,8 @@ impl Panel {
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let query = oid.clone();
-            let files = gio::spawn_blocking(move || git::changed_files(&repo, &query)).await;
+            let vault = panel.hooks.vault.clone();
+            let files = gio::spawn_blocking(move || vault.git_changed_files(&repo, &query)).await;
             let files = match files {
                 Ok(Ok(files)) => files,
                 Ok(Err(e)) => return tracing::debug!("git show --name-status: {e}"),
@@ -741,7 +740,8 @@ impl Panel {
         self.more.set_sensitive(false);
         let panel = self.clone();
         glib::spawn_future_local(async move {
-            let page = gio::spawn_blocking(move || git::log(&repo, skip, PAGE)).await;
+            let vault = panel.hooks.vault.clone();
+            let page = gio::spawn_blocking(move || vault.git_log(&repo, skip, PAGE)).await;
             panel.more.set_sensitive(true);
             let page = match page {
                 Ok(Ok(page)) => page,
@@ -766,7 +766,9 @@ impl Panel {
     // --- commands -----------------------------------------------------------------------------
 
     /// Run one git command on the selected repository off the main thread, say what happened, and
-    /// refresh. `hold` goes insensitive while the job runs, which is what a transfer needs.
+    /// refresh. `hold` goes insensitive while the job runs, which is what a transfer needs; it is
+    /// also what marks the job as one the user is waiting on, so [`Hooks::syncing`] runs with it
+    /// and the status bar can spin for the same span.
     ///
     /// A failure gets a dialog rather than a toast: what git puts on stderr is the whole answer to
     /// "why did the push not go", and it is too long and too important to let scroll past.
@@ -774,7 +776,7 @@ impl Panel {
         self: &Rc<Self>,
         verb: &'static str,
         hold: Option<gtk::Button>,
-        job: impl FnOnce(&Repo) -> Result<String, git::Error> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
     ) {
         let repo = {
             let state = self.state.borrow();
@@ -785,16 +787,21 @@ impl Panel {
         };
         if let Some(button) = &hold {
             button.set_sensitive(false);
+            self.sync_busy.set(true);
+            (self.hooks.syncing)(true);
         }
         let panel = self.clone();
+        let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || job(&repo)).await;
+            let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
             if let Some(button) = &hold {
                 button.set_sensitive(true);
+                panel.sync_busy.set(false);
+                (panel.hooks.syncing)(false);
             }
             match done {
                 Ok(Ok(message)) => (panel.hooks.toast)(&message),
-                Ok(Err(e)) => panel.failed(verb, &e.to_string()),
+                Ok(Err(e)) => panel.failed(verb, &format!("{e:#}")),
                 Err(_) => tracing::warn!("the git worker panicked"),
             }
             panel.schedule_refresh();
@@ -818,8 +825,10 @@ impl Panel {
         // file goes in and an untracked one stays untracked, as VS Code's smart commit does.
         let all = !self.to_commit().0;
         self.message.buffer().set_text("");
-        self.command("Commit", None, move |repo| {
-            git::commit(repo, &message, all).map(|id| format!("Committed {id}"))
+        self.command("Commit", None, move |vault, repo| {
+            vault
+                .git_commit(repo, &message, all)
+                .map(|id| format!("Committed {id}"))
         });
     }
 
@@ -827,9 +836,14 @@ impl Panel {
     /// repository. The pane's selection follows, so the status bar's branch and the pane never
     /// end up talking about two different repositories.
     pub fn sync(self: &Rc<Self>, key: Option<&str>) {
+        // One at a time. The pane's own button is insensitive for the duration, but the status
+        // bar's branch is a second surface on the same action and stays clickable.
+        if self.sync_busy.get() {
+            return;
+        }
         let index = {
             let state = self.state.borrow();
-            key.and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+            key.and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
                 .unwrap_or(state.selected)
         };
         if self.state.borrow().selected != index {
@@ -838,8 +852,8 @@ impl Panel {
             self.chooser.set_selected(index as u32);
         }
         let hold = self.sync.clone();
-        self.command("Sync", Some(hold), |repo| {
-            git::sync(repo).map(|transcript| {
+        self.command("Sync", Some(hold), |vault, repo| {
+            vault.git_sync(repo).map(|transcript| {
                 tracing::debug!("git sync: {transcript}");
                 "Synced".to_string()
             })
@@ -848,15 +862,19 @@ impl Panel {
 
     fn stage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
-        self.write("Stage", paths, move |repo, paths| {
-            git::stage(repo, paths).map(|()| format!("Staged {}", files(n)))
+        self.write("Stage", paths, move |vault, repo, paths| {
+            vault
+                .git_stage(repo, paths)
+                .map(|()| format!("Staged {}", files(n)))
         });
     }
 
     fn unstage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
-        self.write("Unstage", paths, move |repo, paths| {
-            git::unstage(repo, paths).map(|()| format!("Unstaged {}", files(n)))
+        self.write("Unstage", paths, move |vault, repo, paths| {
+            vault
+                .git_unstage(repo, paths)
+                .map(|()| format!("Unstaged {}", files(n)))
         });
     }
 
@@ -865,15 +883,12 @@ impl Panel {
         self: &Rc<Self>,
         verb: &'static str,
         paths: Vec<String>,
-        job: impl FnOnce(&Repo, &[&str]) -> Result<String, git::Error> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo, &[String]) -> anyhow::Result<String> + Send + 'static,
     ) {
         if paths.is_empty() {
             return;
         }
-        self.command(verb, None, move |repo| {
-            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-            job(repo, &paths)
-        });
+        self.command(verb, None, move |vault, repo| job(vault, repo, &paths));
     }
 
     /// The paths of one whole section, for its header's bulk button.
@@ -919,8 +934,10 @@ impl Panel {
                         (panel.hooks.trash)(&key);
                         panel.schedule_refresh();
                     }
-                    false => panel.write("Discard", vec![path], move |repo, paths| {
-                        git::discard(repo, paths).map(|()| format!("Discarded {name}"))
+                    false => panel.write("Discard", vec![path], move |vault, repo, paths| {
+                        vault
+                            .git_discard(repo, paths)
+                            .map(|()| format!("Discarded {name}"))
                     }),
                 }
             },
@@ -958,21 +975,33 @@ impl Panel {
         };
         let (rel, key) = (rel.to_string(), key.to_string());
         let name = split_name(&rel).1.to_string();
-        let path = repo.root.join(&rel);
         let (left_title, right_title, tag) = (sides.left_title(), sides.right_title(), sides.tag());
         let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        let worktree_key = key.clone();
+        let tab_key = key.clone();
         glib::spawn_future_local(async move {
             let read = gio::spawn_blocking(move || {
                 // A side git has no file for is a new or deleted file, and an empty string is
                 // exactly the right thing to diff against.
                 let left = match sides.left_rev() {
-                    Some(rev) => side(git::show(&repo, rev, &rel)),
-                    None => Vec::new(),
+                    Some(rev) => side(vault.git_show(&repo, rev, &rel)),
+                    None => Blob::Text(String::new()),
                 };
                 let right = match &sides {
-                    Sides::Staged => side(git::show(&repo, "", &rel)),
-                    Sides::Worktree => std::fs::read(&path).unwrap_or_default(),
-                    Sides::Commit { oid, .. } => side(git::show(&repo, oid, &rel)),
+                    Sides::Staged => side(vault.git_show(&repo, "", &rel)),
+                    // The worktree side is the file itself, which on a remote vault is on the
+                    // other machine: reading it through the vault is what makes the diff work
+                    // there as well as here.
+                    Sides::Worktree => match vault.read_text(&worktree_key) {
+                        Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+                        Ok(_) => Blob::Binary,
+                        Err(e) => {
+                            tracing::debug!("reading {key}: {e}");
+                            Blob::Text(String::new())
+                        }
+                    },
+                    Sides::Commit { oid, .. } => side(vault.git_show(&repo, oid, &rel)),
                 };
                 (left, right)
             })
@@ -982,11 +1011,9 @@ impl Panel {
             };
             // The same test the tab opener uses, and the same answer: a diff of two binaries is
             // noise, so the pane says why instead of showing it.
-            if left.contains(&0) || right.contains(&0) {
+            let (Blob::Text(left), Blob::Text(right)) = (left, right) else {
                 return (panel.hooks.toast)(&format!("{name} is binary"));
-            }
-            let left = String::from_utf8_lossy(&left).into_owned();
-            let right = String::from_utf8_lossy(&right).into_owned();
+            };
             let title = format!("{name} ({right_title})");
             let (body, _) = crate::diff::view(
                 (&format!("{name} ({left_title})"), &left),
@@ -994,7 +1021,7 @@ impl Panel {
                 &accent_core::diff::lines(&left, &right),
                 false,
             );
-            (panel.hooks.open_diff)(&format!("diff:{tag}:{key}"), &title, &body);
+            (panel.hooks.open_diff)(&format!("diff:{tag}:{tab_key}"), &title, &body);
         });
     }
 
@@ -1026,9 +1053,11 @@ impl Panel {
             .set_sensitive(anything && !message.trim().is_empty());
         // A clean tree has nothing to say, so the box goes — but never out from under a message
         // being written: a refresh fires on every save, and one of those would take it away
-        // mid-sentence.
-        self.commit_box
-            .set_visible(anything || !message.is_empty() || self.message.has_focus());
+        // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
+        // rather than by being in the same container.
+        let show = anything || !message.is_empty() || self.message.has_focus();
+        self.commit_box.set_visible(show);
+        self.commit.set_visible(show);
     }
 }
 
@@ -1050,8 +1079,8 @@ impl Panel {
     pub fn repo_of(&self, key: &str) -> Option<(Repo, String)> {
         let state = self.state.borrow();
         let root = self.hooks.vault.root();
-        let repo = state.repos.get(index_of(&state, root, key)?)?;
-        let rel = absolute(root, key)
+        let repo = state.repos.get(index_of(&state, &root, key)?)?;
+        let rel = absolute(&root, key)
             .strip_prefix(&repo.root)
             .ok()?
             .to_string_lossy()
@@ -1064,7 +1093,7 @@ impl Panel {
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
-            .and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+            .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
         branch_text(&state.statuses.get(index)?.branch)
     }
@@ -1081,10 +1110,11 @@ impl Panel {
         let Some((repo, rel)) = self.repo_of(key) else {
             return done(None);
         };
+        let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let bytes = gio::spawn_blocking(move || git::show(&repo, "HEAD", &rel)).await;
-            done(match bytes {
-                Ok(Ok(Some(bytes))) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            let blob = gio::spawn_blocking(move || vault.git_show(&repo, "HEAD", &rel)).await;
+            done(match blob {
+                Ok(Ok(Some(Blob::Text(text)))) => Some(text),
                 _ => None,
             });
         });
@@ -1163,7 +1193,7 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
     let repos = vault.repos();
     let statuses = repos
         .iter()
-        .map(|repo| match git::status(repo) {
+        .map(|repo| match vault.git_status(repo) {
             Ok(status) => status,
             Err(e) => {
                 // A repository git will not talk about costs an empty row, not a dialog: it may
@@ -1175,11 +1205,11 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
         .collect();
     let (commits, submodules) = match repos.get(clamp(selected, repos.len())) {
         Some(repo) => (
-            git::log(repo, 0, PAGE).unwrap_or_else(|e| {
+            vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
                 tracing::debug!("git log: {e}");
                 Vec::new()
             }),
-            git::submodules(repo).unwrap_or_default(),
+            vault.git_submodules(repo).unwrap_or_default(),
         ),
         None => (Vec::new(), Vec::new()),
     };
@@ -1191,12 +1221,12 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
     }
 }
 
-fn side(read: Result<Option<Vec<u8>>, git::Error>) -> Vec<u8> {
+fn side(read: anyhow::Result<Option<Blob>>) -> Blob {
     match read {
-        Ok(bytes) => bytes.unwrap_or_default(),
+        Ok(blob) => blob.unwrap_or_else(|| Blob::Text(String::new())),
         Err(e) => {
-            tracing::debug!("git show: {e}");
-            Vec::new()
+            tracing::debug!("git show: {e:#}");
+            Blob::Text(String::new())
         }
     }
 }
@@ -1608,7 +1638,7 @@ fn lane_width(row: &LogRow) -> i32 {
 /// monitor is watching yet, so nothing would ever tell the pane to look again.
 fn empty_page(check: &gtk::Button) -> adw::StatusPage {
     let page = adw::StatusPage::builder()
-        .icon_name("network-transmit-receive-symbolic")
+        .icon_name(SYNC_ICON)
         .title("No Repository")
         .description("Run git init in the terminal to start one.")
         .child(check)

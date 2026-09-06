@@ -129,8 +129,13 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
         &chosen.clone().unwrap_or_else(system_font),
     ));
 
+    // An icon rather than the word: the row already carries a font button whose label is the
+    // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
+    // dialog. `document-revert-symbolic` is the arrow back to a saved state, which is what this
+    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography).
     let reset = gtk::Button::builder()
-        .label("Reset")
+        .icon_name("document-revert-symbolic")
+        .tooltip_text("Reset to the System Font")
         .valign(gtk::Align::Center)
         .sensitive(chosen.is_some())
         .build();

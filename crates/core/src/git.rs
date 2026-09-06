@@ -582,14 +582,43 @@ pub fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
     files
 }
 
+/// One version of a file, as a diff can use it.
+///
+/// Text or not: every caller decides that first and shows a message instead of a screen of
+/// noise, so the test belongs where the bytes are rather than in each of them. It is the same
+/// NUL test `grep` and `git` use, and it is what lets this cross a wire as a string.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Blob {
+    Text(String),
+    Binary,
+}
+
+impl Blob {
+    pub fn of(bytes: &[u8]) -> Blob {
+        match bytes.contains(&0) {
+            true => Blob::Binary,
+            false => Blob::Text(String::from_utf8_lossy(bytes).into_owned()),
+        }
+    }
+
+    /// The text, or "" for a binary: a caller that has already said its piece about binaries can
+    /// carry on without a second match.
+    pub fn text(&self) -> &str {
+        match self {
+            Blob::Text(t) => t,
+            Blob::Binary => "",
+        }
+    }
+}
+
 /// The bytes of `path` at `rev`, or `None` when that revision has no such file.
 ///
 /// An empty `rev` means the index, which is what the diff view compares a staged change against.
 /// A file that is new — untracked, or added but not yet committed — is a normal answer here, not
 /// an error, so the four ways git words "it isn't there" all become `Ok(None)`.
-pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Vec<u8>>, Error> {
+pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     match run(&repo.root, &["show", &format!("{rev}:{path}")], None, true) {
-        Ok(bytes) => Ok(Some(bytes)),
+        Ok(bytes) => Ok(Some(Blob::of(&bytes))),
         Err(Error::Git(msg))
             if msg.contains("does not exist") || msg.contains("exists on disk, but not in") =>
         {
@@ -1138,8 +1167,14 @@ mod tests {
         write_file(dir, "new.md", "new\n");
 
         let repo = open(dir);
-        assert_eq!(show(&repo, "HEAD", "a.md").unwrap().unwrap(), b"one\n");
-        assert_eq!(show(&repo, "", "a.md").unwrap().unwrap(), b"two\n");
+        assert_eq!(
+            show(&repo, "HEAD", "a.md").unwrap(),
+            Some(Blob::Text("one\n".into()))
+        );
+        assert_eq!(
+            show(&repo, "", "a.md").unwrap(),
+            Some(Blob::Text("two\n".into()))
+        );
         assert_eq!(show(&repo, "HEAD", "gone.md").unwrap(), None);
         assert_eq!(
             show(&repo, "", "new.md").unwrap(),
@@ -1243,8 +1278,8 @@ mod tests {
         let st = status(&repo).unwrap();
         assert_eq!(paths(st.changes()), ["new.md"], "still untracked");
         assert_eq!(
-            show(&repo, "HEAD", "a.md").unwrap().as_deref(),
-            Some(&b"two\n"[..]),
+            show(&repo, "HEAD", "a.md").unwrap(),
+            Some(Blob::Text("two\n".into())),
             "the tracked change went in"
         );
     }

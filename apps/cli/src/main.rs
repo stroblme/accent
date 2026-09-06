@@ -105,6 +105,19 @@ enum Cmd {
         #[command(flatten)]
         common: Common,
     },
+    /// Serve one vault as JSON-RPC over stdin and stdout.
+    ///
+    /// This is what runs on a remote host: the desktop uploads this binary, starts it over ssh,
+    /// and drives the whole façade through the pipe. It answers until stdin closes, which is what
+    /// happens when the window goes away, so nothing is left behind on the host.
+    Serve {
+        /// Vault root directory.
+        #[arg(long)]
+        vault: PathBuf,
+        /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
+        #[arg(long)]
+        db: Option<PathBuf>,
+    },
     /// Generate a synthetic Obsidian-shaped vault for tests and benchmarks.
     ///
     /// Writes `<out_dir>` plus an external code tree at `<out_dir>-external` that the vault
@@ -235,6 +248,15 @@ fn main() -> Result<()> {
             let s = ix.stats()?;
             println!("{}", serde_json::to_string_pretty(&s)?);
             println!("unresolved links {}", ix.unresolved_links()?.len());
+        }
+        Cmd::Serve { vault, db } => {
+            // Logging must not go anywhere near stdout: that is the protocol.
+            accent_api::rpc::serve(
+                &vault,
+                db.as_deref(),
+                std::io::stdin().lock(),
+                std::io::stdout(),
+            )?;
         }
         Cmd::GenVault {
             out_dir,

@@ -11,8 +11,9 @@
 use crate::theme;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use webkit6::prelude::*;
 
 /// Prose column width, in `ch`. DESIGN.md asks for 60 to 72 characters, and `ch` is the advance
@@ -160,23 +161,36 @@ impl Inner {
     }
 }
 
+/// What the preview is allowed to read: a vault-relative path in, a file on *this* machine out,
+/// `None` when there is none. Every window passes `Vault::fetch`, which is the file itself for a
+/// local vault and a copy fetched over ssh for a remote one — so a call can block on the network.
+type Resolve = dyn Fn(&str) -> Option<PathBuf> + Send + Sync;
+
 pub struct Preview {
     inner: Rc<Inner>,
     widget: gtk::Widget,
 }
 
 impl Preview {
-    /// `root` is the canonical vault directory; the custom URI scheme serves files from inside it.
-    /// `on_open` fires when the reader clicks a wikilink, with the link target as written.
+    /// `resolve` turns a vault-relative asset path into a file on this machine; [`resolve_asset`]
+    /// says which half of the containment guarantee is whose. `on_open` fires when the reader
+    /// clicks a wikilink, with the link target as written.
     ///
     /// ponytail: every `Preview` builds its own `WebContext`, so one per tab means one WebKit
     /// process group per tab. Sharing a context (and its registered scheme) across previews is the
     /// upgrade path if tab memory ever shows up in a measurement.
-    pub fn new(root: PathBuf, on_open: impl Fn(&str) + 'static) -> Preview {
-        let root = root.canonicalize().unwrap_or(root);
+    pub fn new(
+        resolve: impl Fn(&str) -> Option<PathBuf> + Send + Sync + 'static,
+        on_open: impl Fn(&str) + 'static,
+    ) -> Preview {
+        // `register_uri_scheme` asks only for `'static` and calls back on the main loop, so an `Rc`
+        // would be enough to hold the resolver there — but every request hands it to a
+        // `gio::spawn_blocking` worker, and crossing a thread needs `Send`. Hence `Arc`, and the
+        // `Send + Sync` bound that an `Arc` of a shared closure requires.
+        let resolve: Arc<Resolve> = Arc::new(resolve);
 
         let context = webkit6::WebContext::new();
-        context.register_uri_scheme("accent", move |request| serve(&root, request));
+        context.register_uri_scheme("accent", move |request| serve(&resolve, request));
 
         // Ephemeral: no cookie jar, no disk cache, nothing that outlives the window.
         let session = webkit6::NetworkSession::new_ephemeral();
@@ -460,40 +474,66 @@ fn decide(
 
 /// Answer one `accent://file/<rel>` request, or fail it. Everything the preview is allowed to see
 /// passes through here, so this is the only place a path from a note becomes a path on disk.
-fn serve(root: &Path, request: &webkit6::URISchemeRequest) {
-    let deny = |what: &str| {
-        let mut error = glib::Error::new(gio::IOErrorEnum::PermissionDenied, what);
-        request.finish_error(&mut error);
-    };
+///
+/// The answer arrives a main-loop turn later. Resolving a remote vault's asset downloads it, which
+/// is an ssh round trip, and the handler runs on the main loop — a large image would freeze the
+/// window. WebKit documents the way out on `register_uri_scheme`: keep a reference to the request
+/// and finish it once the data is there. So the resolving goes to a `gio::spawn_blocking` worker,
+/// the same pairing the git pane uses, and only the finishing comes back to the main loop.
+fn serve(resolve: &Arc<Resolve>, request: &webkit6::URISchemeRequest) {
     let uri = request.uri().unwrap_or_default();
     let Some(("file", rel)) = accent_uri(&uri) else {
-        return deny("not a vault file");
+        return deny(request, "not a vault file");
     };
-    let Some(path) = resolve_asset(root, &rel) else {
-        return deny("outside the vault");
-    };
-    let file = gio::File::for_path(&path);
-    match file.read(gio::Cancellable::NONE) {
+    let (resolve, request) = (resolve.clone(), request.clone());
+    glib::spawn_future_local(async move {
+        match gio::spawn_blocking(move || resolve_asset(&*resolve, &rel)).await {
+            Ok(Some(path)) => send(&request, &path),
+            Ok(None) => deny(&request, "outside the vault"),
+            Err(_) => deny(&request, "the asset worker panicked"),
+        }
+    });
+}
+
+/// Hand the file at `path` to WebKit, or fail the request with whatever stopped us.
+fn send(request: &webkit6::URISchemeRequest, path: &Path) {
+    match gio::File::for_path(path).read(gio::Cancellable::NONE) {
         Ok(stream) => {
-            let size = std::fs::metadata(&path).map_or(-1, |m| m.len() as i64);
-            let mime = gio::content_type_guess(Some(&path), None).0;
+            let size = std::fs::metadata(path).map_or(-1, |m| m.len() as i64);
+            let mime = gio::content_type_guess(Some(path), None).0;
             request.finish(&stream, size, Some(&mime));
         }
-        Err(e) => deny(&e.to_string()),
+        Err(e) => deny(request, &e.to_string()),
     }
 }
 
-/// `root`-relative asset path -> a real file inside the vault, or `None`.
+fn deny(request: &webkit6::URISchemeRequest, what: &str) {
+    let mut error = glib::Error::new(gio::IOErrorEnum::PermissionDenied, what);
+    request.finish_error(&mut error);
+}
+
+/// A note's asset path -> a real file on this machine, or `None`.
 ///
-/// Canonicalising both sides and re-checking the prefix is what stops `![[../../../etc/passwd]]`
-/// and a symlink that points out of the vault; neither survives the comparison.
-fn resolve_asset(root: &Path, rel: &str) -> Option<PathBuf> {
+/// Containment is split now that the vault may be on another machine. The lexical half is here and
+/// unconditional: an empty, absolute or `..`-escaping `rel` never reaches the resolver, which is
+/// what stops `![[../../../etc/passwd]]` however the resolver is written. The other half is the
+/// resolver's, and has to be: only it knows the root, so only it can say whether the file it hands
+/// back is still inside the vault once symlinks have been followed.
+fn resolve_asset(resolve: &Resolve, rel: &str) -> Option<PathBuf> {
     if rel.is_empty() || Path::new(rel).is_absolute() {
         return None;
     }
-    let root = root.canonicalize().ok()?;
-    let path = root.join(rel).canonicalize().ok()?;
-    path.starts_with(&root).then_some(path)
+    // Never more `..` than there are directories to climb back out of.
+    let mut depth = 0usize;
+    for part in Path::new(rel).components() {
+        match part {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            _ => return None,
+        }
+    }
+    resolve(rel)
 }
 
 /// Split `accent://<host>/<path>` into host and percent-decoded path, dropping `?query` and
@@ -666,40 +706,59 @@ mod tests {
         assert!(theme_css(FG, light, ACCENT, "Inter", 13.0).contains("\"Inter\""));
     }
 
+    /// A resolver of the shape a caller that owns the root passes in: a join that canonicalises,
+    /// so nothing under the root can lead out of it.
+    fn vault_resolver(root: PathBuf) -> impl Fn(&str) -> Option<PathBuf> + Send + Sync {
+        move |rel| {
+            let root = root.canonicalize().ok()?;
+            let path = root.join(rel).canonicalize().ok()?;
+            path.starts_with(&root).then_some(path)
+        }
+    }
+
     #[test]
     fn resolve_asset_accepts_a_path_inside_the_vault() {
         let root = scratch("inside");
         std::fs::create_dir(root.join("attachments")).unwrap();
         std::fs::write(root.join("attachments/img.png"), b"x").unwrap();
+        let resolve = vault_resolver(root.clone());
         assert_eq!(
-            resolve_asset(&root, "attachments/img.png"),
+            resolve_asset(&resolve, "attachments/img.png"),
             Some(root.canonicalize().unwrap().join("attachments/img.png"))
         );
+        // Nothing there is the resolver's `None`, and reaches the reader as the same refusal.
+        assert_eq!(resolve_asset(&resolve, "missing.png"), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn resolve_asset_rejects_traversal_and_absolute_paths() {
-        let root = scratch("traversal");
-        std::fs::create_dir(root.join("notes")).unwrap();
-        assert_eq!(resolve_asset(&root, "../../../../etc/passwd"), None);
-        assert_eq!(resolve_asset(&root, "notes/../../etc/passwd"), None);
-        assert_eq!(resolve_asset(&root, "/etc/passwd"), None);
-        assert_eq!(resolve_asset(&root, ""), None);
-        assert_eq!(resolve_asset(&root, "missing.png"), None);
-        std::fs::remove_dir_all(&root).unwrap();
+        // A resolver that hands back whatever it is asked for, so a `None` below can only have
+        // come from the check here — which is the point: it holds for any resolver.
+        let naive = |rel: &str| Some(PathBuf::from(rel));
+        for rel in [
+            "../../../../etc/passwd",
+            "notes/../../etc/passwd",
+            "/etc/passwd",
+            "",
+        ] {
+            assert_eq!(resolve_asset(&naive, rel), None, "{rel}");
+        }
     }
 
     #[test]
-    fn resolve_asset_rejects_a_symlink_out_of_the_vault() {
+    fn resolve_asset_leaves_a_symlink_out_of_the_vault_to_the_resolver() {
         let root = scratch("symlink");
         let outside = scratch("symlink-target");
         std::fs::write(outside.join("secret.txt"), b"x").unwrap();
         std::os::unix::fs::symlink(outside.join("secret.txt"), root.join("escape.txt")).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("out")).unwrap();
 
-        assert_eq!(resolve_asset(&root, "escape.txt"), None);
-        assert_eq!(resolve_asset(&root, "out/secret.txt"), None);
+        // Neither path is lexically wrong, so the check here passes them on; refusing them takes
+        // the root, which only the resolver has.
+        let resolve = vault_resolver(root.clone());
+        assert_eq!(resolve_asset(&resolve, "escape.txt"), None);
+        assert_eq!(resolve_asset(&resolve, "out/secret.txt"), None);
         std::fs::remove_dir_all(&root).unwrap();
         std::fs::remove_dir_all(&outside).unwrap();
     }

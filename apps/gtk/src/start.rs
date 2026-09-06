@@ -1,8 +1,9 @@
 //! Start screen: pick a vault when the app is launched without one.
 //!
-//! Nothing here knows about `App`: the window takes the shared config and one callback and hands
+//! Nothing here knows about `App`: the window takes the shared config and two callbacks and hands
 //! itself back, so the caller opens the vault and closes this window on its own terms.
 
+use accent_api::ssh;
 use accent_core::config::Config;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -16,13 +17,16 @@ const MIN_WIDTH: i32 = 420;
 const MIN_HEIGHT: i32 = 400;
 /// Keeps the button and the recent list a readable column instead of the window's full width.
 const COLUMN_WIDTH: i32 = 360;
+/// The response the connect dialog opens a remote with.
+const CONNECT: &str = "connect";
 
 /// The window shown when `accent` is launched without a vault path.
-/// `on_open` receives the chosen vault directory.
+/// `on_open` receives the chosen vault directory, `on_open_remote` an `ssh://` address.
 pub fn present(
     app: &adw::Application,
     config: Rc<RefCell<Config>>,
     on_open: impl Fn(PathBuf) + 'static,
+    on_open_remote: impl Fn(String) + 'static,
 ) -> adw::ApplicationWindow {
     // The start screen is a window like any other, so it follows the same theme preference.
     crate::theme::apply(config.borrow().theme);
@@ -35,6 +39,7 @@ pub fn present(
         .height_request(MIN_HEIGHT)
         .build();
     let on_open: Rc<dyn Fn(PathBuf)> = Rc::new(on_open);
+    let on_open_remote: Rc<dyn Fn(String)> = Rc::new(on_open_remote);
 
     // Ellipsis: the label needs a folder before it can act.
     let open = gtk::Button::builder()
@@ -69,13 +74,38 @@ pub fn present(
         }
     });
 
+    // A pill like its neighbour but not suggested: opening a folder on this machine stays the
+    // primary action, and two suggested buttons side by side would name neither of them.
+    let remote = gtk::Button::builder()
+        .label("Open Remote…")
+        .halign(gtk::Align::Center)
+        .build();
+    remote.add_css_class("pill");
+    remote.connect_clicked({
+        let (window, on_open_remote) = (window.downgrade(), on_open_remote.clone());
+        move |_| {
+            if let Some(window) = window.upgrade() {
+                connect_dialog(&window, &on_open_remote);
+            }
+        }
+    });
+
+    // 12 px, the spacing DESIGN.md gives two related widgets.
+    let buttons = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .build();
+    buttons.append(&open);
+    buttons.append(&remote);
+
     let column = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(18)
         .halign(gtk::Align::Center)
         .width_request(COLUMN_WIDTH)
         .build();
-    column.append(&open);
+    column.append(&buttons);
     if let Some(list) = recent_list(&config, &on_open) {
         column.append(&list);
     }
@@ -134,17 +164,19 @@ fn recent_row(
     config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
 ) -> adw::ActionRow {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+    let (title, subtitle) = labels(&path, home);
     let row = adw::ActionRow::builder()
-        .title(name)
-        .subtitle(abbreviate(&path, home))
+        .title(title)
+        .subtitle(subtitle)
         .activatable(true)
         // Directory names are plain text, not Pango markup: an "R&D" vault must not warn.
         .use_markup(false)
         .build();
+    // Only a remote is marked: most rows are folders on this machine, and an icon on every one of
+    // them would say nothing. `network-server-symbolic` is in Adwaita 50 under `symbolic/places/`.
+    if ssh::is_remote_path(&path) {
+        row.add_prefix(&gtk::Image::from_icon_name("network-server-symbolic"));
+    }
     row.connect_activated({
         let (path, on_open) = (path.clone(), on_open.clone());
         move |_| on_open(path.clone())
@@ -178,6 +210,24 @@ fn recent_row(
     row
 }
 
+/// What a recent row says about a vault: a local one is named by its folder and placed by its
+/// path, a remote one by its host and by the path on that host — two vaults called `Notes` on two
+/// machines have to read differently. An address that will not parse is shown as it was stored,
+/// since anything else would be a guess about what the user meant.
+fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
+    if ssh::is_remote_path(path) {
+        return match ssh::parse(&path.to_string_lossy()) {
+            Ok(url) => (url.host, url.path.display().to_string()),
+            Err(_) => (path.display().to_string(), String::new()),
+        };
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    (name, abbreviate(path, home))
+}
+
 /// The path as GNOME writes it: under `home`, `/home/me/Notes` becomes `~/Notes`.
 pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
     let stripped = home
@@ -190,10 +240,196 @@ pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// Recent vaults whose directory is still there. A deleted or unmounted one is dropped rather
-/// than offered as a row that can only fail.
+/// Recent vaults still worth offering. A local directory that has gone — deleted, or on a drive
+/// nobody has mounted — is dropped rather than offered as a row that can only fail.
+///
+/// A remote is kept whatever state it is in: the only way to find out is to connect, and dialling
+/// out to draw a start screen would be far worse than an entry that might not answer.
 fn existing(recent: &[PathBuf]) -> Vec<PathBuf> {
-    recent.iter().filter(|p| p.is_dir()).cloned().collect()
+    recent
+        .iter()
+        .filter(|p| ssh::is_remote_path(p) || p.is_dir())
+        .cloned()
+        .collect()
+}
+
+// ------------------------------------------------------------------ connecting
+
+/// Ask for a host and a path, and hand the address they make to `on_open_remote`.
+///
+/// An `AdwAlertDialog` like the ones in `fileops`: Cancel, one verb, and the form as its extra
+/// child. Any response closes such a dialog, so an address that does not parse is refused by
+/// keeping Connect insensitive and saying why under the fields, rather than by closing on a
+/// failure the user would then have to reopen the dialog to correct. The start screen has no
+/// toast overlay, so there is nowhere else for that sentence to go anyway.
+fn connect_dialog(window: &adw::ApplicationWindow, on_open_remote: &Rc<dyn Fn(String)>) {
+    let host = gtk::Entry::builder()
+        .placeholder_text("server.example.com")
+        .activates_default(true)
+        .hexpand(true)
+        .build();
+    let path = gtk::Entry::builder()
+        .placeholder_text("/home/you/Notes")
+        .activates_default(true)
+        .build();
+    let why = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .build();
+    why.add_css_class("error");
+
+    // 12 px between related widgets, as the name dialogs in `fileops` use.
+    let form = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .build();
+    form.append(&host_field(&host));
+    form.append(&path);
+    form.append(&why);
+
+    let dialog = adw::AlertDialog::new(Some("Open Remote Vault"), None);
+    dialog.set_extra_child(Some(&form));
+    dialog.add_responses(&[("cancel", "Cancel"), (CONNECT, "Connect")]);
+    dialog.set_response_appearance(CONNECT, adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some(CONNECT));
+    dialog.set_close_response("cancel");
+    // Enter in either field activates the default response, which is this one, so an empty form
+    // has to leave it unusable rather than merely dim.
+    dialog.set_response_enabled(CONNECT, false);
+
+    // Weak throughout: the dialog owns the entries and an entry owns its handlers, so anything
+    // held strongly in here would keep the closed dialog alive for the rest of the session.
+    let check = Rc::new(glib::clone!(
+        #[weak]
+        dialog,
+        #[weak]
+        host,
+        #[weak]
+        path,
+        #[weak]
+        why,
+        move || {
+            let address = address(&host.text(), &path.text());
+            let message = address.as_ref().err().map_or("", String::as_str);
+            why.set_label(message);
+            why.set_visible(!message.is_empty());
+            dialog.set_response_enabled(CONNECT, address.is_ok());
+        }
+    ));
+    for entry in [&host, &path] {
+        let check = check.clone();
+        entry.connect_changed(move |_| check());
+    }
+
+    dialog.choose(Some(window), gio::Cancellable::NONE, {
+        let (host, path, on_open_remote) = (host.clone(), path.clone(), on_open_remote.clone());
+        move |response| {
+            if response != CONNECT {
+                return;
+            }
+            // Connect is only sensitive while the two fields make an address, so this holds.
+            if let Ok(address) = address(&host.text(), &path.text()) {
+                on_open_remote(address);
+            }
+        }
+    });
+    // The entry is mapped once the dialog has been presented, not before.
+    host.grab_focus();
+}
+
+/// The host entry, with the hosts from `~/.ssh/config` in a menu beside it.
+///
+/// A menu button rather than completion inside the entry, because GTK4 dropped
+/// `GtkEntryCompletion` and put nothing in its place: a `GtkDropDown` either closes the field to
+/// what is listed or needs a factory of its own to stay editable. These are a shortcut for typing,
+/// not the only way in, so the cheap shape is the right one. Nothing to suggest, no button.
+fn host_field(entry: &gtk::Entry) -> gtk::Widget {
+    let hosts = ssh_hosts(&ssh_config());
+    if hosts.is_empty() {
+        return entry.clone().upcast();
+    }
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A long config is a list that scrolls rather than a popover taller than the screen.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(280)
+        .child(&list)
+        .build();
+    let popover = gtk::Popover::builder().child(&scroller).build();
+    for host in hosts {
+        let item = gtk::Button::builder()
+            .child(&gtk::Label::builder().label(&host).xalign(0.0).build())
+            .build();
+        item.add_css_class("flat");
+        item.connect_clicked({
+            let (entry, popover, host) = (entry.clone(), popover.clone(), host.clone());
+            move |_| {
+                entry.set_text(&host);
+                popover.popdown();
+            }
+        });
+        list.append(&item);
+    }
+    // `view-list-symbolic` for what the button does — show a list — per DESIGN.md's preference for
+    // a name that says the action over one that says which way a panel opens.
+    let button = gtk::MenuButton::builder()
+        .icon_name("view-list-symbolic")
+        .tooltip_text("Hosts from ~/.ssh/config")
+        .popover(&popover)
+        .build();
+    let field = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    field.add_css_class("linked");
+    field.append(entry);
+    field.append(&button);
+    field.upcast()
+}
+
+/// The user's ssh config, or nothing at all. Having none is ordinary rather than an error: the
+/// hosts it holds are a convenience, and every field here still accepts anything typed.
+fn ssh_config() -> String {
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".ssh/config"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+/// The host names an ssh config declares, in the order it declares them.
+///
+/// A `Host` line carries patterns as well as names, and a pattern (`*`, `?`, or a `!` negation)
+/// matches hosts rather than naming one, so there is nothing there to connect to. `Match` blocks
+/// and `Include` are not followed: this only saves the user some typing.
+fn ssh_hosts(config: &str) -> Vec<String> {
+    config
+        .lines()
+        .filter_map(|line| {
+            let (key, rest) = line.trim().split_once(char::is_whitespace)?;
+            key.eq_ignore_ascii_case("host").then_some(rest)
+        })
+        .flat_map(str::split_whitespace)
+        .filter(|name| !name.contains(['*', '?', '!']))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The address the two fields make, or why they do not make one yet.
+///
+/// Assembled as text and read back with [`ssh::parse`] rather than built as an [`ssh::Url`], so a
+/// host typed with a login, a port or IPv6 brackets is understood exactly as `Vault` will
+/// understand it, and a malformed one is refused here rather than at the connection. A field that
+/// is still empty is an unfinished form, not a mistake, so it comes back with nothing to say.
+fn address(host: &str, path: &str) -> Result<String, String> {
+    let (host, path) = (host.trim(), path.trim());
+    if host.is_empty() || path.is_empty() {
+        return Err(String::new());
+    }
+    // Asked here rather than left to the parser, which never sees the two fields apart: `box` and
+    // `srv/vault` would join into `ssh://boxsrv/vault`, a host nobody typed.
+    if !path.starts_with('/') {
+        return Err("the path must be absolute".to_string());
+    }
+    ssh::parse(&format!("ssh://{host}{path}")).map(|url| url.to_string())
 }
 
 #[cfg(test)]
@@ -244,5 +480,65 @@ mod tests {
         assert_eq!(kept, std::slice::from_ref(&dir));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn existing_keeps_a_remote_it_cannot_check() {
+        let remote = PathBuf::from("ssh://box/srv/vault");
+        let gone = PathBuf::from("/no/such/vault/on/this/machine");
+        assert_eq!(existing(&[remote.clone(), gone]), [remote]);
+    }
+
+    #[test]
+    fn a_remote_row_is_named_by_its_host_and_placed_by_its_remote_path() {
+        assert_eq!(
+            labels(Path::new("ssh://me@box:2222/srv/vault"), None),
+            ("box".to_string(), "/srv/vault".to_string())
+        );
+        // An address that will not parse is shown as it was stored.
+        assert_eq!(
+            labels(Path::new("ssh://box"), None),
+            ("ssh://box".to_string(), String::new())
+        );
+        // A local row keeps the folder-and-path it has always had.
+        assert_eq!(
+            labels(Path::new("/home/me/Notes"), Some(Path::new("/home/me"))),
+            ("Notes".to_string(), "~/Notes".to_string())
+        );
+    }
+
+    #[test]
+    fn ssh_hosts_takes_the_names_and_leaves_the_patterns() {
+        let config = concat!(
+            "Host box tunnel\n",
+            "  HostName 10.0.0.1\n",
+            "host lowercase\n",
+            "Host *\n",
+            "  ForwardAgent yes\n",
+            "Host *.example.com jump-?\n",
+            "Host * !secret\n",
+            "# Host commented\n",
+        );
+        assert_eq!(ssh_hosts(config), ["box", "tunnel", "lowercase"]);
+        assert!(ssh_hosts("").is_empty());
+    }
+
+    #[test]
+    fn an_address_needs_both_fields_and_an_absolute_path() {
+        assert_eq!(
+            address(" box ", " /srv/vault "),
+            Ok("ssh://box/srv/vault".to_string())
+        );
+        assert_eq!(
+            address("me@box:2222", "/srv/vault"),
+            Ok("ssh://me@box:2222/srv/vault".to_string())
+        );
+        // Nothing to say about a form that is not finished.
+        assert_eq!(address("", "/srv/vault"), Err(String::new()));
+        assert_eq!(address("box", ""), Err(String::new()));
+        assert_eq!(
+            address("box", "srv/vault"),
+            Err("the path must be absolute".to_string())
+        );
     }
 }

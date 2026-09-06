@@ -13,7 +13,7 @@ use crate::{comment, completion, highlight, multicaret, typing};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{Heading, Link};
 use adw::prelude::*;
-use gtk::{gdk, gio, glib, pango};
+use gtk::{gdk, gio, glib, graphene, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -153,6 +153,10 @@ pub struct Tab {
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
+    /// The sticky block title over the top of the view, and the bar it sits on. Hidden until
+    /// something is scrolled out of sight above the first visible line.
+    sticky: gtk::Label,
+    sticky_bar: gtk::Box,
     /// What this tab holds, fixed when it opened. Everything markdown-specific — the styling
     /// spans, completion, spellcheck, the column cap, the hanging heading markers — asks this
     /// first, so a source file gets a source editor and a note is unchanged.
@@ -277,6 +281,9 @@ pub fn open(
     let marks = crate::marks::Renderer::new();
     marks.set_visible(false);
     sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&marks, 1);
+    // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
+    // does nothing is one that makes the user select the line first.
+    line_clipboard(&view);
     // Both are markdown behaviour: wikilink and tag completion, and continuing a list or a fence
     // on Return. In a Python file they would be wrong rather than merely unused.
     if flavour.is_note() {
@@ -317,6 +324,34 @@ pub fn open(
     let overlay = gtk::Overlay::builder().child(&scroller).build();
     overlay.add_overlay(&width);
 
+    // The sticky block title, pinned over the top of the view. The label carries the document
+    // font by name and by class, so it follows both the display-wide rule and this tab's own
+    // zoom; the box under it paints the view's own background, which is what the scrolled text
+    // has to disappear behind.
+    let sticky = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .single_line_mode(true)
+        .margin_top(2)
+        .margin_bottom(2)
+        .margin_end(GUTTER)
+        .build();
+    sticky.add_css_class("accent-doc");
+    sticky.set_widget_name(&view.widget_name());
+    let sticky_bar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .valign(gtk::Align::Start)
+        .can_target(false)
+        .visible(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    sticky_bar.add_css_class("view");
+    sticky_bar.append(&sticky);
+    // A rule under it, or the pinned line reads as a line of the note that the one below it has
+    // been scrolled halfway behind.
+    sticky_bar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    overlay.add_overlay(&sticky_bar);
+
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
     let map = sourceview5::Map::new();
@@ -353,6 +388,8 @@ pub fn open(
         column: Cell::new(column_width),
         map: map.clone(),
         numbers,
+        sticky: sticky.clone(),
+        sticky_bar: sticky_bar.clone(),
         head: RefCell::new(None),
         marks: marks.clone(),
         flavour,
@@ -395,6 +432,14 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_, _, _| tab.set_clamp()
+    ));
+
+    // What the top of the view is inside changes on every scroll, and the widget the title has
+    // to line up with moves with the clamp, so the bar is recomputed rather than positioned once.
+    scroller.vadjustment().connect_value_changed(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.update_sticky()
     ));
 
     tab.analyse();
@@ -672,6 +717,79 @@ fn duplicated(line: &str) -> String {
         true => line.to_string(),
         false => format!("\n{line}"),
     }
+}
+
+/// Which opener a sticky block title shows for the line at the top of the view: the innermost of
+/// the two candidates, and none at all where the only one is the top line itself, which the
+/// reader can already see.
+fn sticky_opener(top: i32, heading: Option<i32>, fence: Option<i32>) -> Option<i32> {
+    [heading, fence]
+        .into_iter()
+        .flatten()
+        .filter(|line| *line < top)
+        .max()
+}
+
+/// A line as the clipboard should carry it: with the newline back that a last line does not have
+/// of its own, so pasting it opens a line rather than splicing into the one under the caret.
+fn paste_ready(line: &str) -> String {
+    match line.ends_with('\n') {
+        true => line.to_string(),
+        false => format!("{line}\n"),
+    }
+}
+
+/// The caret's line, from its start to the start of the next one, so the trailing newline is part
+/// of it except on a last line that has none.
+fn caret_line(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
+    let mut start = buffer.iter_at_mark(&buffer.get_insert());
+    start.set_line_offset(0);
+    let mut end = start;
+    // On the last line this lands on the end of the buffer and reports failure, which is
+    // exactly where the line ends, so the answer is the same either way.
+    end.forward_line();
+    (start, end)
+}
+
+/// VS Code's whole-line cut and copy: with nothing selected, `Ctrl+X` and `Ctrl+C` take the
+/// caret's whole line, its newline with it, so a later paste puts a line back instead of a
+/// fragment.
+///
+/// No key handling, and no accelerator either — DESIGN.md's never-bind list keeps `Ctrl+X`/`C`
+/// for the widget. Both chords emit these two signals, and `gtk_text_buffer_cut_clipboard` and
+/// `..._copy_clipboard` do nothing at all without a selection, so each handler runs before an
+/// inherited one that is then a no-op and does the work itself. Selecting the line and letting
+/// the default handler have it instead would work for the cut and leave the copy selected.
+///
+/// After a cut the caret is where the deletion left it, at the start of the following line;
+/// VS Code lands on the same line but keeps the column.
+fn line_clipboard(view: &sourceview5::View) {
+    view.connect_copy_clipboard(|view| {
+        let buffer = view.buffer();
+        if buffer.has_selection() {
+            return;
+        }
+        let (start, end) = caret_line(&buffer);
+        view.clipboard()
+            .set_text(&paste_ready(&buffer.text(&start, &end, true)));
+    });
+    view.connect_cut_clipboard(|view| {
+        let buffer = view.buffer();
+        if buffer.has_selection() || !view.is_editable() {
+            return;
+        }
+        let (mut start, mut end) = caret_line(&buffer);
+        let line = buffer.text(&start, &end, true);
+        view.clipboard().set_text(&paste_ready(&line));
+        // A last line with no newline of its own takes the one above it, or the cut leaves the
+        // blank line it used to sit on. `delete_line` does the same.
+        if !line.ends_with('\n') {
+            start.backward_char();
+        }
+        buffer.begin_user_action();
+        buffer.delete(&mut start, &mut end);
+        buffer.end_user_action();
+    });
 }
 
 /// Family and point size of a font description, with our own defaults where it is silent, scaled
@@ -1119,16 +1237,9 @@ impl Tab {
 
     // --- line operations -----------------------------------------------------------------
 
-    /// The caret's line, from its start to the start of the next one, so the trailing newline is
-    /// part of it except on a last line that has none.
+    /// The caret's whole line; see [`caret_line`], which the clipboard handlers share.
     fn line_bounds(&self) -> (gtk::TextIter, gtk::TextIter) {
-        let mut start = self.buffer.iter_at_mark(&self.buffer.get_insert());
-        start.set_line_offset(0);
-        let mut end = start;
-        // On the last line this lands on the end of the buffer and reports failure, which is
-        // exactly where the line ends, so the answer is the same either way.
-        end.forward_line();
-        (start, end)
+        caret_line(self.buffer.upcast_ref())
     }
 
     /// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
@@ -1175,16 +1286,83 @@ impl Tab {
     /// Scroll the viewport by `n` lines, leaving the caret where it is. The adjustment's own
     /// `step_increment` is a tenth of a page in GtkTextView rather than a line, so the height
     /// comes from the first visible line instead.
+    ///
+    /// `line_at_y` and not `iter_at_location`: the latter answers with whether the position is
+    /// *over text*, and buffer x 0 is the page gutter at every scroll position, so it returned
+    /// nothing and this scrolled by nothing. `line_at_y` takes the y alone and clamps, which also
+    /// covers the top of the document, where y is the negative of the top margin.
     pub fn scroll_lines(&self, n: i32) {
-        let visible = self.view.visible_rect();
-        let height = self
-            .view
-            .iter_at_location(visible.x(), visible.y())
-            .map(|iter| self.view.iter_location(&iter).height())
-            .filter(|height| *height > 0);
-        let Some(height) = height else { return };
+        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
+        // The display line's height and not the paragraph's: `iter_location` measures the caret
+        // at that position, so a wrapped line still steps one screen row at a time.
+        let height = self.view.iter_location(&first).height();
+        if height <= 0 {
+            return;
+        }
         let adjustment = self.scroller.vadjustment();
         adjustment.set_value(adjustment.value() + f64::from(n * height));
+    }
+
+    /// Pin the opening line of whatever block the top of the view is inside above the view, or
+    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
+    /// this, now that its first line has gone off the top.
+    ///
+    /// A block is a markdown heading or a fenced code block, which is exactly what the styling
+    /// pass has already marked on the buffer — so the answer is two tag-toggle searches through
+    /// the buffer's own index rather than a second parse or a walk back through the lines.
+    /// Nothing here reads a language's structure, so a function inside a `.py` tab has no title
+    /// to pin; that needs a parser this editor does not have.
+    fn update_sticky(&self) {
+        if !self.flavour.is_note() {
+            return;
+        }
+        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
+        let top = first.line();
+        // From the *end* of the top line, so a heading or a fence opening on that line is found
+        // and then discarded by `sticky_opener` for being on screen already, rather than passed
+        // over in favour of the one above it.
+        let mut from = first;
+        from.forward_to_line_end();
+        let table = self.buffer.tag_table();
+        let previous = |name: &str| {
+            let tag = table.lookup(name)?;
+            let mut at = from;
+            at.backward_to_tag_toggle(Some(&tag)).then(|| at.line())
+        };
+        let heading = ["h1", "h2", "h3", "h4", "h5", "h6"]
+            .iter()
+            .filter_map(|name| previous(name))
+            .max();
+        let fence = table.lookup("codeblock").and_then(|tag| {
+            // Only from inside the block: below it the nearest toggle is its closing one, which
+            // is a block the reader has already left.
+            let mut at = from;
+            if !at.has_tag(&tag) || !at.backward_to_tag_toggle(Some(&tag)) {
+                return None;
+            }
+            at.starts_tag(Some(&tag)).then(|| at.line())
+        });
+        let Some(line) = sticky_opener(top, heading, fence) else {
+            self.sticky_bar.set_visible(false);
+            return;
+        };
+        let Some(start) = self.buffer.iter_at_line(line) else {
+            return;
+        };
+        let mut end = start;
+        end.forward_to_line_end();
+        self.sticky
+            .set_text(self.buffer.text(&start, &end, false).trim_end());
+        // The clamp centres the view in the scroller, so where the text column starts is not
+        // something the bar can be told once. The page gutter goes on top of it.
+        let origin = graphene::Point::zero();
+        let left = self
+            .view
+            .compute_point(&self.sticky_bar, &origin)
+            .map_or(0, |point| point.x() as i32);
+        self.sticky
+            .set_margin_start((left + self.view.left_margin()).max(0));
+        self.sticky_bar.set_visible(true);
     }
 
     /// VS Code's Add Cursor Above / Below. Multi-caret lives on the view subclass; the tab keeps
@@ -1438,6 +1616,8 @@ impl Tab {
             Flavour::Code => {}
         }
         self.update_marks();
+        // The tags the sticky title reads are the ones that were just re-applied.
+        self.update_sticky();
     }
 
     /// Redraw the gutter's change bars from the committed text. Rides the same path as styling,
@@ -1535,6 +1715,45 @@ mod tests {
             leading_indent("   \n"),
             "   ",
             "a blank line still has its indent"
+        );
+    }
+
+    /// What a whole-line cut or copy puts on the clipboard: a line, newline included, so the
+    /// paste that follows it opens a line of its own.
+    #[test]
+    fn a_copied_line_carries_its_newline() {
+        assert_eq!(paste_ready("- item\n"), "- item\n");
+        assert_eq!(
+            paste_ready("last line"),
+            "last line\n",
+            "a last line has none"
+        );
+        assert_eq!(paste_ready("\n"), "\n", "an empty line is still a line");
+    }
+
+    /// The sticky title shows the innermost block that has actually gone off the top.
+    #[test]
+    fn a_sticky_title_shows_the_innermost_block_above_the_view() {
+        assert_eq!(sticky_opener(30, Some(4), None), Some(4), "a heading alone");
+        assert_eq!(
+            sticky_opener(30, Some(4), Some(20)),
+            Some(20),
+            "the fence inside the section wins"
+        );
+        assert_eq!(
+            sticky_opener(30, Some(40), None),
+            None,
+            "a heading below the view is not around it"
+        );
+        assert_eq!(
+            sticky_opener(4, Some(4), None),
+            None,
+            "the line itself is already on screen"
+        );
+        assert_eq!(
+            sticky_opener(30, None, None),
+            None,
+            "plain prose pins nothing"
         );
     }
 
