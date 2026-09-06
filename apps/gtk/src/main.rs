@@ -1365,26 +1365,49 @@ impl App {
     /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
     ///
     /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
-    /// would come back as a changed-on-disk banner instead of a replacement.
-    fn replace_in_notes(self: &Rc<Self>, re: &accent_api::Regex, replacement: &str, literal: bool) {
-        let Some(vault) = self.vault() else {
+    /// would come back as a changed-on-disk banner instead of a replacement. That part is the
+    /// main loop's, and so is the reload afterwards; the rewrite between them is not. It is a
+    /// read, a substitution and an fsync per note — 1.9 s across 245 notes and 35 s across 3.3k
+    /// of them, measured on the generated vault — so it goes to a worker thread and `done` hands
+    /// the sidebar back its pane when it lands.
+    fn replace_in_notes(
+        self: &Rc<Self>,
+        re: accent_api::Regex,
+        replacement: String,
+        literal: bool,
+        done: Box<dyn FnOnce()>,
+    ) {
+        let Some(vault) = self.vault().cloned() else {
+            done();
             return self.needs_vault("replace across notes");
         };
-        let Some(ops) = self.ops() else { return };
+        let Some(ops) = self.ops().cloned() else {
+            done();
+            return;
+        };
         let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
         (ops.flush)(&open);
-        match vault.replace_all(re, replacement, literal) {
-            Ok(report) => {
-                let unsaved = (ops.reload)(&report.rewritten);
-                self.toast(&replace_message(
-                    report.matches,
-                    report.rewritten.len(),
-                    report.failed.len(),
-                    unsaved,
-                ));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let outcome =
+                gio::spawn_blocking(move || vault.replace_all(&re, &replacement, literal)).await;
+            if let Some(app) = weak.upgrade() {
+                match outcome {
+                    Ok(Ok(report)) => {
+                        let unsaved = (ops.reload)(&report.rewritten);
+                        app.toast(&replace_message(
+                            report.matches,
+                            report.rewritten.len(),
+                            report.failed.len(),
+                            unsaved,
+                        ));
+                    }
+                    Ok(Err(e)) => app.toast(&format!("Cannot replace: {e:#}")),
+                    Err(_) => tracing::warn!("the replace worker panicked"),
+                }
             }
-            Err(e) => self.toast(&format!("Cannot replace: {e:#}")),
-        }
+            done();
+        });
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
@@ -3785,53 +3808,58 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let files = tree.widget().clone();
     let _ = app.tree.set(tree);
 
-    let data =
-        sidebar::Data {
-            // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
-            search: Arc::new({
-                let vault = vault.clone();
-                move |query| match query {
-                    sidebar::Query::Fts(text, all) => sidebar::Answer::Fts(
-                        vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default(),
-                    ),
-                    sidebar::Query::Grep { re, all } => {
-                        // `total` is what Replace All would rewrite, not how many rows there are:
-                        // the walked trees below add rows and nothing to it, and neither does a
-                        // source file the index holds a body for. The button promises edits.
-                        let (mut hits, total) =
-                            vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
-                        // What the index holds first, because that is what it can count; with
-                        // All on, the trees it was never asked to hold get whatever room is left.
-                        if all {
-                            let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                            hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
-                        }
-                        sidebar::Answer::Grep(hits, total)
+    let data = sidebar::Data {
+        // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
+        search: Arc::new({
+            let vault = vault.clone();
+            move |query| match query {
+                sidebar::Query::Fts(text, all) => {
+                    sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default())
+                }
+                sidebar::Query::Grep { re, all } => {
+                    // `total` is what Replace All would rewrite, not how many rows there are:
+                    // the walked trees below add rows and nothing to it, and neither does a
+                    // source file the index holds a body for. The button promises edits.
+                    let (mut hits, total) = vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                    // What the index holds first, because that is what it can count; with
+                    // All on, the trees it was never asked to hold get whatever room is left.
+                    if all {
+                        let room = SEARCH_LIMIT.saturating_sub(hits.len());
+                        hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
                     }
+                    sidebar::Answer::Grep(hits, total)
                 }
-            }),
-            replace_all: Box::new(glib::clone!(
-                #[weak]
-                app,
-                move |re: &accent_api::Regex, replacement: &str, literal: bool| app
-                    .replace_in_notes(re, replacement, literal)
-            )),
-            tags: Box::new({
-                let vault = vault.clone();
-                move || vault.tags().unwrap_or_default()
-            }),
-            files_with_tag: Box::new({
-                let vault = vault.clone();
-                move |tag| {
-                    vault
-                        .files_with_tag(tag)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|f| f.rel_path)
-                        .collect()
-                }
-            }),
-        };
+            }
+        }),
+        replace_all: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |re: accent_api::Regex,
+                  replacement: String,
+                  literal: bool,
+                  done: Box<dyn FnOnce()>| app.replace_in_notes(
+                re,
+                replacement,
+                literal,
+                done
+            )
+        )),
+        tags: Box::new({
+            let vault = vault.clone();
+            move || vault.tags().unwrap_or_default()
+        }),
+        files_with_tag: Box::new({
+            let vault = vault.clone();
+            move |tag| {
+                vault
+                    .files_with_tag(tag)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.rel_path)
+                    .collect()
+            }
+        }),
+    };
     let git = build_git(app, vault);
     adopt_sidebar(
         app,
