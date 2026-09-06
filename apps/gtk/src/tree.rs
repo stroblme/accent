@@ -309,7 +309,7 @@ pub fn build(
 
     // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
     // window is open, and the label is only ever a prefix of a tooltip.
-    let root_label = crate::fileops::display_path(vault.root(), "");
+    let root_label = crate::fileops::display_path(&vault.root(), "");
     // Shared, because `setup` runs once per recycled row widget and both ends of every drag
     // report through the same closure.
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);

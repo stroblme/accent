@@ -48,7 +48,16 @@ pub enum Query {
     /// the All toggle — search what git ignores and what the walk skipped, as well.
     Fts(String, bool),
     /// Exact matching over bodies, one result row per match. `all` means what it does above.
-    Grep { re: Regex, all: bool },
+    ///
+    /// The pattern travels as what was typed plus the toggles rather than as the compiled
+    /// `Regex`: the vault may be on another machine, and case-insensitivity lives in the builder
+    /// rather than in the pattern string, so the string alone would quietly change the search.
+    /// It is still compiled here first, so an unusable pattern costs no worker thread.
+    Grep {
+        text: String,
+        options: Options,
+        all: bool,
+    },
 }
 
 /// What a [`Query`] answered. The `usize` is how many of the matches a Replace All would rewrite,
@@ -71,7 +80,7 @@ pub struct Data {
     /// Rewrite every match in the vault. `literal` says whether `$1` in the replacement is a
     /// capture group or two characters. It writes one note at a time, so it runs off the main
     /// loop and calls `done` there once it has: the pane stays busy until then.
-    pub replace_all: Box<dyn Fn(Regex, String, bool, Box<dyn FnOnce()>)>,
+    pub replace_all: Box<dyn Fn(String, Options, String, bool, Box<dyn FnOnce()>)>,
 }
 
 pub struct Sidebar {
@@ -752,7 +761,9 @@ impl Search {
     /// insensitive, and a query typed meanwhile waits for the writes rather than racing them.
     fn replace_all(self: &Rc<Self>) {
         let key = self.key();
-        let (Ok(re), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
+        // Compiled and thrown away: the vault is asked in the same terms the box holds, and this
+        // is only here to refuse a pattern that does not compile before anything is rewritten.
+        let (Ok(_), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
             return;
         };
         if self.busy.get() {
@@ -763,7 +774,8 @@ impl Search {
         self.apply.set_sensitive(false);
         let search = self.clone();
         (self.data.replace_all)(
-            re,
+            key.text.clone(),
+            key.options,
             replacement,
             !key.options.regex,
             Box::new(move || {
@@ -777,10 +789,14 @@ impl Search {
 /// A [`Key`] as the worker thread needs it.
 fn compile(key: &Key) -> Result<Query, search::Error> {
     match key.grep {
-        true => Ok(Query::Grep {
-            re: compile_regex(key)?,
-            all: key.all,
-        }),
+        true => {
+            compile_regex(key)?;
+            Ok(Query::Grep {
+                text: key.text.clone(),
+                options: key.options,
+                all: key.all,
+            })
+        }
         false => Ok(Query::Fts(key.text.clone(), key.all)),
     }
 }

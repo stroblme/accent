@@ -5,6 +5,7 @@
 //! worker thread reconciles and watches in the background. The window is never blocked, and every
 //! change the vault reports arrives here as an [`Event`].
 
+mod askpass;
 mod comment;
 mod completion;
 mod diff;
@@ -204,6 +205,10 @@ fn ms() -> u128 {
 }
 
 fn main() -> glib::ExitCode {
+    // ssh spawns accent as its own askpass helper; that process only answers the question.
+    if let Some(code) = askpass::maybe_run() {
+        return code;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -756,6 +761,10 @@ struct App {
     active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// Raised across the window when a remote vault stops answering, with a way back. A banner
+    /// rather than a toast because it is a state that persists and needs a decision, and one
+    /// across the window rather than per tab because it is every tab that is affected.
+    connection: adw::Banner,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
     /// The bar along the bottom of the editor column: progress, branch, file type, word count.
@@ -833,8 +842,21 @@ impl App {
     ///
     /// ponytail: a window with no vault answers `/`, which is never seen: every key such a window
     /// holds is absolute, and joining an absolute path onto any root gives the path back.
-    fn root(&self) -> &Path {
-        self.vault.as_ref().map_or(Path::new("/"), |v| v.root())
+    fn root(&self) -> PathBuf {
+        self.vault
+            .as_ref()
+            .map_or_else(|| PathBuf::from("/"), |v| v.root())
+    }
+
+    /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
+    /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
+    fn show_connection_banner(&self, why: &str) {
+        self.connection.set_title(why);
+        self.connection.set_revealed(true);
+    }
+
+    fn hide_connection_banner(&self) {
+        self.connection.set_revealed(false);
     }
 
     /// Say why something needs a folder open, for the actions that do.
@@ -1161,7 +1183,7 @@ impl App {
         };
         let prefs = self.prefs();
         let tab = editor::open(
-            self.root(),
+            &self.root(),
             key,
             text,
             flavour,
@@ -1206,7 +1228,7 @@ impl App {
             path,
             key,
             doc::file_name(key),
-            &fileops::display_path(self.root(), key),
+            &fileops::display_path(&self.root(), key),
             &self.tabs(),
             place,
         );
@@ -1332,7 +1354,7 @@ impl App {
     ) {
         let page = self.tabs().append(child);
         page.set_title(doc::file_name(key));
-        page.set_tooltip(&fileops::display_path(self.root(), key));
+        page.set_tooltip(&fileops::display_path(&self.root(), key));
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
         self.docs
@@ -1375,7 +1397,8 @@ impl App {
     /// the sidebar back its pane when it lands.
     fn replace_in_notes(
         self: &Rc<Self>,
-        re: accent_api::Regex,
+        query: String,
+        options: accent_api::Options,
         replacement: String,
         literal: bool,
         done: Box<dyn FnOnce()>,
@@ -1392,8 +1415,10 @@ impl App {
         (ops.flush)(&open);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let outcome =
-                gio::spawn_blocking(move || vault.replace_all(&re, &replacement, literal)).await;
+            let outcome = gio::spawn_blocking(move || {
+                vault.replace_all(&query, options, &replacement, literal)
+            })
+            .await;
             if let Some(app) = weak.upgrade() {
                 match outcome {
                     Ok(Ok(report)) => {
@@ -1573,7 +1598,7 @@ impl App {
             false => {
                 self.note_used(&key);
                 self.title.set_subtitle(&match doc.is_loose() {
-                    true => fileops::display_path(self.root(), &key),
+                    true => fileops::display_path(&self.root(), &key),
                     false => key.clone(),
                 });
             }
@@ -2100,15 +2125,33 @@ impl App {
                 for doc in self.docs() {
                     let key = doc.key();
                     if key == from {
-                        doc.retarget(self.root(), &to);
+                        doc.retarget(&self.root(), &to);
                     } else if let Some(rest) = key.strip_prefix(&prefix) {
-                        doc.retarget(self.root(), &format!("{to}/{rest}"));
+                        doc.retarget(&self.root(), &format!("{to}/{rest}"));
                     }
                 }
                 accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
+            // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
+            // asks git what changed; nothing else in the window is affected.
+            Event::GitChanged => {
+                if let Some(git) = self.git.get() {
+                    git.schedule_refresh();
+                }
+            }
+            // A remote vault is still coming up. It reads as the same wait as indexing, because
+            // that is what it is: the window is open and the files are not there yet.
+            Event::Connecting(what) => self.statusbar.set_progress(Some(&format!("{what}…"))),
+            Event::Connected => {
+                self.statusbar.set_progress(None);
+                self.hide_connection_banner();
+            }
+            Event::Disconnected(why) => {
+                self.statusbar.set_progress(None);
+                self.show_connection_banner(&why);
+            }
             Event::Error(message) => self.toast(&message),
         }
     }
@@ -3204,7 +3247,7 @@ impl App {
     /// or a re-read from disk can have changed.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
-            vault.set_config(config.vault(self.root()));
+            vault.set_config(config.vault(&self.root()));
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
@@ -3554,6 +3597,8 @@ fn build_window(
     let title = adw::WindowTitle::new(&vault_name, "");
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
+    // Hidden until something goes wrong with a connection, which for a local vault is never.
+    let connection = adw::Banner::builder().button_label("Reconnect").build();
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
     // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
     // would slide it away instead if that ever reads as a jump.
@@ -3660,6 +3705,7 @@ fn build_window(
     // `content` and presentation mode takes them away with it rather than unrevealing them.
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&connection);
     // A bottom bar rather than a row inside the content: presentation mode takes it away with the
     // header for one line, and the find bar and the terminal panel stack above it.
     toolbar.add_bottom_bar(statusbar.widget());
@@ -3702,6 +3748,7 @@ fn build_window(
         active_pane: RefCell::new(first.clone()),
         title,
         toasts,
+        connection,
         find,
         statusbar,
         docs: RefCell::new(Vec::new()),
@@ -3819,16 +3866,22 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 sidebar::Query::Fts(text, all) => {
                     sidebar::Answer::Fts(vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default())
                 }
-                sidebar::Query::Grep { re, all } => {
+                sidebar::Query::Grep { text, options, all } => {
                     // `total` is what Replace All would rewrite, not how many rows there are:
                     // the walked trees below add rows and nothing to it, and neither does a
                     // source file the index holds a body for. The button promises edits.
-                    let (mut hits, total) = vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
+                    let (mut hits, total) = vault
+                        .grep(&text, options, SEARCH_LIMIT, all)
+                        .unwrap_or_default();
                     // What the index holds first, because that is what it can count; with
                     // All on, the trees it was never asked to hold get whatever room is left.
                     if all {
                         let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                        hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
+                        hits.extend(
+                            vault
+                                .grep_unindexed(&text, options, room)
+                                .unwrap_or_default(),
+                        );
                     }
                     sidebar::Answer::Grep(hits, total)
                 }
@@ -3837,15 +3890,13 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         replace_all: Box::new(glib::clone!(
             #[weak]
             app,
-            move |re: accent_api::Regex,
+            move |query: String,
+                  options: accent_api::Options,
                   replacement: String,
                   literal: bool,
-                  done: Box<dyn FnOnce()>| app.replace_in_notes(
-                re,
-                replacement,
-                literal,
-                done
-            )
+                  done: Box<dyn FnOnce()>| {
+                app.replace_in_notes(query, options, replacement, literal, done)
+            }
         )),
         tags: Box::new({
             let vault = vault.clone();

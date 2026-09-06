@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use accent_api::Vault;
-use accent_api::git::{self, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
+use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
@@ -150,7 +150,6 @@ pub struct Panel {
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh closes them all.
     expanded: RefCell<Option<String>>,
-    monitors: RefCell<Vec<gio::FileMonitor>>,
 }
 
 impl Panel {
@@ -326,7 +325,6 @@ impl Panel {
             again: Cell::new(false),
             syncing: Cell::new(false),
             expanded: RefCell::new(None),
-            monitors: RefCell::new(Vec::new()),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
@@ -534,7 +532,6 @@ impl Panel {
             let selected = clamp(self.state.borrow().selected, fetched.repos.len());
             self.state.borrow_mut().selected = selected;
             self.chooser.set_selected(selected as u32);
-            self.rebuild_monitors(&fetched.repos);
             self.syncing.set(false);
         }
         self.chooser.set_visible(fetched.repos.len() > 1);
@@ -559,13 +556,13 @@ impl Panel {
                 status
                     .ignored
                     .iter()
-                    .map(|path| ignored_key(self.hooks.vault.root(), repo, path))
+                    .map(|path| ignored_key(&self.hooks.vault.root(), repo, path))
             })
             .collect();
 
         let rows = match fetched.statuses.get(selected) {
             Some(status) => rows_of(status, &fetched.submodules, &|path| {
-                vault_key(self.hooks.vault.root(), &fetched.repos[selected], path)
+                vault_key(&self.hooks.vault.root(), &fetched.repos[selected], path)
             }),
             None => Vec::new(),
         };
@@ -614,33 +611,6 @@ impl Panel {
         }
         self.sync_commit();
         (self.hooks.changed)();
-    }
-
-    /// Watch each repository's git directory and its local branches: a commit, a checkout or a
-    /// stage from the terminal all land in one of the two, and the pane follows without polling.
-    fn rebuild_monitors(self: &Rc<Self>, repos: &[Repo]) {
-        let mut monitors = Vec::new();
-        for repo in repos {
-            for dir in [repo.git_dir.clone(), repo.git_dir.join("refs/heads")] {
-                let monitor = gio::File::for_path(&dir)
-                    .monitor_directory(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE);
-                let monitor = match monitor {
-                    Ok(monitor) => monitor,
-                    Err(e) => {
-                        tracing::debug!("watching {}: {e}", dir.display());
-                        continue;
-                    }
-                };
-                let weak = Rc::downgrade(self);
-                monitor.connect_changed(move |_, _, _, _| {
-                    if let Some(panel) = weak.upgrade() {
-                        panel.schedule_refresh();
-                    }
-                });
-                monitors.push(monitor);
-            }
-        }
-        *self.monitors.borrow_mut() = monitors;
     }
 
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
@@ -695,7 +665,8 @@ impl Panel {
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let query = oid.clone();
-            let files = gio::spawn_blocking(move || git::changed_files(&repo, &query)).await;
+            let vault = panel.hooks.vault.clone();
+            let files = gio::spawn_blocking(move || vault.git_changed_files(&repo, &query)).await;
             let files = match files {
                 Ok(Ok(files)) => files,
                 Ok(Err(e)) => return tracing::debug!("git show --name-status: {e}"),
@@ -741,7 +712,8 @@ impl Panel {
         self.more.set_sensitive(false);
         let panel = self.clone();
         glib::spawn_future_local(async move {
-            let page = gio::spawn_blocking(move || git::log(&repo, skip, PAGE)).await;
+            let vault = panel.hooks.vault.clone();
+            let page = gio::spawn_blocking(move || vault.git_log(&repo, skip, PAGE)).await;
             panel.more.set_sensitive(true);
             let page = match page {
                 Ok(Ok(page)) => page,
@@ -774,7 +746,7 @@ impl Panel {
         self: &Rc<Self>,
         verb: &'static str,
         hold: Option<gtk::Button>,
-        job: impl FnOnce(&Repo) -> Result<String, git::Error> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
     ) {
         let repo = {
             let state = self.state.borrow();
@@ -787,14 +759,15 @@ impl Panel {
             button.set_sensitive(false);
         }
         let panel = self.clone();
+        let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || job(&repo)).await;
+            let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
             if let Some(button) = &hold {
                 button.set_sensitive(true);
             }
             match done {
                 Ok(Ok(message)) => (panel.hooks.toast)(&message),
-                Ok(Err(e)) => panel.failed(verb, &e.to_string()),
+                Ok(Err(e)) => panel.failed(verb, &format!("{e:#}")),
                 Err(_) => tracing::warn!("the git worker panicked"),
             }
             panel.schedule_refresh();
@@ -818,8 +791,10 @@ impl Panel {
         // file goes in and an untracked one stays untracked, as VS Code's smart commit does.
         let all = !self.to_commit().0;
         self.message.buffer().set_text("");
-        self.command("Commit", None, move |repo| {
-            git::commit(repo, &message, all).map(|id| format!("Committed {id}"))
+        self.command("Commit", None, move |vault, repo| {
+            vault
+                .git_commit(repo, &message, all)
+                .map(|id| format!("Committed {id}"))
         });
     }
 
@@ -829,7 +804,7 @@ impl Panel {
     pub fn sync(self: &Rc<Self>, key: Option<&str>) {
         let index = {
             let state = self.state.borrow();
-            key.and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+            key.and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
                 .unwrap_or(state.selected)
         };
         if self.state.borrow().selected != index {
@@ -838,8 +813,8 @@ impl Panel {
             self.chooser.set_selected(index as u32);
         }
         let hold = self.sync.clone();
-        self.command("Sync", Some(hold), |repo| {
-            git::sync(repo).map(|transcript| {
+        self.command("Sync", Some(hold), |vault, repo| {
+            vault.git_sync(repo).map(|transcript| {
                 tracing::debug!("git sync: {transcript}");
                 "Synced".to_string()
             })
@@ -848,15 +823,19 @@ impl Panel {
 
     fn stage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
-        self.write("Stage", paths, move |repo, paths| {
-            git::stage(repo, paths).map(|()| format!("Staged {}", files(n)))
+        self.write("Stage", paths, move |vault, repo, paths| {
+            vault
+                .git_stage(repo, paths)
+                .map(|()| format!("Staged {}", files(n)))
         });
     }
 
     fn unstage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
-        self.write("Unstage", paths, move |repo, paths| {
-            git::unstage(repo, paths).map(|()| format!("Unstaged {}", files(n)))
+        self.write("Unstage", paths, move |vault, repo, paths| {
+            vault
+                .git_unstage(repo, paths)
+                .map(|()| format!("Unstaged {}", files(n)))
         });
     }
 
@@ -865,15 +844,12 @@ impl Panel {
         self: &Rc<Self>,
         verb: &'static str,
         paths: Vec<String>,
-        job: impl FnOnce(&Repo, &[&str]) -> Result<String, git::Error> + Send + 'static,
+        job: impl FnOnce(&Vault, &Repo, &[String]) -> anyhow::Result<String> + Send + 'static,
     ) {
         if paths.is_empty() {
             return;
         }
-        self.command(verb, None, move |repo| {
-            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
-            job(repo, &paths)
-        });
+        self.command(verb, None, move |vault, repo| job(vault, repo, &paths));
     }
 
     /// The paths of one whole section, for its header's bulk button.
@@ -919,8 +895,10 @@ impl Panel {
                         (panel.hooks.trash)(&key);
                         panel.schedule_refresh();
                     }
-                    false => panel.write("Discard", vec![path], move |repo, paths| {
-                        git::discard(repo, paths).map(|()| format!("Discarded {name}"))
+                    false => panel.write("Discard", vec![path], move |vault, repo, paths| {
+                        vault
+                            .git_discard(repo, paths)
+                            .map(|()| format!("Discarded {name}"))
                     }),
                 }
             },
@@ -958,21 +936,33 @@ impl Panel {
         };
         let (rel, key) = (rel.to_string(), key.to_string());
         let name = split_name(&rel).1.to_string();
-        let path = repo.root.join(&rel);
         let (left_title, right_title, tag) = (sides.left_title(), sides.right_title(), sides.tag());
         let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        let worktree_key = key.clone();
+        let tab_key = key.clone();
         glib::spawn_future_local(async move {
             let read = gio::spawn_blocking(move || {
                 // A side git has no file for is a new or deleted file, and an empty string is
                 // exactly the right thing to diff against.
                 let left = match sides.left_rev() {
-                    Some(rev) => side(git::show(&repo, rev, &rel)),
-                    None => Vec::new(),
+                    Some(rev) => side(vault.git_show(&repo, rev, &rel)),
+                    None => Blob::Text(String::new()),
                 };
                 let right = match &sides {
-                    Sides::Staged => side(git::show(&repo, "", &rel)),
-                    Sides::Worktree => std::fs::read(&path).unwrap_or_default(),
-                    Sides::Commit { oid, .. } => side(git::show(&repo, oid, &rel)),
+                    Sides::Staged => side(vault.git_show(&repo, "", &rel)),
+                    // The worktree side is the file itself, which on a remote vault is on the
+                    // other machine: reading it through the vault is what makes the diff work
+                    // there as well as here.
+                    Sides::Worktree => match vault.read_text(&worktree_key) {
+                        Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+                        Ok(_) => Blob::Binary,
+                        Err(e) => {
+                            tracing::debug!("reading {key}: {e}");
+                            Blob::Text(String::new())
+                        }
+                    },
+                    Sides::Commit { oid, .. } => side(vault.git_show(&repo, oid, &rel)),
                 };
                 (left, right)
             })
@@ -982,11 +972,9 @@ impl Panel {
             };
             // The same test the tab opener uses, and the same answer: a diff of two binaries is
             // noise, so the pane says why instead of showing it.
-            if left.contains(&0) || right.contains(&0) {
+            let (Blob::Text(left), Blob::Text(right)) = (left, right) else {
                 return (panel.hooks.toast)(&format!("{name} is binary"));
-            }
-            let left = String::from_utf8_lossy(&left).into_owned();
-            let right = String::from_utf8_lossy(&right).into_owned();
+            };
             let title = format!("{name} ({right_title})");
             let (body, _) = crate::diff::view(
                 (&format!("{name} ({left_title})"), &left),
@@ -994,7 +982,7 @@ impl Panel {
                 &accent_core::diff::lines(&left, &right),
                 false,
             );
-            (panel.hooks.open_diff)(&format!("diff:{tag}:{key}"), &title, &body);
+            (panel.hooks.open_diff)(&format!("diff:{tag}:{tab_key}"), &title, &body);
         });
     }
 
@@ -1050,8 +1038,8 @@ impl Panel {
     pub fn repo_of(&self, key: &str) -> Option<(Repo, String)> {
         let state = self.state.borrow();
         let root = self.hooks.vault.root();
-        let repo = state.repos.get(index_of(&state, root, key)?)?;
-        let rel = absolute(root, key)
+        let repo = state.repos.get(index_of(&state, &root, key)?)?;
+        let rel = absolute(&root, key)
             .strip_prefix(&repo.root)
             .ok()?
             .to_string_lossy()
@@ -1064,7 +1052,7 @@ impl Panel {
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
-            .and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+            .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
         branch_text(&state.statuses.get(index)?.branch)
     }
@@ -1081,10 +1069,11 @@ impl Panel {
         let Some((repo, rel)) = self.repo_of(key) else {
             return done(None);
         };
+        let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let bytes = gio::spawn_blocking(move || git::show(&repo, "HEAD", &rel)).await;
-            done(match bytes {
-                Ok(Ok(Some(bytes))) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            let blob = gio::spawn_blocking(move || vault.git_show(&repo, "HEAD", &rel)).await;
+            done(match blob {
+                Ok(Ok(Some(Blob::Text(text)))) => Some(text),
                 _ => None,
             });
         });
@@ -1163,7 +1152,7 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
     let repos = vault.repos();
     let statuses = repos
         .iter()
-        .map(|repo| match git::status(repo) {
+        .map(|repo| match vault.git_status(repo) {
             Ok(status) => status,
             Err(e) => {
                 // A repository git will not talk about costs an empty row, not a dialog: it may
@@ -1175,11 +1164,11 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
         .collect();
     let (commits, submodules) = match repos.get(clamp(selected, repos.len())) {
         Some(repo) => (
-            git::log(repo, 0, PAGE).unwrap_or_else(|e| {
+            vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
                 tracing::debug!("git log: {e}");
                 Vec::new()
             }),
-            git::submodules(repo).unwrap_or_default(),
+            vault.git_submodules(repo).unwrap_or_default(),
         ),
         None => (Vec::new(), Vec::new()),
     };
@@ -1191,12 +1180,12 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
     }
 }
 
-fn side(read: Result<Option<Vec<u8>>, git::Error>) -> Vec<u8> {
+fn side(read: anyhow::Result<Option<Blob>>) -> Blob {
     match read {
-        Ok(bytes) => bytes.unwrap_or_default(),
+        Ok(blob) => blob.unwrap_or_else(|| Blob::Text(String::new())),
         Err(e) => {
-            tracing::debug!("git show: {e}");
-            Vec::new()
+            tracing::debug!("git show: {e:#}");
+            Blob::Text(String::new())
         }
     }
 }

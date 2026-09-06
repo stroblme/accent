@@ -27,6 +27,7 @@ version = "0.1.0"
 dependencies = [
  "accent-core",
  "anyhow",
+ "blake3",
  "chrono",
  "serde",
  "serde_json",
