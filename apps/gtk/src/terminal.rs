@@ -12,6 +12,13 @@
 //! dispatches a window's application accelerators ahead of the VTE, so nothing a controller on
 //! this widget claims can beat them, and `main::apply_accels` unbinds the rest of the table for
 //! as long as a terminal has the focus (`main::reserved`, `has_focus`).
+//!
+//! Nothing hung on the shell's widgets may hold them: the page owns the scroller, the scroller owns
+//! the view, so a strong reference captured by a signal handler, a gesture or an action group the
+//! view itself carries closes a ring that closing the tab cannot cut. GTK4 finalises a widget by
+//! reference count alone — there is no `destroy` to break one from outside — and a `VteTerminal`
+//! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
+//! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -126,12 +133,16 @@ pub fn open(tabs: &adw::TabView, cwd: &Path, key: String) -> Rc<Term> {
         paint(&view);
     }
 
-    let title = page.clone();
-    view.connect_window_title_changed(move |view| {
-        if let Some(text) = view.window_title().filter(|t| !t.is_empty()) {
-            title.set_title(&text);
+    // Weak: the page owns this view by way of the scroller, so holding it here would be a ring.
+    view.connect_window_title_changed(glib::clone!(
+        #[weak(rename_to = title)]
+        page,
+        move |view| {
+            if let Some(text) = view.window_title().filter(|t| !t.is_empty()) {
+                title.set_title(&text);
+            }
         }
-    });
+    ));
 
     let shell = shell();
     let named = shell.clone();
@@ -226,8 +237,11 @@ fn install_links(view: &vte4::Terminal) {
     let secondary = gtk::GestureClick::new();
     secondary.set_button(gdk::BUTTON_SECONDARY);
     secondary.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let under = view.clone();
-    secondary.connect_pressed(move |_, _, x, y| fill_menu(&menu, link_at(&under, x, y).as_deref()));
+    secondary.connect_pressed(glib::clone!(
+        #[weak(rename_to = under)]
+        view,
+        move |_, _, x, y| fill_menu(&menu, link_at(&under, x, y).as_deref())
+    ));
     view.add_controller(secondary);
 
     // Ctrl and the primary button, which is what GNOME Terminal asks for and what a PDF link here
@@ -237,16 +251,19 @@ fn install_links(view: &vte4::Terminal) {
     let primary = gtk::GestureClick::new();
     primary.set_button(gdk::BUTTON_PRIMARY);
     primary.set_propagation_phase(gtk::PropagationPhase::Capture);
-    let under = view.clone();
-    primary.connect_pressed(move |gesture, _, x, y| {
-        if gesture
-            .current_event_state()
-            .contains(gdk::ModifierType::CONTROL_MASK)
-            && let Some(uri) = link_at(&under, x, y)
-        {
-            launch(&uri);
+    primary.connect_pressed(glib::clone!(
+        #[weak(rename_to = under)]
+        view,
+        move |gesture, _, x, y| {
+            if gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::CONTROL_MASK)
+                && let Some(uri) = link_at(&under, x, y)
+            {
+                launch(&uri);
+            }
         }
-    });
+    ));
     view.add_controller(primary);
 }
 
@@ -292,12 +309,15 @@ fn link_actions(view: &vte4::Terminal) -> gio::SimpleActionGroup {
     });
     group.add_action(&open);
     let copy = gio::SimpleAction::new("copy", Some(glib::VariantTy::STRING));
-    let view = view.clone();
-    copy.connect_activate(move |_, target| {
-        if let Some(uri) = target.and_then(|t| t.str()) {
-            view.clipboard().set_text(uri);
+    copy.connect_activate(glib::clone!(
+        #[weak]
+        view,
+        move |_, target| {
+            if let Some(uri) = target.and_then(|t| t.str()) {
+                view.clipboard().set_text(uri);
+            }
         }
-    });
+    ));
     group.add_action(&copy);
     group
 }
