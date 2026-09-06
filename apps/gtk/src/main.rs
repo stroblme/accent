@@ -1464,9 +1464,7 @@ impl App {
             tab.watch_file(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |tab| {
-                    app.refresh_tab(tab);
-                }
+                move |tab| app.file_changed(tab)
             ));
         }
         self.mark_loose(&tab.page, &tab.rel());
@@ -1661,6 +1659,23 @@ impl App {
             git.schedule_refresh();
         }
         Ok(())
+    }
+
+    /// A watcher says the file under a tab moved.
+    ///
+    /// Whose write it was is the first question. Every save is a rename into place, which a file
+    /// monitor reports as a change like anyone else's, so the etag is the only thing that tells
+    /// our own writes apart from a real one: a file still carrying the etag we wrote holds
+    /// exactly what the buffer already has. Reloading it anyway threw the view at the caret a
+    /// second after every keystroke, and on a buffer typed into since the save it raised a
+    /// "changed on disk" banner against our own bytes.
+    ///
+    /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
+    /// the user was asked, and has to reload whatever the etag says.
+    fn file_changed(&self, tab: &Rc<Tab>) {
+        if tab.etag.get() != Etag::of(&tab.path()).ok() {
+            self.refresh_tab(tab);
+        }
     }
 
     /// Refresh a tab from what is on disk, unless its buffer holds edits nobody has saved: that
@@ -1939,7 +1954,7 @@ impl App {
                 };
                 match &doc {
                     Doc::Text(tab) => {
-                        self.refresh_tab(tab);
+                        self.file_changed(tab);
                         if self.is_active(tab) {
                             self.sync_active();
                         }
