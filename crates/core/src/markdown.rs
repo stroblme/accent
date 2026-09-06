@@ -141,7 +141,7 @@ pub fn analyze(text: &str) -> Analysis {
             }
             Event::Code(ref t) => {
                 let n = run(text, &r, b"`");
-                wrapped(&mut a.spans, r, Style::CodeInline, n);
+                wrapped(&mut a.spans, text, r, Style::CodeInline, b"`", n);
                 if let Some(h) = heading.as_mut() {
                     h.2.push_str(t);
                 }
@@ -149,8 +149,8 @@ pub fn analyze(text: &str) -> Analysis {
                     l.text.push_str(t);
                 }
             }
-            Event::InlineMath(_) => wrapped(&mut a.spans, r, Style::Math, 1),
-            Event::DisplayMath(_) => wrapped(&mut a.spans, r, Style::Math, 2),
+            Event::InlineMath(_) => wrapped(&mut a.spans, text, r, Style::Math, b"$", 1),
+            Event::DisplayMath(_) => wrapped(&mut a.spans, text, r, Style::Math, b"$", 2),
             Event::Start(Cm::CodeBlock(kind)) => {
                 in_code = true;
                 a.spans.push(sp(r.clone(), Style::CodeBlock));
@@ -186,7 +186,9 @@ pub fn analyze(text: &str) -> Analysis {
                 in_meta = true;
                 a.spans.push(sp(r.clone(), Style::Frontmatter));
                 a.spans.push(sp(r.start..r.start + 3, Style::Marker));
-                a.spans.push(sp(r.end - 3..r.end, Style::Marker));
+                if let Some(m) = meta_close(text, &r) {
+                    a.spans.push(sp(m, Style::Marker));
+                }
                 fm_title = frontmatter(text, &r, &mut a);
             }
             Event::End(TagEnd::MetadataBlock(_)) => in_meta = false,
@@ -201,7 +203,7 @@ pub fn analyze(text: &str) -> Analysis {
                     if wiki { Style::WikiLink } else { Style::Link },
                 ));
                 if wiki {
-                    wiki_markers(&mut a.spans, &r, 2);
+                    wiki_markers(&mut a.spans, text, &r, b"[[");
                 }
                 open.push(pending(r, &dest_url, link_type, false));
             }
@@ -213,7 +215,7 @@ pub fn analyze(text: &str) -> Analysis {
                 let wiki = matches!(link_type, LinkType::WikiLink { .. });
                 a.spans.push(sp(r.clone(), Style::Image));
                 if wiki {
-                    wiki_markers(&mut a.spans, &r, 3);
+                    wiki_markers(&mut a.spans, text, &r, b"![[");
                 }
                 open.push(pending(r, &dest_url, link_type, true));
             }
@@ -283,17 +285,31 @@ fn delimited(
 }
 
 /// Style the whole range (delimiters included) and dim the delimiters on top.
-fn wrapped(out: &mut Vec<Span>, r: Range<usize>, style: Style, n: usize) {
+///
+/// The delimiters are read back rather than assumed, like [`delimited`] does: an event range
+/// need not start where its opening delimiter does — pulldown-cmark reports the math in
+/// `[[$|é$]]` as starting inside the alias — and counting `n` bytes in from an end that is not
+/// a delimiter can cut a character in half.
+fn wrapped(out: &mut Vec<Span>, text: &str, r: Range<usize>, style: Style, chars: &[u8], n: usize) {
+    let b = text.as_bytes();
     out.push(sp(r.clone(), style));
-    if n > 0 && r.len() >= n * 2 {
+    if n > 0
+        && r.len() >= n * 2
+        && b[r.start..r.start + n].iter().all(|c| chars.contains(c))
+        && b[r.end - n..r.end].iter().all(|c| chars.contains(c))
+    {
         out.push(sp(r.start..r.start + n, Style::Marker));
         out.push(sp(r.end - n..r.end, Style::Marker));
     }
 }
 
-fn wiki_markers(out: &mut Vec<Span>, r: &Range<usize>, open: usize) {
-    if r.len() > open + 2 {
-        out.push(sp(r.start..r.start + open, Style::Marker));
+/// `[[` (or `![[`) and the `]]` that closes it, read back from the source: an event range does
+/// not always start where its own brackets do, and taking `open` bytes on faith can cut a
+/// character in half.
+fn wiki_markers(out: &mut Vec<Span>, text: &str, r: &Range<usize>, open: &[u8]) {
+    let seg = &text.as_bytes()[r.clone()];
+    if seg.len() > open.len() + 2 && seg.starts_with(open) && seg.ends_with(b"]]") {
+        out.push(sp(r.start..r.start + open.len(), Style::Marker));
         out.push(sp(r.end - 2..r.end, Style::Marker));
     }
 }
@@ -328,6 +344,21 @@ fn heading_marker(text: &str, r: &Range<usize>) -> Option<Range<usize>> {
         i += 1;
     }
     Some(r.start..i)
+}
+
+/// The closing `---` (or `...`) line of a frontmatter block, when the block's range reaches it.
+///
+/// The range's last three bytes are not it: the parser can end a block short of its delimiter
+/// (an indented `---` inside a list item), and taking them anyway can cut a character in half.
+/// Reading the delimiter back is also the only thing that keeps the marker off the trailing
+/// newline the range carries.
+fn meta_close(text: &str, r: &Range<usize>) -> Option<Range<usize>> {
+    let end = trim_eol(text, r).end;
+    let start = text[r.start..end].rfind('\n').map(|i| r.start + i + 1)?;
+    let line = &text[start..end];
+    let closes =
+        !line.is_empty() && (line.bytes().all(|c| c == b'-') || line.bytes().all(|c| c == b'.'));
+    closes.then_some(start..end)
 }
 
 /// Opening and closing fence lengths of a fenced code block.
@@ -1299,6 +1330,72 @@ mod tests {
                 );
             }
             let _ = to_html(t);
+        }
+    }
+
+    /// Every range `analyze` reports is a byte range into the source, and consumers slice them
+    /// directly — uniffi hands them to Android as they are, and `&text[range]` panics on a
+    /// boundary that cuts a character in half. So: every construct, crossed with a character of
+    /// each UTF-8 width.
+    #[test]
+    fn every_span_boundary_survives_a_multibyte_note() {
+        let samples = ["é", "中", "🎉", "aé中🎉"];
+        let templates = [
+            "[[X]]",
+            "[[X|X]]",
+            "![[X]]",
+            "[[X#X|X]]",
+            "**X**",
+            "*X*",
+            "__X__",
+            "~~X~~",
+            "`X`",
+            "``X``",
+            "$X$",
+            "$$X$$",
+            // A math run pulldown-cmark reports as starting inside the alias, not at its `$`.
+            "[[$|X$]]",
+            "[[X|$X$]]",
+            // An embed whose event range pulldown-cmark starts past its own `![[`.
+            "![[# :![[X|X)]]&.%)]]",
+            "# X\n",
+            "- X\n",
+            "1. X\n",
+            "> X\n",
+            "#X\n",
+            "[X](X)",
+            "```X\nX\n```\n",
+            "---\ntitle: X\ntags: [X, X]\n---\n\n# X\n\n- [ ] X `X` **X** [[X|X]] #X\n",
+            // A frontmatter block the parser ends short of its own delimiter: the closing
+            // marker used to be the range's last three bytes, whatever they happened to be.
+            "1. ---\n\tX\n---",
+        ];
+        for t in templates {
+            for s in samples {
+                let doc = t.replace('X', s);
+                let a = analyze(&doc);
+                for span in &a.spans {
+                    assert!(
+                        span.range.start <= span.range.end
+                            && span.range.end <= doc.len()
+                            && doc.is_char_boundary(span.range.start)
+                            && doc.is_char_boundary(span.range.end),
+                        "bad span {span:?} in {doc:?}"
+                    );
+                }
+                for l in &a.links {
+                    assert!(
+                        doc.is_char_boundary(l.range.start) && doc.is_char_boundary(l.range.end),
+                        "bad link {l:?} in {doc:?}"
+                    );
+                }
+                for g in &a.tags {
+                    assert!(
+                        doc.is_char_boundary(g.range.start) && doc.is_char_boundary(g.range.end),
+                        "bad tag {g:?} in {doc:?}"
+                    );
+                }
+            }
         }
     }
 
