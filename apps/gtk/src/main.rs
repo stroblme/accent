@@ -3795,15 +3795,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                         vault.search(&text, SEARCH_LIMIT, all).unwrap_or_default(),
                     ),
                     sidebar::Query::Grep { re, all } => {
-                        let (mut hits, mut total) =
+                        // `total` is what Replace All would rewrite, not how many rows there are:
+                        // the walked trees below add rows and nothing to it, and neither does a
+                        // source file the index holds a body for. The button promises edits.
+                        let (mut hits, total) =
                             vault.grep(&re, SEARCH_LIMIT, all).unwrap_or_default();
                         // What the index holds first, because that is what it can count; with
                         // All on, the trees it was never asked to hold get whatever room is left.
                         if all {
                             let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                            let (rest, more) = vault.grep_unindexed(&re, room).unwrap_or_default();
-                            hits.extend(rest);
-                            total += more;
+                            hits.extend(vault.grep_unindexed(&re, room).unwrap_or_default());
                         }
                         sidebar::Answer::Grep(hits, total)
                     }

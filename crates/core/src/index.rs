@@ -1045,8 +1045,11 @@ impl Index {
     }
 
     /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
-    /// the total the scan saw, so a truncated list can still say how much a Replace All would
-    /// touch.
+    /// how many of them a Replace All would rewrite, so a truncated list can still say so.
+    ///
+    /// The rows reach every indexed body; the count is **markdown only**, like
+    /// [`grep_paths`](Self::grep_paths), which is what the rewrite actually visits. Counting a
+    /// source file's hits would have the button promise edits it never makes.
     ///
     /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
     /// are about this", regexes answer "where exactly does this text occur". The bodies are
@@ -1061,7 +1064,7 @@ impl Index {
     ) -> Result<(Vec<Match>, usize)> {
         let mut st = self.conn.prepare_cached(GREP_SQL)?;
         let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
-        let (mut out, mut total) = (Vec::new(), 0usize);
+        let (mut out, mut total, mut listed_only) = (Vec::new(), 0usize, 0usize);
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
             // Tested before the other columns are fetched: most notes do not match, and their
@@ -1070,6 +1073,13 @@ impl Index {
                 continue;
             }
             let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
+            // A source file's hits are listed like any other and counted into nothing: the
+            // rewrite behind the count never opens one.
+            let notes = row.get::<_, i64>(3)? == FileKind::Markdown.as_i64();
+            let counter = match notes {
+                true => &mut total,
+                false => &mut listed_only,
+            };
             Self::matches_in(
                 &rel_path,
                 title.as_deref(),
@@ -1077,7 +1087,7 @@ impl Index {
                 re,
                 limit,
                 &mut out,
-                &mut total,
+                counter,
             );
         }
         Ok((out, total))
@@ -1233,8 +1243,9 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
 /// and an uncapped one agree on which matches they drop.
 ///
 /// `?1` drops the git-ignored exclusion, `?2` is [`FileKind::Markdown`] — the escape that keeps a
-/// note in the results whatever ignores it.
-const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
+/// note in the results whatever ignores it. The kind comes back as a column too, because the
+/// count [`grep`](Index::grep) returns beside the rows is markdown only.
+const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body, f.kind
      FROM notes n JOIN files f ON f.id = n.file_id
      WHERE ?1 OR f.git_ignored = 0 OR f.kind = ?2
      ORDER BY f.rel_path";
@@ -2121,8 +2132,11 @@ mod tests {
         );
 
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
-        assert_eq!(ix.grep(&re, 10, false).unwrap().1, 2);
-        assert_eq!(ix.grep(&re, 10, true).unwrap().1, 3);
+        // The rows are what the exclusion moves; grep's count is markdown only, so the one note
+        // is all of it either way.
+        assert_eq!(ix.grep(&re, 10, false).unwrap().0.len(), 2);
+        assert_eq!(ix.grep(&re, 10, true).unwrap().0.len(), 3);
+        assert_eq!(ix.grep(&re, 10, true).unwrap().1, 1);
 
         // Go to File follows the default; the tree is the escape hatch, not a toggle here.
         assert_eq!(
@@ -2191,8 +2205,10 @@ mod tests {
         );
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
         let (matches, total) = ix.grep(&re, 10, false).unwrap();
-        assert_eq!(total, 1);
         assert_eq!(matches[0].rel_path, "tool.py");
+        // Listed, not counted: the count is what a Replace All would rewrite, and it rewrites
+        // notes.
+        assert_eq!(total, 0);
 
         // Over the cap and binary: a stat row each, and nothing to match against.
         let body_count = |rel: &str| -> i64 {
