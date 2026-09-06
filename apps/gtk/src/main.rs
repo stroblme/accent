@@ -69,6 +69,12 @@ const ZOOM_STEP: f64 = 0.1;
 /// How often the tree may be re-read while the first index is still running, in microseconds:
 /// often enough that a cold start fills in as it goes, rarely enough to stay off the main loop.
 const TREE_REPAINT: i64 = 250_000;
+/// Tracing target for the save/etag decisions, so a conflict reported in a real session can be
+/// read back afterwards: `RUST_LOG=accent::saves=debug accent <vault>` records every write with
+/// the etag it expected and the one it wrote, and every watcher report with the etag the tab
+/// holds against the one on disk. Its own target, because the answer is a handful of lines and
+/// `accent=debug` is a wall of them.
+const SAVES: &str = "accent::saves";
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
@@ -1647,10 +1653,17 @@ impl App {
         // A loose tab is not in any vault, so it writes through core directly. Same atomic save,
         // same etag gate; what it misses is the watcher being told the write was ours, which the
         // tab's own file monitor makes harmless.
-        let etag = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
-            Some(vault) => vault.save(&tab.rel(), &text, expected)?,
-            None => accent_core::fs::write_note(&tab.path(), &text, expected)?,
+        let written = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.save(&tab.rel(), &text, expected),
+            None => accent_core::fs::write_note(&tab.path(), &text, expected),
         };
+        match &written {
+            Ok(etag) => tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, ?etag, "wrote"),
+            Err(e) => {
+                tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, error = %e, "refused");
+            }
+        }
+        let etag = written?;
         tab.mark_clean(etag);
         tab.clear_disk_alert();
         // Our own writes go through the vault, which tells the watcher they were ours, so no
@@ -1673,7 +1686,16 @@ impl App {
     /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
     /// the user was asked, and has to reload whatever the etag says.
     fn file_changed(&self, tab: &Rc<Tab>) {
-        if tab.etag.get() != Etag::of(&tab.path()).ok() {
+        let (ours, disk) = (tab.etag.get(), Etag::of(&tab.path()).ok());
+        tracing::debug!(
+            target: SAVES,
+            rel = %tab.rel(),
+            ?ours,
+            ?disk,
+            modified = tab.modified.get(),
+            "watcher"
+        );
+        if ours != disk {
             self.refresh_tab(tab);
         }
     }
@@ -2048,7 +2070,9 @@ impl App {
         let Some(vault) = self.vault() else {
             return;
         };
-        let (Ok((mine, _)), Ok((theirs, _))) = (vault.read(original), vault.read(conflict)) else {
+        let (Ok((mine, mine_etag)), Ok((theirs, theirs_etag))) =
+            (vault.read(original), vault.read(conflict))
+        else {
             return self.toast("Cannot read the conflicting notes");
         };
         let resolve = {
@@ -2087,8 +2111,8 @@ impl App {
         };
         let key = format!("conflict:sync:{original}");
         let body = diff::conflict(
-            (original, &mine),
-            (conflict, &theirs),
+            (&written_at(original, &mine_etag), &mine),
+            (&written_at(conflict, &theirs_etag), &theirs),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -4413,6 +4437,20 @@ fn wire_tree(app: &Rc<App>) {
         }
     ));
     list.add_controller(keys);
+}
+
+/// A conflict pane's label: the file, and when it was last written.
+///
+/// The two sides of a sync conflict are one note twice, and which of them is called Mine is
+/// decided by which one kept the original name — that is Syncthing's decision, not ours, and the
+/// copy it renames can be the newer of the two. The time is the only thing here that says so.
+fn written_at(rel: &str, etag: &Etag) -> String {
+    match glib::DateTime::from_unix_local(etag.mtime_ns / 1_000_000_000)
+        .and_then(|when| when.format("%d %b %H:%M"))
+    {
+        Ok(when) => format!("{rel} · {when}"),
+        Err(_) => rel.to_string(),
+    }
 }
 
 /// Where a Menu-key popover points: the focused row, or the top of the list. In `host`'s
