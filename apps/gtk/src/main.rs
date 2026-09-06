@@ -8,6 +8,7 @@
 mod askpass;
 mod comment;
 mod completion;
+mod connect;
 mod diff;
 mod doc;
 mod editor;
@@ -85,6 +86,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-note", "New Note", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
+    ("win.upload", "Upload Files…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     ("win.terminal", "New Terminal", &["<Control>j"]),
     // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
@@ -768,6 +770,13 @@ struct Presenting {
 
 // ----------------------------------------------------------------------------------- app state
 
+/// What the palette lists, kept warm so the dialog never waits on the vault.
+#[derive(Default)]
+struct Corpus {
+    files: Rc<Vec<String>>,
+    tags: Rc<Vec<String>>,
+}
+
 struct App {
     /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
     /// no index, no watcher, no session, and every tab keyed by an absolute path.
@@ -790,6 +799,9 @@ struct App {
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
     connection: adw::Banner,
+    /// How far a remote vault has got in coming up, across the top of the document column. Only
+    /// a remote vault's window puts it in the layout at all.
+    connect: connect::Bar,
     /// Find, replace and go to line, one bar for the window rather than one per tab.
     find: Rc<find::Bar>,
     /// The bar along the bottom of the editor column: progress, branch, file type, word count.
@@ -812,6 +824,10 @@ struct App {
     preview: RefCell<Option<preview::Preview>>,
     /// Numbers the shells this window has opened, so each tab has a key of its own.
     terminals: Cell<usize>,
+    /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
+    /// background rather than asked for when the dialog opens: on a remote vault that question
+    /// costs a round trip, and the palette is a thing that has to appear instantly.
+    corpus: RefCell<Corpus>,
     /// Sidebar on the left, editor column on the right; drag the handle to resize.
     split: gtk::Paned,
     /// The sidebar column itself: hiding the sidebar is hiding this widget.
@@ -871,6 +887,15 @@ impl App {
         self.vault
             .as_ref()
             .map_or_else(|| PathBuf::from("/"), |v| v.root())
+    }
+
+    /// The machine this window's vault is on, or "" when it is this one. In the subtitle
+    /// whatever is open, because "which machine am I editing on" is not a question a window
+    /// should ever leave to the tab that happens to be selected.
+    fn host(&self) -> String {
+        self.vault()
+            .and_then(|v| v.remote().map(|r| r.url().host.clone()))
+            .unwrap_or_default()
     }
 
     /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
@@ -1083,6 +1108,12 @@ impl App {
         self.active_doc()?.tab().cloned()
     }
 
+    /// What the active tab is showing, for the background answers that must not land on a tab the
+    /// user has since moved away from.
+    fn active_key(&self) -> Option<String> {
+        Some(self.active_doc()?.key())
+    }
+
     fn active_doc(&self) -> Option<Doc> {
         let page = self.tabs().selected_page()?;
         self.doc_for_page(&page)
@@ -1180,13 +1211,43 @@ impl App {
     }
 
     /// A text file in an editor tab, unless its bytes say it is not one after all.
+    ///
+    /// The read happens on a worker thread, so opening a note on a remote vault does not hold the
+    /// window for the round trip — measured at ~60 ms to the host this was developed against,
+    /// which is four frames. Locally it lands in the same turn of the loop and nothing changes.
     fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour) {
-        // Through the vault, which is what makes a tab on a remote note work: a loose file has no
-        // vault to ask, so it still reads its own absolute path.
-        let read = match self.vault().filter(|_| !doc::is_loose_key(key)) {
-            Some(vault) => vault.read_text(key),
-            None => accent_core::fs::read_text(path),
-        };
+        // A loose file has no vault to ask, so it still reads its own absolute path.
+        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let (key, path) = (key.to_string(), path.to_path_buf());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking({
+                let key = key.clone();
+                move || match vault {
+                    Some(vault) => vault.read_text(&key),
+                    None => accent_core::fs::read_text(&path),
+                }
+            })
+            .await;
+            let Some(app) = weak.upgrade() else { return };
+            // Two clicks on the same row while the first read was in flight: the tab exists now.
+            if app.doc_for(&key).is_some() {
+                return;
+            }
+            match read {
+                Ok(read) => app.adopt_text(&key, read, flavour),
+                Err(_) => tracing::warn!("the reader panicked on {key}"),
+            }
+        });
+    }
+
+    /// What [`open_text`](Self::open_text) does once the bytes are in hand.
+    fn adopt_text(
+        self: &Rc<Self>,
+        key: &str,
+        read: std::io::Result<accent_core::fs::Read>,
+        flavour: Flavour,
+    ) {
         let text = match read {
             Ok(accent_core::fs::Read::Text(text)) => text,
             Ok(accent_core::fs::Read::Binary { size }) => {
@@ -1639,7 +1700,7 @@ impl App {
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
         let Some(doc) = self.active_doc() else {
-            self.title.set_subtitle("");
+            self.title.set_subtitle(&self.host());
             if let Some(sidebar) = self.sidebar.get() {
                 sidebar.set_backlinks(&[]);
             }
@@ -1652,25 +1713,51 @@ impl App {
             true => self.title.set_subtitle(&doc.page().title()),
             false => {
                 self.note_used(&key);
-                self.title.set_subtitle(&match doc.is_loose() {
+                let where_ = match doc.is_loose() {
                     true => fileops::display_path(&self.root(), &key),
                     false => key.clone(),
+                };
+                // On a remote vault the path alone is ambiguous — the same note path exists on
+                // this machine too — so the host is named with it, every time.
+                self.title.set_subtitle(&match self.host().is_empty() {
+                    true => where_,
+                    false => format!("{where_} — {}", self.host()),
                 });
             }
         }
         // Backlinks and the preview are about notes. A source file, an image or a status page
         // leaves both empty rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
+        // Off the main loop: one round trip on a remote vault is ~60 ms here, and this runs on
+        // every tab switch. The pane is emptied at once so it never shows the last note's
+        // backlinks while the new note's are still coming.
         if let Some(sidebar) = self.sidebar.get() {
-            let mut sources: Vec<String> = Vec::new();
-            if let Some(vault) = self.vault().filter(|_| note.is_some()) {
-                for link in vault.backlinks(&key).unwrap_or_default() {
+            sidebar.set_backlinks(&[]);
+        }
+        if let Some(vault) = self.vault().filter(|_| note.is_some()).cloned() {
+            let (key, weak) = (key.clone(), Rc::downgrade(self));
+            glib::spawn_future_local(async move {
+                let found = gio::spawn_blocking({
+                    let key = key.clone();
+                    move || vault.backlinks(&key).unwrap_or_default()
+                })
+                .await;
+                let Some(app) = weak.upgrade() else { return };
+                // The user may have moved on while we were asking; a stale answer must not
+                // replace the pane the current tab put there.
+                if app.active_key().as_deref() != Some(&key) {
+                    return;
+                }
+                let mut sources: Vec<String> = Vec::new();
+                for link in found.unwrap_or_default() {
                     if !sources.contains(&link.src_rel_path) {
                         sources.push(link.src_rel_path);
                     }
                 }
-            }
-            sidebar.set_backlinks(&sources);
+                if let Some(sidebar) = app.sidebar.get() {
+                    sidebar.set_backlinks(&sources);
+                }
+            });
         }
         self.sync_status();
         self.sync_outline();
@@ -2105,6 +2192,7 @@ impl App {
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.mark_tags_dirty();
                 }
+                self.refresh_corpus();
                 self.sync_active();
                 // Conflicts on notes nobody has open have no banner to appear on, so the toast
                 // that is already there says how many are waiting in the vault.
@@ -2206,13 +2294,20 @@ impl App {
             }
             // A remote vault is still coming up. It reads as the same wait as indexing, because
             // that is what it is: the window is open and the files are not there yet.
-            Event::Connecting(what) => self.statusbar.set_progress(Some(&format!("{what}…"))),
+            // The bar carries the one step that can measure itself, the upload, and pulses
+            // through the rest; the text says which step it is.
+            Event::Connecting { what, fraction } => {
+                self.statusbar.set_progress(Some(&format!("{what}…")));
+                self.connect.show(fraction);
+            }
             Event::Connected => {
                 self.statusbar.set_progress(None);
+                self.connect.hide();
                 self.hide_connection_banner();
             }
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);
+                self.connect.hide();
                 self.show_connection_banner(&why);
             }
             Event::Error(message) => self.toast(&message),
@@ -2643,6 +2738,19 @@ impl App {
             "new-folder" => {
                 if let Some(ops) = self.need_ops("create a folder") {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
+                }
+            }
+            // The one way to upload into the vault root: the tree has no row for it, so the
+            // folder's own context menu cannot offer it and this reads the selection the way
+            // New Folder does.
+            "upload" => {
+                if let Some(ops) = self.need_ops("upload files") {
+                    match ops.vault.is_remote() {
+                        true => fileops::upload(ops, &self.selected_dir().unwrap_or_default()),
+                        // Listed for every vault, because the palette shows all of ACTIONS, so
+                        // the local one says why nothing opened rather than doing nothing.
+                        false => self.toast("This vault is already on this machine"),
+                    }
                 }
             }
             "terminal" => self.open_terminal(),
@@ -3195,7 +3303,40 @@ impl App {
         }
     }
 
+    /// Re-read what the palette lists, off the main loop. Cheap enough to do on every reconcile
+    /// and every time the dialog opens, which is what keeps the answer both instant and current.
+    fn refresh_corpus(self: &Rc<Self>) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let loaded = gio::spawn_blocking(move || {
+                (
+                    // Never widened: Go to File has no All toggle, and the tree is where an
+                    // ignored file is reached, dimmed but listed.
+                    vault.file_paths(false).unwrap_or_default(),
+                    vault
+                        .tags()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(name, _)| name)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .await;
+            if let (Some(app), Ok((files, tags))) = (weak.upgrade(), loaded) {
+                *app.corpus.borrow_mut() = Corpus {
+                    files: Rc::new(files),
+                    tags: Rc::new(tags),
+                };
+            }
+        });
+    }
+
     fn palette(self: &Rc<Self>, initial: palette::Mode) {
+        // For the next time it opens; this one uses what is already there.
+        self.refresh_corpus();
         // Two answers to "recent": what this window opened, and what changed on disk. The first
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mru = self.recent_notes.borrow().clone();
@@ -3216,15 +3357,8 @@ impl App {
             mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
             load_files: Box::new({
-                let vault = self.vault.clone();
-                move || {
-                    // Never widened: Go to File has no All toggle, and the tree is where an
-                    // ignored file is reached, dimmed but listed.
-                    vault
-                        .as_ref()
-                        .and_then(|v| v.file_paths(false).ok())
-                        .unwrap_or_default()
-                }
+                let corpus = self.corpus.borrow().files.clone();
+                move || corpus.as_ref().clone()
             }),
             commands: ACTIONS
                 .iter()
@@ -3236,16 +3370,8 @@ impl App {
                 })
                 .collect(),
             load_tags: Box::new({
-                let vault = self.vault.clone();
-                move || {
-                    vault
-                        .as_ref()
-                        .and_then(|v| v.tags().ok())
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(tag, _)| tag)
-                        .collect()
-                }
+                let corpus = self.corpus.borrow().tags.clone();
+                move || corpus.as_ref().clone()
             }),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
@@ -3800,7 +3926,16 @@ fn build_window(
     // The find bar goes in the toolbar's content rather than among its top bars: presentation
     // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
     let find = find::Bar::new();
+    // A first connection to a remote host is the window becoming usable, not a list being
+    // replaced, so its bar spans the document column rather than sitting in the status bar
+    // beside the text (DESIGN.md, Loading). The text stays in the status bar either way. Only a
+    // remote vault puts the widget in the layout: a local one is connected from the moment it
+    // opens, so there is nothing to draw and no height to reserve.
+    let connect = connect::Bar::new();
     let editor_column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    if vault.as_ref().is_some_and(|v| v.is_remote()) {
+        editor_column.append(connect.widget());
+    }
     editor_column.append(find.widget());
     editor_column.append(&toasts);
 
@@ -3852,6 +3987,8 @@ fn build_window(
         title,
         toasts,
         connection,
+        connect,
+        corpus: RefCell::new(Corpus::default()),
         find,
         statusbar,
         docs: RefCell::new(Vec::new()),

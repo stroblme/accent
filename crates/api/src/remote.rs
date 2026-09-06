@@ -316,7 +316,16 @@ impl Remote {
     }
 
     fn say(&self, what: &str) {
-        let _ = self.events.send(Event::Connecting(what.to_string()));
+        self.step(what, None);
+    }
+
+    /// The same message with a measure on it, for the one step of a connection whose length is
+    /// known before it starts.
+    fn step(&self, what: &str, fraction: Option<f64>) {
+        let _ = self.events.send(Event::Connecting {
+            what: what.to_string(),
+            fraction,
+        });
     }
 
     fn disconnect(&self, why: &str) {
@@ -365,7 +374,10 @@ impl Remote {
         }
 
         let total = bytes.len();
-        self.say(&format!("Uploading the server (0 / {} MB)", mb(total)));
+        self.step(
+            &format!("Uploading the server (0 / {} MB)", mb(total)),
+            Some(0.0),
+        );
         let mut child = self
             .ssh(&ssh::run(
                 &self.url,
@@ -384,13 +396,15 @@ impl Remote {
                     .write_all(chunk)
                     .map_err(|e| format!("uploading the server: {e}"))?;
                 let done = ((n + 1) * CHUNK).min(total);
-                self.say(&format!(
-                    "Uploading the server ({} / {} MB)",
-                    mb(done),
-                    mb(total)
-                ));
+                self.step(
+                    &format!("Uploading the server ({} / {} MB)", mb(done), mb(total)),
+                    Some(done as f64 / total as f64),
+                );
             }
         }
+        // The bytes are all written, and the host is still unpacking them: without this the bar
+        // would sit full for seconds under a message saying the upload had finished.
+        self.say("Installing the server");
         let out = child
             .wait_with_output()
             .map_err(|e| format!("uploading the server: {e}"))?;

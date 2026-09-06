@@ -69,7 +69,14 @@ pub enum Event {
     GitChanged,
     /// A remote vault is still getting ready, and this is what it is doing. Shown where the
     /// indexing progress is shown, because to the reader it is the same wait.
-    Connecting(String),
+    ///
+    /// `fraction` is how far the step has got, 0 to 1, for the one step that can measure itself:
+    /// uploading the server binary, which is most of a first connection's wait. The others are
+    /// waits of unknown length, and say so with `None` rather than with a number nobody computed.
+    Connecting {
+        what: String,
+        fraction: Option<f64>,
+    },
     /// The remote vault is answering. A local vault never sends this: it is connected from the
     /// moment it opens.
     Connected,

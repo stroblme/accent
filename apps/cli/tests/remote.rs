@@ -55,7 +55,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let (mut connected, mut reconciled) = (false, false);
     while Instant::now() < deadline && !(connected && reconciled) {
         match events.recv_timeout(Duration::from_millis(500)) {
-            Ok(Event::Connecting(what)) => eprintln!("  {what}"),
+            Ok(Event::Connecting { what, .. }) => eprintln!("  {what}"),
             Ok(Event::Connected) => connected = true,
             Ok(Event::Reconciled(_)) => reconciled = true,
             Ok(Event::Disconnected(why)) => panic!("disconnected: {why}"),
