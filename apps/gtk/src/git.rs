@@ -83,6 +83,23 @@ enum Row {
     Submodule(Submodule),
 }
 
+/// One line of the history list. A flat store with two kinds rather than a `GtkTreeListModel`:
+/// the log is spliced wholesale on every refresh anyway, so a tree model would only add a
+/// create-child-model closure and a placeholder state to keep in step with it.
+#[derive(Clone)]
+enum LogItem {
+    Commit(LogRow),
+    /// A file the commit above it changed, shown while that commit is expanded.
+    File {
+        /// The commit the file belongs to, and its first parent — `None` on a root commit, whose
+        /// files have nothing on the left to compare against.
+        oid: String,
+        parent: Option<String>,
+        letter: char,
+        path: String,
+    },
+}
+
 /// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
 /// it is replaced at the same moment and a reader wants a consistent set.
 #[derive(Default)]
@@ -111,11 +128,12 @@ pub struct Panel {
     chooser: gtk::DropDown,
     branch: gtk::Label,
     counts: gtk::Label,
-    pull: gtk::Button,
-    push: gtk::Button,
+    sync: gtk::Button,
     message: gtk::TextView,
     placeholder: gtk::Label,
     commit: gtk::Button,
+    /// The message box and its button, hidden together when there is nothing to commit.
+    commit_box: gtk::Box,
     divider: gtk::Paned,
     changes: gio::ListStore,
     log: gio::ListStore,
@@ -129,6 +147,9 @@ pub struct Panel {
     /// Set while the repository list is being replaced, so the chooser's own notify does not read
     /// the splice as the user picking a repository.
     syncing: Cell<bool>,
+    /// The commit whose file list is open, if any. One at a time: a second expansion closes the
+    /// first, and a refresh closes them all.
+    expanded: RefCell<Option<String>>,
     monitors: RefCell<Vec<gio::FileMonitor>>,
 }
 
@@ -138,6 +159,12 @@ impl Panel {
         let chooser = gtk::DropDown::builder()
             .model(&names)
             .visible(false)
+            // A repository is named after its directory, and the button's default label asks for
+            // the whole name however long it is: measured at 345 px for a 43-character one, which
+            // is the sidebar's real floor whenever a vault has more than one repository. The
+            // button ellipsizes; the popup list keeps the names whole, having room for them.
+            .factory(&name_factory(true))
+            .list_factory(&name_factory(false))
             .build();
 
         let branch = gtk::Label::builder()
@@ -149,20 +176,31 @@ impl Panel {
         let counts = gtk::Label::new(None);
         counts.add_css_class("dim-label");
         counts.add_css_class("numeric");
-        // Plain arrows, not the network glyphs: `network-receive` and `network-transmit` are the
-        // same pair of arrows with a different one emphasised, which at 16 px is no difference at
-        // all. Down is what comes to you and up is what leaves, which is the whole distinction.
-        let pull = icon_button("go-down-symbolic", "Pull");
-        let push = icon_button("go-up-symbolic", "Push");
-        let refresh = icon_button("view-refresh-symbolic", "Refresh");
+        // One button, both halves, and the counts inside it: nothing in the app fetches, so a
+        // behind count is only as fresh as the last sync and cannot decide whether to pull.
+        // Three buttons was also what stopped the sidebar shrinking — the branch row measured
+        // 186 px of minimum width with them and 105 with one.
+        let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        arrows.append(&counts);
+        arrows.append(&gtk::Image::from_icon_name(
+            "network-transmit-receive-symbolic",
+        ));
+        let sync = gtk::Button::builder()
+            .child(&arrows)
+            .valign(gtk::Align::Center)
+            .build();
+        sync.add_css_class("flat");
+        // The "No Repository" page's own button: `git init` in a vault with no repository writes
+        // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
+        let check = gtk::Button::builder()
+            .label("Check Again")
+            .halign(gtk::Align::Center)
+            .build();
+        check.add_css_class("pill");
 
         let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        for child in [branch.upcast_ref::<gtk::Widget>(), counts.upcast_ref()] {
-            branch_row.append(child);
-        }
-        for button in [&pull, &push, &refresh] {
-            branch_row.append(button);
-        }
+        branch_row.append(&branch);
+        branch_row.append(&sync);
 
         // The message box is a card so it reads as somewhere to type rather than as a label, and
         // it scrolls rather than growing: a long commit message must not push the lists away.
@@ -200,9 +238,11 @@ impl Panel {
             .sensitive(false)
             .build();
         commit.add_css_class("suggested-action");
+        // The button leads: it belongs with the branch row above it, where the pane's actions
+        // are, rather than below a box that grows as it is typed into.
         let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        commit_box.append(&overlay);
         commit_box.append(&commit);
+        commit_box.append(&overlay);
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
         let changes_view = gtk::ListView::new(
@@ -210,6 +250,9 @@ impl Panel {
             None::<gtk::SignalListItemFactory>,
         );
         changes_view.add_css_class("navigation-sidebar");
+        // One click opens the diff, which is the rule the tree already follows: see
+        // `set_single_click_activate` in `tree.rs`.
+        changes_view.set_single_click_activate(true);
 
         let log = gio::ListStore::new::<glib::BoxedAnyObject>();
         let log_view = gtk::ListView::new(
@@ -256,7 +299,7 @@ impl Panel {
         column.append(&divider);
 
         let stack = gtk::Stack::builder().vexpand(true).build();
-        stack.add_named(&empty_page(), Some("empty"));
+        stack.add_named(&empty_page(&check), Some("empty"));
         stack.add_named(&column, Some("repo"));
         stack.set_visible_child_name("empty");
 
@@ -268,11 +311,11 @@ impl Panel {
             chooser,
             branch,
             counts,
-            pull,
-            push,
+            sync,
             message,
             placeholder,
             commit,
+            commit_box,
             divider,
             changes,
             log,
@@ -282,11 +325,12 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(false),
             syncing: Cell::new(false),
+            expanded: RefCell::new(None),
             monitors: RefCell::new(Vec::new()),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&refresh);
+        panel.wire_header(&check);
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
@@ -323,26 +367,9 @@ impl Panel {
 
     // --- wiring -------------------------------------------------------------------------------
 
-    fn wire_header(self: &Rc<Self>, refresh: &gtk::Button) {
-        on_click(self, &self.pull, |panel| {
-            let hold = panel.pull.clone();
-            panel.command("Pull", Some(hold), |repo| {
-                git::pull(repo).map(|transcript| {
-                    tracing::debug!("git pull: {transcript}");
-                    "Pulled".to_string()
-                })
-            });
-        });
-        on_click(self, &self.push, |panel| {
-            let hold = panel.push.clone();
-            panel.command("Push", Some(hold), |repo| {
-                git::push(repo).map(|transcript| {
-                    tracing::debug!("git push: {transcript}");
-                    "Pushed".to_string()
-                })
-            });
-        });
-        on_click(self, refresh, |panel| panel.refresh());
+    fn wire_header(self: &Rc<Self>, check: &gtk::Button) {
+        on_click(self, &self.sync, |panel| panel.sync(None));
+        on_click(self, check, |panel| panel.refresh());
         on_click(self, &self.more, |panel| panel.load_more());
 
         let weak = Rc::downgrade(self);
@@ -398,6 +425,23 @@ impl Panel {
         mine
     }
 
+    /// Put the keyboard in the commit box, which is what `Ctrl+Shift+G` is for once the pane is
+    /// up. From an idle: the chord shows the pane in the same frame, and a widget that is not on
+    /// screen yet cannot take focus.
+    pub fn focus_commit(&self) {
+        if self.stack.visible_child_name().as_deref() != Some("repo") {
+            return;
+        }
+        let message = self.message.clone();
+        glib::idle_add_local_once(move || {
+            // Mapped, not merely visible: a box hidden because there is nothing to commit leaves
+            // its children visible in their own right, and focus would go nowhere.
+            if message.is_mapped() {
+                message.grab_focus();
+            }
+        });
+    }
+
     fn wire_changes(self: &Rc<Self>, view: &gtk::ListView) {
         let factory = gtk::SignalListItemFactory::new();
         let weak = Rc::downgrade(self);
@@ -437,6 +481,24 @@ impl Panel {
             }
         });
         view.set_factory(Some(&factory));
+
+        // The same one-click rule as the changes list and the tree: a commit opens its file list,
+        // a file in it opens its diff.
+        view.set_single_click_activate(true);
+        let weak = Rc::downgrade(self);
+        view.connect_activate(move |view, position| {
+            let (Some(panel), Some(item)) =
+                (weak.upgrade(), log_at(view.model().as_ref(), position))
+            else {
+                return;
+            };
+            match item {
+                LogItem::Commit(row) => panel.toggle(&row.commit),
+                LogItem::File {
+                    oid, parent, path, ..
+                } => panel.compare(&path, &path, Sides::Commit { oid, parent }),
+            }
+        });
     }
 
     // --- refresh ------------------------------------------------------------------------------
@@ -525,6 +587,17 @@ impl Panel {
                 self.counts.set_text("");
             }
         }
+        // Without an upstream every click answers "There is no tracking information", so the
+        // button says so up front instead.
+        let upstream = fetched
+            .statuses
+            .get(selected)
+            .and_then(|s| s.branch.upstream.clone());
+        self.sync.set_sensitive(upstream.is_some());
+        self.sync.set_tooltip_text(Some(&match &upstream {
+            Some(name) => format!("Sync with {name}"),
+            None => "This branch has no upstream to sync with".to_string(),
+        }));
         self.more.set_visible(fetched.commits.len() >= PAGE);
         self.fill_log(fetched.commits.clone(), 0);
 
@@ -574,15 +647,87 @@ impl Panel {
     /// unchanged: [`git::lanes`] is one forward pass, so a Load More can only append, and
     /// appending leaves the reader where they were instead of scrolling back to the top.
     fn fill_log(&self, commits: Vec<Commit>, keep: usize) {
+        self.collapse();
         let rows = git::lanes(commits);
         let keep = keep.min(rows.len()) as u32;
         let items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
             .iter()
             .cloned()
-            .map(glib::BoxedAnyObject::new)
+            .map(|row| glib::BoxedAnyObject::new(LogItem::Commit(row)))
             .collect();
         self.log
             .splice(keep, self.log.n_items().saturating_sub(keep), &items);
+    }
+
+    /// Take away whatever file list is open. The file rows of one commit are contiguous, and only
+    /// one commit is ever expanded, so this is a single splice.
+    fn collapse(&self) {
+        self.expanded.replace(None);
+        let mut start = None;
+        let mut n = 0;
+        for i in 0..self.log.n_items() {
+            if matches!(log_at_index(&self.log, i), Some(LogItem::File { .. })) {
+                start.get_or_insert(i);
+                n += 1;
+            }
+        }
+        if let Some(start) = start {
+            self.log.splice(start, n, &[] as &[glib::BoxedAnyObject]);
+        }
+    }
+
+    /// Show, or hide again, the files one commit changed.
+    fn toggle(self: &Rc<Self>, commit: &Commit) {
+        let was = self.expanded.borrow().clone();
+        self.collapse();
+        if was.as_deref() == Some(commit.id.as_str()) {
+            return;
+        }
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        self.expanded.replace(Some(commit.id.clone()));
+        let (oid, parent) = (commit.id.clone(), commit.parents.first().cloned());
+        let panel = self.clone();
+        glib::spawn_future_local(async move {
+            let query = oid.clone();
+            let files = gio::spawn_blocking(move || git::changed_files(&repo, &query)).await;
+            let files = match files {
+                Ok(Ok(files)) => files,
+                Ok(Err(e)) => return tracing::debug!("git show --name-status: {e}"),
+                Err(_) => return tracing::warn!("the git worker panicked"),
+            };
+            // A refresh, or another commit, may have landed while git was answering.
+            if panel.expanded.borrow().as_deref() != Some(oid.as_str()) {
+                return;
+            }
+            let Some(at) = panel.row_of_commit(&oid) else {
+                return;
+            };
+            let rows: Vec<glib::BoxedAnyObject> = files
+                .into_iter()
+                .map(|(letter, path)| {
+                    glib::BoxedAnyObject::new(LogItem::File {
+                        oid: oid.clone(),
+                        parent: parent.clone(),
+                        letter,
+                        path,
+                    })
+                })
+                .collect();
+            panel.log.splice(at + 1, 0, &rows);
+        });
+    }
+
+    /// Where a commit sits in the log store, or `None` if it has since been spliced away.
+    fn row_of_commit(&self, oid: &str) -> Option<u32> {
+        (0..self.log.n_items()).find(|i| {
+            matches!(log_at_index(&self.log, *i), Some(LogItem::Commit(row)) if row.commit.id == oid)
+        })
     }
 
     fn load_more(self: &Rc<Self>) {
@@ -612,7 +757,9 @@ impl Panel {
                 state.commits.extend(page);
                 state.commits.clone()
             };
-            panel.fill_log(commits, panel.log.n_items() as usize);
+            // `skip` is how many commit rows the store already had, which after the collapse
+            // inside `fill_log` is exactly how many of them stay.
+            panel.fill_log(commits, skip);
         });
     }
 
@@ -667,9 +814,35 @@ impl Panel {
         if message.trim().is_empty() {
             return;
         }
+        // Nothing staged means "commit what changed", which is `git commit -a`: every tracked
+        // file goes in and an untracked one stays untracked, as VS Code's smart commit does.
+        let all = !self.to_commit().0;
         self.message.buffer().set_text("");
         self.command("Commit", None, move |repo| {
-            git::commit(repo, &message).map(|id| format!("Committed {id}"))
+            git::commit(repo, &message, all).map(|id| format!("Committed {id}"))
+        });
+    }
+
+    /// Pull and then push the repository `key` sits in, or the selected one where `key` names no
+    /// repository. The pane's selection follows, so the status bar's branch and the pane never
+    /// end up talking about two different repositories.
+    pub fn sync(self: &Rc<Self>, key: Option<&str>) {
+        let index = {
+            let state = self.state.borrow();
+            key.and_then(|key| index_of(&state, self.hooks.vault.root(), key))
+                .unwrap_or(state.selected)
+        };
+        if self.state.borrow().selected != index {
+            self.state.borrow_mut().selected = index;
+            // The notify this fires is the same one a user's pick fires, refresh included.
+            self.chooser.set_selected(index as u32);
+        }
+        let hold = self.sync.clone();
+        self.command("Sync", Some(hold), |repo| {
+            git::sync(repo).map(|transcript| {
+                tracing::debug!("git sync: {transcript}");
+                "Synced".to_string()
+            })
         });
     }
 
@@ -768,14 +941,14 @@ impl Panel {
         match section {
             // A conflict is resolved in the file, not in a diff of two sides that both lost.
             Section::Conflicts => (self.hooks.open)(key),
-            Section::Staged => self.compare(entry, key, Sides::Staged),
-            Section::Changes => self.compare(entry, key, Sides::Worktree),
+            Section::Staged => self.compare(&entry.path, key, Sides::Staged),
+            Section::Changes => self.compare(&entry.path, key, Sides::Worktree),
         }
     }
 
     /// Open the comparison a row stands for. Both sides are read in one worker hop, because two
     /// would show the file mid-write if it changed between them.
-    fn compare(self: &Rc<Self>, entry: &Entry, key: &str, sides: Sides) {
+    fn compare(self: &Rc<Self>, rel: &str, key: &str, sides: Sides) {
         let repo = {
             let state = self.state.borrow();
             match state.repos.get(state.selected) {
@@ -783,18 +956,23 @@ impl Panel {
                 None => return,
             }
         };
-        let (rel, key) = (entry.path.clone(), key.to_string());
-        let name = split_name(&entry.path).1.to_string();
+        let (rel, key) = (rel.to_string(), key.to_string());
+        let name = split_name(&rel).1.to_string();
         let path = repo.root.join(&rel);
+        let (left_title, right_title, tag) = (sides.left_title(), sides.right_title(), sides.tag());
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let read = gio::spawn_blocking(move || {
-                // "" is the index; a side git has no file for is a new or deleted file, and the
-                // empty string is exactly the right thing to diff against.
-                let left = side(git::show(&repo, sides.left_rev(), &rel));
-                let right = match sides {
+                // A side git has no file for is a new or deleted file, and an empty string is
+                // exactly the right thing to diff against.
+                let left = match sides.left_rev() {
+                    Some(rev) => side(git::show(&repo, rev, &rel)),
+                    None => Vec::new(),
+                };
+                let right = match &sides {
                     Sides::Staged => side(git::show(&repo, "", &rel)),
                     Sides::Worktree => std::fs::read(&path).unwrap_or_default(),
+                    Sides::Commit { oid, .. } => side(git::show(&repo, oid, &rel)),
                 };
                 (left, right)
             })
@@ -809,14 +987,14 @@ impl Panel {
             }
             let left = String::from_utf8_lossy(&left).into_owned();
             let right = String::from_utf8_lossy(&right).into_owned();
-            let title = format!("{name} ({})", sides.right_title());
+            let title = format!("{name} ({right_title})");
             let (body, _) = crate::diff::view(
-                (&format!("{name} ({})", sides.left_title()), &left),
+                (&format!("{name} ({left_title})"), &left),
                 (&title, &right),
                 &accent_core::diff::lines(&left, &right),
                 false,
             );
-            (panel.hooks.open_diff)(&format!("diff:{}:{key}", sides.tag()), &title, &body);
+            (panel.hooks.open_diff)(&format!("diff:{tag}:{key}"), &title, &body);
         });
     }
 
@@ -828,19 +1006,29 @@ impl Panel {
         buffer.text(&start, &end, false).to_string()
     }
 
-    /// The placeholder and the Commit button both follow the box and the index.
+    /// What the selected repository has to commit: whether anything is in the index, and whether
+    /// there is anything at all — index or worktree — for a `git commit -a` to take.
+    fn to_commit(&self) -> (bool, bool) {
+        let state = self.state.borrow();
+        let Some(status) = state.statuses.get(state.selected) else {
+            return (false, false);
+        };
+        let staged = status.staged().next().is_some();
+        (staged, staged || status.changes().next().is_some())
+    }
+
+    /// The placeholder, the Commit button and whether the box is there at all.
     fn sync_commit(&self) {
         let message = self.message_text();
         self.placeholder.set_visible(message.is_empty());
-        let staged = {
-            let state = self.state.borrow();
-            state
-                .statuses
-                .get(state.selected)
-                .is_some_and(|status| status.staged().next().is_some())
-        };
+        let anything = self.to_commit().1;
         self.commit
-            .set_sensitive(staged && !message.trim().is_empty());
+            .set_sensitive(anything && !message.trim().is_empty());
+        // A clean tree has nothing to say, so the box goes — but never out from under a message
+        // being written: a refresh fires on every save, and one of those would take it away
+        // mid-sentence.
+        self.commit_box
+            .set_visible(anything || !message.is_empty() || self.message.has_focus());
     }
 }
 
@@ -904,44 +1092,60 @@ impl Panel {
 }
 
 /// Which two things a row's diff compares.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Sides {
     /// HEAD against the index: what this commit would add.
     Staged,
     /// The index against the file on disk: what is not staged yet.
     Worktree,
+    /// One commit against its first parent, which is what a file under an expanded history row
+    /// shows. `parent` is `None` on a root commit, whose left side is simply empty.
+    Commit { oid: String, parent: Option<String> },
 }
 
 impl Sides {
-    fn left_rev(self) -> &'static str {
+    /// The revision the left pane reads, `None` meaning there is nothing on that side at all.
+    fn left_rev(&self) -> Option<&str> {
         match self {
-            Sides::Staged => "HEAD",
-            Sides::Worktree => "",
+            Sides::Staged => Some("HEAD"),
+            Sides::Worktree => Some(""),
+            Sides::Commit { parent, .. } => parent.as_deref(),
         }
     }
 
-    fn left_title(self) -> &'static str {
+    fn left_title(&self) -> String {
         match self {
-            Sides::Staged => "HEAD",
-            Sides::Worktree => "Index",
+            Sides::Staged => "HEAD".to_string(),
+            Sides::Worktree => "Index".to_string(),
+            Sides::Commit { parent, .. } => match parent {
+                Some(parent) => short(parent),
+                None => "Nothing".to_string(),
+            },
         }
     }
 
-    fn right_title(self) -> &'static str {
+    fn right_title(&self) -> String {
         match self {
-            Sides::Staged => "Index",
-            Sides::Worktree => "Working Tree",
+            Sides::Staged => "Index".to_string(),
+            Sides::Worktree => "Working Tree".to_string(),
+            Sides::Commit { oid, .. } => short(oid),
         }
     }
 
-    /// What keys the tab, so the two comparisons of one file are two tabs and asking twice
-    /// reveals the one already open.
-    fn tag(self) -> &'static str {
+    /// What keys the tab, so the comparisons of one file are a tab each and asking twice reveals
+    /// the one already open.
+    fn tag(&self) -> String {
         match self {
-            Sides::Staged => "index",
-            Sides::Worktree => "worktree",
+            Sides::Staged => "index".to_string(),
+            Sides::Worktree => "worktree".to_string(),
+            Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
         }
     }
+}
+
+/// An object name as git abbreviates it in the log.
+fn short(oid: &str) -> String {
+    oid.chars().take(7).collect()
 }
 
 // --- the worker's half --------------------------------------------------------------------------
@@ -999,6 +1203,37 @@ fn side(read: Result<Option<Vec<u8>>, git::Error>) -> Vec<u8> {
 
 // --- widgets ------------------------------------------------------------------------------------
 
+/// The line one changed file is shown on — status letter, name, directory — in the changes list
+/// and under an expanded history row alike. Whatever comes after the directory, the changes list's
+/// action buttons, is appended by the caller, and the binders find all four by sibling order.
+fn file_line() -> gtk::Box {
+    let letter = gtk::Label::builder().width_chars(1).build();
+    for class in ["dim-label", "numeric", "monospace"] {
+        letter.add_css_class(class);
+    }
+    let name = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
+    let dir = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(pango::EllipsizeMode::Start)
+        .build();
+    dir.add_css_class("dim-label");
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for child in [
+        letter.upcast_ref::<gtk::Widget>(),
+        name.upcast_ref(),
+        dir.upcast_ref(),
+    ] {
+        row.append(child);
+    }
+    row
+}
+
 /// One changes row: a header layout and an entry layout in a stack, so a recycled row can be
 /// either. The buttons hold the `GtkListItem` rather than the row's data, because the data is
 /// replaced under them every time the row is reused.
@@ -1036,21 +1271,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     header.append(&title);
     header.append(&all);
 
-    let letter = gtk::Label::builder().width_chars(1).build();
-    for class in ["dim-label", "numeric", "monospace"] {
-        letter.add_css_class(class);
-    }
-    let name = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
-    let dir = gtk::Label::builder()
-        .xalign(0.0)
-        .hexpand(true)
-        .ellipsize(pango::EllipsizeMode::Start)
-        .build();
-    dir.add_css_class("dim-label");
+    let entry = file_line();
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("git-actions");
@@ -1080,15 +1301,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         actions.append(&button);
     }
 
-    let entry = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    for child in [
-        letter.upcast_ref::<gtk::Widget>(),
-        name.upcast_ref(),
-        dir.upcast_ref(),
-        actions.upcast_ref(),
-    ] {
-        entry.append(child);
-    }
+    entry.append(&actions);
 
     // Not homogeneous: the header's button is taller than an entry row, and every row taking that
     // height would turn the list into a ladder.
@@ -1198,7 +1411,7 @@ fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)>
 }
 
 /// One log row: the graph on the left, the summary and its author on the right.
-fn log_row(item: &gtk::ListItem) -> gtk::Box {
+fn log_row(item: &gtk::ListItem) -> gtk::Stack {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
     // graph of the commit that used to be in it.
@@ -1206,13 +1419,17 @@ fn log_row(item: &gtk::ListItem) -> gtk::Box {
         #[weak]
         item,
         move |_, cr, _, height| {
-            if let Some(row) = log_of(&item) {
+            if let Some(LogItem::Commit(row)) = log_of(&item) {
                 draw_lanes(cr, &row, height as f64);
             }
         }
     ));
 
-    let refs = gtk::Label::new(None);
+    // Ellipsized like every other name in the pane: a decoration is as long as the branch it
+    // names, and without this a long branch is the sidebar's floor.
+    let refs = gtk::Label::builder()
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
     for class in ["caption", "dim-label"] {
         refs.add_css_class(class);
     }
@@ -1243,19 +1460,65 @@ fn log_row(item: &gtk::ListItem) -> gtk::Box {
     text.append(&line);
     text.append(&meta);
 
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.append(&area);
-    row.append(&text);
-    row
+    let commit = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    commit.append(&area);
+    commit.append(&text);
+
+    // A file of the expanded commit, indented past the graph so it reads as belonging above it.
+    let file = file_line();
+    file.set_margin_start(LANE * 2);
+    file.set_margin_top(2);
+    file.set_margin_bottom(2);
+
+    // Not homogeneous, for the reason `change_row` gives: a commit row is two lines tall and a
+    // file row one, and every row taking the taller of the two would be a ladder.
+    let stack = gtk::Stack::builder()
+        .hhomogeneous(false)
+        .vhomogeneous(false)
+        .build();
+    stack.add_named(&commit, Some("commit"));
+    stack.add_named(&file, Some("file"));
+    stack
 }
 
 fn bind_log(item: &gtk::ListItem) {
-    let (Some(root), Some(row)) = (item.child().and_downcast::<gtk::Box>(), log_of(item)) else {
+    let (Some(stack), Some(item_row)) = (item.child().and_downcast::<gtk::Stack>(), log_of(item))
+    else {
         return;
     };
+    let (Some(commit), Some(file)) = (
+        stack.child_by_name("commit").and_downcast::<gtk::Box>(),
+        stack.child_by_name("file").and_downcast::<gtk::Box>(),
+    ) else {
+        return;
+    };
+
+    let row = match item_row {
+        LogItem::Commit(row) => row,
+        LogItem::File { letter, path, .. } => {
+            stack.set_visible_child_name("file");
+            let (Some(mark), Some(dir)) = (
+                file.first_child().and_downcast::<gtk::Label>(),
+                file.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            let Some(name) = mark.next_sibling().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            mark.set_text(&letter.to_string());
+            let (directory, base) = split_name(&path);
+            name.set_text(base);
+            dir.set_text(directory);
+            stack.set_tooltip_text(Some(&path));
+            return;
+        }
+    };
+
+    stack.set_visible_child_name("commit");
     let (Some(area), Some(text)) = (
-        root.first_child().and_downcast::<gtk::DrawingArea>(),
-        root.last_child().and_downcast::<gtk::Box>(),
+        commit.first_child().and_downcast::<gtk::DrawingArea>(),
+        commit.last_child().and_downcast::<gtk::Box>(),
     ) else {
         return;
     };
@@ -1282,7 +1545,7 @@ fn bind_log(item: &gtk::ListItem) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    root.set_tooltip_text(Some(&row.commit.id));
+    stack.set_tooltip_text(Some(&row.commit.id));
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -1340,16 +1603,47 @@ fn lane_width(row: &LogRow) -> i32 {
     (widest as i32 + 1) * LANE + LANE
 }
 
-fn empty_page() -> adw::StatusPage {
+/// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
+/// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
+/// monitor is watching yet, so nothing would ever tell the pane to look again.
+fn empty_page(check: &gtk::Button) -> adw::StatusPage {
     let page = adw::StatusPage::builder()
         .icon_name("network-transmit-receive-symbolic")
         .title("No Repository")
         .description("Run git init in the terminal to start one.")
+        .child(check)
         .vexpand(true)
         .build();
     // Without this the icon alone takes 128 px of a 200 px column (DESIGN.md, States).
     page.add_css_class("compact");
     page
+}
+
+/// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
+/// and whole where it does not.
+fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let label = gtk::Label::builder().xalign(0.0).build();
+        if ellipsize {
+            label.set_ellipsize(pango::EllipsizeMode::End);
+        }
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            item.set_child(Some(&label));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        if let (Some(label), Some(name)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<gtk::StringObject>(),
+        ) {
+            label.set_text(&name.string());
+        }
+    });
+    factory
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -1407,11 +1701,31 @@ fn row_of(item: &gtk::ListItem) -> Option<Row> {
     )
 }
 
-fn log_of(item: &gtk::ListItem) -> Option<LogRow> {
+fn log_of(item: &gtk::ListItem) -> Option<LogItem> {
     Some(
         item.item()
             .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<LogRow>()
+            .borrow::<LogItem>()
+            .clone(),
+    )
+}
+
+fn log_at(model: Option<&gtk::SelectionModel>, position: u32) -> Option<LogItem> {
+    Some(
+        model?
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()?
+            .borrow::<LogItem>()
+            .clone(),
+    )
+}
+
+fn log_at_index(store: &gio::ListStore, position: u32) -> Option<LogItem> {
+    Some(
+        store
+            .item(position)
+            .and_downcast::<glib::BoxedAnyObject>()?
+            .borrow::<LogItem>()
             .clone(),
     )
 }

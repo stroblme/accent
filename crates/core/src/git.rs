@@ -537,6 +537,51 @@ fn parse_submodule(line: &str) -> Option<Submodule> {
 
 // -------------------------------------------------------------- read and write
 
+/// What one commit changed: a status letter and a path per file.
+///
+/// `-m --first-parent` is what makes a merge answer at all — plain `git show` prints nothing for
+/// one, and `-m` alone prints a diff against every parent in turn. A root commit needs no special
+/// case: every file in it comes back as `A`.
+pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Error> {
+    let out = run(
+        &repo.root,
+        &[
+            "show",
+            "--format=",
+            "--name-status",
+            "-z",
+            "-m",
+            "--first-parent",
+            oid,
+        ],
+        None,
+        true,
+    )?;
+    Ok(parse_name_status(&out))
+}
+
+/// Parse `--name-status -z`: a status token, then its path — except a rename or a copy, whose
+/// token is followed by *two* paths. That is the same trap [`parse_status`] handles for porcelain
+/// records, and it gets the same answer: the new path is the one the row is about.
+pub fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
+    let mut files = Vec::new();
+    let mut tokens = bytes.split(|b| *b == 0).filter(|t| !t.is_empty());
+    while let Some(token) = tokens.next() {
+        let Some(letter) = String::from_utf8_lossy(token).chars().next() else {
+            continue;
+        };
+        let Some(path) = tokens.next() else {
+            break;
+        };
+        let path = match letter {
+            'R' | 'C' => tokens.next().unwrap_or(path),
+            _ => path,
+        };
+        files.push((letter, String::from_utf8_lossy(path).into_owned()));
+    }
+    files
+}
+
 /// The bytes of `path` at `rev`, or `None` when that revision has no such file.
 ///
 /// An empty `rev` means the index, which is what the diff view compares a staged change against.
@@ -577,13 +622,16 @@ fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
 ///
 /// The message goes in over stdin rather than as an argument: a note's commit message is written
 /// in a text box and may be of any length and contain anything.
-pub fn commit(repo: &Repo, message: &str) -> Result<String, Error> {
-    run(
-        &repo.root,
-        &["commit", "-F", "-"],
-        Some(message.as_bytes()),
-        false,
-    )?;
+///
+/// `all` is `git commit -a`, which is what the pane sends when nothing is staged: every tracked
+/// file's change goes in, deletions included, and an untracked file stays untracked. Deliberately
+/// not `git add -A`, which would sweep up whatever the user has not decided about yet.
+pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
+    let args: &[&str] = match all {
+        true => &["commit", "-a", "-F", "-"],
+        false => &["commit", "-F", "-"],
+    };
+    run(&repo.root, args, Some(message.as_bytes()), false)?;
     let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], None, true)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
@@ -594,6 +642,24 @@ pub fn push(repo: &Repo) -> Result<String, Error> {
 
 pub fn pull(repo: &Repo) -> Result<String, Error> {
     transcript(repo, "pull")
+}
+
+/// Pull, then push, as one operation with one transcript.
+///
+/// Both halves run every time. Nothing in accent fetches on its own, so the `behind` count is
+/// only ever as fresh as the last sync and cannot decide whether the pull is worth running. A
+/// failed pull stops there — pushing onto a history the remote has moved past would only be
+/// refused — and its error is the whole answer.
+pub fn sync(repo: &Repo) -> Result<String, Error> {
+    let pulled = pull(repo)?;
+    let pushed = push(repo)?;
+    let both = [pulled, pushed];
+    Ok(both
+        .iter()
+        .filter(|half| !half.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// There is nothing worth parsing in what a transfer prints, and plenty worth reading, so the UI
@@ -669,6 +735,12 @@ mod tests {
     fn commit_all(dir: &Path, message: &str) {
         ok(dir, &["add", "-A"]);
         ok(dir, &["commit", "-m", message]);
+    }
+
+    fn head(dir: &Path) -> String {
+        String::from_utf8_lossy(&sh(dir, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_string()
     }
 
     fn open(dir: &Path) -> Repo {
@@ -1090,7 +1162,7 @@ mod tests {
         stage(&repo, &["a.md"]).unwrap();
         assert_eq!(paths(status(&repo).unwrap().staged()), ["a.md"]);
 
-        let id = commit(&repo, "first\n\nwith a body\n").unwrap();
+        let id = commit(&repo, "first\n\nwith a body\n", false).unwrap();
         assert!(!id.is_empty());
         assert!(status(&repo).unwrap().entries.is_empty(), "a clean tree");
         assert_eq!(log(&repo, 0, 1).unwrap()[0].summary, "first");
@@ -1104,6 +1176,116 @@ mod tests {
         write_file(dir, "a.md", "clobbered\n");
         discard(&repo, &["a.md"]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn changed_files_reads_a_commit_a_root_a_merge_and_a_rename() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        write_file(dir, "b.md", "b\n");
+        commit_all(dir, "root");
+        let root = head(dir);
+        write_file(dir, "a.md", "two\n");
+        commit_all(dir, "second");
+        let second = head(dir);
+        ok(dir, &["mv", "a.md", "renamed.md"]);
+        commit_all(dir, "rename");
+        let rename = head(dir);
+        ok(dir, &["checkout", "-q", "-b", "side", &root]);
+        write_file(dir, "c.md", "c\n");
+        commit_all(dir, "side");
+        ok(dir, &["checkout", "-q", "main"]);
+        ok(dir, &["merge", "-q", "--no-ff", "side", "-m", "merge"]);
+        let merge = head(dir);
+
+        let repo = open(dir);
+        let files = |oid: &str| changed_files(&repo, oid).unwrap();
+        assert_eq!(
+            files(&root),
+            [('A', "a.md".to_string()), ('A', "b.md".to_string())],
+            "a root commit adds everything in it"
+        );
+        assert_eq!(files(&second), [('M', "a.md".to_string())]);
+        assert_eq!(
+            files(&rename),
+            [('R', "renamed.md".to_string())],
+            "a rename is one row, under the name it now has"
+        );
+        assert_eq!(
+            files(&merge),
+            [('A', "c.md".to_string())],
+            "a merge shows its first-parent diff"
+        );
+    }
+
+    #[test]
+    fn commit_all_takes_tracked_changes_and_leaves_untracked_files_alone() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "first");
+
+        write_file(dir, "a.md", "two\n");
+        write_file(dir, "new.md", "new\n");
+        let repo = open(dir);
+        assert_eq!(status(&repo).unwrap().staged().count(), 0, "nothing staged");
+
+        commit(&repo, "everything tracked\n", true).unwrap();
+        let st = status(&repo).unwrap();
+        assert_eq!(paths(st.changes()), ["new.md"], "still untracked");
+        assert_eq!(
+            show(&repo, "HEAD", "a.md").unwrap().as_deref(),
+            Some(&b"two\n"[..]),
+            "the tracked change went in"
+        );
+    }
+
+    #[test]
+    fn sync_moves_a_commit_each_way_through_the_bare_origin() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        init(&source);
+        write_file(&source, "a.md", "one\n");
+        commit_all(&source, "first");
+        ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+        for clone in ["work", "other"] {
+            ok(tmp.path(), &["clone", "-q", "origin", clone]);
+            configure(&tmp.path().join(clone));
+        }
+
+        // The other clone puts a commit on the origin, which is what our pull has to bring back.
+        let other = tmp.path().join("other");
+        write_file(&other, "theirs.md", "theirs\n");
+        commit_all(&other, "theirs");
+        ok(&other, &["push", "-q"]);
+
+        let work = tmp.path().join("work");
+        write_file(&work, "mine.md", "mine\n");
+        commit_all(&work, "mine");
+        let repo = open(&work);
+
+        sync(&repo).unwrap();
+        let st = status(&repo).unwrap();
+        assert_eq!(
+            (st.branch.ahead, st.branch.behind),
+            (0, 0),
+            "both halves ran"
+        );
+        assert!(work.join("theirs.md").exists(), "the pull brought theirs");
+        ok(&other, &["pull", "-q"]);
+        assert!(other.join("mine.md").exists(), "the push sent mine");
     }
 
     #[test]

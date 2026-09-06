@@ -38,7 +38,7 @@ use accent_core::markdown::{Link, LinkKind};
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
-use gtk::{gdk, gio, glib, pango};
+use gtk::{gdk, gio, glib};
 use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -69,6 +69,12 @@ const ZOOM_STEP: f64 = 0.1;
 /// How often the tree may be re-read while the first index is still running, in microseconds:
 /// often enough that a cold start fills in as it goes, rarely enough to stay off the main loop.
 const TREE_REPAINT: i64 = 250_000;
+/// Tracing target for the save/etag decisions, so a conflict reported in a real session can be
+/// read back afterwards: `RUST_LOG=accent::saves=debug accent <vault>` records every write with
+/// the etag it expected and the one it wrote, and every watcher report with the etag the tab
+/// holds against the one on disk. Its own target, because the answer is a handful of lines and
+/// `accent=debug` is a wall of them.
+const SAVES: &str = "accent::saves";
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
@@ -139,6 +145,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
+    ("win.git-sync", "Sync", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // The PDF reader. Back and forward take the chords a browser uses for the same idea;
     // the rest live in the palette, where they are found by name rather than by chord.
@@ -718,6 +725,10 @@ struct App {
     sidebar: OnceCell<sidebar::Sidebar>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
+    /// The pane the session asked for and the sidebar could not show yet. Only the Git page is
+    /// ever missing at restore time — it does not exist until the first refresh finds a
+    /// repository — so the first refresh reads this and then clears it for good.
+    pane_wanted: RefCell<String>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
@@ -1407,28 +1418,15 @@ impl App {
         // have to work out which tab the pointer is over and would race the PDF's own, while this
         // one only ever sees a text tab. Bubble phase, ahead of the scrolled window's controller,
         // which is the order `pdfview` relies on for the same reason.
-        let accum = Cell::new(0.0);
-        let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
-        wheel.connect_scroll(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            #[upgrade_or]
-            glib::Propagation::Proceed,
-            move |controller, _, dy| {
-                if !controller
-                    .current_event_state()
-                    .contains(gdk::ModifierType::CONTROL_MASK)
-                {
-                    return glib::Propagation::Proceed;
-                }
-                let steps = wheel_steps(&accum, dy);
-                for _ in 0..steps.abs() {
-                    app.set_zoom(stepped_zoom(app.zoom.get(), steps > 0));
-                }
-                glib::Propagation::Stop
-            }
-        ));
-        tab.view.add_controller(wheel);
+        zoom_on_wheel(
+            &tab.view,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+            ),
+        );
 
         tab.connect_autosave(glib::clone!(
             #[weak(rename_to = app)]
@@ -1472,9 +1470,7 @@ impl App {
             tab.watch_file(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |tab| {
-                    app.refresh_tab(tab);
-                }
+                move |tab| app.file_changed(tab)
             ));
         }
         self.mark_loose(&tab.page, &tab.rel());
@@ -1657,10 +1653,17 @@ impl App {
         // A loose tab is not in any vault, so it writes through core directly. Same atomic save,
         // same etag gate; what it misses is the watcher being told the write was ours, which the
         // tab's own file monitor makes harmless.
-        let etag = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
-            Some(vault) => vault.save(&tab.rel(), &text, expected)?,
-            None => accent_core::fs::write_note(&tab.path(), &text, expected)?,
+        let written = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.save(&tab.rel(), &text, expected),
+            None => accent_core::fs::write_note(&tab.path(), &text, expected),
         };
+        match &written {
+            Ok(etag) => tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, ?etag, "wrote"),
+            Err(e) => {
+                tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, error = %e, "refused");
+            }
+        }
+        let etag = written?;
         tab.mark_clean(etag);
         tab.clear_disk_alert();
         // Our own writes go through the vault, which tells the watcher they were ours, so no
@@ -1669,6 +1672,32 @@ impl App {
             git.schedule_refresh();
         }
         Ok(())
+    }
+
+    /// A watcher says the file under a tab moved.
+    ///
+    /// Whose write it was is the first question. Every save is a rename into place, which a file
+    /// monitor reports as a change like anyone else's, so the etag is the only thing that tells
+    /// our own writes apart from a real one: a file still carrying the etag we wrote holds
+    /// exactly what the buffer already has. Reloading it anyway threw the view at the caret a
+    /// second after every keystroke, and on a buffer typed into since the save it raised a
+    /// "changed on disk" banner against our own bytes.
+    ///
+    /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
+    /// the user was asked, and has to reload whatever the etag says.
+    fn file_changed(&self, tab: &Rc<Tab>) {
+        let (ours, disk) = (tab.etag.get(), Etag::of(&tab.path()).ok());
+        tracing::debug!(
+            target: SAVES,
+            rel = %tab.rel(),
+            ?ours,
+            ?disk,
+            modified = tab.modified.get(),
+            "watcher"
+        );
+        if ours != disk {
+            self.refresh_tab(tab);
+        }
     }
 
     /// Refresh a tab from what is on disk, unless its buffer holds edits nobody has saved: that
@@ -1947,7 +1976,7 @@ impl App {
                 };
                 match &doc {
                     Doc::Text(tab) => {
-                        self.refresh_tab(tab);
+                        self.file_changed(tab);
                         if self.is_active(tab) {
                             self.sync_active();
                         }
@@ -2041,7 +2070,9 @@ impl App {
         let Some(vault) = self.vault() else {
             return;
         };
-        let (Ok((mine, _)), Ok((theirs, _))) = (vault.read(original), vault.read(conflict)) else {
+        let (Ok((mine, mine_etag)), Ok((theirs, theirs_etag))) =
+            (vault.read(original), vault.read(conflict))
+        else {
             return self.toast("Cannot read the conflicting notes");
         };
         let resolve = {
@@ -2080,8 +2111,8 @@ impl App {
         };
         let key = format!("conflict:sync:{original}");
         let body = diff::conflict(
-            (original, &mine),
-            (conflict, &theirs),
+            (&written_at(original, &mine_etag), &mine),
+            (&written_at(conflict, &theirs_etag), &theirs),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -2235,6 +2266,18 @@ impl App {
         );
         self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
+        // The preview follows the document zoom, so the wheel over it has to reach the same
+        // setting the wheel over the editor does. Capture phase: WebKit answers a Ctrl+scroll
+        // itself, with a zoom of its own that nothing else in the window knows about.
+        zoom_on_wheel(
+            preview.widget(),
+            gtk::PropagationPhase::Capture,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+            ),
+        );
         preview.connect_found(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -2470,19 +2513,7 @@ impl App {
                     tab.add_caret(true);
                 }
             }
-            // A PDF zooms its pages; everything else zooms the document font. Same three
-            // chords, because they mean the same thing to the person pressing them.
-            "zoom-in" | "zoom-out" | "zoom-reset" if self.active_pdf().is_some() => {
-                let Some(pdf) = self.active_pdf() else { return };
-                match name {
-                    "zoom-in" => pdf.zoom_step(false),
-                    "zoom-out" => pdf.zoom_step(true),
-                    _ => pdf.set_zoom(PdfZoom::FitWidth),
-                }
-            }
-            "zoom-in" => self.set_zoom(stepped_zoom(self.zoom.get(), false)),
-            "zoom-out" => self.set_zoom(stepped_zoom(self.zoom.get(), true)),
-            "zoom-reset" => self.set_zoom(1.0),
+            "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
             "pdf-back" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.back();
@@ -2543,7 +2574,26 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
-            "pane-git" => self.show_pane("git"),
+            "pane-git" => {
+                self.show_pane("git");
+                // The chord is how the keyboard reaches the commit box; the pane on its own
+                // leaves the caret in the note.
+                if let Some(git) = self.git.get() {
+                    git.focus_commit();
+                }
+            }
+            // The pane's own button and the status bar's branch are this one action, so whichever
+            // is pressed, the repository synced is the one the active document sits in and the
+            // pane's selection ends up on it.
+            "git-sync" => {
+                if let Some(git) = self.git.get() {
+                    let key = self
+                        .active_doc()
+                        .filter(|d| !d.is_transient())
+                        .map(|d| d.key());
+                    git.sync(key.as_deref());
+                }
+            }
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -2572,6 +2622,36 @@ impl App {
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
+        }
+    }
+
+    /// One of the three zoom chords, dispatched to whatever the active tab is.
+    ///
+    /// A PDF fits its pages, a shell scales its own font and a document scales the display-wide
+    /// one; the other three tab kinds draw at a size nobody chose, so the chords do nothing there.
+    /// It is matched in the same shape as [`App::sync_status`] and [`App::refresh_zoom`] on
+    /// purpose: what the chords reach and what the readout says have to be the same list, or the
+    /// bar says 120 % over something drawn at its own size.
+    fn zoom_action(self: &Rc<Self>, name: &str) {
+        // Reset is 100 % for anything counted in percentages, and Fit Width for a PDF, which is
+        // what a page was fitted to before anyone zoomed it.
+        let stepped = |from: f64| match name {
+            "zoom-in" => stepped_zoom(from, false),
+            "zoom-out" => stepped_zoom(from, true),
+            _ => 1.0,
+        };
+        match self.active_doc() {
+            Some(Doc::Pdf(pdf)) => match name {
+                "zoom-in" => pdf.zoom_step(false),
+                "zoom-out" => pdf.zoom_step(true),
+                _ => pdf.set_zoom(PdfZoom::FitWidth),
+            },
+            Some(Doc::Terminal(term)) => {
+                term.set_zoom(stepped(term.zoom()));
+                self.refresh_zoom();
+            }
+            Some(Doc::Text(_)) => self.set_zoom(stepped(self.zoom.get())),
+            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
         }
     }
 
@@ -2646,6 +2726,22 @@ impl App {
         };
         let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
         fill_shortcuts(&term.forwarded, &forwarded(&self.config.borrow()));
+        // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
+        // scale of its own, which would move the terminal without the readout ever hearing of it.
+        zoom_on_wheel(
+            &term.view,
+            gtk::PropagationPhase::Capture,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[weak]
+                term,
+                move |out| {
+                    term.set_zoom(stepped_zoom(term.zoom(), out));
+                    app.refresh_zoom();
+                }
+            ),
+        );
         terminal::on_exit(
             &term,
             glib::clone!(
@@ -2690,6 +2786,11 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
+        // The session ended on Git and the page has only just appeared. Taken whatever it says,
+        // so a later refresh cannot pull the user back to a pane they have since left.
+        if self.pane_wanted.take() == "git" {
+            self.show_pane("git");
+        }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(git.ignored());
         }
@@ -2732,17 +2833,26 @@ impl App {
         }
     }
 
-    /// The zoom readout in the status bar: the document zoom for a text tab, and the PDF's own
-    /// for a PDF, which fits to the window rather than counting percentages.
+    /// The zoom readout in the status bar: the document zoom for a text tab, the shell's own for a
+    /// terminal, and the PDF's own for a PDF, which fits to the window rather than counting
+    /// percentages.
     ///
     /// A document at 100 % has nothing to say, so the readout goes rather than leaving a control
-    /// saying nothing is going on. A PDF always shows one: fitting is a zoom too, and it is what
-    /// clicking the readout goes back to.
+    /// saying nothing is going on; the same for a shell at its own size. A PDF always shows one:
+    /// fitting is a zoom too, and it is what clicking the readout goes back to. An image, a status
+    /// page and a diff show nothing at all, because no zoom reaches them — the readout used to
+    /// fall through to the window's document zoom and say "120 %" over a picture drawn at its own
+    /// size. It matches the same six variants [`App::zoom_action`] does, so the readout and the
+    /// chords cannot disagree.
     fn refresh_zoom(&self) {
-        let zoom = self.zoom.get();
-        let label = match self.active_pdf() {
-            Some(pdf) => pdf.zoom_label(),
-            None => (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32)),
+        let label = match self.active_doc() {
+            Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
+            Some(Doc::Terminal(term)) => term.zoom_label(),
+            Some(Doc::Text(_)) => {
+                let zoom = self.zoom.get();
+                (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
+            }
+            Some(Doc::Image(_)) | Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -3141,6 +3251,10 @@ impl App {
         }
         // A state file written before panes were saved leaves the name empty; that keeps
         // whichever pane the sidebar was built showing.
+        //
+        // Remembered as well as shown: the Git page is still hidden here, so asking for it is a
+        // no-op until the first refresh finds a repository (`on_git_changed`).
+        self.pane_wanted.replace(session.pane.clone());
         if let Some(sidebar) = self.sidebar.get().filter(|_| !session.pane.is_empty()) {
             sidebar.show_pane(&session.pane);
         }
@@ -3226,6 +3340,40 @@ fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     let total = accum.get() + dy;
     accum.set(total.fract());
     total.trunc() as i32
+}
+
+/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true)` is one step out,
+/// `step(false)` one step in. One notch is one step, the same amount the chords move.
+///
+/// Each controller owns its own accumulator, because a smooth-scroll device sends one notch as
+/// several fractional deltas and two widgets sharing the remainder would zoom each other. Without
+/// Control the event is passed on untouched, so a plain scroll still scrolls whatever it scrolled.
+///
+/// The phase is the caller's. A text view wants `Bubble`, ahead of the scrolled window around it;
+/// WebKit and VTE answer a Ctrl+scroll themselves, with a zoom of their own that neither the
+/// readout nor the session would know about, so those two have to be beaten to it in `Capture`.
+fn zoom_on_wheel(
+    widget: &impl IsA<gtk::Widget>,
+    phase: gtk::PropagationPhase,
+    step: impl Fn(bool) + 'static,
+) {
+    let accum = Cell::new(0.0);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.set_propagation_phase(phase);
+    wheel.connect_scroll(move |controller, _, dy| {
+        if !controller
+            .current_event_state()
+            .contains(gdk::ModifierType::CONTROL_MASK)
+        {
+            return glib::Propagation::Proceed;
+        }
+        let steps = wheel_steps(&accum, dy);
+        for _ in 0..steps.abs() {
+            step(steps > 0);
+        }
+        glib::Propagation::Stop
+    });
+    widget.add_controller(wheel);
 }
 
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
@@ -3436,6 +3584,7 @@ fn build_window(
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
+        pane_wanted: RefCell::new(String::new()),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
         terminals: Cell::new(0),
@@ -3952,15 +4101,31 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         )),
     });
 
+    // The bottom bar of an `AdwToolbarView` is a `GtkWindowHandle`, so a secondary press anywhere
+    // in it asks the shell for the window menu — Restore / Minimize / Maximize / Close under a
+    // footer that is one line of the document's own facts. Claim the press and do nothing with it.
+    // Only button 3: dragging the window by the bar is button 1 and is left alone.
+    let quiet = gtk::GestureClick::new();
+    quiet.set_button(gdk::BUTTON_SECONDARY);
+    quiet.connect_pressed(|gesture, _, _, _| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    app.statusbar.widget().add_controller(quiet);
+
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
     // popover has a plain widget to hang off.
+    //
+    // The claim comes before anything else and happens whatever the tab is. `GtkButton`'s own
+    // gesture is primary-only, so without it the press bubbled past the readout into the window
+    // handle above and the shell's window menu took the pointer over our popover.
     let fit = gtk::GestureClick::new();
     fit.set_button(gdk::BUTTON_SECONDARY);
     fit.connect_pressed(glib::clone!(
         #[weak]
         app,
-        move |_, _, _, _| {
+        move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
             if app.active_pdf().is_none() {
                 return;
             }
@@ -3971,8 +4136,16 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             let popover = gtk::PopoverMenu::from_model(Some(&menu));
             popover.set_parent(app.statusbar.zoom());
             popover.set_has_arrow(false);
-            // A popover parented by hand stays parented until it is unparented by hand.
-            popover.connect_closed(|p| p.unparent());
+            // A popover parented by hand stays parented until it is unparented by hand — but not
+            // while it is closing. `closed` is emitted from inside the item's own `clicked`, and
+            // an unparented widget has no path to the window's action muxer, so unparenting there
+            // dropped the action the click had just asked for: the menu appeared, Fit Page did
+            // nothing, and the page stayed fitted to the width. The idle runs once the click is
+            // over.
+            popover.connect_closed(|p| {
+                let p = p.clone();
+                glib::idle_add_local_once(move || p.unparent());
+            });
             popover.popup();
         }
     ));
@@ -4266,6 +4439,20 @@ fn wire_tree(app: &Rc<App>) {
     list.add_controller(keys);
 }
 
+/// A conflict pane's label: the file, and when it was last written.
+///
+/// The two sides of a sync conflict are one note twice, and which of them is called Mine is
+/// decided by which one kept the original name — that is Syncthing's decision, not ours, and the
+/// copy it renames can be the newer of the two. The time is the only thing here that says so.
+fn written_at(rel: &str, etag: &Etag) -> String {
+    match glib::DateTime::from_unix_local(etag.mtime_ns / 1_000_000_000)
+        .and_then(|when| when.format("%d %b %H:%M"))
+    {
+        Ok(when) => format!("{rel} · {when}"),
+        Err(_) => rel.to_string(),
+    }
+}
+
 /// Where a Menu-key popover points: the focused row, or the top of the list. In `host`'s
 /// coordinates, since that is what the popover is parented to.
 fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
@@ -4310,11 +4497,13 @@ const CAPTURED: &[&str] = &[
 ];
 
 /// Every action a focused terminal hands back to the window: the `Ctrl+Shift` half of the table,
-/// which no shell claims, plus opening a shell and closing one.
+/// which no shell claims, plus opening a shell, closing one and the three zoom chords.
 ///
 /// `Ctrl+W` is the deliberate cost. It is Close Tab everywhere else in the window, so a shell has
 /// to answer it the same way, and readline loses its delete-word — `Ctrl+Backspace` and `Alt+
-/// Backspace` still do that, which is why this is the chord to give up.
+/// Backspace` still do that, which is why this is the chord to give up. The zoom chords are the
+/// same trade: a terminal has a zoom of its own now, so `Ctrl+plus` / `Ctrl+minus` / `Ctrl+0` have
+/// to reach it, and readline loses them.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
 /// the config is not forwarded; `gtk::accelerator_parse` would settle it but needs an initialised
@@ -4328,8 +4517,14 @@ fn forwarded(config: &Config) -> Vec<(&'static str, String)> {
                 .map(move |accel| (*action, accel))
         })
         .filter(|(action, accel)| {
-            matches!(*action, "win.terminal" | "win.close-tab")
-                || (accel.contains("<Control>") && accel.contains("<Shift>"))
+            matches!(
+                *action,
+                "win.terminal"
+                    | "win.close-tab"
+                    | "win.zoom-in"
+                    | "win.zoom-out"
+                    | "win.zoom-reset"
+            ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
         })
         .collect()
 }
@@ -4652,23 +4847,23 @@ fn bench_expand(app: &Rc<App>, rel: &str) {
 
 // --------------------------------------------------------------------------------- appearance
 
-/// The editor uses GNOME's *document* font, not the monospace one: notes are prose.
+/// The display-wide rule every editor starts from: Adwaita Mono at the size of GNOME's *document*
+/// font, which is [`editor::default_font`]. A vault is prose with code fences, tables and
+/// wikilinks in it, and none of those line up in a proportional face, so the family is ours and
+/// only the size follows the system.
+///
+/// It goes through [`editor::font_css`], the same function a tab's own zoom rule is written with,
+/// so the family and the size are decided in one place and a zoomed note cannot end up in a
+/// different face from an unzoomed one.
 fn install_document_font() {
     let Some(display) = gdk::Display::default() else {
         return;
     };
-    let desc = pango::FontDescription::from_string(&editor::default_font());
-    let family = desc
-        .family()
-        .map(|f| f.to_string())
-        .unwrap_or_else(|| "Monospace".to_string());
-    let size = match desc.size() as f64 / pango::SCALE as f64 {
-        s if s > 0.0 => s,
-        _ => 11.0,
-    };
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(&format!(
-        "textview.accent-doc {{ font-family: \"{family}\"; font-size: {size}pt; }}"
+    provider.load_from_string(&editor::font_css(
+        &editor::default_font(),
+        "textview.accent-doc",
+        1.0,
     ));
     // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
     // once per window as well as on every font change, so adding would grow the display's
@@ -4699,6 +4894,12 @@ thread_local! {
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
 /// contents in the same band whatever the interface font makes of their height.
+/// `.accent-bar-button` does the same job for the status bar's two controls, the branch readout
+/// and the zoom one: Adwaita gives a button a 24 px minimum and 5 px of padding either side, a box
+/// is as tall as its tallest child however that child is aligned, and so either of them appearing
+/// lifted the bar from 29 px to 46 px. Dropping the minimum and the vertical padding puts them on
+/// the caption's own line height, and they stay buttons rather than becoming labels, so the click,
+/// the focus ring and the tooltip stay.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -4737,6 +4938,7 @@ fn install_chrome_css() {
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
+             .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
@@ -4891,6 +5093,13 @@ mod tests {
         assert!(has("win.terminal", "<Control>j"));
         assert!(has("win.close-tab", "<Control>w"));
         assert!(has("win.new-folder", "<Control><Shift>n"));
+        // And the zoom chords, because a terminal has a zoom of its own to reach. Every spelling
+        // of them, or Ctrl+= would zoom the shell while Ctrl+plus went to readline.
+        assert!(has("win.zoom-in", "<Control>plus"));
+        assert!(has("win.zoom-in", "<Control>equal"));
+        assert!(has("win.zoom-in", "<Control>KP_Add"));
+        assert!(has("win.zoom-out", "<Control>minus"));
+        assert!(has("win.zoom-reset", "<Control>0"));
         // Left to the shell: plain Ctrl, and anything without Control at all.
         assert!(!has("win.save", "<Control>s"));
         assert!(!has("win.find-previous", "<Shift>F3"));

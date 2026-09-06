@@ -674,14 +674,19 @@ fn duplicated(line: &str) -> String {
     }
 }
 
-/// Family and point size of a font description, with GNOME's defaults where it is silent, scaled
+/// Family and point size of a font description, with our own defaults where it is silent, scaled
 /// by `zoom`. Rounded to two decimals so stepping the zoom does not write `12.100000000000001pt`.
-fn font_css(name: &str, selector: &str, zoom: f64) -> String {
+///
+/// The one place either is decided. `main::install_document_font` writes the display-wide rule
+/// through this too, at zoom 1.0: the extraction used to be written out a second time there with a
+/// different fallback family, so a description with no family of its own would have produced two
+/// different faces.
+pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let desc = pango::FontDescription::from_string(name);
     let family = desc
         .family()
         .map(|f| f.to_string())
-        .unwrap_or_else(|| "Cantarell".to_string());
+        .unwrap_or_else(|| DEFAULT_FAMILY.to_string());
     let size = match desc.size() as f64 / pango::SCALE as f64 {
         pt if pt > 0.0 => pt,
         _ => 11.0,
@@ -808,6 +813,14 @@ impl Tab {
     /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
     pub fn reload_keep_cursor(&self) -> std::io::Result<()> {
         let offset = self.buffer.iter_at_mark(&self.buffer.get_insert()).offset();
+        // Where the page is, kept alongside the caret: the scroll position, and the line at the
+        // top of the view with where that line sits in the buffer, so the same text goes back
+        // under the same edge however far the reload moves it. Replacing the buffer empties it,
+        // which drops the view to line one, and a scroll to the caret from there parks it
+        // against whichever edge is nearer instead of putting the page back.
+        let (top_iter, _) = self.view.line_at_y(self.view.visible_rect().y());
+        let (top_line, top_y) = (top_iter.line(), self.view.line_yrange(&top_iter).0);
+        let scrolled = self.view.vadjustment().map_or(0.0, |v| v.value());
         let text = match fs::read_text(&self.path())? {
             fs::Read::Text(text) => text,
             // It stopped being text while we had it open. The buffer keeps the last readable
@@ -827,11 +840,17 @@ impl Tab {
             .buffer
             .iter_at_offset(offset.min(self.buffer.char_count()));
         self.buffer.place_cursor(&iter);
-        // One idle later, because the buffer has only just been replaced: a scroll measured
-        // against lines the view has not laid out yet lands short of the caret.
+        // One idle later, because the buffer has only just been replaced: a position measured
+        // against lines the view has not laid out yet lands short of the line it was given.
         let (view, buffer) = (self.view.clone(), self.buffer.clone());
         glib::idle_add_local_once(move || {
-            view.scroll_to_mark(&buffer.get_insert(), 0.0, false, 0.0, 0.5);
+            let iter = buffer
+                .iter_at_line(top_line.min(buffer.line_count() - 1))
+                .unwrap_or_else(|| buffer.end_iter());
+            let moved = view.line_yrange(&iter).0 - top_y;
+            if let Some(vadjustment) = view.vadjustment() {
+                vadjustment.set_value(scrolled + f64::from(moved));
+            }
         });
         self.mark_clean(etag);
         self.clear_disk_alert();
@@ -1548,10 +1567,14 @@ mod tests {
         );
     }
 
-    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included.
+    /// A description with no size of its own falls back to GNOME's 11 pt, zoom included, and one
+    /// with no family at all to the family the editor is written in. The display-wide rule goes
+    /// through the same function, so a second fallback here would be a second face there.
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+        let css = font_css("11", "#doc", 1.0);
+        assert!(css.contains("font-family: \"Adwaita Mono\""), "{css}");
     }
 
     /// The gutter is as wide as the longest number it will ever print, and never zero wide.
