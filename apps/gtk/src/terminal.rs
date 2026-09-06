@@ -198,16 +198,39 @@ fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
     view.add_controller(keys);
 }
 
-/// Foreground from the theme, background from the same value the preview is handed, and VTE's own
-/// palette for the sixteen ANSI colours: a terminal's red is the shell's to choose, not ours.
+/// Foreground from the theme composited over the background, background from the same value the
+/// preview is handed, and VTE's own palette for the sixteen ANSI colours: a terminal's red is the
+/// shell's to choose, not ours.
 fn paint(view: &vte4::Terminal) {
-    let fg = view.color();
     let bg = gdk::RGBA::parse(crate::theme::view_bg(
         adw::StyleManager::default().is_dark(),
     ))
     .ok();
+    let theme = view.color();
+    let fg = match &bg {
+        Some(bg) => {
+            let [r, g, b] = over(
+                [theme.red(), theme.green(), theme.blue(), theme.alpha()],
+                [bg.red(), bg.green(), bg.blue()],
+            );
+            gdk::RGBA::new(r, g, b, 1.0)
+        }
+        None => theme,
+    };
     view.set_colors(Some(&fg), bg.as_ref(), &[]);
     view.set_font(Some(&monospace()));
+}
+
+/// VTE stores a foreground as opaque RGB and drops the alpha, so a theme colour like libadwaita's
+/// light `view_fg_color` (80 % black) would paint pure black — blacker than every other piece of
+/// text in the window. Composited here instead.
+fn over(fg: [f32; 4], bg: [f32; 3]) -> [f32; 3] {
+    let a = fg[3];
+    [
+        fg[0] * a + bg[0] * (1.0 - a),
+        fg[1] * a + bg[1] * (1.0 - a),
+        fg[2] * a + bg[2] * (1.0 - a),
+    ]
 }
 
 fn monospace() -> pango::FontDescription {
@@ -235,5 +258,31 @@ mod tests {
         assert_eq!(key(3), "terminal:3");
         // Not loose, which is what would send it through the file machinery.
         assert!(!crate::doc::is_loose_key(&key(1)));
+    }
+
+    fn close(got: [f32; 3], want: [f32; 3]) {
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 0.002, "{got:?} is not {want:?}");
+        }
+    }
+
+    #[test]
+    fn a_translucent_foreground_lands_where_the_rest_of_the_text_does() {
+        // libadwaita's light `view_fg_color` on `--view-bg-color`: the mid grey every other label
+        // in the window composites to, not the pure black VTE would have painted.
+        close(
+            over([0.0, 0.0, 0.024, 0.8], [1.0, 1.0, 1.0]),
+            [0.2, 0.2, 0.219],
+        );
+        // Dark is opaque either way, so this is a no-op there.
+        close(
+            over([1.0, 1.0, 1.0, 1.0], [0.11, 0.11, 0.125]),
+            [1.0, 1.0, 1.0],
+        );
+        // Fully transparent is the background and nothing else.
+        close(
+            over([1.0, 0.0, 0.0, 0.0], [0.11, 0.11, 0.125]),
+            [0.11, 0.11, 0.125],
+        );
     }
 }
