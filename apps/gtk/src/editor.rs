@@ -99,6 +99,43 @@ impl Alert {
     }
 }
 
+/// Which of the standing questions the one banner shows.
+///
+/// A tab has one `AdwBanner` and can have more than one thing to say about its file, so they
+/// queue instead of overwriting each other: a conflict copy appearing used to wipe the "changed
+/// on disk" question, and resolving that copy then took the bar down with the wiped question
+/// still standing — a dirty tab that would never autosave again, with nothing on screen to say
+/// why. The order is what each one can cost: the two that mean this buffer holds the only copy
+/// of something come first, the conflict copy beside the note next (it blocks nothing), and the
+/// read-only report last, because it asks nothing at all.
+///
+/// Queued rather than merged: `AdwBanner` has exactly one button, and two questions on one line
+/// have no honest single label.
+fn banner_alert(standing: &[Alert]) -> Option<Alert> {
+    [
+        Alert::Restore,
+        Alert::Compare,
+        Alert::Conflict,
+        Alert::ReadOnly,
+    ]
+    .into_iter()
+    .find(|a| standing.contains(a))
+}
+
+/// Whether a save may write the file under a tab.
+///
+/// The one rule every save path shares. A buffer whose file moved underneath it holds the only
+/// copy of its edits *and* the answer to a question the banner is still asking, so nothing
+/// writes until that answer is given — which is the rule VS Code follows for the same reason.
+/// A clean buffer has nothing to lose and is let through: that is how the "deleted on disk"
+/// banner writes the note back.
+///
+/// The etag gate in `fs::write_note` is still the last word; this is what keeps a save from
+/// being attempted at all once the tab already knows the answer.
+pub fn may_save(modified: bool, disk_changed: bool) -> bool {
+    !(modified && disk_changed)
+}
+
 /// What kind of text a tab holds.
 ///
 /// Prose and code share every mechanism a tab has — the etag, autosave, find, zoom, the banner —
@@ -175,8 +212,9 @@ pub struct Tab {
     /// Someone else changed the file under a dirty tab. Autosave stops until the user has
     /// answered the banner, so a conflict is never resolved behind their back.
     pub disk_changed: Cell<bool>,
-    /// What the banner is asking for, or `None` while it is hidden.
-    alert: Cell<Option<Alert>>,
+    /// Every question standing about this file. The banner shows one of them ([`banner_alert`]);
+    /// the rest wait rather than being overwritten.
+    alerts: RefCell<Vec<Alert>>,
     context: sourceview5::SearchContext,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
@@ -400,7 +438,7 @@ pub fn open(
         etag: Cell::new(Some(text.etag)),
         modified: Cell::new(false),
         disk_changed: Cell::new(false),
-        alert: Cell::new(None),
+        alerts: RefCell::new(Vec::new()),
         context,
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
@@ -990,31 +1028,53 @@ impl Tab {
         self.marks.restyle(&self.view);
     }
 
-    /// Raise the banner for `alert`, which decides both what it says and what its button does.
+    /// Raise `alert`, which decides both what the banner says and what its button does. It goes
+    /// on the queue: whichever standing question matters most is the one on screen.
     pub fn show_alert(&self, alert: Alert) {
-        self.alert.set(Some(alert));
-        self.banner.set_title(alert.title());
-        self.banner.set_button_label(alert.button());
-        self.banner.set_revealed(true);
+        let mut standing = self.alerts.borrow_mut();
+        if !standing.contains(&alert) {
+            standing.push(alert);
+        }
+        drop(standing);
+        self.render_banner();
+    }
+
+    /// Take one question down, leaving whatever else is standing. The banner comes back with the
+    /// next one rather than going away.
+    pub fn clear_alert(&self, alert: Alert) {
+        self.alerts.borrow_mut().retain(|a| *a != alert);
+        self.render_banner();
     }
 
     /// What the visible banner is asking for, for the handler of its button.
     pub fn alert(&self) -> Option<Alert> {
-        self.alert.get()
+        banner_alert(&self.alerts.borrow())
     }
 
     pub fn hide_banner(&self) {
-        self.alert.set(None);
-        self.banner.set_revealed(false);
+        self.alerts.borrow_mut().clear();
+        self.render_banner();
     }
 
-    /// Take down a banner about the file on disk, and only that. A save or a reload answers
+    fn render_banner(&self) {
+        match self.alert() {
+            Some(alert) => {
+                self.banner.set_title(alert.title());
+                self.banner.set_button_label(alert.button());
+                self.banner.set_revealed(true);
+            }
+            None => self.banner.set_revealed(false),
+        }
+    }
+
+    /// Take down the questions about the file on disk, and only those. A save or a reload answers
     /// "changed on disk" and "deleted on disk"; it says nothing about a conflict copy sitting
     /// next to the note, whose banner has to survive the first autosave.
     pub fn clear_disk_alert(&self) {
-        if matches!(self.alert.get(), Some(Alert::Compare | Alert::Restore)) {
-            self.hide_banner();
-        }
+        self.alerts
+            .borrow_mut()
+            .retain(|a| !matches!(a, Alert::Compare | Alert::Restore));
+        self.render_banner();
     }
 
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing
@@ -1657,11 +1717,18 @@ impl Tab {
 
     /// Save now, unless the file changed underneath us: the user is looking at a banner asking
     /// what to do about it, and writing over the answer they have not given yet is not an option.
+    ///
+    /// A blocked autosave is a plain no-op, with the banner and the tab's dot as the only signal.
+    /// It cannot ask — a modal on every focus change and every idle second is not something
+    /// anyone can work through — and it deliberately does not write the buffer anywhere else
+    /// either: a second copy nothing in the app ever reads back is a second source of truth, and
+    /// the buffer is not going anywhere while the window is open.
     fn autosave_now(self: &Rc<Self>) {
         if let Some(id) = self.autosave.borrow_mut().take() {
             id.remove();
         }
-        if self.modified.get() && !self.disk_changed.get() {
+        let modified = self.modified.get();
+        if modified && may_save(modified, self.disk_changed.get()) {
             self.emit(&self.on_autosave);
         }
     }
@@ -1804,6 +1871,45 @@ mod tests {
         assert_eq!(digits(9), 1);
         assert_eq!(digits(10), 2);
         assert_eq!(digits(1000), 4);
+    }
+
+    /// The save gate, which is the one thing in this file that costs the user their writing when
+    /// it is wrong. VS Code's rule: a file that moved in the background is a question, and a save
+    /// is not an answer to it.
+    #[test]
+    fn a_dirty_buffer_over_a_file_that_moved_is_never_written() {
+        assert!(may_save(true, false), "the ordinary save");
+        assert!(
+            !may_save(true, true),
+            "edits over a file that moved: refused"
+        );
+        assert!(
+            may_save(false, true),
+            "a clean buffer has nothing to lose, which is how a deleted note is written back"
+        );
+        assert!(may_save(false, false));
+    }
+
+    /// One banner, more than one thing to say: they queue by what each can cost instead of
+    /// overwriting each other.
+    #[test]
+    fn the_banner_shows_the_costliest_standing_question() {
+        assert_eq!(banner_alert(&[]), None);
+        assert_eq!(
+            banner_alert(&[Alert::Conflict, Alert::Compare]),
+            Some(Alert::Compare),
+            "unsaved edits over a moved file outrank a copy sitting beside the note"
+        );
+        assert_eq!(
+            banner_alert(&[Alert::Compare, Alert::Restore]),
+            Some(Alert::Restore)
+        );
+        assert_eq!(
+            banner_alert(&[Alert::ReadOnly, Alert::Conflict]),
+            Some(Alert::Conflict),
+            "a report never displaces a question"
+        );
+        assert_eq!(banner_alert(&[Alert::ReadOnly]), Some(Alert::ReadOnly));
     }
 
     #[test]

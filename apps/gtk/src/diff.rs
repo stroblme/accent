@@ -33,6 +33,9 @@ const EMPH_ALPHA: f32 = 0.35;
 /// A filler row has no content, so it whispers instead of shouting. Matches the code-block
 /// background in `highlight.rs` (0.07), which is the same "this area is inert" signal.
 const FILLER_ALPHA: f32 = 0.06;
+/// How long after the last keystroke the edited pane is re-tinted, matching `editor::DEBOUNCE`:
+/// a re-tag covers the whole buffer, so it follows the typing rather than riding it.
+const RETINT: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// Which of the two texts a pane shows. Decides the line number and the tag of every row.
 #[derive(Clone, Copy)]
@@ -112,6 +115,47 @@ fn column_text(rows: &[Option<&DiffLine>]) -> String {
         .join("\n")
 }
 
+/// Where each row starts in [`column_text`], counted in characters, with the end of the last row
+/// appended so every row has a `start..end`.
+///
+/// Not the row's index: `GtkTextBuffer` treats U+2029 as a line break and the diff treats it as
+/// an ordinary character, so a note carrying one puts a row and a buffer line permanently out of
+/// step — the tint, the word emphasis and the gutter all slide down by one per separator. A
+/// character offset means the same thing to both.
+fn row_offsets(rows: &[Option<&DiffLine>]) -> Vec<i32> {
+    let mut offsets = Vec::with_capacity(rows.len() + 1);
+    let mut at = 0;
+    for row in rows {
+        offsets.push(at);
+        at += row.map_or(0, |l| l.text.chars().count() as i32) + 1;
+    }
+    // The join has no newline after the last row, so its end is one short of the running total.
+    offsets.push((at - 1).max(0));
+    offsets
+}
+
+/// The edited column with its alignment fillers taken back out. `padding` holds the character
+/// offset of every filler that is still empty.
+///
+/// Addressed by offset for the same reason as [`row_offsets`]: `str::lines` splits on `\n` alone
+/// while the buffer breaks on more than that, so a line number here would mean two things at once
+/// and drop the wrong line out of a note.
+fn without_padding(text: &str, padding: &[i32], trailing_newline: bool) -> String {
+    let mut kept = Vec::new();
+    let mut at = 0;
+    for line in text.split('\n') {
+        if !padding.contains(&at) {
+            kept.push(line);
+        }
+        at += line.chars().count() as i32 + 1;
+    }
+    let mut out = kept.join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
 fn numbers(rows: &[Option<&DiffLine>], side: Side) -> Vec<Option<usize>> {
     rows.iter()
         .map(|r| r.and_then(|l| side.number(l)))
@@ -170,6 +214,67 @@ fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     );
 }
 
+/// One buffer line without its ending, which is the unit the two columns are compared in.
+fn line_text(buffer: &sourceview5::Buffer, line: i32) -> String {
+    let Some(start) = buffer.iter_at_line(line) else {
+        return String::new();
+    };
+    let mut end = start;
+    if !end.ends_line() {
+        end.forward_to_line_end();
+    }
+    buffer.text(&start, &end, true).to_string()
+}
+
+/// Re-tint the editable pane against the column beside it, after the user has typed into it.
+///
+/// The tags laid down when the pane was built describe the two *original* texts, so they go stale
+/// on the first keystroke and start colouring lines that no longer differ. A row is coloured here
+/// while it differs from the row facing it, which is exactly what the two columns on screen show:
+/// they share one vertical adjustment, so row `i` is always beside row `i`.
+///
+/// The word emphasis is dropped rather than recomputed: it said which words differed from the
+/// line this one was *paired* with by the diff, and typing ends that pairing.
+///
+/// ponytail: re-running the diff and re-aligning both columns would also keep them in step after
+/// a line is added or removed, and is deliberately not done — it means replacing the buffer the
+/// caret is sitting in.
+fn retint(mine: &sourceview5::Buffer, theirs: &sourceview5::Buffer, fillers: &[gtk::TextMark]) {
+    let (start, end) = mine.bounds();
+    for tag in [
+        TAG_ADDED,
+        TAG_REMOVED,
+        TAG_ADDED_EMPH,
+        TAG_REMOVED_EMPH,
+        TAG_FILLER,
+    ] {
+        mine.remove_tag_by_name(tag, &start, &end);
+    }
+    // A filler typed into is a line of the resolved note like any other, which is the same test
+    // `Editable::edited` applies before dropping it.
+    let padding: Vec<i32> = fillers
+        .iter()
+        .map(|mark| mine.iter_at_mark(mark))
+        .filter(|iter| iter.starts_line() && iter.ends_line())
+        .map(|iter| iter.line())
+        .collect();
+    let facing = theirs.line_count();
+    for line in 0..mine.line_count() {
+        let name = if padding.contains(&line) {
+            TAG_FILLER
+        } else if line < facing && line_text(theirs, line) == line_text(mine, line) {
+            continue;
+        } else {
+            TAG_REMOVED
+        };
+        let from = mine.iter_at_line(line).unwrap_or_else(|| mine.end_iter());
+        let to = mine
+            .iter_at_line(line + 1)
+            .unwrap_or_else(|| mine.end_iter());
+        mine.apply_tag_by_name(name, &from, &to);
+    }
+}
+
 /// Print the *source* line number of each row.
 ///
 /// GtkSourceView's own gutter numbers buffer rows, which is wrong here: a filler row has no line
@@ -217,6 +322,9 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side, editable: bool) -> 
     install_tags(&buffer);
     buffer.set_text(&column_text(rows));
     crate::editor::sync_scheme(&buffer);
+    // Rows are addressed by character offset throughout: a buffer line is not a row once the
+    // text carries a U+2029 (see `row_offsets`).
+    let offsets = row_offsets(rows);
     let mut fillers = Vec::new();
     for (i, row) in rows.iter().enumerate() {
         let (name, changed) = match row {
@@ -228,12 +336,8 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side, editable: bool) -> 
         };
         // The range runs to the start of the next row so it covers the newline as well: a
         // paragraph background needs the paragraph tagged, and a filler row is empty.
-        let start = buffer
-            .iter_at_line(i as i32)
-            .unwrap_or_else(|| buffer.end_iter());
-        let end = buffer
-            .iter_at_line(i as i32 + 1)
-            .unwrap_or_else(|| buffer.end_iter());
+        let start = buffer.iter_at_offset(offsets[i]);
+        let end = buffer.iter_at_offset(offsets[i + 1]);
         buffer.apply_tag_by_name(name, &start, &end);
         if row.is_none() {
             // Left gravity: text typed on the row lands after the mark, so the row stops being
@@ -244,12 +348,10 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side, editable: bool) -> 
         // The diff's ranges are byte offsets into the line; the buffer counts characters.
         if let Some((emph_tag, line)) = changed {
             let at = |byte: usize| {
-                buffer.iter_at_line_offset(i as i32, line.text[..byte].chars().count() as i32)
+                buffer.iter_at_offset(offsets[i] + line.text[..byte].chars().count() as i32)
             };
             for range in &line.emphasis {
-                if let (Some(from), Some(to)) = (at(range.start), at(range.end)) {
-                    buffer.apply_tag_by_name(emph_tag, &from, &to);
-                }
+                buffer.apply_tag_by_name(emph_tag, &at(range.start), &at(range.end));
             }
         }
     }
@@ -268,7 +370,17 @@ fn pane(title: &str, rows: &[Option<&DiffLine>], side: Side, editable: bool) -> 
     // Off on purpose: `install_line_numbers` prints the source numbers instead.
     view.set_show_line_numbers(false);
     view.set_wrap_mode(gtk::WrapMode::None);
-    install_line_numbers(&view, numbers(rows, side));
+    // The gutter is indexed by buffer line, and a row can occupy more than one of them, so the
+    // source numbers are spread over the lines the buffer actually made. A continuation line
+    // gets none, which is what a filler row already gets.
+    let mut by_line = vec![None; buffer.line_count().max(1) as usize];
+    for (i, number) in numbers(rows, side).into_iter().enumerate() {
+        let line = buffer.iter_at_offset(offsets[i]).line() as usize;
+        if let Some(slot) = by_line.get_mut(line) {
+            *slot = number;
+        }
+    }
+    install_line_numbers(&view, by_line);
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
@@ -324,21 +436,11 @@ impl Editable {
             .iter()
             .map(|mark| self.buffer.iter_at_mark(mark))
             .filter(|iter| iter.starts_line() && iter.ends_line())
-            .map(|iter| iter.line())
+            .map(|iter| iter.offset())
             .collect();
         let (start, end) = self.buffer.bounds();
         let text = self.buffer.text(&start, &end, true);
-        let mut kept: String = text
-            .lines()
-            .enumerate()
-            .filter(|(n, _)| !padding.contains(&(*n as i32)))
-            .map(|(_, line)| line)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if self.trailing_newline {
-            kept.push('\n');
-        }
-        Some(kept)
+        Some(without_padding(&text, &padding, self.trailing_newline))
     }
 }
 
@@ -371,6 +473,26 @@ pub fn view(
     // and then the other one cannot be scrolled to the end of its own text.
     new.scroller
         .set_vadjustment(Some(&old.scroller.vadjustment()));
+
+    // The tags say what the two texts looked like when the pane opened, so they have to be
+    // re-derived once one of them is being typed into. Debounced at the editor's own
+    // re-highlight interval, because this walks both columns and re-tags a whole buffer.
+    if editable {
+        let pending: Rc<Cell<Option<glib::SourceId>>> = Rc::new(Cell::new(None));
+        let fillers = old.fillers.clone();
+        let theirs = new.buffer.clone();
+        old.buffer.connect_changed(move |mine| {
+            if let Some(id) = pending.take() {
+                id.remove();
+            }
+            let (mine, theirs, fillers) = (mine.clone(), theirs.clone(), fillers.clone());
+            let again = pending.clone();
+            pending.set(Some(glib::timeout_add_local_once(RETINT, move || {
+                again.set(None);
+                retint(&mine, &theirs, &fillers);
+            })));
+        });
+    }
 
     // Weak, both because this closure is connected to one of the very views it restyles and
     // because the style manager below outlives the dialog: a strong capture either way is a cycle
@@ -456,9 +578,6 @@ pub fn conflict(
     let lines = accent_core::diff::lines(original.1, conflict.1);
     let mine = format!("Mine — {}", original.0);
     let theirs = format!("Theirs — {}", conflict.0);
-    // ponytail: the Mine pane is editable and its diff tags are not recomputed as it is typed
-    // into, so the green and red rows go stale. They still say what the two texts looked like
-    // when the tab opened, which is what the reader is comparing against.
     let (diff, edits) = view((&mine, original.1), (&theirs, conflict.1), &lines, true);
 
     let keep_theirs = gtk::Button::with_label("Keep Theirs");
@@ -542,6 +661,47 @@ mod tests {
             vec![Some("alpha"), Some("bravo"), Some("charlie")]
         );
         assert_eq!(texts(&right), vec![Some("alpha"), None, None]);
+    }
+
+    /// U+2029 is an ordinary character to the diff and a line break to `GtkTextBuffer`, so a row
+    /// index and a buffer line stop agreeing the moment a note carries one. Everything in a pane
+    /// is addressed by character offset instead.
+    #[test]
+    fn a_row_is_found_by_counting_characters_not_by_its_index() {
+        let d = lines("alpha\u{2029}one\nbravo\n", "alpha\u{2029}one\nbravo two\n");
+        let (left, _) = align(&d);
+        assert_eq!(
+            row_offsets(&left),
+            vec![0, 10, 15],
+            "row 1 starts 10 characters in, though the buffer calls it line 2"
+        );
+        assert_eq!(
+            row_offsets(&[]),
+            vec![0],
+            "an empty column still has an end"
+        );
+    }
+
+    /// The same disagreement on the way back out: a filler is dropped by where it is, not by
+    /// which line something calls it.
+    #[test]
+    fn padding_is_dropped_by_offset_and_the_rest_is_written_back_whole() {
+        // "alpha\u{2029}one" then an empty filler row at offset 10, then "bravo".
+        let text = "alpha\u{2029}one\n\nbravo";
+        assert_eq!(
+            without_padding(text, &[10], false),
+            "alpha\u{2029}one\nbravo"
+        );
+        assert_eq!(
+            without_padding(text, &[], true),
+            "alpha\u{2029}one\n\nbravo\n",
+            "a row nobody called padding survives, blank or not"
+        );
+        assert_eq!(
+            without_padding("a\nb\n", &[], true),
+            "a\nb\n\n",
+            "a blank last line is a line: it used to be swallowed with the final newline"
+        );
     }
 
     #[test]

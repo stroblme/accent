@@ -1400,7 +1400,7 @@ impl App {
         );
         self.adopt(tab, how);
         if flavour.is_note() {
-            self.sync_conflict_banner(key);
+            self.sync_conflict_banner(key, None);
         }
     }
 
@@ -1988,17 +1988,43 @@ impl App {
 
     /// `explicit` is a Ctrl+S, which may raise a dialog. An autosave never can: interrupting
     /// someone mid-sentence with a modal is exactly what autosave exists to avoid.
+    ///
+    /// A buffer whose file moved underneath it is not written at all, and the save is not even
+    /// attempted ([`editor::may_save`]): the banner is holding a question and a save is not an
+    /// answer to it. Ctrl+S raises the same dialog a refused write raises, so a reflex save is
+    /// never silently dropped; an autosave says nothing beyond the banner already on screen.
+    ///
+    /// The two paths a tab leaves by — a tab closing, a window closing — deliberately do *not*
+    /// come through here. They write and then ask when the write is refused, because a buffer on
+    /// its way out has nowhere else to be kept and refusing there would lose it outright.
     fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
+        if !editor::may_save(tab.modified.get(), tab.disk_changed.get()) {
+            if explicit {
+                // A note deleted underneath us is asking to be written back, and its banner's
+                // button already says Save, so Ctrl+S does that rather than offering to
+                // overwrite a file that is not there.
+                match tab.alert() {
+                    Some(Alert::Restore) => self.answer_banner(tab),
+                    _ => self.ask_overwrite(tab),
+                }
+            }
+            return;
+        }
         match self.write_tab(tab, tab.etag.get()) {
             Ok(()) => {
                 if explicit {
                     self.toast("Saved");
                 }
             }
-            Err(SaveError::ChangedOnDisk { .. }) if explicit => self.ask_overwrite(tab),
+            // The etag gate refused: the tab holds the question from now on, whatever asked. It
+            // used to be recorded only for an autosave, so a Ctrl+S that was cancelled left a
+            // blocked tab with no banner on it.
             Err(SaveError::ChangedOnDisk { .. }) => {
                 tab.disk_changed.set(true);
                 tab.show_alert(Alert::Compare);
+                if explicit {
+                    self.ask_overwrite(tab);
+                }
             }
             Err(e) => self.toast(&format!("Save failed: {e}")),
         }
@@ -2045,10 +2071,28 @@ impl App {
     ///
     /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
     /// the user was asked, and has to reload whatever the etag says.
+    ///
+    /// A stat that failed is not an answer and must not read as one. It used to fall in with "no
+    /// file there", which differs from any etag we hold and so raised the banner: on a remote
+    /// vault a dropped ssh connection would report a conflict over a diff holding nothing but the
+    /// user's own edits. Nothing is lost by waiting — a real change fires the watcher again, and
+    /// the etag gate refuses any save that would clobber one in the meantime.
     fn file_changed(&self, tab: &Rc<Tab>) {
-        let disk = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
-            Some(vault) => vault.stat(&tab.rel()).ok().flatten(),
-            None => Etag::of(&tab.path()).ok(),
+        let looked = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.stat(&tab.rel()),
+            None => match Etag::of(&tab.path()) {
+                Ok(etag) => Ok(Some(etag)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(e),
+            },
+        };
+        let disk = match looked {
+            Ok(disk) => disk,
+            Err(e) => {
+                return tracing::debug!(
+                    target: SAVES, rel = %tab.rel(), error = %e, "watcher: could not stat"
+                );
+            }
         };
         let ours = tab.etag.get();
         tracing::debug!(
@@ -2198,7 +2242,7 @@ impl App {
                 {
                     Some(conflict) => self.resolve_conflict(&rel, conflict),
                     None => {
-                        tab.hide_banner();
+                        tab.clear_alert(Alert::Conflict);
                         self.toast("The conflict copy is gone");
                     }
                 }
@@ -2370,7 +2414,7 @@ impl App {
                 // A conflict copy is never a tab of its own; what its removal changes is the
                 // banner on the note it was a copy of.
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
-                    self.sync_conflict_banner(&original);
+                    self.sync_conflict_banner(&original, None);
                 }
                 // A trashed folder arrives as one removal, so everything under it goes too:
                 // a tab whose file is inside a folder that no longer exists has nothing left.
@@ -2404,7 +2448,7 @@ impl App {
                 accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
                 self.sync_active();
             }
-            Event::Conflict { original, .. } => self.sync_conflict_banner(&original),
+            Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
             // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
             // asks git what changed; nothing else in the window is affected.
             Event::GitChanged => {
@@ -2434,13 +2478,17 @@ impl App {
         }
     }
 
-    /// Raise or drop the conflict banner on the tab showing `rel`, from what is on disk now.
+    /// Raise or drop the conflict question on the tab showing `rel`, from what is on disk now.
     ///
     /// DESIGN.md, States: a conflict copy is a state that persists and needs a decision, so it is
-    /// a banner on the note it concerns rather than a toast that scrolls past. It displaces a
-    /// "changed on disk" banner if one is up, which loses no work: `disk_changed` still holds
-    /// autosave back and Ctrl+S still raises the overwrite dialog.
-    fn sync_conflict_banner(&self, rel: &str) {
+    /// a banner on the note it concerns rather than a toast that scrolls past. It queues behind a
+    /// "changed on disk" question rather than displacing it, and taking it down again brings that
+    /// one back instead of clearing the bar.
+    ///
+    /// `trashed` is a copy this window has just sent to the trash. The index is a worker thread
+    /// and a batch behind, so it still lists the file and the banner would otherwise linger until
+    /// `FileRemoved` caught up a few hundred milliseconds later.
+    fn sync_conflict_banner(&self, rel: &str, trashed: Option<&str>) {
         // Conflict copies are a vault idea: they are found by the index.
         if self.vault.is_none() {
             return;
@@ -2448,15 +2496,15 @@ impl App {
         let Some(tab) = self.tab_for(rel) else {
             return;
         };
-        match self
+        let standing = self
             .vault()
             .and_then(|v| v.conflicts_of(rel).ok())
             .unwrap_or_default()
-            .is_empty()
-        {
-            false => tab.show_alert(Alert::Conflict),
-            true if tab.alert() == Some(Alert::Conflict) => tab.hide_banner(),
-            true => {}
+            .iter()
+            .any(|copy| Some(copy.as_str()) != trashed);
+        match standing {
+            true => tab.show_alert(Alert::Conflict),
+            false => tab.clear_alert(Alert::Conflict),
         }
     }
 
@@ -2485,7 +2533,11 @@ impl App {
                     }
                     diff::Choice::KeepMine { edited: Some(text) } => {
                         let Some(vault) = app.vault() else { return };
-                        if let Err(e) = vault.save(&original, &text, None) {
+                        // Gated on the version the resolver was built from, not forced. This is
+                        // a tab and not a modal: it can sit open while the note is typed into
+                        // and autosaved, and a merge decided against an older Mine must not
+                        // undo what has been written since.
+                        if let Err(e) = vault.save(&original, &text, Some(mine_etag)) {
                             return app.toast(&format!("Cannot resolve: {e}"));
                         }
                         true
@@ -2500,7 +2552,8 @@ impl App {
                 if let Some(ops) = app.ops() {
                     fileops::trash(ops, &conflict);
                 }
-                app.sync_conflict_banner(&original);
+                // The copy is named here because the index has not seen it go yet.
+                app.sync_conflict_banner(&original, Some(&conflict));
             }
         };
         let key = format!("conflict:sync:{original}");
