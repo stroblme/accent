@@ -210,6 +210,9 @@ impl Panel {
             None::<gtk::SignalListItemFactory>,
         );
         changes_view.add_css_class("navigation-sidebar");
+        // One click opens the diff, which is the rule the tree already follows: see
+        // `set_single_click_activate` in `tree.rs`.
+        changes_view.set_single_click_activate(true);
 
         let log = gio::ListStore::new::<glib::BoxedAnyObject>();
         let log_view = gtk::ListView::new(
@@ -396,6 +399,23 @@ impl Panel {
             self.do_commit();
         }
         mine
+    }
+
+    /// Put the keyboard in the commit box, which is what `Ctrl+Shift+G` is for once the pane is
+    /// up. From an idle: the chord shows the pane in the same frame, and a widget that is not on
+    /// screen yet cannot take focus.
+    pub fn focus_commit(&self) {
+        if self.stack.visible_child_name().as_deref() != Some("repo") {
+            return;
+        }
+        let message = self.message.clone();
+        glib::idle_add_local_once(move || {
+            // Mapped, not merely visible: a box hidden because there is nothing to commit leaves
+            // its children visible in their own right, and focus would go nowhere.
+            if message.is_mapped() {
+                message.grab_focus();
+            }
+        });
     }
 
     fn wire_changes(self: &Rc<Self>, view: &gtk::ListView) {

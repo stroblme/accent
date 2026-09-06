@@ -718,6 +718,10 @@ struct App {
     sidebar: OnceCell<sidebar::Sidebar>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
+    /// The pane the session asked for and the sidebar could not show yet. Only the Git page is
+    /// ever missing at restore time — it does not exist until the first refresh finds a
+    /// repository — so the first refresh reads this and then clears it for good.
+    pane_wanted: RefCell<String>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
@@ -2530,7 +2534,14 @@ impl App {
                 }
             }
             "pane-tags" => self.show_pane("tags"),
-            "pane-git" => self.show_pane("git"),
+            "pane-git" => {
+                self.show_pane("git");
+                // The chord is how the keyboard reaches the commit box; the pane on its own
+                // leaves the caret in the note.
+                if let Some(git) = self.git.get() {
+                    git.focus_commit();
+                }
+            }
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
@@ -2723,6 +2734,11 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
+        // The session ended on Git and the page has only just appeared. Taken whatever it says,
+        // so a later refresh cannot pull the user back to a pane they have since left.
+        if self.pane_wanted.take() == "git" {
+            self.show_pane("git");
+        }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(git.ignored());
         }
@@ -3183,6 +3199,10 @@ impl App {
         }
         // A state file written before panes were saved leaves the name empty; that keeps
         // whichever pane the sidebar was built showing.
+        //
+        // Remembered as well as shown: the Git page is still hidden here, so asking for it is a
+        // no-op until the first refresh finds a repository (`on_git_changed`).
+        self.pane_wanted.replace(session.pane.clone());
         if let Some(sidebar) = self.sidebar.get().filter(|_| !session.pane.is_empty()) {
             sidebar.show_pane(&session.pane);
         }
@@ -3512,6 +3532,7 @@ fn build_window(
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
+        pane_wanted: RefCell::new(String::new()),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
         terminals: Cell::new(0),
