@@ -1147,10 +1147,13 @@ impl App {
                 return self.open_status(
                     key,
                     "File Too Large",
+                    // The file's size goes through `human`, which is decimal because that is what
+                    // GNOME shows in Files. The cap does not: it is `16 * 1024 * 1024`, and
+                    // decimal units render that as "16.8 MB", which is not the number anyone set.
                     &format!(
-                        "{} is over the {} accent will read into an editor.",
+                        "{} is over the {} MiB accent will read into an editor.",
                         human(size),
-                        human(accent_core::fs::MAX_TEXT)
+                        accent_core::fs::MAX_TEXT / (1024 * 1024)
                     ),
                 );
             }
@@ -3560,7 +3563,7 @@ fn build_window(
     let placeholder = adw::StatusPage::builder()
         .icon_name("text-x-generic-symbolic")
         .title("No Note Open")
-        .description("Pick one in the sidebar, or press Ctrl+P to search.")
+        .description("Pick one in the sidebar, or press Ctrl+E to go to a file.")
         .build();
     // The panes hang off a bin, so a split can swap the whole arrangement for a `GtkPaned` the
     // same way it swaps one branch of it (`panes::split`).
@@ -4775,7 +4778,13 @@ fn label_of_owned(action: &str) -> Option<&'static str> {
 fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
-        ["win.new-note", "win.new-folder", "win.save"].as_slice(),
+        [
+            "win.new-note",
+            "win.new-folder",
+            "win.open-file",
+            "win.save",
+        ]
+        .as_slice(),
         ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
         ["win.preferences", "win.about"].as_slice(),
         // What leaves the vault, in the order of how much it takes with it.
@@ -5035,7 +5044,11 @@ thread_local! {
 /// theme's view colours instead of the scheme's grey, and the completion popup takes the
 /// popover's. The scheme itself stays: dropping it takes the find bar's match highlight with it.
 /// On the `text` node only `color` is ours, because GtkSourceView pins that node's background to
-/// transparent at maximum priority; the background therefore goes on the `textview` node.
+/// transparent at maximum priority; the background therefore goes on the `textview` node. The
+/// gutter is the same correction one node over: a scheme's `line-numbers` style carries a
+/// background of its own, and Solarized's is a shade off its text background (`base2` on `base3`,
+/// `base02` on `base03`), so the line numbers sat in a stripe beside the page. Adwaita happens to
+/// paint the two the same, which is why only Solarized showed it.
 // ponytail: the header rule leans on libadwaita's own header padding (6 above a lone header,
 // 3 + 3 above a stacked one) adding up to the same offset. Reach for `AdwToolbarView`'s spacing
 // API instead if one ever appears; today the class is the only handle on it.
@@ -5071,6 +5084,7 @@ fn install_chrome_css() {
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
+             textview border gutter {{ background-color: var(--view-bg-color); }} \
              GtkSourceAssistant.completion {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); min-width: 240px; \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
