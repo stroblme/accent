@@ -2714,14 +2714,19 @@ impl App {
                 // cannot see is a symlink *inside* the vault pointing outside it, and the answer
                 // here is handed to a WebView, so that is worth one `canonicalize`: a note
                 // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
-                Some(vault) => vault.fetch(rel).ok().filter(|path| {
-                    match (path.canonicalize(), vault.root().canonicalize()) {
-                        (Ok(real), Ok(root)) => real.starts_with(root),
-                        // A remote vault's copy lives in the cache, not under the root, and the
-                        // host already refused anything that escapes it there.
-                        _ => vault.is_remote(),
-                    }
-                }),
+                // `asset` first, because `![[img.png]]` names the file the way a wikilink does
+                // and the index is what knows it lives in `Attachments/`.
+                Some(vault) => vault
+                    .asset(rel)
+                    .and_then(|rel| vault.fetch(&rel).ok())
+                    .filter(|path| {
+                        match (path.canonicalize(), vault.root().canonicalize()) {
+                            (Ok(real), Ok(root)) => real.starts_with(root),
+                            // A remote vault's copy lives in the cache, not under the root, and the
+                            // host already refused anything that escapes it there.
+                            _ => vault.is_remote(),
+                        }
+                    }),
                 None => Some(root.join(rel)),
             },
             glib::clone!(
@@ -2747,7 +2752,7 @@ impl App {
         preview.connect_found(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |count| app.find.set_matches(count)
+            move |label| app.find.set_matches_text(label)
         ));
         *self.preview.borrow_mut() = Some(preview);
     }
