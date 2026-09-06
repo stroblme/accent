@@ -33,10 +33,15 @@ const PULSE: Duration = Duration::from_millis(80);
 const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
 const OUTLINE_ICON: &str = "view-list-bullet-symbolic";
 /// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
-const GIT_ICON: &str = "network-transmit-receive-symbolic";
+/// The reading is the one this pane had all along; the name is not. `network-transmit-receive`
+/// draws as two arrows in Adwaita but as a boxed device in WhiteSur, where the Git tab read as a
+/// network port — the artwork is the theme's, so a name whose glyph is arrows in both is the one
+/// to hold (DESIGN.md, Iconography). Adwaita 50 has no git, branch or history glyph at all, so
+/// this follows the precedent Backlinks set: a mail name whose drawing says the right thing.
+const GIT_ICON: &str = "mail-send-receive-symbolic";
 /// Two machines wired together, which is what a forward is: a port on one cabled to a port on the
-/// other. Git already has the transmit/receive arrows, and the rest of Adwaita's network names are
-/// signal strengths, a server tower or a VPN shield — none of them a port.
+/// other. The rest of Adwaita's network names are signal strengths, a server tower or a VPN
+/// shield — none of them a port.
 const PORTS_ICON: &str = "network-wired-symbolic";
 
 /// How far each heading level is indented in the Outline pane, on the 6/12/18 spacing scale.
