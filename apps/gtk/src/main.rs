@@ -86,6 +86,19 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     ("win.terminal", "New Terminal", &["<Control>j"]),
+    // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
+    // can be named by the terminal's own context menu. Both spellings carry Control and Shift, so
+    // `forwarded` hands them back from a focused shell without being told to.
+    (
+        "win.terminal-copy",
+        "Copy in Terminal",
+        &["<Control><Shift>c"],
+    ),
+    (
+        "win.terminal-paste",
+        "Paste in Terminal",
+        &["<Control><Shift>v"],
+    ),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
@@ -2478,6 +2491,18 @@ impl App {
                 }
             }
             "terminal" => self.open_terminal(),
+            // Nothing to do over any other tab: the editor and the PDF have their own copy, and a
+            // paste into a document is GtkTextView's.
+            "terminal-copy" => {
+                if let Some(Doc::Terminal(term)) = self.active_doc() {
+                    term.copy();
+                }
+            }
+            "terminal-paste" => {
+                if let Some(Doc::Terminal(term)) = self.active_doc() {
+                    term.paste();
+                }
+            }
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -5159,6 +5184,9 @@ mod tests {
         assert!(has("win.terminal", "<Control>j"));
         assert!(has("win.close-tab", "<Control>w"));
         assert!(has("win.new-folder", "<Control><Shift>n"));
+        // Copy and paste came the same way once they stopped being callbacks on the shell.
+        assert!(has("win.terminal-copy", "<Control><Shift>c"));
+        assert!(has("win.terminal-paste", "<Control><Shift>v"));
         // And the zoom chords, because a terminal has a zoom of its own to reach. Every spelling
         // of them, or Ctrl+= would zoom the shell while Ctrl+plus went to readline.
         assert!(has("win.zoom-in", "<Control>plus"));
