@@ -386,9 +386,13 @@ impl Vault {
     /// that could not be written is reported rather than fatal, because a vault where most of the
     /// replacements landed is a real outcome the user has to be told about.
     ///
-    /// ponytail: the rewrite runs on the calling thread, like every other write here. It reads,
-    /// substitutes and fsyncs one note at a time, so a replace across thousands of notes will
-    /// stall the caller; move it to the worker with a progress event if that ever bites.
+    /// It reads, substitutes and fsyncs one note at a time on the calling thread, which costs
+    /// far more than a main loop can spend: 1.9 s across 245 notes and 35 s across 3.3k of them,
+    /// measured on the 3.6k-note generated vault. Callers with a UI run it on a worker thread —
+    /// the desktop app does, and the handle is `Send + Sync` so a binding can too.
+    ///
+    /// ponytail: no progress callback. The one caller shows an indeterminate bar, and a fraction
+    /// nothing renders would be machinery for its own sake. Nor is it undoable — see NOTEPAD.
     pub fn replace_all(
         &self,
         re: &Regex,
@@ -537,8 +541,9 @@ impl Vault {
         self.searcher().search(query, limit, include_ignored)
     }
 
-    /// Exact search: one row per match of `re`, capped at `limit`, plus the total match count.
-    /// `include_ignored` means what it does in [`search`](Self::search).
+    /// Exact search: one row per match of `re`, capped at `limit`, plus how many of them a
+    /// [`replace_all`](Self::replace_all) would rewrite — markdown only, since that is all it
+    /// visits. `include_ignored` means what it does in [`search`](Self::search).
     pub fn grep(
         &self,
         re: &Regex,
@@ -551,18 +556,23 @@ impl Vault {
     /// The same exact search over the files the index does not hold at all: those under a
     /// dependency tree, a `node_modules` or a `target/` the walk deliberately never entered.
     ///
-    /// This is the second half of the Search pane's All toggle. The first half drops the
-    /// git-ignored exclusion, which is a column in the index; this one reaches what was never
-    /// indexed, and it can only be a walk. Everything already in the index is skipped by path, so
-    /// no file is greped twice, and the walk stops as soon as `limit` matches are in hand.
+    /// This is the second half of the Search pane's All toggle, and only the exact-match path
+    /// runs it. The first half drops the git-ignored exclusion, which is a column in the index and
+    /// which ranked search reads as well; this one reaches what was never indexed, and it can only
+    /// be a walk, so a ranked query has no way to fold it in. Everything already in the index is
+    /// skipped by path, so no file is greped twice, and the walk stops as soon as `limit` matches
+    /// are in hand.
     ///
     /// It reads from disk on the caller's thread — the sidebar's search worker — so the index
     /// lock is released before the first file is opened. `.git` and `.trash` stay unreachable,
     /// and so does a symlinked repository's own gitignored build output: that is somebody else's
     /// build tree, and leaving it out is what keeps a per-query walk affordable.
     ///
+    /// Rows only, no count beside them: nothing here can be rewritten by Replace All, which
+    /// visits the indexed notes, so a number of matches past `limit` would have no reader.
+    ///
     /// ponytail: the walk runs per query, with no cache, for as long as All is on.
-    pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<(Vec<Match>, usize)> {
+    pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<Vec<Match>> {
         // Collected before the walk: the guard must not be held across file I/O.
         let known: HashSet<String> = self.searcher().file_paths(true)?.into_iter().collect();
         let opts = walk::ScanOptions {
@@ -574,7 +584,7 @@ impl Vault {
             target_gitignore: true,
             ..walk::ScanOptions::default()
         };
-        let (mut out, mut total) = (Vec::new(), 0usize);
+        let (mut out, mut seen) = (Vec::new(), 0usize);
         for f in walk::scan(&self.root, &opts).files {
             if out.len() >= limit {
                 break;
@@ -584,13 +594,13 @@ impl Vault {
             }
             match fs::read_text(&f.canonical) {
                 Ok(fs::Read::Text(t)) if !t.lossy => {
-                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut out, &mut total);
+                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut out, &mut seen);
                 }
                 Ok(_) => {}
                 Err(e) => tracing::debug!("grep skipped {}: {e}", f.rel_path),
             }
         }
-        Ok((out, total))
+        Ok(out)
     }
 
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
@@ -1424,6 +1434,14 @@ mod tests {
         ));
     }
 
+    /// Replacing across a vault is minutes of fsyncs, so the desktop app runs it on a worker
+    /// thread. That only compiles while the handle can cross one.
+    #[test]
+    fn a_vault_handle_can_cross_a_thread() {
+        fn crosses<T: Send + Sync>() {}
+        crosses::<Vault>();
+    }
+
     #[test]
     fn replace_all_rewrites_every_match_and_reindexes() {
         let f = Fixture::open(VaultConfig::default());
@@ -1465,8 +1483,8 @@ mod tests {
         // The index never walked node_modules, so its own grep cannot see the dependency.
         assert_eq!(f.vault.grep(&re, 10, true).unwrap().1, 1);
 
-        let (hits, total) = f.vault.grep_unindexed(&re, 10).unwrap();
-        assert_eq!(total, 1, "{hits:?}");
+        let hits = f.vault.grep_unindexed(&re, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "node_modules/dep.js");
         assert!(
             !hits.iter().any(|h| h.rel_path == "a.md"),
@@ -1488,7 +1506,30 @@ mod tests {
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
-        assert_eq!(total, 1, "the NUL byte keeps bin.dat out");
+        // Listed, but not counted: the count is what Replace All would rewrite, and it rewrites
+        // notes. (The NUL byte is what keeps bin.dat out of the rows.)
+        assert_eq!(total, 0);
+    }
+
+    /// The Search pane's "Replace All (N)": N is what the rewrite touches, not what the list
+    /// shows. A source file's matches are rows without being edits.
+    #[test]
+    fn the_replace_count_is_notes_while_the_rows_are_every_text_file() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "zorblat once\n");
+        f.write("tool.py", "zorblat\nzorblat again\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let re = search::pattern("zorblat", Options::default()).unwrap();
+        let (hits, total) = f.vault.grep(&re, 10, false).unwrap();
+        assert_eq!(hits.len(), 3, "the list shows both files: {hits:?}");
+        assert_eq!(total, 1, "only the note's match is a rewrite");
+        // And that is exactly what the rewrite then visits.
+        let report = f.vault.replace_all(&re, "zzz", true).unwrap();
+        assert_eq!(report.rewritten, vec!["a.md".to_string()]);
+        assert_eq!(report.matches, 1);
+        assert_eq!(f.read("tool.py"), "zorblat\nzorblat again\n");
     }
 
     /// Only regex mode expands `$1`; a literal replacement is written as typed.

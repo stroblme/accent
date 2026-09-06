@@ -51,8 +51,9 @@ pub enum Query {
     Grep { re: Regex, all: bool },
 }
 
-/// What a [`Query`] answered. The `usize` is the total match count, which the capped list cannot
-/// give and a Replace All has to be measured against.
+/// What a [`Query`] answered. The `usize` is how many of the matches a Replace All would rewrite,
+/// which the capped list cannot give and which is smaller than the list: the rewrite is notes
+/// only, while the rows reach every text file.
 pub enum Answer {
     Fts(Vec<SearchHit>),
     Grep(Vec<Match>, usize),
@@ -68,8 +69,9 @@ pub struct Data {
     pub tags: Box<dyn Fn() -> Vec<(String, i64)>>,
     pub files_with_tag: Box<dyn Fn(&str) -> Vec<String>>,
     /// Rewrite every match in the vault. `literal` says whether `$1` in the replacement is a
-    /// capture group or two characters.
-    pub replace_all: Box<dyn Fn(&Regex, &str, bool)>,
+    /// capture group or two characters. It writes one note at a time, so it runs off the main
+    /// loop and calls `done` there once it has: the pane stays busy until then.
+    pub replace_all: Box<dyn Fn(Regex, String, bool, Box<dyn FnOnce()>)>,
 }
 
 pub struct Sidebar {
@@ -591,8 +593,13 @@ impl Search {
             text: self.entry.text().to_string(),
             options,
             // Replacing is an exact operation, so opening the replace row switches modes too:
-            // a ranked full-text hit is not a place in a file that can be rewritten. All does
-            // not switch modes — ranked search honours it as well now.
+            // a ranked full-text hit is not a place in a file that can be rewritten.
+            //
+            // All still does not switch modes, and that is a decision rather than an oversight:
+            // forcing exact would turn a two-word ranked query into a literal-substring one, so
+            // asking for more files would quietly find fewer, and it would pay `grep_unindexed`'s
+            // walk on every keystroke. What it costs is that the walked trees stay out of ranked
+            // results, which is what All's tooltip now says out loud.
             grep: options.any() || self.replace_row.reveals_child(),
             all: self.toggles[3].is_active(),
         }
@@ -728,20 +735,42 @@ impl Search {
         self.results.splice(0, self.results.n_items(), &objects);
     }
 
-    /// How many matches the query found. The list is capped, the count is not.
+    /// How many matches the button would rewrite — not how many the query found. The list is
+    /// capped and spans every text file; the number is uncapped and counts notes, because that
+    /// is what Replace All opens. A vault of source files would otherwise be promised edits that
+    /// never happen.
     fn set_total(&self, total: usize) {
         self.apply.set_label(&format!("Replace All ({total})"));
         self.apply.set_sensitive(total > 0);
     }
 
     /// Rewrite the vault, then ask the same question again so the rows show what is there now.
+    ///
+    /// The rewrite is one fsync per note and runs on a worker thread; 245 notes took 1.9 s on the
+    /// generated vault and 3.3k took 35 s, all of which the main loop used to spend frozen. The
+    /// pane marks itself busy for the duration instead — the bar pulses, Replace All goes
+    /// insensitive, and a query typed meanwhile waits for the writes rather than racing them.
     fn replace_all(self: &Rc<Self>) {
         let key = self.key();
         let (Ok(re), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
             return;
         };
-        (self.data.replace_all)(&re, &replacement, !key.options.regex);
-        self.start();
+        if self.busy.get() {
+            return;
+        }
+        self.busy.set(true);
+        self.set_busy(true);
+        self.apply.set_sensitive(false);
+        let search = self.clone();
+        (self.data.replace_all)(
+            re,
+            replacement,
+            !key.options.regex,
+            Box::new(move || {
+                search.busy.set(false);
+                search.start();
+            }),
+        );
     }
 }
 
@@ -927,13 +956,20 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         .build();
     replace_toggle.add_css_class("flat");
 
-    // Text buttons, not icons: Adwaita has no glyph for any of the three, and VS Code's `Aa`,
+    // Text buttons, not icons: Adwaita has no glyph for any of the four, and VS Code's `Aa`,
     // `Word` and `.*` are what a user arriving from there already reads.
+    //
+    // All's tooltip says which half of "everywhere" it reaches, because the two halves are not
+    // the same mechanism: dropping the git-ignored exclusion is a column the ranked search reads
+    // too, while the skipped trees are a walk that only the exact-match path makes.
     let toggles = [
         ("Aa", "Match Case"),
         ("Word", "Match Whole Word"),
         (".*", "Use Regular Expression"),
-        ("All", "Search Ignored and Skipped Files Too"),
+        (
+            "All",
+            "Search Ignored Files, and Skipped Ones in an Exact Search",
+        ),
     ]
     .map(|(label, tooltip)| {
         let button = gtk::ToggleButton::builder()
