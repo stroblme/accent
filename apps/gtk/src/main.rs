@@ -80,7 +80,9 @@ const SAVES: &str = "accent::saves";
 
 /// Every user-facing action: the name it answers to, the label the menu and the palette show, and
 /// its accelerators. One table, so an action cannot exist without being reachable and findable
-/// (DESIGN.md, Keyboard). Tab switching is `AdwTabView`'s own set of shortcuts.
+/// (DESIGN.md, Keyboard). Stepping along the bar and picking a tab by number stay `AdwTabView`'s
+/// own shortcuts; the two that walk the tabs in the order they were last used are ours, because
+/// libadwaita has no notion of that order.
 const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
     ("win.open-file", "Open File…", &["<Control>o"]),
@@ -88,6 +90,15 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.upload", "Upload Files…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
+    // Most-recently-used order, so one press is the note before this one. Both spellings of the
+    // backwards chord, because X11 delivers Shift+Tab as `ISO_Left_Tab` and which of the two a
+    // GTK trigger matches is a question of the keymap rather than of the table.
+    ("win.next-tab", "Next Tab", &["<Control>Tab"]),
+    (
+        "win.previous-tab",
+        "Previous Tab",
+        &["<Control><Shift>Tab", "<Control><Shift>ISO_Left_Tab"],
+    ),
     ("win.terminal", "New Terminal", &["<Control>j"]),
     // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
     // can be named by the terminal's own context menu. Both spellings carry Control and Shift, so
@@ -760,6 +771,21 @@ impl Mode {
     }
 }
 
+/// Why a tab was opened, which decides whether it stays.
+///
+/// A tab opened by browsing — a click in the sidebar tree, a search hit, a Git row, a wikilink
+/// followed — is a `Preview`: the next such open closes it and takes its place, so clicking down
+/// a list of notes to see what is in them leaves one tab rather than twenty. Anything the reader
+/// named is `Kept`: the palette, Open File…, a drop, a rename, the command line and the session,
+/// where the file was asked for by name and the tab is meant to stay. A preview tab becomes a
+/// kept one the moment it is edited, its own tab is double-clicked, or it is moved to another
+/// pane, all three being the reader saying they want to keep it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    Kept,
+    Preview,
+}
+
 /// What leaving presentation mode has to put back. The window's size is not part of it: F5 only
 /// takes the chrome away, and fullscreen stays F11's job, so the two compose freely.
 #[derive(Clone, Copy)]
@@ -958,6 +984,43 @@ impl App {
     fn close_page(&self, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.close_page(page);
+        }
+    }
+
+    /// `Ctrl+Tab` and `Ctrl+Shift+Tab`: one step through the active pane's tabs in the order they
+    /// were last used. Per pane, because a pane owns its tab view and its bar is what says which
+    /// notes are in it; a window-wide order would have to move the keyboard across a split, which
+    /// is not what a split is for.
+    fn cycle_tab(&self, forward: bool) {
+        let pane = self.pane();
+        if let Some(page) = pane.step(forward) {
+            pane.tabs.set_selected_page(&page);
+        }
+    }
+
+    /// Put the pane on the tab its reader was on before `page`, in time for `page` to go.
+    ///
+    /// Here rather than after the detach, because `AdwTabView` moves the selection to the left
+    /// neighbour itself the moment the selected page leaves — and by the time anything could
+    /// correct that, the neighbour is the newest thing in the history and the answer is lost.
+    /// Selecting first means the page that is closing is no longer the selected one, so
+    /// libadwaita has nothing to pick.
+    fn select_survivor(&self, page: &adw::TabPage) {
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        if pane.tabs.selected_page().as_ref() != Some(page) {
+            return;
+        }
+        if let Some(next) = pane.survivor(page) {
+            pane.tabs.set_selected_page(&next);
+        }
+    }
+
+    /// This tab is a real one now, not a preview: it was edited, or its tab was double-clicked.
+    fn promote(&self, page: &adw::TabPage) {
+        if let Some(pane) = self.pane_of(page) {
+            pane.keep(page);
         }
     }
 
@@ -1173,6 +1236,16 @@ impl App {
     /// says "text": a `.png` that is really random bytes is still an image tab, but a `.py` full
     /// of NULs is a status page rather than a screen of garbage.
     fn open_path(self: &Rc<Self>, key: &str) {
+        self.open_as(key, Opened::Kept);
+    }
+
+    /// Open `key` for a look: the tab is this pane's preview, and the next such open takes its
+    /// place instead of leaving it behind. What a click in the sidebar and a followed link do.
+    fn open_preview(self: &Rc<Self>, key: &str) {
+        self.open_as(key, Opened::Preview);
+    }
+
+    fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
             // A session pointing at a file that has since been deleted lands here too, and
             // "outside this vault" would be the wrong thing to say about it.
@@ -1181,20 +1254,38 @@ impl App {
                 false => self.toast(&format!("Cannot open {key}: no such file")),
             };
         };
+        // A note that is already open keeps whatever it is: looking at a real tab again does not
+        // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
             return self.reveal_page(doc.page());
         }
         match doc::kind_of(&key) {
-            Kind::Note => self.open_text(&key, &path, Flavour::Note),
-            Kind::Image => self.open_image(&key, &path),
-            Kind::Pdf => self.open_pdf(&key, &path),
-            Kind::Text => self.open_text(&key, &path, flavour_of(&key)),
+            Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
+            Kind::Image => self.open_image(&key, &path, how),
+            Kind::Pdf => self.open_pdf(&key, &path, how),
+            Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
         }
     }
 
     /// Open a note. Kept as its own name because most callers mean exactly this, and it says so.
     fn open_note(self: &Rc<Self>, rel: &str) {
         self.open_path(rel);
+    }
+
+    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before.
+    ///
+    /// The old tab goes after the new one is in place, so the pane never stands empty and closes
+    /// itself out from under the note arriving in it.
+    fn mark_opened(&self, page: &adw::TabPage, how: Opened) {
+        if how != Opened::Preview {
+            return;
+        }
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        if let Some(old) = pane.set_preview(page) {
+            pane.tabs.close_page(&old);
+        }
     }
 
     /// The preferences every text tab is built with.
@@ -1215,7 +1306,7 @@ impl App {
     /// The read happens on a worker thread, so opening a note on a remote vault does not hold the
     /// window for the round trip — measured at ~60 ms to the host this was developed against,
     /// which is four frames. Locally it lands in the same turn of the loop and nothing changes.
-    fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour) {
+    fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour, how: Opened) {
         // A loose file has no vault to ask, so it still reads its own absolute path.
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
         let (key, path) = (key.to_string(), path.to_path_buf());
@@ -1235,7 +1326,7 @@ impl App {
                 return;
             }
             match read {
-                Ok(read) => app.adopt_text(&key, read, flavour),
+                Ok(read) => app.adopt_text(&key, read, flavour, how),
                 Err(_) => tracing::warn!("the reader panicked on {key}"),
             }
         });
@@ -1247,6 +1338,7 @@ impl App {
         key: &str,
         read: std::io::Result<accent_core::fs::Read>,
         flavour: Flavour,
+        how: Opened,
     ) {
         let text = match read {
             Ok(accent_core::fs::Read::Text(text)) => text,
@@ -1255,6 +1347,7 @@ impl App {
                     key,
                     "Binary File",
                     &format!("{} is not text, so there is nothing to edit.", human(size)),
+                    how,
                 );
             }
             Ok(accent_core::fs::Read::TooLarge { size }) => {
@@ -1269,6 +1362,7 @@ impl App {
                         human(size),
                         accent_core::fs::MAX_TEXT / (1024 * 1024)
                     ),
+                    how,
                 );
             }
             Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
@@ -1304,14 +1398,14 @@ impl App {
                 },
             ),
         );
-        self.adopt(tab);
+        self.adopt(tab, how);
         if flavour.is_note() {
             self.sync_conflict_banner(key);
         }
     }
 
     /// A PDF, in the reader.
-    fn open_pdf(self: &Rc<Self>, key: &str, path: &Path) {
+    fn open_pdf(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
         let place = self
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
@@ -1368,6 +1462,7 @@ impl App {
         self.mark_loose(&page, key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
         self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
         self.sync_active();
         self.save_session_soon();
     }
@@ -1378,7 +1473,7 @@ impl App {
     }
 
     /// An image, in a tab that only looks at it.
-    fn open_image(self: &Rc<Self>, key: &str, path: &Path) {
+    fn open_image(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
         // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
         // widget needs real bytes, and the protocol deliberately carries none.
         let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
@@ -1390,7 +1485,7 @@ impl App {
             .vexpand(true)
             .child(&picture)
             .build();
-        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
         // On the scroller rather than the picture: while the image is fitted it is smaller than
         // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
         // phase, ahead of the scroller's own controller, as everywhere else.
@@ -1429,7 +1524,7 @@ impl App {
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
     /// sentence and at most one button).
-    fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str) {
+    fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
         let key = key.to_string();
         let status = adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
@@ -1453,7 +1548,7 @@ impl App {
             }
         ));
         status.set_child(Some(&button));
-        self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic");
+        self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic", how);
     }
 
     /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
@@ -1481,6 +1576,7 @@ impl App {
         key: &str,
         child: &impl IsA<gtk::Widget>,
         icon: &str,
+        how: Opened,
     ) -> Rc<doc::Viewer> {
         let page = self.tabs().append(child);
         page.set_title(doc::file_name(key));
@@ -1490,6 +1586,7 @@ impl App {
         let viewer = doc::Viewer::new(key, page.clone());
         self.docs.borrow_mut().push(wrap(viewer.clone()));
         self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
         self.sync_active();
         self.save_session_soon();
         viewer
@@ -1498,11 +1595,14 @@ impl App {
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
     /// exact match rather than the top of the note.
     ///
+    /// Every row that leads here — a search hit, a tag, a backlink, an outline heading — is a
+    /// single click in the sidebar, so the note opens as a preview.
+    ///
     /// ponytail: the offset is turned into a character offset by counting the text in front of it,
     /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
     /// belongs on `Tab` if anything ever needs it per keystroke.
     fn open_note_at(self: &Rc<Self>, rel: &str, offset: Option<usize>) {
-        self.open_note(rel);
+        self.open_preview(rel);
         let (Some(offset), Some(tab)) = (offset, self.tab_for(rel)) else {
             return;
         };
@@ -1574,7 +1674,7 @@ impl App {
             return self.needs_vault("follow a link");
         };
         match vault.resolve_link(target) {
-            Ok(Some(rel)) => self.open_note(&rel),
+            Ok(Some(rel)) => self.open_preview(&rel),
             Ok(None) => self.toast(&format!("No note called {target}")),
             Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
         }
@@ -1643,7 +1743,7 @@ impl App {
     }
 
     /// Wire a freshly opened tab into the window.
-    fn adopt(self: &Rc<Self>, tab: Rc<Tab>) {
+    fn adopt(self: &Rc<Self>, tab: Rc<Tab>, how: Opened) {
         // Ctrl+scroll zooms the document, as it zooms a PDF page, through the same step and the
         // same readout. On the view rather than on the window: a window-level controller would
         // have to work out which tab the pointer is over and would race the PDF's own, while this
@@ -1693,7 +1793,9 @@ impl App {
         tab.buffer.connect_changed(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.on_edit()
+            #[weak]
+            tab,
+            move |_| app.on_edit(&tab)
         ));
 
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
@@ -1709,6 +1811,7 @@ impl App {
         self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab));
         self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
         self.sync_active();
         self.save_session_soon();
     }
@@ -2674,13 +2777,18 @@ impl App {
 
     // --- chrome --------------------------------------------------------------------------
 
-    /// The point of the app (DESIGN.md): the chrome fades while the user types.
-    fn on_edit(&self) {
-        // Only a keystroke into a focused editor hides it; a reload writing into a background
-        // buffer is not the user typing.
-        if self.focused().is_some_and(|w| w.is::<sourceview5::View>()) {
-            self.hide_chrome();
+    /// A change in `tab`'s buffer: the chrome fades while the user types, which is the point of
+    /// the app (DESIGN.md), and the tab stops being a preview.
+    ///
+    /// Only a keystroke into *this* tab's own view counts. A reload writing into a background
+    /// buffer is not the user typing, and neither is one arriving in another pane while the
+    /// keyboard is here.
+    fn on_edit(&self, tab: &Rc<Tab>) {
+        if !tab.view.has_focus() {
+            return;
         }
+        self.hide_chrome();
+        self.promote(&tab.page);
     }
 
     /// `Root` and `GtkWindow` both spell this `focus`, so the window's one is named here once.
@@ -2788,6 +2896,8 @@ impl App {
                     self.tabs().close_page(&page);
                 }
             }
+            "next-tab" => self.cycle_tab(true),
+            "previous-tab" => self.cycle_tab(false),
             "split-left" => self.split_active(Side::Left),
             "split-right" => self.split_active(Side::Right),
             "split-up" => self.split_active(Side::Up),
@@ -4191,11 +4301,12 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         vault.clone(),
         rows,
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
-        // tree no longer has to agree with it about what a file is.
+        // tree no longer has to agree with it about what a file is. A row opens as a preview:
+        // one click is looking, not keeping.
         glib::clone!(
             #[weak]
             app,
-            move |_kind, rel: &str| app.open_path(rel)
+            move |_kind, rel: &str| app.open_preview(rel)
         ),
         // A drag out of the tree is the only notice the panes get that their drop zones should
         // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
@@ -4316,7 +4427,8 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         }),
         open: Box::new(move |key| {
             if let Some(app) = open.upgrade() {
-                app.open_path(key);
+                // A single click, the same as a tree row, so the same preview tab.
+                app.open_preview(key);
             }
         }),
         open_diff: Box::new(move |key, title, body| {
@@ -4459,12 +4571,16 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 let (tabs, page) = (tabs.clone(), page.clone());
                 app.ask_unsaved(&tab, &e, move |app, close| {
                     if close {
+                        // Only once the answer is in: a cancelled close must not have moved the
+                        // selection off the tab it kept.
+                        app.select_survivor(&page);
                         app.forget_page(&page);
                     }
                     tabs.close_page_finish(&page, close);
                 });
                 return glib::Propagation::Stop;
             }
+            app.select_survivor(page);
             app.forget_page(page);
             glib::Propagation::Proceed
         }
@@ -4482,11 +4598,22 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         app,
         #[weak]
         pane,
-        move |_| {
+        move |tabs| {
+            if let Some(page) = tabs.selected_page() {
+                pane.touch(&page);
+            }
             app.set_active_pane(&pane);
             app.sync_active();
             app.save_session_soon();
         }
+    ));
+    // Double-clicking a tab is what makes a preview tab a real one, which is VS Code's gesture
+    // for it. A pane holding one tab hides its bar, so there is nothing to double-click there —
+    // and nothing to protect either, since a preview tab is only ever replaced by the next one.
+    pane.on_tab_double_click(glib::clone!(
+        #[weak]
+        app,
+        move |page| app.promote(page)
     ));
     // The placeholder is a property of the window, not of one pane: it shows only when no pane
     // has anything left to show, which with panes that close themselves means the last one.
@@ -5067,6 +5194,9 @@ const CAPTURED: &[&str] = &[
 ///
 /// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
 ///   the one budgeted cost: readline loses delete-word, and `Alt+Backspace` still does it.
+/// * `win.next-tab` / `win.previous-tab` (`Ctrl+Tab`) — the same rule as Close Tab, and these
+///   were `AdwTabView`'s own capture-phase chords before they were actions, so a shell never had
+///   them to lose. No readline meaning either: `Ctrl+I` is the completion key, not `Ctrl+Tab`.
 /// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
 ///   scale one have to be reachable from inside one.
 /// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
@@ -5082,6 +5212,8 @@ fn reserved(action: &str, accel: &str) -> bool {
     matches!(
         action,
         "win.close-tab"
+            | "win.next-tab"
+            | "win.previous-tab"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
