@@ -5423,7 +5423,9 @@ fn install_document_font() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&editor::font_css(
         &editor::default_font(),
-        "textview.accent-doc",
+        // The label too: the editor's sticky block title is a line of the document, and a tab at
+        // the default zoom has no `#accent-doc-N` rule of its own for it to pick the face up from.
+        "textview.accent-doc, label.accent-doc",
         1.0,
     ));
     // Replaced rather than stacked, the way `theme::apply` handles its own provider: this runs
