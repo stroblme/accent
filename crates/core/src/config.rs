@@ -27,6 +27,9 @@ theme = "solarized"
 "win.find-next" = ["F3"]
 "win.about" = []
 
+[search]
+exclude = ["Archive", "Code/vendor"]
+
 [vaults."/home/me/Notes"]
 daily_dir = "Daily"
 daily_pattern = "%Y-%m-%d"
@@ -74,8 +77,29 @@ pub struct Config {
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
     /// list means the action is deliberately unbound.
     pub shortcuts: BTreeMap<String, Vec<String>>,
+    pub search: SearchConfig,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
+}
+
+/// What search leaves out on the user's say-so.
+///
+/// The one place a directory can be named. It joins what git ignores in the index's exclusion
+/// column rather than replacing it, so `All` still reaches these directories, the file tree still
+/// lists them dimmed, and — DESIGN.md, Sidebar — a note inside one is still found, because that
+/// column is never applied to markdown. Naming a directory here is therefore a way to quieten
+/// search, never a way to hide a note.
+///
+/// It is deliberately not a walk-level skip: [`crate::walk`]'s own skips keep whole dependency
+/// trees out of the index and out of the kernel's watch budget, which is a different question
+/// from "I would rather not see this folder in my results".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Vault-relative directory paths, applied to every vault; one that names nothing in this
+    /// vault costs nothing. A path, not a glob: `Archive` is the top-level folder of that name,
+    /// and `Code/vendor` is the one inside `Code`.
+    pub exclude: Vec<String>,
 }
 
 impl Default for Config {
@@ -89,6 +113,7 @@ impl Default for Config {
             column_width: 50,
             theme: Theme::System,
             shortcuts: BTreeMap::new(),
+            search: SearchConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -377,6 +402,7 @@ mod tests {
         // the user says "no shortcut at all" rather than "fall back to the default".
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
         assert!(c.shortcuts["win.about"].is_empty());
+        assert_eq!(c.search.exclude, ["Archive", "Code/vendor"]);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
@@ -385,6 +411,7 @@ mod tests {
         assert_eq!(again.theme, Theme::Solarized);
         assert_eq!(again.vaults["/home/me/Notes"].new_note_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
+        assert_eq!(again.search.exclude, c.search.exclude);
     }
 
     #[test]

@@ -3341,22 +3341,27 @@ impl App {
         if self.pane_wanted.take() == "git" {
             self.show_pane("git");
         }
+        // What search leaves out: git's answer and the `[search] exclude` list, as one set. This
+        // is where the two meet, and it is also what gives a vault with no repository an exclusion
+        // mechanism at all — a refresh lands here whether or not it found one.
+        let mut excluded = git.ignored();
+        excluded.extend(self.config.borrow().search.exclude.iter().cloned());
         if let Some(tree) = self.tree.get() {
-            tree.set_ignored(git.ignored());
+            tree.set_ignored(excluded.clone());
         }
         // The same set the tree dims its rows with, handed to the index so every query can leave
         // it out. It is a few thousand `UPDATE`s on a large vault, so it goes to a worker thread;
         // a search already on screen is asked again once it lands, because its answer changed
         // without the box being touched.
         if let Some(vault) = self.vault.clone() {
-            let ignored: Vec<String> = git.ignored().into_iter().collect();
+            let ignored: Vec<String> = excluded.into_iter().collect();
             let weak = Rc::downgrade(self);
             glib::spawn_future_local(async move {
-                let written = gio::spawn_blocking(move || vault.set_git_ignored(&ignored)).await;
+                let written = gio::spawn_blocking(move || vault.set_excluded(&ignored)).await;
                 match written {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => return tracing::warn!("recording the git ignore set: {e}"),
-                    Err(_) => return tracing::warn!("the ignore-set writer panicked"),
+                    Ok(Err(e)) => return tracing::warn!("recording the exclusion set: {e}"),
+                    Err(_) => return tracing::warn!("the exclusion-set writer panicked"),
                 }
                 if let Some(app) = weak.upgrade()
                     && let Some(sidebar) = app.sidebar.get()
