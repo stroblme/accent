@@ -223,10 +223,52 @@ impl Remote {
 
     // ---------------------------------------------------------------- ssh
 
+    /// One ssh invocation, with the environment that makes a prompt reach a dialog instead of a
+    /// terminal nobody is looking at.
+    ///
+    /// `SSH_ASKPASS` points at accent itself: the app re-runs as its own askpass helper when it
+    /// sees `ACCENT_ASKPASS`, so there is one binary to install and the dialog looks like the
+    /// rest of the window. `REQUIRE=force` is what makes ssh use it even when it can see a
+    /// terminal, which it can — the app was very likely started from one.
+    fn ssh(&self, argv: &[String]) -> Command {
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        if let Ok(exe) = std::env::current_exe() {
+            cmd.env("SSH_ASKPASS", exe)
+                .env("SSH_ASKPASS_REQUIRE", "force")
+                .env("ACCENT_ASKPASS", "1");
+        }
+        cmd
+    }
+
+    /// Ask ssh to start forwarding a local port to one on the remote, over the master that is
+    /// already open. Nothing is spawned: the running master takes the instruction and keeps it.
+    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
+        self.control(ssh::forward(&self.url, &self.ctl, local, remote))
+    }
+
+    pub fn cancel_forward(&self, local: u16, remote: u16) -> Result<(), String> {
+        self.control(ssh::cancel(&self.url, &self.ctl, local, remote))
+    }
+
+    fn control(&self, argv: Vec<String>) -> Result<(), String> {
+        let out = self
+            .ssh(&argv)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("cannot run ssh: {e}"))?;
+        match out.status.success() {
+            true => Ok(()),
+            false => Err(match String::from_utf8_lossy(&out.stderr).trim() {
+                "" => "ssh refused".to_string(),
+                why => why.to_string(),
+            }),
+        }
+    }
+
     fn ssh_output(&self, command: &str) -> std::io::Result<Vec<u8>> {
-        let argv = ssh::run(&self.url, &self.ctl, command);
-        let out = Command::new(&argv[0])
-            .args(&argv[1..])
+        let out = self
+            .ssh(&ssh::run(&self.url, &self.ctl, command))
             .stdin(Stdio::null())
             .output()?;
         match out.status.success() {
@@ -238,9 +280,8 @@ impl Remote {
     }
 
     fn ssh_input(&self, command: &str, bytes: &[u8]) -> std::io::Result<()> {
-        let argv = ssh::run(&self.url, &self.ctl, command);
-        let mut child = Command::new(&argv[0])
-            .args(&argv[1..])
+        let mut child = self
+            .ssh(&ssh::run(&self.url, &self.ctl, command))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -294,9 +335,8 @@ impl Remote {
         if let Some(dir) = self.ctl.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let argv = ssh::master(&self.url, &self.ctl);
-        let out = Command::new(&argv[0])
-            .args(&argv[1..])
+        let out = self
+            .ssh(&ssh::master(&self.url, &self.ctl))
             // The master must not read our stdin, and its own prompts go through SSH_ASKPASS.
             .stdin(Stdio::null())
             .output()
@@ -326,9 +366,12 @@ impl Remote {
 
         let total = bytes.len();
         self.say(&format!("Uploading the server (0 / {} MB)", mb(total)));
-        let argv = ssh::run(&self.url, &self.ctl, &ssh::install_server_cmd(&hash));
-        let mut child = Command::new(&argv[0])
-            .args(&argv[1..])
+        let mut child = self
+            .ssh(&ssh::run(
+                &self.url,
+                &self.ctl,
+                &ssh::install_server_cmd(&hash),
+            ))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -365,10 +408,8 @@ impl Remote {
         let local = ssh::server_binary().map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
         let command = ssh::serve_cmd(&ssh::server_path(&ssh::hash_of(&bytes)), &self.url.path);
-        let argv = ssh::run(&self.url, &self.ctl, &command);
-
-        let mut child = Command::new(&argv[0])
-            .args(&argv[1..])
+        let mut child = self
+            .ssh(&ssh::run(&self.url, &self.ctl, &command))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -430,9 +471,8 @@ impl Drop for Remote {
                 }
             }
         }
-        let argv = ssh::exit(&self.url, &self.ctl);
-        let _ = Command::new(&argv[0])
-            .args(&argv[1..])
+        let _ = self
+            .ssh(&ssh::exit(&self.url, &self.ctl))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

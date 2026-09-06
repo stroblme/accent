@@ -24,6 +24,11 @@ PDFIUM_URL    := https://github.com/bblanchon/pdfium-binaries/releases/download/
 PDFIUM_SHA256 := 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
 PDFIUM_LIB    := vendor/pdfium/libpdfium.so
 
+# The remote server is this same CLI, built static so it starts on a host older than this one.
+# Its name on the remote is its own blake3, so a rebuild re-provisions exactly once.
+MUSL_TARGET := x86_64-unknown-linux-musl
+SERVER_BIN  := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(MUSL_TARGET)/$(PROFILE)/accent-cli
+
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
 # Honours CARGO_TARGET_DIR, which parallel worktrees must each set to a directory of their
@@ -41,7 +46,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fat
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium help
+        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -115,6 +120,27 @@ smoke: gtk vault
 	@# which makes this check pass while proving nothing.
 	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
+## server: build the static accent-cli that gets uploaded to a remote host
+#
+# Static because the host may be older than this machine: a binary linked against Tumbleweed's
+# glibc will not start on a stable distro, and the whole point is that any x86_64 Linux works.
+# rusqlite is bundled C, so this needs a musl-capable C compiler, not only the Rust target.
+# `cargo zigbuild` brings its own and needs no root, which is why it is tried first.
+server:
+	@rustup target list --installed | grep -qx '$(MUSL_TARGET)' \
+		|| rustup target add $(MUSL_TARGET)
+	@if command -v cargo-zigbuild >/dev/null && command -v zig >/dev/null; then \
+		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target $(MUSL_TARGET); \
+	elif command -v musl-gcc >/dev/null || command -v x86_64-linux-musl-gcc >/dev/null; then \
+		$(CARGO) build -p accent-cli $(CARGO_PROFILE_FLAG) --target $(MUSL_TARGET); \
+	else \
+		echo "No musl C toolchain. Either (no root needed):"; \
+		echo "    uv tool install cargo-zigbuild && ln -s \$$HOME/.local/share/uv/tools/cargo-zigbuild/bin/python-zig \$$HOME/.local/bin/zig"; \
+		echo "or install your distro's musl package (openSUSE: musl-devel, Debian: musl-tools)."; \
+		exit 1; \
+	fi
+	@echo "Server binary: $(SERVER_BIN)"
+
 ## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
 install: all
 	install -Dm755 $(TARGET_DIR)/accent      $(DESTDIR)$(BINDIR)/accent
@@ -131,6 +157,9 @@ install: all
 	@# without the library. $(LIBDIR)/accent is `../lib/accent` seen from the binary in $(BINDIR),
 	@# which is the second place crates/core/src/pdf.rs looks.
 	-@test -f $(PDFIUM_LIB) && install -Dm755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
+	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
+	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
+	-@test -f $(SERVER_BIN) && install -Dm755 $(SERVER_BIN) $(DESTDIR)$(LIBDIR)/accent/accent-cli
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null

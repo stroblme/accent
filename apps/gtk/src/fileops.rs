@@ -313,6 +313,12 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
     // What lands in the trash should be what the user last saw, so a dirty tab is written out
     // before the file moves. Whatever cannot be written stays visible in its tab's banner.
     (ops.flush)(std::slice::from_ref(&rel));
+    // A vault on another machine has no session bus to ask and no trash to ask it about, so the
+    // only delete there is is the permanent one — which is exactly the case this already has a
+    // dialog for, and it says so in the same words.
+    if ops.vault.is_remote() {
+        return confirm_delete(&ops, &name, &rel);
+    }
     // ponytail: the tree and the index catch up through the watcher rather than being told here.
     // Post the removal explicitly if a trashed file is ever seen lingering in the sidebar.
     gio::File::for_path(&path).trash_async(
@@ -326,7 +332,7 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
             // What a sandbox without a working trash portal answers. There is nothing to fall
             // back to but a permanent delete, and that has to be asked about.
             Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => {
-                confirm_delete(&ops, &path, &name, &rel)
+                confirm_delete(&ops, &name, &rel)
             }
             Err(e) => (ops.toast)(&format!("Cannot trash {name}: {e}")),
         },
@@ -335,11 +341,15 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
 
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
-fn confirm_delete(ops: &Rc<Ops>, path: &Path, name: &str, rel: &str) {
+fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
     let dialog = adw::AlertDialog::new(
         Some("Delete Permanently?"),
         Some(&format!(
-            "{name} cannot be moved to the trash on this system. Deleting it cannot be undone."
+            "{name} cannot be moved to the trash{}. Deleting it cannot be undone.",
+            match ops.vault.is_remote() {
+                true => " on the remote",
+                false => " on this system",
+            }
         )),
     );
     dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
@@ -347,9 +357,8 @@ fn confirm_delete(ops: &Rc<Ops>, path: &Path, name: &str, rel: &str) {
     dialog.set_default_response(Some("cancel"));
     dialog.set_close_response("cancel");
 
-    let (ops, path, name, rel, window) = (
+    let (ops, name, rel, window) = (
         ops.clone(),
-        path.to_path_buf(),
         name.to_string(),
         rel.to_string(),
         ops.window.clone(),
@@ -358,11 +367,7 @@ fn confirm_delete(ops: &Rc<Ops>, path: &Path, name: &str, rel: &str) {
         if response != "delete" {
             return;
         }
-        let removed = match path.is_dir() {
-            true => std::fs::remove_dir_all(&path),
-            false => std::fs::remove_file(&path),
-        };
-        match removed {
+        match ops.vault.delete(&rel) {
             Ok(()) => {
                 (ops.close)(&rel);
                 (ops.toast)(&format!("Deleted {name}"));

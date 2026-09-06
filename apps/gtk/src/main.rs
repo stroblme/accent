@@ -32,7 +32,7 @@ mod theme;
 mod tree;
 mod typing;
 
-use accent_api::{Config, Etag, Event, SaveError, Session, Vault};
+use accent_api::{Config, Etag, Event, SaveError, Session, Vault, ssh};
 use accent_core::config::PdfZoom;
 use accent_core::index::Phase;
 use accent_core::markdown::{Link, LinkKind};
@@ -381,12 +381,19 @@ impl Shell {
             // Launched with no folder: pick up the vault this window was last opened on, and only
             // fall back to the start screen when there is none or it has gone away.
             let last = self.config.borrow().recent_vaults.first().cloned();
-            match last.filter(|path| path.is_dir()) {
+            match last.filter(|path| path.is_dir() || ssh::is_remote_path(path)) {
                 Some(root) => self.open_vault(gtk_app, root, None),
                 None => self.start_screen(gtk_app),
             }
             return glib::ExitCode::SUCCESS;
         };
+        // An address rather than a path, and `create_file_for_arg` would answer a URI whose
+        // `path()` is `None` — "cannot resolve" for something perfectly openable.
+        if let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) {
+            let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
+            self.open_vault(gtk_app, PathBuf::from(address), note);
+            return glib::ExitCode::SUCCESS;
+        }
         // Resolved against the *invoking* process's directory, not this one's: a second
         // `accent notes/x.md` is forwarded here by the single instance, whose cwd is its own.
         let path = match command_line.create_file_for_arg(arg).path() {
@@ -441,23 +448,41 @@ impl Shell {
             window.present();
             return;
         }
-        let window = start::present(gtk_app, self.config.clone(), {
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |root| {
-                shell.open_vault(&gtk_app, root, None);
-                // The start window has done its job. It is reached through the shell rather than
-                // captured, which is what keeps the closure it lives in out of its own cycle.
-                if let Some(window) = shell.start.upgrade() {
-                    window.close();
+        let window = start::present(
+            gtk_app,
+            self.config.clone(),
+            {
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |root| {
+                    shell.open_vault(&gtk_app, root, None);
+                    // The start window has done its job. It is reached through the shell rather than
+                    // captured, which is what keeps the closure it lives in out of its own cycle.
+                    if let Some(window) = shell.start.upgrade() {
+                        window.close();
+                    }
                 }
-            }
-        });
+            },
+            {
+                // An address rather than a directory, and that is the whole difference: a remote
+                // vault is opened, keyed and remembered exactly as a local one is.
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |address: String| {
+                    shell.open_vault(&gtk_app, PathBuf::from(address), None);
+                    if let Some(window) = shell.start.upgrade() {
+                        window.close();
+                    }
+                }
+            },
+        );
         self.start.set(Some(&window));
     }
 
     /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
     /// than opening a second one on the same index, session and watcher. New Window lands on the
     /// start screen instead, where a vault without a window yet is picked.
+    ///
+    /// `root` is what the vault is keyed by: a directory, or an `ssh://` address for one on
+    /// another machine. The two are one list, one rule and one window each.
     fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -1156,7 +1181,13 @@ impl App {
 
     /// A text file in an editor tab, unless its bytes say it is not one after all.
     fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour) {
-        let text = match accent_core::fs::read_text(path) {
+        // Through the vault, which is what makes a tab on a remote note work: a loose file has no
+        // vault to ask, so it still reads its own absolute path.
+        let read = match self.vault().filter(|_| !doc::is_loose_key(key)) {
+            Some(vault) => vault.read_text(key),
+            None => accent_core::fs::read_text(path),
+        };
+        let text = match read {
             Ok(accent_core::fs::Read::Text(text)) => text,
             Ok(accent_core::fs::Read::Binary { size }) => {
                 return self.open_status(
@@ -1224,8 +1255,9 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
         let pdf = pdftab::open(
-            path,
+            &path,
             key,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
@@ -1286,7 +1318,10 @@ impl App {
 
     /// An image, in a tab that only looks at it.
     fn open_image(self: &Rc<Self>, key: &str, path: &Path) {
-        let picture = gtk::Picture::for_filename(path);
+        // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
+        // widget needs real bytes, and the protocol deliberately carries none.
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
+        let picture = gtk::Picture::for_filename(&path);
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
         picture.set_can_shrink(true);
         let scroller = gtk::ScrolledWindow::builder()
@@ -1295,6 +1330,23 @@ impl App {
             .child(&picture)
             .build();
         self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic");
+    }
+
+    /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
+    /// else: the PDF engine, an image, the preview's assets.
+    ///
+    /// ponytail: on a remote vault this downloads on the main thread, so a large PDF holds the
+    /// window for as long as the transfer takes. Move it to a worker thread with the opening
+    /// status the PDF tab already shows if that ever bites.
+    fn local_copy(&self, key: &str) -> Option<PathBuf> {
+        let vault = self.vault()?;
+        match vault.fetch(key) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("fetching {key}: {e}");
+                None
+            }
+        }
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
@@ -1463,13 +1515,16 @@ impl App {
             return path.is_file().then(|| (key.to_string(), path));
         }
         // A window with no vault has nothing to be relative to, so only absolute keys open.
-        let path = self.vault()?.resolve(key).ok()?;
-        if !path.exists() {
+        let vault = self.vault()?;
+        let path = vault.resolve(key).ok()?;
+        // Asked of the vault rather than of this machine: on a remote one the path is the host's
+        // and `exists()` here would answer about a file that was never meant to be here.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
+        if !vault.exists(&key) {
             return None;
         }
         // Normalised, so `./a.md` and `a.md` are one tab rather than two.
-        let key = path.strip_prefix(self.root()).ok()?.to_str()?;
-        Some((key.to_string(), path))
+        Some((key, path))
     }
 
     /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one
@@ -1784,7 +1839,11 @@ impl App {
     /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
     /// the user was asked, and has to reload whatever the etag says.
     fn file_changed(&self, tab: &Rc<Tab>) {
-        let (ours, disk) = (tab.etag.get(), Etag::of(&tab.path()).ok());
+        let disk = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
+            Some(vault) => vault.stat(&tab.rel()).ok().flatten(),
+            None => Etag::of(&tab.path()).ok(),
+        };
+        let ours = tab.etag.get();
         tracing::debug!(
             target: SAVES,
             rel = %tab.rel(),
@@ -1944,7 +2003,11 @@ impl App {
     /// The unsaved buffer against the file underneath it, in the conflict resolver.
     fn compare_with_disk(self: &Rc<Self>, tab: &Rc<Tab>) {
         let rel = tab.rel();
-        let Ok((disk, _)) = accent_core::fs::read_note(&tab.path()) else {
+        let read = match self.vault().filter(|_| !doc::is_loose_key(&rel)) {
+            Some(vault) => vault.read(&rel).map(|(text, _)| text),
+            None => accent_core::fs::read_note(&tab.path()).map(|(text, _)| text),
+        };
+        let Ok(disk) = read else {
             return self.toast(&format!("Cannot read {rel} from disk"));
         };
         let mine = tab.text();
@@ -2372,8 +2435,27 @@ impl App {
         if self.preview.borrow().is_some() {
             return;
         }
+        // The preview's assets come through the vault, so a note's images load whether the file
+        // is on this disk or on a host. A window with no vault has only absolute keys, which the
+        // resolver hands straight back.
+        let vault = self.vault().cloned();
+        let root = self.root();
         let preview = preview::Preview::new(
-            self.root().to_path_buf(),
+            move |rel: &str| match &vault {
+                // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
+                // cannot see is a symlink *inside* the vault pointing outside it, and the answer
+                // here is handed to a WebView, so that is worth one `canonicalize`: a note
+                // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
+                Some(vault) => vault.fetch(rel).ok().filter(|path| {
+                    match (path.canonicalize(), vault.root().canonicalize()) {
+                        (Ok(real), Ok(root)) => real.starts_with(root),
+                        // A remote vault's copy lives in the cache, not under the root, and the
+                        // host already refused anything that escapes it there.
+                        _ => vault.is_remote(),
+                    }
+                }),
+                None => Some(root.join(rel)),
+            },
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -2861,11 +2943,19 @@ impl App {
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         let n = self.terminals.get() + 1;
         self.terminals.set(n);
-        let cwd = cwd.unwrap_or_else(|| match self.vault() {
-            Some(vault) => vault.root().to_path_buf(),
-            None => glib::home_dir(),
-        });
-        let term = terminal::open(&self.tabs(), &cwd, terminal::key(n));
+        // A remote vault's shell opens on the remote, unless the caller named a directory here:
+        // `accent --terminal <dir>` means this machine whatever window it lands in.
+        let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
+            (None, Some(remote)) => terminal::Shell::Remote {
+                argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
+                host: remote.url().host.clone(),
+            },
+            _ => terminal::Shell::Local(cwd.unwrap_or_else(|| match self.vault() {
+                Some(vault) => vault.root(),
+                None => glib::home_dir(),
+            })),
+        };
+        let term = terminal::open(&self.tabs(), &shell, terminal::key(n));
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -3565,11 +3655,17 @@ fn build_window(
     theme::apply(shell.config.borrow().theme);
 
     // No root is a window opened on a file: no index to build, no watcher to run, and nothing
-    // to add to the recent-vaults list.
+    // to add to the recent-vaults list. A root that is an `ssh://` address is a vault on another
+    // machine — it opens the same way and returns just as fast, because the connection is made on
+    // a thread and reports itself through the events like the indexing does.
     let (vault, events) = match &root {
         Some(root) => {
             let vault_config = shell.config.borrow().vault(root);
-            match Vault::open(root, vault_config) {
+            let opened = match ssh::is_remote_path(root) {
+                true => Vault::open_remote(&root.to_string_lossy(), vault_config),
+                false => Vault::open(root, vault_config),
+            };
+            match opened {
                 Ok((vault, events)) => (Some(Arc::new(vault)), Some(events)),
                 Err(e) => {
                     eprintln!("cannot open {}: {e:#}", root.display());
@@ -3594,7 +3690,14 @@ fn build_window(
             .unwrap_or_else(|| root.display().to_string()),
         None => "Accent".to_string(),
     };
-    let title = adw::WindowTitle::new(&vault_name, "");
+    // A remote window says which machine it is on, under the vault's name. Nothing else in the
+    // chrome differs: it is the same vault, and the point is that it behaves like one.
+    let host = root
+        .as_deref()
+        .and_then(|r| ssh::parse(&r.to_string_lossy()).ok())
+        .map(|url| url.host)
+        .unwrap_or_default();
+    let title = adw::WindowTitle::new(&vault_name, &host);
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
     // Hidden until something goes wrong with a connection, which for a local vault is never.
@@ -3887,6 +3990,25 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         }),
+        // Port forwarding is ssh's, over the master that is already open: nothing is spawned and
+        // nothing is kept but the list the pane shows.
+        add_forward: Box::new({
+            let vault = vault.clone();
+            move |local, remote| match vault.remote() {
+                Some(r) => r.forward(local, remote),
+                None => Err("this vault is not remote".to_string()),
+            }
+        }),
+        remove_forward: Box::new({
+            let vault = vault.clone();
+            move |local, remote| {
+                if let Some(r) = vault.remote()
+                    && let Err(e) = r.cancel_forward(local, remote)
+                {
+                    tracing::warn!("cancelling the forward {local} -> {remote}: {e}");
+                }
+            }
+        }),
         replace_all: Box::new(glib::clone!(
             #[weak]
             app,
@@ -3990,6 +4112,9 @@ fn adopt_sidebar(
     // in the main header, and the tree starts level with the tab bar. `AdwHeaderBar` centres a
     // title widget, and the header-to-header size group already keeps the two bands equal, so the
     // switcher needs neither a box around it nor a size group of its own.
+    // A remote vault is the only one with ports to forward, and that is settled when the window
+    // is built rather than discovered later, so unlike the Git pane this needs no refresh to say.
+    pane.set_ports_visible(app.vault().is_some_and(|v| v.is_remote()));
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes dim rather than hide while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");

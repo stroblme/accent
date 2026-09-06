@@ -309,6 +309,10 @@ pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
 // ------------------------------------------------------- server provisioning
 
 /// Where the uploaded `accent-cli` lives on the remote, relative to the login's home.
+/// The one architecture Phase 5 provisions. A host of another shape needs its own build,
+/// which is a build-matrix question rather than a code one.
+pub const MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
+
 pub const SERVER_DIR: &str = ".local/share/accent/server";
 
 /// The binary is named after its own contents, so a mismatched build is a missing file rather than
@@ -384,16 +388,21 @@ pub fn server_binary() -> Result<PathBuf, String> {
         };
     }
     let exe = std::env::current_exe().map_err(|e| format!("cannot find my own path: {e}"))?;
-    let dir = exe.parent().unwrap_or(Path::new("."));
-    let candidates = [
-        dir.join("../lib/accent/accent-cli"),
-        // `target/release/accent` sitting beside `target/x86_64-unknown-linux-musl/release/`.
-        dir.join("../x86_64-unknown-linux-musl/release/accent-cli"),
-    ];
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .ok_or_else(|| "no server binary to upload; run `make server` first".to_string())
+    // Up the ancestors rather than one fixed step: the installed layout puts us in `bin/` beside
+    // `lib/accent`, a development build runs from `target/<profile>/`, and a test binary from
+    // `target/debug/deps/`. Four levels reaches the cargo target directory from all three.
+    for dir in exe.ancestors().skip(1).take(4) {
+        for candidate in [
+            dir.join("lib/accent/accent-cli"),
+            dir.join("../lib/accent/accent-cli"),
+            dir.join(format!("{MUSL_TARGET}/release/accent-cli")),
+        ] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err("no server binary to upload; run `make server` first".to_string())
 }
 
 /// Where files fetched from this remote are kept, under the same short name as the socket.
