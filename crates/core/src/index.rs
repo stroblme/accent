@@ -6,6 +6,7 @@
 use crate::markdown;
 use crate::walk::{self, FileKind, ScanOptions};
 use anyhow::{Context, Result};
+use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -261,6 +262,22 @@ impl Index {
         // during a reconcile would fail with SQLITE_BUSY and the exclusion would silently not
         // apply until the next one.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // [`search`] cuts its snippet inside the query, so the folding it shares with the marking
+        // has to be reachable from SQL. Deterministic and innocuous: it is a pure function of its
+        // arguments and touches nothing outside them.
+        conn.create_scalar_function(
+            "snippet_window",
+            2,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| {
+                Ok(snippet_window(
+                    ctx.get_raw(0).as_str()?,
+                    ctx.get_raw(1).as_str()?,
+                ))
+            },
+        )?;
 
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let has_files: bool = conn
@@ -993,7 +1010,7 @@ impl Index {
     /// two-character one 0.5 s, and `snippet()` was every millisecond of it. It re-derives the
     /// match positions from the term index, which for a prefix term means merging the doclist of
     /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
-    /// same window with `instr` over the body the index already stores costs a tenth of that.
+    /// same window over the body the index already stores costs a tenth of that.
     pub fn search(
         &self,
         query: &str,
@@ -1005,8 +1022,7 @@ impl Index {
             return Ok(Vec::new());
         }
         let mut st = self.conn.prepare_cached(
-            "SELECT f.rel_path, f.title,
-                    substr(notes_fts.body, max(1, instr(lower(notes_fts.body), ?4) - 40), 240)
+            "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4)
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
              WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
                  SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
@@ -1016,8 +1032,8 @@ impl Index {
              ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
         )?;
         let terms = terms(query);
-        // The most specific term makes the most useful window, and SQLite's `lower` is ASCII, so
-        // the needle is folded the same way or `instr` would never find it.
+        // The most specific term makes the most useful window, and it goes in folded because
+        // that is how `snippet_window` reads the body it looks through.
         let window = terms
             .iter()
             .max_by_key(|t| t.len())
@@ -1028,7 +1044,7 @@ impl Index {
                 q,
                 query.trim(),
                 limit as i64,
-                window.to_ascii_lowercase(),
+                fold(window),
                 include_ignored,
                 FileKind::Markdown.as_i64(),
             ],
@@ -1287,35 +1303,103 @@ fn terms(query: &str) -> Vec<&str> {
     query.split_whitespace().collect()
 }
 
-/// Wrap every occurrence of a query term in the guillemets the UI turns into bold, the way FTS5's
-/// own `snippet()` did. The input is the 240-character window SQLite already cut, so this is a
-/// pass over a row of text rather than over a note.
+/// How much of a note a snippet quotes, and how much of that comes before the term it found.
+const SNIPPET_CHARS: usize = 240;
+const SNIPPET_LEAD: usize = 40;
+
+/// U+00C0..U+017F (Latin-1 Supplement and Latin Extended-A) folded to their unaccented ASCII
+/// base, in code-point order; `_` means the character keeps itself, because nothing in ASCII
+/// stands for it (æ, ð, ø, ß, ł and the two multiplication signs). Generated from Unicode NFD by
+/// dropping the combining marks, which is what `remove_diacritics=2` does.
+const LATIN_BASE: &[u8; 192] = b"aaaaaa_ceeeeiiii_nooooo__uuuuy__aaaaaa_ceeeeiiii_nooooo__uuuuy_y\
+                                 aaaaaaccccccccdd__eeeeeeeeeegggggggghh__iiiiiiiii___jjkk_llllll_\
+                                 ___nnnnnn___oooooo__rrrrrrsssssssstttt__uuuuuuuuuuuuwwyyyzzzzzz_";
+
+/// Fold one character the way `notes_fts` matches it: lower case, and a Latin letter stripped of
+/// its diacritics. This is the single place that folding is decided; the window and the marking
+/// both go through it, and they have to agree or a hit is quoted with nothing highlighted in it.
 ///
-/// ponytail: matching is ASCII-case-insensitive rather than the `unicode61 remove_diacritics 2`
-/// tokenizer that ranked the note, and the window carries no leading ellipsis because knowing
-/// where it starts would cost a second `lower(body)` per row. A hit found only through diacritic
-/// folding is therefore quoted without being marked. The snippet is a preview; ranking is exact.
+/// ponytail: `unicode61 remove_diacritics 2` is a table inside SQLite that no SQL function
+/// exposes, so this is an approximation of it — the Latin ranges people actually type, and plain
+/// lower casing everywhere else. That is already more than the ASCII-only `lower()` it replaced.
+fn fold_char(c: char) -> char {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    match u32::from(c).checked_sub(0xC0).map(|i| i as usize) {
+        Some(i) if i < LATIN_BASE.len() && LATIN_BASE[i] != b'_' => char::from(LATIN_BASE[i]),
+        _ => c,
+    }
+}
+
+fn fold(s: &str) -> String {
+    s.chars().map(fold_char).collect()
+}
+
+/// How many bytes of `hay` the folded `needle` matches at its start, or `None` if it does not.
+/// `needle` is folded already; folding `hay` lazily is what keeps the byte offsets those of the
+/// original text, which a fold that shortens `café` to `cafe` would otherwise lose.
+fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
+    let mut want = needle.chars();
+    let mut used = 0;
+    for c in hay.chars() {
+        let Some(w) = want.next() else {
+            return Some(used);
+        };
+        if fold_char(c) != w {
+            return None;
+        }
+        used += c.len_utf8();
+    }
+    want.next().is_none().then_some(used)
+}
+
+/// The stretch of `body` a hit should quote: [`SNIPPET_LEAD`] characters ahead of the first
+/// folded occurrence of `needle`, [`SNIPPET_CHARS`] in all, with `…` on whichever side was cut.
+///
+/// `needle` arrives folded. Finding the window here rather than with SQL's `instr(lower(body))`
+/// is what lets it fold the way the index does: SQLite's `lower` is ASCII, so a note found only
+/// through `cafe` ~ `café` used to fall back to quoting its first 240 characters — which is the
+/// other half of why nothing in it was ever marked.
+fn snippet_window(body: &str, needle: &str) -> String {
+    let hit = body
+        .char_indices()
+        .position(|(i, _)| folded_prefix(&body[i..], needle).is_some())
+        .unwrap_or(0);
+    let start = hit.saturating_sub(SNIPPET_LEAD);
+    let mut rest = body.chars().skip(start);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(rest.by_ref().take(SNIPPET_CHARS));
+    if rest.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Wrap every occurrence of a query term in the guillemets the UI turns into bold, the way FTS5's
+/// own `snippet()` did. The input is the window [`snippet_window`] already cut, so this is a pass
+/// over a row of text rather than over a note, and it folds the same way that cut did.
 fn mark_terms(window: &str, terms: &[&str]) -> String {
-    let lower = window.to_ascii_lowercase();
     let needles: Vec<String> = terms
         .iter()
         .filter(|t| !t.is_empty())
-        .map(|t| t.to_ascii_lowercase())
+        .map(|t| fold(t))
         .collect();
     let mut out = String::with_capacity(window.len() + 8 * needles.len());
-    let mut i = 0;
-    while i < window.len() {
-        match needles.iter().find(|n| lower[i..].starts_with(n.as_str())) {
+    let mut rest = window;
+    while !rest.is_empty() {
+        match needles.iter().find_map(|n| folded_prefix(rest, n)) {
             Some(n) => {
                 out.push('«');
-                out.push_str(&window[i..i + n.len()]);
+                out.push_str(&rest[..n]);
                 out.push('»');
-                i += n.len();
+                rest = &rest[n..];
             }
             None => {
-                let c = window[i..].chars().next().expect("i is a char boundary");
+                let c = rest.chars().next().expect("rest is not empty");
                 out.push(c);
-                i += c.len_utf8();
+                rest = &rest[c.len_utf8()..];
             }
         }
     }
@@ -1491,6 +1575,63 @@ mod tests {
         assert_eq!(mark_terms("nothing here", &words), "nothing here");
         assert_eq!(mark_terms("äöü ferris", &words[..1]), "äöü «ferris»");
         assert_eq!(mark_terms("as is", &terms("")), "as is");
+        // The index folds diacritics to find the note, so the marking folds them to show why.
+        assert_eq!(
+            mark_terms("un café au coin", &terms("cafe")),
+            "un «café» au coin"
+        );
+        assert_eq!(mark_terms("ÄHNLICH", &terms("ahnlich")), "«ÄHNLICH»");
+    }
+
+    #[test]
+    fn folding_is_lower_case_without_the_latin_diacritics() {
+        assert_eq!(fold("Café ÎLE Straße łódź"), "cafe ile straße łodz");
+        // One character in, one out: the window is cut by character position, not by byte.
+        assert_eq!(fold("Ünïcode").chars().count(), "Ünïcode".chars().count());
+    }
+
+    /// A window cut out of the middle of a note says so at the end it cut; one that starts where
+    /// the note does must not claim otherwise.
+    #[test]
+    fn a_snippet_says_which_ends_it_cut() {
+        assert_eq!(snippet_window("a café here", "cafe"), "a café here");
+
+        let long: String = "wide ".repeat(200) + "café";
+        let tail = snippet_window(&long, "cafe");
+        assert!(tail.starts_with('…') && !tail.ends_with('…'), "{tail}");
+        assert!(tail.contains("café"), "{tail}");
+
+        // A term the note does not hold quotes the note's start, so only its end was cut.
+        let head = snippet_window(&long, "zzz");
+        assert!(!head.starts_with('…') && head.ends_with('…'), "{head}");
+    }
+
+    /// The whole of the diacritic path, through SQLite: the tokenizer finds the note through the
+    /// fold, so the window has to be cut around the word that was found and the word marked.
+    #[test]
+    fn a_hit_found_by_folding_is_quoted_around_the_word_it_found() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("Paris.md"),
+            format!("# Paris\n{}\nun café au coin\n", "filler prose ".repeat(60)),
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("cafe", 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "the fold has to find it: {hits:?}");
+        assert!(
+            hits[0].snippet.contains("«café»"),
+            "quoted but not marked: {:?}",
+            hits[0].snippet
+        );
+        assert!(
+            hits[0].snippet.starts_with('…'),
+            "a window cut out of the middle says so: {:?}",
+            hits[0].snippet
+        );
     }
 
     #[test]
