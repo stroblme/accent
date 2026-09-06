@@ -276,6 +276,11 @@ pub fn open(
         Flavour::Code => {}
     }
     buffer.set_text(&text.text);
+    // `set_text` leaves the insert mark where the text ended, so a note opened without one — every
+    // note but a search hit or a template's `{{cursor}}` — had its caret on the last line while the
+    // view sat at the top. Invisible in the editor, but the preview follows the caret, so a note
+    // opened in Split view opened at its end.
+    buffer.place_cursor(&buffer.start_iter());
     // Bracket matching is noise in prose and the point in code.
     buffer.set_highlight_matching_brackets(!flavour.is_note());
     sync_scheme(&buffer);

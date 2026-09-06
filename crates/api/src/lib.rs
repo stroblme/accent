@@ -564,6 +564,20 @@ impl Vault {
         ask!(self, |v: &Local| v.conflicts(), "conflicts", json!([]))
     }
 
+    /// Which vault file an embed names, or `None` when nothing answers to it.
+    ///
+    /// `![[img.png]]` is written the way a wikilink is, so a basename on its own has to be found
+    /// the way `[[note]]` is found — through the index, which knows the file lives in
+    /// `Attachments/`. The path as written wins whenever it is really there, so an embed that
+    /// spells the whole path never takes a second look. Here rather than in the preview because
+    /// nothing about it is the desktop's: the same embeds render on Android.
+    pub fn asset(&self, rel: &str) -> Option<String> {
+        if self.exists(rel) {
+            return Some(rel.to_string());
+        }
+        self.resolve_link(rel).ok().flatten()
+    }
+
     pub fn conflicts_of(&self, rel: &str) -> Result<Vec<String>> {
         ask!(
             self,
@@ -2341,6 +2355,27 @@ mod tests {
             Some("Sub/Meeting Notes.md")
         );
         assert_eq!(f.vault.resolve_link("nothing here").unwrap(), None);
+    }
+
+    #[test]
+    fn an_asset_is_found_by_its_basename() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Attachments/img.png", "not really a png");
+        f.write("Note.md", "![[img.png]]\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        // What the preview is handed for `![[img.png]]`: a basename, and the file is elsewhere.
+        assert_eq!(
+            f.vault.asset("img.png").as_deref(),
+            Some("Attachments/img.png")
+        );
+        // A path that is really there is taken as written.
+        assert_eq!(
+            f.vault.asset("Attachments/img.png").as_deref(),
+            Some("Attachments/img.png")
+        );
+        assert_eq!(f.vault.asset("nowhere.png"), None);
     }
 
     #[test]
