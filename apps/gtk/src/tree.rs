@@ -218,15 +218,7 @@ impl Tree {
 
     /// The row under a pointer position, for the context menu.
     pub fn row_at(&self, x: f64, y: f64) -> Option<(char, String)> {
-        let mut widget = self.view.pick(x, y, gtk::PickFlags::DEFAULT)?;
-        // `pick` lands on the label or the icon; the row identity hangs off the expander above it.
-        let expander = loop {
-            match widget.downcast::<gtk::TreeExpander>() {
-                Ok(expander) => break expander,
-                Err(w) => widget = w.parent()?,
-            }
-        };
-        expander.list_row()?.item().as_ref().and_then(decode)
+        row_at(&self.view, x, y)
     }
 
     /// Expand everything above `rel`, then select it and scroll it into view. False when the path
@@ -267,6 +259,20 @@ fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
     rel.match_indices('/').map(|(at, _)| &rel[..at])
 }
 
+/// The row at a position in the list, as (kind char, rel path), or `None` over the blank area
+/// below the last one.
+fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<(char, String)> {
+    let mut widget = view.pick(x, y, gtk::PickFlags::DEFAULT)?;
+    // `pick` lands on the label or the icon; the row identity hangs off the expander above it.
+    let expander = loop {
+        match widget.downcast::<gtk::TreeExpander>() {
+            Ok(expander) => break expander,
+            Err(w) => widget = w.parent()?,
+        }
+    };
+    expander.list_row()?.item().as_ref().and_then(decode)
+}
+
 /// The row holding `rel`, or `None` while its parent is still collapsed.
 ///
 /// ponytail: a linear scan of the rows the model currently has, which is every *visible* row and
@@ -304,14 +310,119 @@ fn children_model(
     store
 }
 
+/// What a tree-to-tree move travels as, beside the plain string a pane opens.
+///
+/// ponytail: a `GtkStringObject` rather than the `application/x-accent-path` mime the design note
+/// named, because `GtkDropTarget` matches on GType and never on a mime type — a mime would mean
+/// `GtkDropTargetAsync` and reading the drop's stream by hand. What the decision asks for is a
+/// type the panes do not take, and their target takes `AdwTabPage` and `String` only, so a folder
+/// offering this and nothing else cannot be dropped into a pane at all.
+fn move_content(rel: &str) -> gdk::ContentProvider {
+    gdk::ContentProvider::for_value(&gtk::StringObject::new(rel).to_value())
+}
+
+/// What a dropped row is handed to: the path it came from, and the path it goes to.
+type Move = Rc<dyn Fn(&str, &str)>;
+
+/// The path a tree drag is carrying, if it is one.
+fn dragged(value: &glib::Value) -> Option<String> {
+    Some(value.get::<gtk::StringObject>().ok()?.string().to_string())
+}
+
+/// A drop target that moves the dragged file into the directory `dir` answers with for the
+/// pointer position — `Some("")` being the vault root — and refuses the drop where it answers
+/// `None`.
+///
+/// The refusal happens while the pointer is still moving rather than after the drop, so a row
+/// that cannot take what is over it never lights up: a folder onto itself, into what is under it,
+/// or into the folder it is already in are simply not targets. GTK's own `:drop(active)` outline
+/// on the row is then the whole of the feedback, and there is nothing else to draw.
+fn move_target(
+    on_move: &Move,
+    dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
+) -> gtk::DropTarget {
+    let target = gtk::DropTarget::new(gtk::StringObject::static_type(), gdk::DragAction::MOVE);
+    // The dragged path has to be readable while the drag is still in flight, or the decision
+    // could only be taken once the drop had already happened.
+    target.set_preload(true);
+    let dir = Rc::new(dir);
+    let planned = {
+        let dir = dir.clone();
+        move |target: &gtk::DropTarget, x, y| {
+            let from = target.value().as_ref().and_then(dragged)?;
+            let to = crate::fileops::move_dest(&from, &dir(target, x, y)?)?;
+            Some((from, to))
+        }
+    };
+    let planned = Rc::new(planned);
+    // Both, because `enter` is what decides whether the row highlights at all and `motion` is
+    // what corrects it once the preloaded value has arrived.
+    let answer = {
+        let planned = planned.clone();
+        move |target: &gtk::DropTarget, x, y| match planned(target, x, y) {
+            Some(_) => gdk::DragAction::MOVE,
+            None => gdk::DragAction::empty(),
+        }
+    };
+    target.connect_enter({
+        let answer = answer.clone();
+        move |target, x, y| answer(target, x, y)
+    });
+    target.connect_motion(answer);
+    let on_move = on_move.clone();
+    target.connect_drop(move |target, value, x, y| {
+        // The value is handed over here rather than read back off the target, which is the one
+        // place it is certain to have arrived.
+        let (Some(from), Some(dir)) = (dragged(value), dir(target, x, y)) else {
+            return false;
+        };
+        match crate::fileops::move_dest(&from, &dir) {
+            Some(to) => {
+                on_move(&from, &to);
+                true
+            }
+            None => false,
+        }
+    });
+    target
+}
+
+/// The row above the tree naming the vault, and the drop zone for "put it in the vault root".
+///
+/// The blank area below the last row is the other one, and a tree scrolled deep in a large vault
+/// has none, which is what this is for: it is always on screen. A label rather than a list row,
+/// because it stands for what the whole listing is of — there is nothing to open or expand.
+fn root_row(label: &str) -> gtk::Box {
+    let row = gtk::Box::builder()
+        .spacing(6)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(6)
+        .margin_bottom(6)
+        .tooltip_text(label)
+        .build();
+    row.append(&gtk::Image::from_icon_name(icon_name('d')));
+    row.append(
+        &gtk::Label::builder()
+            .label(label.rsplit('/').next().unwrap_or(label))
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .css_classes(["heading"])
+            .build(),
+    );
+    row
+}
+
 /// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row,
 /// `on_drag` with `true` while a row is being dragged out of the tree and `false` when it is over,
-/// so the panes can put their drop zones up for the duration.
+/// so the panes can put their drop zones up for the duration, and `on_move` with the path a row
+/// was dragged from and the path it was dropped onto.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
     on_activate: impl Fn(char, &str) + 'static,
     on_drag: impl Fn(bool) + 'static,
+    on_move: impl Fn(&str, &str) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let ignored: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
@@ -329,8 +440,12 @@ pub fn build(
     // Shared, because `setup` runs once per recycled row widget and both ends of every drag
     // report through the same closure.
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);
+    let moves: Move = Rc::new(on_move);
+    let vault_row = root_row(&root_label);
+    vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
     let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
+    let row_moves = moves.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
         let label = gtk::Label::builder()
@@ -356,23 +471,42 @@ pub fn build(
             tooltip.set_text(Some(&format!("{root_label}/{rel}")));
             true
         });
-        // A row can be dragged into a pane, which opens the note there, or onto a pane's edge,
-        // which splits it. The path travels as a plain string: it is what every drop handler
-        // wants, and it survives the row being recycled under the drag. Directories are not
-        // draggable, having no single note to open.
+        // A row can be dragged into a pane, which opens the note there, onto a pane's edge, which
+        // splits it, or back into the tree, which moves the file. The two travel as two content
+        // types (see `move_content`) and the payload is the path either way, which is what every
+        // drop handler wants and what survives the row being recycled under the drag.
+        //
+        // `MOVE` beside `COPY` so the pointer says which of the two is about to happen. The panes
+        // ask for both and GTK's drop target settles a tie on `COPY`, so what they do is unchanged.
         let source = gtk::DragSource::builder()
-            .actions(gdk::DragAction::COPY)
+            .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
             .build();
         source.connect_prepare(|source, _, _| {
             let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
             let (kind, rel) = expander.list_row()?.item().as_ref().and_then(decode)?;
-            (kind != 'd').then(|| gdk::ContentProvider::for_value(&rel.to_value()))
+            let moving = move_content(&rel);
+            // A directory offers the move type alone: it has no single note to open, so a pane
+            // must never be able to take it.
+            Some(match kind == 'd' {
+                true => moving,
+                false => gdk::ContentProvider::new_union(&[
+                    moving,
+                    gdk::ContentProvider::for_value(&rel.to_value()),
+                ]),
+            })
         });
         let begin = dragging.clone();
         source.connect_drag_begin(move |_, _| begin(true));
         let end = dragging.clone();
         source.connect_drag_end(move |_, _, _| end(false));
         expander.add_controller(source);
+        // Dropped on a row: into the folder, or into the folder holding the file, which is where
+        // that row's New Note would have put one too.
+        expander.add_controller(move_target(&row_moves, |target, _, _| {
+            let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
+            let (kind, rel) = expander.list_row()?.item().as_ref().and_then(decode)?;
+            Some(crate::fileops::row_dir(Some((&rel, kind == 'd'))).to_string())
+        }));
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&expander));
@@ -440,6 +574,15 @@ pub fn build(
             on_activate(kind, &rel);
         }
     });
+    // The blank area below the last row is the vault root, the same place a right-click there
+    // creates in. A drop that landed on a row is that row's own business — its target has already
+    // accepted or refused it — so this one has to answer for the blank area alone, or a refusal
+    // bubbling up out of a row would turn into a move to the root.
+    view.add_controller(move_target(&moves, |target, x, y| {
+        let view = target.widget()?.downcast::<gtk::ListView>().ok()?;
+        row_at(&view, x, y).is_none().then(String::new)
+    }));
+
     let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -453,6 +596,7 @@ pub fn build(
     // scrolled window turns everything that grows afterwards into a scrollbar. If a scrollbar
     // ever comes back, the next dial is setting that inner scrolled window's policies to Never.
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    host.append(&vault_row);
     host.append(&scroller);
     Tree {
         host,
