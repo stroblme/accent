@@ -1,5 +1,13 @@
 //! `gen-vault`: a synthetic Obsidian-shaped vault for tests and benchmarks.
 //!
+//! ```text
+//! cargo run --release -p accent-core --example gen-vault -- testvault --notes 3600 --files 40000
+//! ```
+//!
+//! An example rather than a CLI subcommand: it is repo tooling, not a feature of the app, and
+//! `make vault` is its only caller. Being Rust in the workspace keeps it under the same
+//! `clippy --all-targets` gate and keeps its tests in `cargo test` (`test = true` in Cargo.toml).
+//!
 //! The user's real vault is never read, not even to sample it — this only mimics its *shape*:
 //! folder depth, note-size distribution, wikilinks/embeds, a ~300-tag Zipf pool, Syncthing
 //! conflicts and temp files, `.obsidian/`, a symlinked external code repo, an in-vault `.venv`,
@@ -21,6 +29,53 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+const USAGE: &str = "usage: cargo run -p accent-core --example gen-vault -- \
+<out_dir> [--notes N] [--files N] [--seed N] [--force]";
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut out: Option<PathBuf> = None;
+    let mut notes = 3600usize;
+    let mut files = 40_000usize;
+    let mut seed = 42u64;
+    let mut force = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        let val = args.get(i + 1).map(String::as_str);
+        let need = || val.with_context(|| format!("{flag} needs a value\n{USAGE}"));
+        match flag {
+            "--notes" => {
+                notes = need()?.parse()?;
+                i += 1;
+            }
+            "--files" => {
+                files = need()?.parse()?;
+                i += 1;
+            }
+            "--seed" => {
+                seed = need()?.parse()?;
+                i += 1;
+            }
+            "--force" => force = true,
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return Ok(());
+            }
+            _ if flag.starts_with('-') => bail!("unknown flag {flag}\n{USAGE}"),
+            _ if out.is_none() => out = Some(PathBuf::from(flag)),
+            _ => bail!("one <out_dir> only\n{USAGE}"),
+        }
+        i += 1;
+    }
+
+    let out = out.context(USAGE)?;
+    let s = run(&out, notes, files, seed, force)?;
+    print_summary(&out, &s);
+    Ok(())
+}
 
 // ------------------------------------------------------------------ rng
 
@@ -227,7 +282,7 @@ const CONFS: &[&str] = &["QIP", "IEEE-QCE", "Qiskit-Camp", "APS-March"];
 // ------------------------------------------------------------------ summary
 
 #[derive(Debug, Default, Clone)]
-pub struct Summary {
+struct Summary {
     /// Regular files written inside the vault (symlinks and directories not counted).
     pub files: usize,
     pub dirs: usize,
@@ -892,7 +947,7 @@ fn note_dirs(rng: &mut Rng) -> Vec<String> {
 
 // ------------------------------------------------------------------ run
 
-pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result<Summary> {
+fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result<Summary> {
     let t0 = Instant::now();
     let name = out
         .file_name()
@@ -1321,7 +1376,7 @@ pub fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Re
     })
 }
 
-pub fn print_summary(out: &Path, s: &Summary) {
+fn print_summary(out: &Path, s: &Summary) {
     println!("vault         {}", out.display());
     println!(
         "files         {}  (regular files inside the vault)",

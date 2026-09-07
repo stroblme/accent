@@ -39,6 +39,8 @@ TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(PROFILE)
 VAULT     ?= testvault
 VAULT_NOTES ?= 3600
 VAULT_FILES ?= 40000
+# Repo tooling rather than a CLI subcommand, so the fixtures are not a public feature of the app.
+GEN_VAULT := crates/core/examples/gen-vault.rs
 
 # Headless runs need an X server; :99 is what ROADMAP.md and CI use.
 DISPLAY_NUM ?= 99
@@ -94,7 +96,14 @@ clippy:
 	$(CARGO) clippy --workspace --all-targets --locked --features accent-core/pdf -- -D warnings
 
 ## check: the pre-flight gate, what CI runs
-check: fmt-check clippy test test-pdf
+#
+# The PDF tests run only when libpdfium is already there, so a fresh clone is not forced into a
+# 7 MB download by the gate; `make pdfium` or `make test-pdf` fetches it, and CI does both.
+# The skip is loud on purpose: the tests skip themselves silently without the library.
+check: fmt-check clippy test
+	@if test -f $(PDFIUM_LIB); then $(MAKE) test-pdf; else \
+		echo "SKIPPED the PDF tests: no $(PDFIUM_LIB). Run \`make pdfium\` (or \`make test-pdf\`) to fetch it."; \
+	fi
 
 ## doc: build and open the API documentation
 doc:
@@ -104,11 +113,15 @@ doc:
 run: gtk vault
 	$(TARGET_DIR)/accent $(VAULT)
 
-## vault: generate the dummy vault used by tests and benchmarks (skipped if it exists)
-vault: | $(VAULT)
-$(VAULT):
-	$(CARGO) run $(CARGO_PROFILE_FLAG) -p accent-cli -- \
-		gen-vault $(VAULT) --notes $(VAULT_NOTES) --files $(VAULT_FILES)
+## vault: generate the dummy vault used by tests and benchmarks (regenerated when the generator changes)
+#
+# A plain prerequisite, not order-only: the fixtures are only as good as the generator that wrote
+# them, so an edit to it makes what is on disk stale. `--force` is what lets the recipe write over
+# the directory it just found out of date.
+vault: $(VAULT)
+$(VAULT): $(GEN_VAULT)
+	$(CARGO) run $(CARGO_PROFILE_FLAG) -p accent-core --example gen-vault -- \
+		$(VAULT) --notes $(VAULT_NOTES) --files $(VAULT_FILES) --force
 
 ## smoke: headless start-up check, fails on any GTK critical
 smoke: gtk vault
