@@ -187,9 +187,15 @@ fn classify(ev: &notify::Event) -> Vec<VaultEvent> {
     }
     // A repository's innards, before the vault rules get a chance to drop them. What happened in
     // there does not matter — a commit touches a dozen files under `.git` and the answer to all
-    // of them is the same one refresh — so the kind of change is not carried.
+    // of them is the same one refresh — so the kind of change is not carried. Reads are the one
+    // thing dropped: inotify's mask carries `IN_OPEN`, so the `git status` the pane runs opens
+    // `.git/HEAD` and came back as news for the pane, which asked git again — a refresh a second
+    // for as long as the window was open.
     if let Some(path) = ev.paths.iter().find(|p| in_git(p)) {
-        return vec![VaultEvent::Git(path.clone())];
+        return match ev.kind {
+            EventKind::Access(_) => vec![],
+            _ => vec![VaultEvent::Git(path.clone())],
+        };
     }
     let live: Vec<&PathBuf> = ev.paths.iter().filter(|p| !ignored(p)).collect();
 
@@ -482,6 +488,39 @@ mod tests {
                 vec![p("/v/.syncthing.N.md.tmp")]
             ))
             .is_empty()
+        );
+    }
+
+    /// Reading a repository is not changing it. inotify's mask carries `IN_OPEN`, so every
+    /// `git status` the Git pane runs opens `.git/HEAD` — and reporting that as news made the
+    /// pane ask git again, once a second, forever.
+    #[test]
+    fn a_read_inside_a_git_directory_is_not_a_change() {
+        use notify::event::{AccessKind, AccessMode, DataChange};
+        let p = |s: &str| PathBuf::from(s);
+        let ev = |kind, paths: Vec<PathBuf>| notify::Event {
+            kind,
+            paths,
+            attrs: Default::default(),
+        };
+
+        for kind in [
+            EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            EventKind::Access(AccessKind::Close(AccessMode::Read)),
+            EventKind::Access(AccessKind::Read),
+        ] {
+            assert!(
+                classify(&ev(kind, vec![p("/v/.git/HEAD")])).is_empty(),
+                "{kind:?} is a read"
+            );
+        }
+        assert_eq!(
+            classify(&ev(
+                EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                vec![p("/v/.git/HEAD")]
+            )),
+            vec![VaultEvent::Git(p("/v/.git/HEAD"))],
+            "a write to the same file still is"
         );
     }
 }

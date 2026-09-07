@@ -513,6 +513,8 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         )),
         "git_changed_files" => git_result(git::changed_files(&repo(0)?, &arg::<String>(p, 1)?)),
         "git_submodules" => git_result(git::submodules(&repo(0)?)),
+        "git_branches" => git_result(git::branches(&repo(0)?)),
+        "git_checkout" => git_result(git::checkout(&repo(0)?, &arg::<String>(p, 1)?)),
         "git_commit" => git_result(git::commit(&repo(0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
         "git_sync" => git_result(git::sync(&repo(0)?)),
         "git_stage" => git_result(git::stage(&repo(0)?, &refs(&paths(1)?))),

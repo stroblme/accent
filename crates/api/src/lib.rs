@@ -663,6 +663,24 @@ impl Vault {
         )
     }
 
+    pub fn git_branches(&self, repo: &Repo) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |_: &Local| git::branches(repo).map_err(anyhow::Error::from),
+            "git_branches",
+            json!([repo])
+        )
+    }
+
+    pub fn git_checkout(&self, repo: &Repo, branch: &str) -> Result<()> {
+        ask!(
+            self,
+            |_: &Local| git::checkout(repo, branch).map_err(anyhow::Error::from),
+            "git_checkout",
+            json!([repo, branch])
+        )
+    }
+
     pub fn git_commit(&self, repo: &Repo, message: &str, all: bool) -> Result<String> {
         ask!(
             self,
