@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The completion-kind icons. Adwaita has no glyph for a function or an enum member, so these
+  are shipped with the binary rather than looked up in the theme; the prefix is what
+  `IconTheme::add_resource_path` is pointed at, so GTK finds them by name like any other icon.
+-->
+<gresources>
+  <gresource prefix="/io/github/stroblme/Accent">
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-class-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-constant-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-member-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-field-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-function-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-interface-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-keyword-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-method-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-module-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-snippet-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-struct-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-tag-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-text-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-type-parameter-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-variable-symbolic.svg</file>
+  </gresource>
+</gresources>

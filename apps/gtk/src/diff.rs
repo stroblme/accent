@@ -24,6 +24,9 @@ const TAG_FILLER: &str = "filler";
 /// alpha over the view background so the text on top keeps its contrast either way.
 pub(crate) const ADDED_HUE: (f32, f32, f32) = (0.15, 0.70, 0.35);
 pub(crate) const REMOVED_HUE: (f32, f32, f32) = (0.80, 0.20, 0.25);
+/// Not a diff colour: the amber a warning is underlined in (`diagnostics.rs`). It lives beside
+/// the other two because they are one palette and are mixed by the same [`tint`].
+pub(crate) const WARNING_HUE: (f32, f32, f32) = (0.85, 0.60, 0.10);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
 const CHANGE_ALPHA: f32 = 0.16;

@@ -9,7 +9,8 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, completion, highlight, multicaret, typing};
+use crate::{comment, completion, diagnostics, fold, highlight, multicaret, typing};
+use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{Heading, Link};
 use adw::prelude::*;
@@ -218,6 +219,15 @@ pub struct Tab {
     context: sourceview5::SearchContext,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
+    /// What the language server last said about this file, and the provider that shows the loud
+    /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
+    /// both read it back after the paint.
+    diagnostics: RefCell<Vec<Diagnostic>>,
+    annotations: sourceview5::AnnotationProvider,
+    /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
+    /// hidden right now lives in the buffer's own tag, not here.
+    folds: RefCell<Vec<Fold>>,
+    fold_renderer: fold::Renderer,
     /// The note's headings, for the Outline pane. Produced by the same analysis as the links, so
     /// keeping them costs nothing over throwing them away.
     headings: RefCell<Vec<Heading>>,
@@ -275,6 +285,10 @@ pub fn open(
         Flavour::Csv => highlight::install_csv_tags(&buffer),
         Flavour::Code => {}
     }
+    // Every flavour: a note gets diagnostics too (a dangling wikilink is one), and folds its
+    // sections as a source file folds its functions.
+    diagnostics::install_tags(&buffer);
+    fold::install_tag(&buffer);
     buffer.set_text(&text.text);
     // `set_text` leaves the insert mark where the text ended, so a note opened without one — every
     // note but a search hit or a template's `{{cursor}}` — had its caret on the last line while the
@@ -324,6 +338,14 @@ pub fn open(
     let marks = crate::marks::Renderer::new();
     marks.set_visible(false);
     sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&marks, 1);
+    // The diagnostic gutter and the messages at the ends of the lines. A note's own diagnostics
+    // are hints, which draw neither, so it keeps a clean margin.
+    view.set_show_line_marks(!flavour.is_note());
+    let annotations = sourceview5::AnnotationProvider::new();
+    view.annotations().add_provider(&annotations);
+    // Outside the change bars, next to the text: a chevron is about the block it opens.
+    let folds = crate::fold::Renderer::new();
+    sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&folds, 2);
     // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
     // does nothing is one that makes the user select the line first.
     line_clipboard(&view);
@@ -447,6 +469,10 @@ pub fn open(
         context,
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        diagnostics: RefCell::new(Vec::new()),
+        annotations,
+        folds: RefCell::new(Vec::new()),
+        fold_renderer: folds.clone(),
         headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
@@ -466,6 +492,28 @@ pub fn open(
     tab.set_line_numbers(prefs.line_numbers);
     if text.lossy {
         tab.show_alert(Alert::ReadOnly);
+    }
+
+    // The two gutter icons, and what they say when the pointer rests on one. Installed here
+    // rather than above because the tooltip reads the tab's own diagnostics back.
+    for (category, icon) in [
+        (diagnostics::MARK_ERROR, "dialog-error-symbolic"),
+        (diagnostics::MARK_WARNING, "dialog-warning-symbolic"),
+    ] {
+        let attributes = sourceview5::MarkAttributes::builder()
+            .icon_name(icon)
+            .build();
+        attributes.connect_query_tooltip_text(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            #[upgrade_or_default]
+            move |_, mark| {
+                let line = tab.buffer.iter_at_mark(mark).line().max(0) as u32;
+                diagnostics::messages_on(&tab.diagnostics.borrow(), line)
+            }
+        ));
+        // Above the git change bars, which have no icon and nothing to say.
+        view.set_mark_attributes(category, &attributes, 2);
     }
 
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
@@ -516,6 +564,24 @@ pub fn open(
         #[strong]
         marks,
         move |view| marks.restyle(view)
+    ));
+    // Same resolved foreground, same reason: the underlines and the chevrons are mixed with it.
+    diagnostics::restyle(&buffer, &view);
+    folds.restyle(&view);
+    view.connect_map(glib::clone!(
+        #[strong]
+        buffer,
+        #[strong]
+        folds,
+        move |view| {
+            diagnostics::restyle(&buffer, view);
+            folds.restyle(view);
+        }
+    ));
+    folds.connect_toggle(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |line| tab.toggle_fold(line)
     ));
 
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
@@ -659,7 +725,17 @@ fn line_numbers(
     renderer.connect_query_data(glib::clone!(
         #[strong]
         width,
-        move |renderer, _, line| {
+        move |renderer, lines, line| {
+            // A line hidden inside a fold still reaches here and is laid out with no height, so
+            // its number would be painted on top of the header's. Nothing is the right number.
+            // The signal hands the lines over as a plain `GObject`, hence the cast.
+            if let Some(lines) = lines.downcast_ref::<sourceview5::GutterLines>() {
+                let mode = sourceview5::GutterRendererAlignmentMode::Cell;
+                if lines.line_yrange(line, mode).1 <= 0 {
+                    renderer.set_text("");
+                    return;
+                }
+            }
             let width = width.get();
             renderer.set_text(&format!("{:>width$}", line + 1));
         }
@@ -1031,6 +1107,107 @@ impl Tab {
             Flavour::Code => {}
         }
         self.marks.restyle(&self.view);
+        diagnostics::restyle(&self.buffer, &self.view);
+        self.fold_renderer.restyle(&self.view);
+    }
+
+    /// What the language server last said about this file. Replaces the previous answer whole,
+    /// which is what a publish is; an empty list clears the tab.
+    pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
+        diagnostics::render(&self.buffer, &self.annotations, &items);
+        *self.diagnostics.borrow_mut() = items;
+    }
+
+    /// What is painted now, for the status bar and the hover.
+    pub fn diagnostics(&self) -> std::cell::Ref<'_, Vec<Diagnostic>> {
+        self.diagnostics.borrow()
+    }
+
+    /// The buffer as a plain `GtkTextBuffer`, which is what `fold` works in: nothing it does
+    /// needs GtkSourceView.
+    fn text_buffer(&self) -> &gtk::TextBuffer {
+        self.buffer.upcast_ref()
+    }
+
+    /// What the server says can be folded. Whatever is hidden stays hidden if its header survived
+    /// the re-analysis, at wherever the line has moved to.
+    // The language layer is the caller and arrives with `lang::attach`.
+    #[allow(dead_code)]
+    pub fn set_folds(&self, folds: Vec<Fold>) {
+        fold::resync(self.text_buffer(), &self.folds.borrow(), &folds);
+        self.fold_renderer
+            .set_starts(folds.iter().map(|f| f.start_line as i32).collect());
+        *self.folds.borrow_mut() = folds;
+    }
+
+    /// Open or shut the block whose header is `line`. What the gutter chevron does.
+    pub fn toggle_fold(&self, line: i32) {
+        let known = self
+            .folds
+            .borrow()
+            .iter()
+            .any(|f| f.start_line as i32 == line);
+        if !known {
+            return;
+        }
+        match fold::is_folded(self.text_buffer(), line) {
+            true => fold::unfold(self.text_buffer(), line),
+            false => self.fold_line(line),
+        }
+        self.fold_renderer.queue_draw();
+    }
+
+    fn fold_line(&self, line: i32) {
+        let found = self
+            .folds
+            .borrow()
+            .iter()
+            .find(|f| f.start_line as i32 == line)
+            .copied();
+        if let Some(f) = found {
+            fold::fold(self.text_buffer(), f);
+        }
+    }
+
+    fn caret_line(&self) -> i32 {
+        self.buffer
+            .iter_at_mark(&self.buffer.get_insert())
+            .line()
+            .max(0)
+    }
+
+    /// Fold the innermost block the caret is in.
+    pub fn fold_at_caret(&self) {
+        let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
+        if let Some(f) = found {
+            fold::fold(self.text_buffer(), f);
+            self.fold_renderer.queue_draw();
+        }
+    }
+
+    /// Open the block the caret is on, whether the caret is on its header or inside it.
+    pub fn unfold_at_caret(&self) {
+        let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
+        if let Some(f) = found {
+            fold::unfold(self.text_buffer(), f.start_line as i32);
+            self.fold_renderer.queue_draw();
+        }
+    }
+
+    pub fn fold_all(&self) {
+        // Outermost first, so a nested block is already inside a hidden run and the caret only
+        // has to be moved out once.
+        let mut folds = self.folds.borrow().clone();
+        folds.sort_by_key(|f| f.start_line);
+        for f in folds {
+            fold::fold(self.text_buffer(), f);
+        }
+        self.fold_renderer.queue_draw();
+    }
+
+    pub fn unfold_all(&self) {
+        fold::unfold_all(self.text_buffer());
+        self.fold_renderer.queue_draw();
     }
 
     /// Raise `alert`, which decides both what the banner says and what its button does. It goes
@@ -1502,6 +1679,8 @@ impl Tab {
             (false, _) => self.context.backward(&start),
         };
         if let Some((s, e, _)) = found {
+            // A match inside a folded block opens it, or the selection is invisible.
+            fold::reveal(self.text_buffer(), &s);
             self.buffer.select_range(&s, &e);
             self.view
                 .scroll_to_mark(&self.buffer.get_insert(), 0.1, false, 0.0, 0.5);
@@ -1556,19 +1735,42 @@ impl Tab {
         self.buffer.line_count()
     }
 
+    /// The one way the caret is sent somewhere: open whatever fold is hiding the destination,
+    /// put the caret there, scroll it to `align` down the view and take the focus.
+    ///
+    /// Every jump goes through here — an outline row, a search hit, a go-to line, a definition —
+    /// so none of them can land inside a folded block and leave the window looking unchanged.
+    pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
+        fold::reveal(self.text_buffer(), iter);
+        self.buffer.place_cursor(iter);
+        self.view
+            .scroll_to_mark(&self.buffer.get_insert(), 0.0, true, 0.0, align);
+        self.view.grab_focus();
+    }
+
     /// Put the caret on a 1-based line and column, both clamped to what the note has.
     pub fn goto_line(&self, line: i32, column: i32) {
-        let iter = self.line_iter(line, column);
-        self.buffer.place_cursor(&iter);
-        self.view
-            .scroll_to_mark(&self.buffer.get_insert(), 0.0, true, 0.0, 0.25);
-        self.view.grab_focus();
+        self.jump_to(&self.line_iter(line, column), 0.25);
+    }
+
+    /// Put the caret at a server position, which is zero-based and counts characters.
+    // Go to Definition and the References pane are the callers, and arrive with them.
+    #[allow(dead_code)]
+    pub fn goto_pos(&self, pos: Pos) {
+        self.jump_to(&diagnostics::iter_at(&self.buffer, pos), 0.25);
+    }
+
+    /// Put the caret `chars` characters into the buffer.
+    pub fn goto_offset(&self, chars: usize) {
+        let offset = (chars as i32).clamp(0, self.buffer.char_count());
+        self.jump_to(&self.buffer.iter_at_offset(offset), 0.3);
     }
 
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
     /// number is still being typed.
     pub fn show_line(&self, line: i32) {
         let mut iter = self.line_iter(line, 1);
+        fold::reveal(self.text_buffer(), &iter);
         self.view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.25);
     }
 
