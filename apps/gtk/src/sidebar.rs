@@ -1,4 +1,4 @@
-//! The left sidebar: Files / Search / Tags / Backlinks in a view switcher.
+//! The left sidebar: Files / Search / Tags / References in a view switcher.
 //!
 //! The pane knows nothing about the vault. The file tree arrives as a finished widget and every
 //! query goes through a closure in [`Data`], so this module never touches app state and the
@@ -37,7 +37,7 @@ const OUTLINE_ICON: &str = "view-list-bullet-symbolic";
 /// draws as two arrows in Adwaita but as a boxed device in WhiteSur, where the Git tab read as a
 /// network port — the artwork is the theme's, so a name whose glyph is arrows in both is the one
 /// to hold (DESIGN.md, Iconography). Adwaita 50 has no git, branch or history glyph at all, so
-/// this follows the precedent Backlinks set: a mail name whose drawing says the right thing.
+/// this follows the precedent References set: a mail name whose drawing says the right thing.
 const GIT_ICON: &str = "mail-send-receive-symbolic";
 /// Two machines wired together, which is what a forward is: a port on one cabled to a port on the
 /// other. The rest of Adwaita's network names are signal strengths, a server tower or a VPN
@@ -116,8 +116,11 @@ struct VaultPanes {
     all_toggle: gtk::ToggleButton,
     replace_entry: gtk::Entry,
     restart_search: Rc<dyn Fn()>,
-    backlinks: gtk::StringList,
-    backlinks_stack: gtk::Stack,
+    references: gtk::StringList,
+    references_stack: gtk::Stack,
+    /// The empty page of the References pane. Its words change with what the tab holds — a note
+    /// has backlinks, a source file has references — so they are set rather than built in.
+    references_empty: adw::StatusPage,
     tags_dirty: Rc<Cell<bool>>,
     tags_divider: gtk::Paned,
     /// The Git pane's page, so it can be hidden: a vault under no version control has nothing to
@@ -133,15 +136,17 @@ struct VaultPanes {
 impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
     /// `on_open` is called with a vault-relative path when the user activates a result, a tagged
-    /// file or a backlink, plus the byte offset of the match when the row is one.
+    /// file or a reference, plus the byte offset of the match when the row is one.
+    /// `on_reference` is called with a References row, which carries a line number of its own.
     /// `vault` carries the tree widget and the index closures behind Files, Search, Tags and
-    /// Backlinks; `None` builds a sidebar with only the Outline pane, which is what a window
+    /// References; `None` builds a sidebar with only the Outline pane, which is what a window
     /// opened on a single file has to show. `on_open` is called with a vault-relative path when
-    /// the user activates a result, a tagged file or a backlink, plus the byte offset of the
+    /// the user activates a result, a tagged file or a reference, plus the byte offset of the
     /// match when the row is one.
     pub fn new(
         vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
         on_open: impl Fn(&str, Option<usize>) + 'static,
+        on_reference: impl Fn(&str) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
         let stack = adw::ViewStack::builder().vexpand(true).build();
@@ -168,12 +173,12 @@ impl Sidebar {
                 "user-bookmarks-symbolic",
             );
 
-            let backlinks = gtk::StringList::new(&[]);
-            let backlinks_stack = backlinks_body(&backlinks, on_open.clone());
+            let references = gtk::StringList::new(&[]);
+            let (references_stack, references_empty) = references_body(&references, on_reference);
             stack.add_titled_with_icon(
-                &backlinks_stack,
-                Some("backlinks"),
-                "Backlinks",
+                &references_stack,
+                Some("references"),
+                "References",
                 BACKLINK_ICON,
             );
 
@@ -202,8 +207,7 @@ impl Sidebar {
             (
                 search,
                 tags,
-                backlinks,
-                backlinks_stack,
+                (references, references_stack, references_empty),
                 git_page,
                 git_divider,
                 ports_page,
@@ -234,15 +238,17 @@ impl Sidebar {
             switcher: switcher.upcast(),
             stack,
             panes: panes.map(
-                |(search, tags, backlinks, backlinks_stack, git_page, git_divider, ports_page)| {
+                |(search, tags, references, git_page, git_divider, ports_page)| {
+                    let (references, references_stack, references_empty) = references;
                     VaultPanes {
                         search_entry: search.entry,
                         replace_toggle: search.replace_toggle,
                         all_toggle: search.all_toggle,
                         replace_entry: search.replace_entry,
                         restart_search: search.restart,
-                        backlinks,
-                        backlinks_stack,
+                        references,
+                        references_stack,
+                        references_empty,
                         tags_dirty: tags.dirty,
                         tags_divider: tags.divider,
                         git_page,
@@ -286,18 +292,26 @@ impl Sidebar {
         &self.root
     }
 
-    /// Replace the backlinks list (called when the active tab changes).
-    pub fn set_backlinks(&self, notes: &[String]) {
+    /// Replace what the References pane lists, and say what its emptiness would mean: a note's
+    /// backlinks and a source file's references are the same pane asking different questions.
+    pub fn set_references(&self, rows: &[String], empty: (&str, &str)) {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        let refs: Vec<&str> = notes.iter().map(String::as_str).collect();
+        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
         panes
-            .backlinks
-            .splice(0, panes.backlinks.n_items(), refs.as_slice());
+            .references
+            .splice(0, panes.references.n_items(), rows.as_slice());
+        panes.references_empty.set_title(empty.0);
+        panes.references_empty.set_description(Some(empty.1));
         panes
-            .backlinks_stack
-            .set_visible_child_name(if refs.is_empty() { "empty" } else { "list" });
+            .references_stack
+            .set_visible_child_name(if rows.is_empty() { "empty" } else { "list" });
+    }
+
+    /// Which pane is on screen, for the callers that only refresh what is being looked at.
+    pub fn is_showing(&self, name: &str) -> bool {
+        self.stack.visible_child_name().as_deref() == Some(name)
     }
 
     /// Whether this sidebar has the named pane at all, and is showing it. A window with no vault
@@ -339,7 +353,7 @@ impl Sidebar {
         }
     }
 
-    /// Show a pane by name: "files", "search", "tags", "backlinks", "git", "ports" or "outline",
+    /// Show a pane by name: "files", "search", "tags", "references", "git", "ports" or "outline",
     /// focusing its entry where there is one.
     pub fn show_pane(&self, name: &str) {
         // A pane this sidebar does not have leaves it where it was, which for a window with no
@@ -524,8 +538,8 @@ struct Row {
     snippet: String,
 }
 
-/// A `GtkListView` of plain strings — backlinks and the files carrying a tag are the same row.
-fn path_list(model: &gtk::StringList, on_open: OnOpen) -> gtk::ListView {
+/// A `GtkListView` of plain strings — references and the files carrying a tag are the same row.
+fn path_list(model: &gtk::StringList, on_activate: impl Fn(&str) + 'static) -> gtk::ListView {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
         let label = gtk::Label::builder()
@@ -557,7 +571,7 @@ fn path_list(model: &gtk::StringList, on_open: OnOpen) -> gtk::ListView {
             .and_then(|m| m.item(pos))
             .and_downcast::<gtk::StringObject>()
         {
-            on_open(&s.string(), None);
+            on_activate(&s.string());
         }
     });
     view
@@ -1239,7 +1253,10 @@ fn tags_pane(data: &Rc<Data>, on_open: &OnOpen) -> TagsPane {
     let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     files_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     files_box.append(&heading);
-    files_box.append(&scroller(&path_list(&files, on_open.clone())));
+    files_box.append(&scroller(&path_list(&files, {
+        let on_open = on_open.clone();
+        move |rel: &str| on_open(rel, None)
+    })));
     files_box.set_visible(false);
 
     // A paned rather than a fixed height: the two lists share the pane, and where the user puts
@@ -1613,19 +1630,21 @@ pub fn outline_list<T: Copy + 'static>(
     scroller(&view).upcast()
 }
 
-fn backlinks_body(model: &gtk::StringList, on_open: OnOpen) -> gtk::Stack {
+/// The References pane: the rows, and the page shown instead when there are none.
+fn references_body(
+    model: &gtk::StringList,
+    on_reference: impl Fn(&str) + 'static,
+) -> (gtk::Stack, adw::StatusPage) {
     let stack = gtk::Stack::builder().vexpand(true).build();
-    stack.add_named(
-        &status_page(
-            BACKLINK_ICON,
-            "No Backlinks",
-            "No note links to the open one.",
-        ),
-        Some("empty"),
+    let empty = status_page(
+        BACKLINK_ICON,
+        "No Backlinks",
+        "No note links to the open one.",
     );
-    stack.add_named(&scroller(&path_list(model, on_open)), Some("list"));
+    stack.add_named(&empty, Some("empty"));
+    stack.add_named(&scroller(&path_list(model, on_reference)), Some("list"));
     stack.set_visible_child_name("empty");
-    stack
+    (stack, empty)
 }
 
 #[cfg(test)]
