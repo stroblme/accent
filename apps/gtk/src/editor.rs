@@ -514,7 +514,10 @@ pub fn open(
     width.connect_resize(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_, _, _| tab.set_clamp()
+        move |_, _, _| {
+            tab.set_clamp();
+            tab.update_sticky();
+        }
     ));
 
     // What the top of the view is inside changes on every scroll, and the widget the title has
@@ -1582,6 +1585,13 @@ impl Tab {
     /// blocks at all.
     pub fn update_sticky(&self) {
         if self.flavour == Flavour::Csv {
+            return;
+        }
+        // Before the view is allocated its visible rect is empty and `line_at_y` answers with
+        // whatever line the layout happens to be at, which pinned a heading over a note that was
+        // at its very top. The resize hook recomputes once there is a height.
+        if self.view.height() == 0 {
+            self.sticky_bar.set_visible(false);
             return;
         }
         let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
