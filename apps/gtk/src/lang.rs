@@ -73,8 +73,6 @@ impl State {
     }
 
     /// Whether the "no language server" toast still has to be said, marking it said.
-    // Go to Definition is the caller and arrives with it.
-    #[allow(dead_code)]
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
     }

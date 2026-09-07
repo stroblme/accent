@@ -38,10 +38,10 @@ mod theme;
 mod tree;
 mod typing;
 
-use accent_api::{Config, Etag, Event, SaveError, Session, Vault, ssh};
+use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
 use accent_core::config::PdfZoom;
 use accent_core::index::Phase;
-use accent_core::markdown::{Link, LinkKind};
+use accent_core::markdown::LinkKind;
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
@@ -69,6 +69,11 @@ const RENDER: Duration = Duration::from_millis(300);
 const SESSION: Duration = Duration::from_secs(1);
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
 const POLL: Duration = Duration::from_millis(120);
+/// A jump into a file that is not open yet waits for the read: how often it looks for the tab,
+/// and how many times before it gives up. 300 ms in all, which is five times the ~60 ms a read
+/// from the remote vault this was developed against costs.
+const OPEN_POLL: Duration = Duration::from_millis(30);
+const OPEN_TRIES: usize = 10;
 /// One press of Zoom In or Zoom Out, a tenth of the document font.
 const ZOOM_STEP: f64 = 0.1;
 /// How often the tree may be re-read while the first index is still running, in microseconds:
@@ -198,8 +203,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.reveal-in-sidebar", "Reveal in Sidebar", &[]),
     (
         "win.follow-link",
-        "Follow Link",
-        &["<Control><Shift>Return"],
+        "Go to Definition",
+        &["<Control><Shift>Return", "F12"],
     ),
     // Control+Shift chords, which the terminal's reserved set already lets through, and which no
     // GtkSourceView built-in claims.
@@ -1834,7 +1839,7 @@ impl App {
         tab.connect_follow(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_, link| app.follow(link)
+            move |_| app.go_to_definition()
         ));
         tab.connect_cursor(glib::clone!(
             #[weak(rename_to = app)]
@@ -3192,11 +3197,7 @@ impl App {
             "pane-outline" => self.show_pane("outline"),
             "backlinks" => self.show_pane("backlinks"),
             "view-mode" => self.set_mode(self.mode.get().next()),
-            "follow-link" => {
-                if let Some(link) = self.active().and_then(|tab| tab.link_at_cursor()) {
-                    self.follow(&link);
-                }
-            }
+            "follow-link" => self.go_to_definition(),
             "fold" => {
                 if let Some(tab) = self.active() {
                     tab.fold_at_caret();
@@ -3557,20 +3558,87 @@ impl App {
         }
     }
 
-    fn follow(self: &Rc<Self>, link: &Link) {
-        if link.kind == LinkKind::External {
-            gtk::UriLauncher::new(&link.target).launch(
-                Some(&self.window),
-                gio::Cancellable::NONE,
-                |result| {
-                    if let Err(e) = result {
-                        tracing::warn!("cannot open link in browser: {e}");
-                    }
-                },
-            );
+    /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
+    ///
+    /// An external link under the caret is followed as a link, because that is what the reader
+    /// pointed at; everything else is a question for the language server, whether the tab holds
+    /// a note or a source file.
+    fn go_to_definition(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return;
+        };
+        if let Some(link) = tab
+            .link_at_cursor()
+            .filter(|link| link.kind == LinkKind::External)
+        {
+            return self.launch(&link.target);
+        }
+        let Some(vault) = tab.lang.vault() else {
+            return self.needs_vault("go to a definition");
+        };
+        // Said once per tab: a file whose server is not installed would otherwise toast on every
+        // Ctrl+click, and the answer does not change while the tab is open.
+        if let Some(server) = tab.lang.support().and_then(|s| s.missing) {
+            if tab.lang.claim_toast() {
+                let language = tab.language().unwrap_or_else(|| "this file".to_string());
+                self.toast(&format!(
+                    "No language server for {language} ({server} not found)"
+                ));
+            }
             return;
         }
-        self.open_target(&link.target);
+        let pos = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            lang::flush(tab.clone()).await;
+            let found = vault.definition(&tab.rel(), pos).await;
+            tracing::debug!("definition for {} at {pos:?}: {found:?}", tab.rel());
+            let Some(app) = weak.upgrade() else { return };
+            match found.unwrap_or_default().as_slice() {
+                [] => app.toast("No definition found"),
+                [one] => app.open_at(one),
+                // ponytail: the References pane lists the rest; until it does, the first one is
+                // where a definition with overloads goes.
+                [first, ..] => app.open_at(first),
+            }
+        });
+    }
+
+    /// Open a location and put the caret on it: a URL in the browser, a path in a tab.
+    ///
+    /// A file that is not open yet is read on a worker thread, so its tab arrives a turn or two
+    /// later; the jump waits for it rather than being dropped on the floor.
+    fn open_at(self: &Rc<Self>, loc: &Location) {
+        if loc.is_url() {
+            return self.launch(&loc.path);
+        }
+        let (key, at) = (loc.path.clone(), loc.range.start);
+        match doc::is_loose_key(&key) {
+            // Outside the vault: the same door a file dropped on the window comes through, and
+            // the tab it opens gets no language server of its own.
+            true => self.open_path(&key),
+            false => self.open_preview(&key),
+        }
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            for _ in 0..OPEN_TRIES {
+                let Some(app) = weak.upgrade() else { return };
+                if let Some(tab) = app.tab_for(&key) {
+                    return tab.goto_pos(at);
+                }
+                drop(app);
+                glib::timeout_future(OPEN_POLL).await;
+            }
+        });
+    }
+
+    /// Hand a URL to the desktop.
+    fn launch(&self, uri: &str) {
+        gtk::UriLauncher::new(uri).launch(Some(&self.window), gio::Cancellable::NONE, |result| {
+            if let Err(e) = result {
+                tracing::warn!("cannot open link in browser: {e}");
+            }
+        });
     }
 
     fn show_pane(&self, name: &str) {

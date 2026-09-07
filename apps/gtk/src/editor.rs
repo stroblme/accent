@@ -56,7 +56,6 @@ const DIM: f64 = 0.6;
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
-type LinkHook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>, &Link)>>>;
 
 /// Why a tab's banner is up. The intent is stored rather than re-derived when the button is
 /// pressed, so the button always does what its label says: deriving it from the file system meant
@@ -244,7 +243,7 @@ pub struct Tab {
     on_edited: Hook,
     on_banner: Hook,
     on_cursor: Hook,
-    on_follow: LinkHook,
+    on_follow: Hook,
     /// This tab's document on the vault's language layer: what it can answer, what it last
     /// answered, and the refresh that is still in flight. Empty for a tab outside every vault.
     pub lang: lang::State,
@@ -620,10 +619,16 @@ pub fn open(
             {
                 return;
             }
-            if let Some(link) = tab.link_at(x, y) {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                tab.follow(&link);
+            // The caret goes where the pointer is first: Go to Definition asks about the caret,
+            // and a Ctrl+click means "this one", not "wherever I last typed".
+            let (bx, by) =
+                tab.view
+                    .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            if let Some(iter) = tab.view.iter_at_location(bx, by) {
+                tab.buffer.place_cursor(&iter);
             }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            tab.emit(&tab.on_follow);
         }
     ));
     view.add_controller(click);
@@ -1753,8 +1758,6 @@ impl Tab {
     }
 
     /// Put the caret at a server position, which is zero-based and counts characters.
-    // Go to Definition and the References pane are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn goto_pos(&self, pos: Pos) {
         self.jump_to(&diagnostics::iter_at(&self.buffer, pos), 0.25);
     }
@@ -1803,8 +1806,8 @@ impl Tab {
         *self.on_banner.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Called for a Ctrl+click or a Ctrl+Return on a link.
-    pub fn connect_follow(self: &Rc<Self>, f: impl Fn(&Rc<Tab>, &Link) + 'static) {
+    /// Called for a Ctrl+click in the view or the Go to Definition chord.
+    pub fn connect_follow(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
         *self.on_follow.borrow_mut() = Some(Rc::new(f));
     }
 
@@ -1819,13 +1822,6 @@ impl Tab {
         let f = hook.borrow().clone();
         if let Some(f) = f {
             f(self);
-        }
-    }
-
-    fn follow(self: &Rc<Self>, link: &Link) {
-        let f = self.on_follow.borrow().clone();
-        if let Some(f) = f {
-            f(self, link);
         }
     }
 
