@@ -260,11 +260,14 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
-        // The vault worker is no longer the only writer: [`Index::set_excluded`] writes from
-        // whichever thread the git refresh landed on. Without a timeout, a refresh arriving
-        // during a reconcile would fail with SQLITE_BUSY and the exclusion would silently not
-        // apply until the next one. This alone is not enough: see [`Index::write_tx`] for the
-        // transaction shape without which the handler this installs is never called.
+        // The app writes through the vault worker alone, but nothing here enforces that: the CLI
+        // opens a connection of its own and so does every test, and a second writer must wait for
+        // the first rather than fail. This alone is not enough: see [`Index::write_tx`] for the
+        // transaction shape without which the handler this installs is never called. And it is
+        // not a substitute for one writer either — a waiter can be starved by a writer that takes
+        // the lock back between batches, as a reconcile does, and then it fails after the whole
+        // timeout. That is why [`Index::set_excluded`] is now handed to the worker rather than
+        // written against it.
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         // [`search`] cuts its snippet inside the query, so the folding it shares with the marking
         // has to be reachable from SQL. Deterministic and innocuous: it is a pure function of its
