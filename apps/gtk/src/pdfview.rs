@@ -911,12 +911,16 @@ impl PdfView {
 }
 
 /// Point an adjustment at a content size without disturbing where it is scrolled to.
+///
+/// The upper bound is never below the page size, which GTK asserts on and which a document
+/// smaller than the window otherwise breaks — an A4 sketch in a split pane, or any small page in
+/// a large one. There is nothing to scroll in that case either way: the value clamps to zero.
 fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     let Some(adjustment) = adjustment else {
         return;
     };
     let value = adjustment.value().min((upper - page).max(0.0));
-    adjustment.configure(value, 0.0, upper, page * 0.1, page * 0.9, page);
+    adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
 mod imp {
