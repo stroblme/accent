@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, completion, diagnostics, fold, highlight, multicaret, typing};
+use crate::{comment, completion, diagnostics, fold, highlight, lang, multicaret, typing};
 use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{Heading, Link};
@@ -245,6 +245,9 @@ pub struct Tab {
     on_banner: Hook,
     on_cursor: Hook,
     on_follow: LinkHook,
+    /// This tab's document on the vault's language layer: what it can answer, what it last
+    /// answered, and the refresh that is still in flight. Empty for a tab outside every vault.
+    pub lang: lang::State,
 }
 
 /// Open `key` in a new tab of `tabs`, with `text` already read from disk.
@@ -485,6 +488,7 @@ pub fn open(
         on_banner: RefCell::new(None),
         on_cursor: RefCell::new(None),
         on_follow: RefCell::new(None),
+        lang: lang::State::default(),
     });
     tab.set_font(prefs.font.as_deref(), zoom);
     tab.set_spellcheck(prefs.spellcheck);
@@ -1018,12 +1022,16 @@ impl Tab {
     }
 
     /// A rename landed: point the tab at the new path without losing the buffer.
-    pub fn retarget(&self, root: &Path, new_rel: &str) {
+    pub fn retarget(self: &Rc<Self>, root: &Path, new_rel: &str) {
+        let old_rel = self.rel();
         *self.rel.borrow_mut() = new_rel.to_string();
         *self.path.borrow_mut() = root.join(new_rel);
         self.page.set_title(&self.tab_title());
         self.page
             .set_tooltip(&crate::fileops::display_path(root, new_rel));
+        // A language server keys its documents by URI and knows nothing of the move, so the old
+        // path is closed and the new one opened.
+        lang::retarget(self, &old_rel);
     }
 
     pub fn text(&self) -> String {
@@ -1131,8 +1139,6 @@ impl Tab {
 
     /// What the server says can be folded. Whatever is hidden stays hidden if its header survived
     /// the re-analysis, at wherever the line has moved to.
-    // The language layer is the caller and arrives with `lang::attach`.
-    #[allow(dead_code)]
     pub fn set_folds(&self, folds: Vec<Fold>) {
         fold::resync(self.text_buffer(), &self.folds.borrow(), &folds);
         self.fold_renderer
@@ -1960,8 +1966,10 @@ impl Tab {
 }
 
 impl Drop for Tab {
-    /// A closed tab takes its pending timeouts and its font provider with it.
+    /// A closed tab takes its pending timeouts, its font provider and its document on the
+    /// language layer with it.
     fn drop(&mut self) {
+        lang::detach(self);
         for pending in [&self.debounce, &self.autosave, &self.cursor] {
             if let Some(id) = pending.borrow_mut().take() {
                 id.remove();
