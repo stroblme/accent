@@ -1564,18 +1564,21 @@ pub fn outline_note(title: &str, body: &str) -> gtk::Widget {
     status_page(OUTLINE_ICON, title, body).upcast()
 }
 
-/// A note's headings as rows that jump to them: `(level, text, byte offset into the note)`.
+/// An outline as rows that jump: `(level, text, where a click goes)`.
 ///
-/// Indented by level rather than nested in a tree: a heading list is read top to bottom, and an
+/// Generic in what a row jumps to, because the two callers mean different things by it: a text
+/// tab's symbols carry a position in the buffer and a PDF's bookmarks carry a page number.
+///
+/// Indented by level rather than nested in a tree: an outline is read top to bottom, and an
 /// expander per row would hide exactly what the pane exists to show.
-pub fn outline_list(
-    headings: &[(u8, String, usize)],
-    on_jump: impl Fn(usize) + 'static,
+pub fn outline_list<T: Copy + 'static>(
+    rows: &[(u8, String, T)],
+    on_jump: impl Fn(T) + 'static,
 ) -> gtk::Widget {
-    let texts: Vec<&str> = headings.iter().map(|(_, text, _)| text.as_str()).collect();
+    let texts: Vec<&str> = rows.iter().map(|(_, text, _)| text.as_str()).collect();
     let model = gtk::StringList::new(&texts);
-    let levels: Vec<u8> = headings.iter().map(|(level, _, _)| *level).collect();
-    let offsets: Vec<usize> = headings.iter().map(|(_, _, at)| *at).collect();
+    let levels: Vec<u8> = rows.iter().map(|(level, _, _)| *level).collect();
+    let targets: Vec<T> = rows.iter().map(|(_, _, at)| *at).collect();
 
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(|_, item| {
@@ -1602,8 +1605,8 @@ pub fn outline_list(
     let view = gtk::ListView::new(Some(gtk::SingleSelection::new(Some(model))), Some(factory));
     view.add_css_class("navigation-sidebar");
     view.set_single_click_activate(true);
-    view.connect_activate(move |_, pos| {
-        if let Some(at) = offsets.get(pos as usize) {
+    view.connect_activate(move |_, row| {
+        if let Some(at) = targets.get(row as usize) {
             on_jump(*at);
         }
     });
