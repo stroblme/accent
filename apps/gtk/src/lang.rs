@@ -91,11 +91,11 @@ pub fn pos_of(iter: &gtk::TextIter) -> Pos {
 pub fn language_id(tab: &Tab) -> String {
     match tab.flavour() {
         Flavour::Note => "markdown".to_string(),
+        // No language at all is `text`, which is what the word suggestions are keyed on.
         _ => tab
             .buffer
             .language()
-            .map(|l| l.id().to_string())
-            .unwrap_or_default(),
+            .map_or_else(|| "text".to_string(), |l| l.id().to_string()),
     }
 }
 
