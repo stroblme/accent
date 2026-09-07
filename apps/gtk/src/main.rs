@@ -9,6 +9,7 @@ mod askpass;
 mod comment;
 mod completion;
 mod connect;
+mod diagnostics;
 mod diff;
 mod doc;
 mod editor;
@@ -2551,8 +2552,15 @@ impl App {
                 self.show_connection_banner(&why);
             }
             Event::Error(message) => self.toast(&message),
-            // ponytail: painted once the editor learns to (Phase 6, GTK slice).
-            Event::Diagnostics { .. } => {}
+            Event::Diagnostics { rel, items } => {
+                if let Some(tab) = self.tab_for(&rel) {
+                    tab.set_diagnostics(items);
+                    // The count lives in the status bar, which only speaks for the active tab.
+                    if self.is_active(&tab) {
+                        self.sync_status();
+                    }
+                }
+            }
         }
     }
 
@@ -3294,18 +3302,19 @@ impl App {
     /// that exists only while an open is in flight.
     /// The file's own facts in the status bar: what it is, and for a note how long it is.
     fn sync_status(&self) {
-        let (kind, words) = match self.active_doc() {
+        let (kind, facts) = match self.active_doc() {
             Some(Doc::Text(tab)) => match tab.flavour() {
                 editor::Flavour::Note => (
                     Some("Markdown".to_string()),
-                    Some(statusbar::word_count(&tab.text())),
+                    Some(statusbar::words_label(statusbar::word_count(&tab.text()))),
                 ),
+                // A code tab counts what is wrong with it instead: words are a prose fact.
                 editor::Flavour::Code => (
                     Some(statusbar::code_label(
                         tab.language().as_deref(),
                         &tab.encoding_label(),
                     )),
-                    None,
+                    diagnostics::counts(&tab.diagnostics()),
                 ),
                 editor::Flavour::Csv => (
                     Some(statusbar::code_label(Some("CSV"), &tab.encoding_label())),
@@ -3318,7 +3327,7 @@ impl App {
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
-        self.statusbar.set_words(words);
+        self.statusbar.set_facts(facts.as_deref());
         self.sync_branch();
     }
 

@@ -110,8 +110,10 @@ impl Bar {
         set(&self.kind, text);
     }
 
-    pub fn set_words(&self, count: Option<usize>) {
-        set(&self.words, count.map(words_label).as_deref());
+    /// The document's own count, whatever it counts: a note's words, a code tab's errors and
+    /// warnings. One slot, because a tab has one such fact and it is the same corner of the bar.
+    pub fn set_facts(&self, text: Option<&str>) {
+        set(&self.words, text);
     }
 
     /// The zoom, while it is worth saying: "110 %", or a PDF's "Fit Width" / "Fit Page".

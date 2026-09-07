@@ -9,7 +9,8 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, completion, highlight, multicaret, typing};
+use crate::{comment, completion, diagnostics, highlight, multicaret, typing};
+use accent_api::Diagnostic;
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{Heading, Link};
 use adw::prelude::*;
@@ -218,6 +219,11 @@ pub struct Tab {
     context: sourceview5::SearchContext,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
+    /// What the language server last said about this file, and the provider that shows the loud
+    /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
+    /// both read it back after the paint.
+    diagnostics: RefCell<Vec<Diagnostic>>,
+    annotations: sourceview5::AnnotationProvider,
     /// The note's headings, for the Outline pane. Produced by the same analysis as the links, so
     /// keeping them costs nothing over throwing them away.
     headings: RefCell<Vec<Heading>>,
@@ -275,6 +281,8 @@ pub fn open(
         Flavour::Csv => highlight::install_csv_tags(&buffer),
         Flavour::Code => {}
     }
+    // Every flavour: a note gets diagnostics too (a dangling wikilink is one).
+    diagnostics::install_tags(&buffer);
     buffer.set_text(&text.text);
     // `set_text` leaves the insert mark where the text ended, so a note opened without one — every
     // note but a search hit or a template's `{{cursor}}` — had its caret on the last line while the
@@ -324,6 +332,11 @@ pub fn open(
     let marks = crate::marks::Renderer::new();
     marks.set_visible(false);
     sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&marks, 1);
+    // The diagnostic gutter and the messages at the ends of the lines. A note's own diagnostics
+    // are hints, which draw neither, so it keeps a clean margin.
+    view.set_show_line_marks(!flavour.is_note());
+    let annotations = sourceview5::AnnotationProvider::new();
+    view.annotations().add_provider(&annotations);
     // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
     // does nothing is one that makes the user select the line first.
     line_clipboard(&view);
@@ -447,6 +460,8 @@ pub fn open(
         context,
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        diagnostics: RefCell::new(Vec::new()),
+        annotations,
         headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
@@ -466,6 +481,28 @@ pub fn open(
     tab.set_line_numbers(prefs.line_numbers);
     if text.lossy {
         tab.show_alert(Alert::ReadOnly);
+    }
+
+    // The two gutter icons, and what they say when the pointer rests on one. Installed here
+    // rather than above because the tooltip reads the tab's own diagnostics back.
+    for (category, icon) in [
+        (diagnostics::MARK_ERROR, "dialog-error-symbolic"),
+        (diagnostics::MARK_WARNING, "dialog-warning-symbolic"),
+    ] {
+        let attributes = sourceview5::MarkAttributes::builder()
+            .icon_name(icon)
+            .build();
+        attributes.connect_query_tooltip_text(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            #[upgrade_or_default]
+            move |_, mark| {
+                let line = tab.buffer.iter_at_mark(mark).line().max(0) as u32;
+                diagnostics::messages_on(&tab.diagnostics.borrow(), line)
+            }
+        ));
+        // Above the git change bars, which have no icon and nothing to say.
+        view.set_mark_attributes(category, &attributes, 2);
     }
 
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
@@ -516,6 +553,13 @@ pub fn open(
         #[strong]
         marks,
         move |view| marks.restyle(view)
+    ));
+    // Same resolved foreground, same reason: the underlines are mixed with it.
+    diagnostics::restyle(&buffer, &view);
+    view.connect_map(glib::clone!(
+        #[strong]
+        buffer,
+        move |view| diagnostics::restyle(&buffer, view)
     ));
 
     // Weak throughout: the buffer, the controllers and the timeouts all live inside the tab, so a
@@ -1031,6 +1075,19 @@ impl Tab {
             Flavour::Code => {}
         }
         self.marks.restyle(&self.view);
+        diagnostics::restyle(&self.buffer, &self.view);
+    }
+
+    /// What the language server last said about this file. Replaces the previous answer whole,
+    /// which is what a publish is; an empty list clears the tab.
+    pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
+        diagnostics::render(&self.buffer, &self.annotations, &items);
+        *self.diagnostics.borrow_mut() = items;
+    }
+
+    /// What is painted now, for the status bar and the hover.
+    pub fn diagnostics(&self) -> std::cell::Ref<'_, Vec<Diagnostic>> {
+        self.diagnostics.borrow()
     }
 
     /// Raise `alert`, which decides both what the banner says and what its button does. It goes
