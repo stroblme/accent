@@ -62,8 +62,6 @@ const RECENT_NOTES: usize = 50;
 const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
-/// Rows in a `[[wikilink]]` or `#tag` completion popup.
-const COMPLETIONS: usize = 20;
 /// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
 const RENDER: Duration = Duration::from_millis(300);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
@@ -1453,36 +1451,7 @@ impl App {
             Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
         };
         let prefs = self.prefs();
-        let tab = editor::open(
-            &self.root(),
-            key,
-            text,
-            flavour,
-            &self.tabs(),
-            &prefs,
-            (
-                // Without a vault there is nothing to complete against, and the closures are
-                // only ever installed on a note anyway.
-                {
-                    let vault = self.vault.clone();
-                    move |prefix: &str| {
-                        vault
-                            .as_ref()
-                            .and_then(|v| v.complete_notes(prefix, COMPLETIONS).ok())
-                            .unwrap_or_default()
-                    }
-                },
-                {
-                    let vault = self.vault.clone();
-                    move |prefix: &str| {
-                        vault
-                            .as_ref()
-                            .and_then(|v| v.complete_tags(prefix, COMPLETIONS).ok())
-                            .unwrap_or_default()
-                    }
-                },
-            ),
-        );
+        let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
         self.adopt(tab, how);
         if flavour.is_note() {
             self.sync_conflict_banner(key, None);
@@ -5892,6 +5861,9 @@ fn install_chrome_css() {
              GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
              GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
                margin-right: 12px; min-height: 30px; }} \
+             GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
+             GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
+               margin-left: 12px; }} \
              textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}"
         ));
         gtk::style_context_add_provider_for_display(

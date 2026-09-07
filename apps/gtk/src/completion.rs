@@ -1,7 +1,8 @@
-//! Completion providers for `[[wikilinks]]` and `#tags`.
+//! The completion popup, for every flavour of text tab.
 //!
-//! Both providers are driven by a closure, not by a vault handle, so this file never touches the
-//! index and the prefix scanning is testable without a display.
+//! One provider, whatever the language: a note's `[[wikilinks]]` and `#tags` arrive from the
+//! index-backed notes provider and a C file's members from clangd, through the same call and in
+//! the same shape, so nothing here knows which it is looking at.
 //!
 //! What the GtkSourceView 5.20 machinery guarantees, read out of `gtksourcecompletion.c` rather
 //! than assumed:
@@ -9,69 +10,47 @@
 //! * `is_trigger` is called from the buffer's `insert-text` handler connected `G_CONNECT_AFTER`,
 //!   with the *insert cursor*, so the iter sits immediately **after** the character `c` that was
 //!   just typed.
-//! * `populate` is synchronous here. The interface's primary entry point is `populate_async`, but
-//!   its default implementation calls the sync `populate` vfunc, and the Rust binding's
-//!   `populate_future` default routes back through it, so implementing `populate` alone is enough.
+//! * `populate_async` is the entry point the completion always uses, and the Rust binding routes
+//!   it to `populate_future`, so the request can be awaited on the main loop.
+//! * `refilter` is called as the user types past the trigger. It is answered from the answer we
+//!   already have rather than by asking again: a server ranks once, for the position the popup
+//!   opened at, and re-requesting per keystroke is a round trip for a narrowing list.
 
+use crate::editor::Tab;
+use accent_api::{Completion, TextEdit};
 use gtk::glib;
 use gtk::subclass::prelude::*;
 use sourceview5::prelude::*;
+use std::rc::Rc;
 
 /// How many rows the popup shows before it scrolls.
 const PAGE_SIZE: u32 = 8;
 
-/// What a provider offers, and how the accepted text is written back.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Kind {
-    #[default]
-    WikiLink,
-    Tag,
-}
-
-/// Byte offset of the trigger that opened this completion, and the text typed since.
-///
-/// `line` is the current line from its start up to the cursor, and `cursor` is a byte offset into
-/// it, so nothing here ever looks at the rest of the buffer.
-///
-/// `None` means there is nothing to complete: no trigger on this line, a `#` run that opens the
-/// line (an ATX heading), a wikilink that is already closed, or a tag the user has typed past.
-fn scan(kind: Kind, line: &str, cursor: usize) -> Option<(usize, &str)> {
-    if !line.is_char_boundary(cursor) {
-        return None;
-    }
-    let head = &line[..cursor];
-    match kind {
-        Kind::WikiLink => {
-            let start = head.rfind("[[")?;
-            let prefix = &head[start + 2..];
-            // `]` means the link was already closed; the cursor is past it, not inside it.
-            (!prefix.contains(']')).then_some((start, prefix))
-        }
-        Kind::Tag => {
-            let start = head.rfind('#')?;
-            // A `#` run that opens the line, indented or not, is an ATX heading marker.
-            if head[..start].trim_end_matches('#').trim().is_empty() {
-                return None;
-            }
-            let prefix = &head[start + 1..];
-            // Whitespace ends a tag, so the cursor is no longer inside one.
-            (!prefix.contains(char::is_whitespace)).then_some((start, prefix))
-        }
-    }
+/// `edits` in the order they can be applied without invalidating each other: last in the document
+/// first, so an edit never moves the range of one still to come.
+fn ordered(mut edits: Vec<TextEdit>) -> Vec<TextEdit> {
+    edits.sort_by_key(|e| {
+        std::cmp::Reverse((e.range.start.line, e.range.start.character, e.text.len()))
+    });
+    edits
 }
 
 // ------------------------------------------------------------------------------------ proposal
 
 mod proposal_imp {
-    use std::cell::RefCell;
-
+    use accent_api::Completion;
     use gtk::glib;
     use gtk::subclass::prelude::*;
     use sourceview5::subclass::prelude::*;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Default)]
     pub struct Proposal {
-        pub text: RefCell<String>,
+        pub item: RefCell<Option<Completion>>,
+        /// The documentation the details panel shows, once `completionItem/resolve` has answered.
+        pub doc: RefCell<Option<String>>,
+        /// A resolve is in flight or has been done; it is asked for at most once per row.
+        pub resolved: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -94,38 +73,51 @@ glib::wrapper! {
 }
 
 impl Proposal {
-    fn new(text: &str) -> Self {
+    fn new(item: Completion) -> Self {
         let obj: Self = glib::Object::new();
-        obj.imp().text.replace(text.to_owned());
+        obj.imp().doc.replace(item.doc.clone());
+        obj.imp().item.replace(Some(item));
         obj
     }
 
-    fn text(&self) -> String {
-        self.imp().text.borrow().clone()
+    fn item(&self) -> Option<Completion> {
+        self.imp().item.borrow().clone()
     }
 }
 
 // ------------------------------------------------------------------------------------ provider
 
 mod provider_imp {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::rc::{Rc, Weak};
 
+    use accent_api::Completion;
     use gtk::prelude::*;
     use gtk::subclass::prelude::*;
     use gtk::{gio, glib};
+    use sourceview5::prelude::*;
     use sourceview5::subclass::prelude::*;
     use sourceview5::{
         CompletionCell, CompletionColumn, CompletionContext, CompletionProposal, CompletionProvider,
     };
 
-    use super::{Kind, Proposal, scan};
-
-    type Candidates = Box<dyn Fn(&str) -> Vec<String>>;
+    use super::{Proposal, ordered};
+    use crate::editor::Tab;
+    use crate::{diagnostics, hover, lang};
 
     #[derive(Default)]
     pub struct Provider {
-        pub kind: Cell<Kind>,
-        pub candidates: RefCell<Option<Candidates>>,
+        /// The tab whose document this completes. Weak: the view holds the provider and the tab
+        /// holds the view, so a strong handle here would keep every closed tab alive.
+        pub tab: RefCell<Weak<Tab>>,
+        /// The whole of the last answer, which is what [`refilter`] narrows. The model handed to
+        /// the popup is only ever a filtered view of this.
+        items: RefCell<Vec<Completion>>,
+        /// The proposal whose details panel was asked for last. A resolve that lands after the
+        /// selection has moved on writes nothing.
+        showing: RefCell<Option<Proposal>>,
     }
 
     #[glib::object_subclass]
@@ -138,59 +130,87 @@ mod provider_imp {
     impl ObjectImpl for Provider {}
 
     impl Provider {
-        /// The current line up to the cursor, plus the cursor iter itself.
-        fn line_to_cursor(context: &CompletionContext) -> Option<(gtk::TextIter, String)> {
-            let buffer = context.buffer()?;
-            let end = buffer.iter_at_mark(&buffer.get_insert());
-            let mut start = end;
-            start.set_line_offset(0);
-            Some((end, buffer.text(&start, &end, true).to_string()))
+        fn tab(&self) -> Option<Rc<Tab>> {
+            self.tab.borrow().upgrade()
         }
 
-        /// Ranked, capped completions for whatever the user has typed since the trigger.
-        fn proposals(&self, context: &CompletionContext) -> gio::ListStore {
+        /// What the user has typed since `item` opened the popup: the text from where the
+        /// accepted insert would start to the caret, which is what a filter matches against.
+        fn typed(context: &CompletionContext, item: &Completion) -> String {
+            let Some(buffer) = context.buffer() else {
+                return String::new();
+            };
+            let start = diagnostics::iter_at(&buffer, item.replace.start);
+            let caret = buffer.iter_at_mark(&buffer.get_insert());
+            match start <= caret {
+                true => buffer.text(&start, &caret, true).to_string(),
+                false => String::new(),
+            }
+        }
+
+        /// The items still matching what has been typed, in the order the server ranked them.
+        fn matching(&self, context: &CompletionContext) -> gio::ListStore {
             let store = gio::ListStore::new::<Proposal>();
-            let Some((_, line)) = Self::line_to_cursor(context) else {
-                return store;
-            };
-            let Some((_, prefix)) = scan(self.kind.get(), &line, line.len()) else {
-                // Nothing for *this* provider to offer, which is not the same as nothing to show:
-                // both providers are populated on every completion, so the wikilink one runs while
-                // a tag is being typed and vice versa. Asking the popup to hide from here took the
-                // other provider's proposals down with it, which is why `[[` only flashed and `#`
-                // never appeared at all. Emptying our own model is the whole job; GtkSourceView
-                // hides the popup once every provider's model is empty.
-                return store;
-            };
-            if let Some(candidates) = self.candidates.borrow().as_ref() {
-                for text in candidates(prefix) {
-                    store.append(&Proposal::new(&text));
+            for item in self.items.borrow().iter() {
+                let typed = Self::typed(context, item);
+                let haystack = item.filter.as_deref().unwrap_or(&item.label);
+                if !typed.is_empty()
+                    && sourceview5::Completion::fuzzy_match(Some(haystack), &typed.to_lowercase())
+                        .is_none()
+                {
+                    continue;
                 }
+                store.append(&Proposal::new(item.clone()));
             }
             store
         }
     }
 
     impl CompletionProviderImpl for Provider {
-        fn is_trigger(&self, iter: &gtk::TextIter, _c: char) -> bool {
-            // One source of truth with `populate`: a trigger is whatever `scan` recognises with
-            // nothing typed after it yet. `iter` is the insert cursor, so the line up to it is
-            // exactly the text `scan` reads, and the character just typed is already part of it.
-            // Deciding this from the cursor column instead is how `## Heading` used to open a
-            // popup listing every tag in the vault.
-            let mut start = *iter;
-            start.set_line_offset(0);
-            let line = iter.buffer().text(&start, iter, true);
-            matches!(scan(self.kind.get(), &line, line.len()), Some((_, "")))
+        fn is_trigger(&self, _iter: &gtk::TextIter, c: char) -> bool {
+            // Whatever the provider said opens a list. Whether there is anything to offer at this
+            // exact spot is the provider's own answer: an empty model hides the popup again,
+            // which is how a lone `[` in a note opens nothing while `[[` opens the note list.
+            self.tab()
+                .and_then(|tab| tab.lang.support())
+                .is_some_and(|s| s.completion_triggers.contains(&c))
         }
 
-        fn populate(&self, context: &CompletionContext) -> Result<gio::ListModel, glib::Error> {
-            Ok(self.proposals(context).upcast())
+        fn populate_future(
+            &self,
+            context: &CompletionContext,
+        ) -> Pin<Box<dyn Future<Output = Result<gio::ListModel, glib::Error>>>> {
+            let (tab, context) = (self.tab(), context.clone());
+            let me = self.ref_counted();
+            Box::pin(async move {
+                let empty = || Ok(gio::ListStore::new::<Proposal>().upcast::<gio::ListModel>());
+                let Some(tab) = tab else { return empty() };
+                let (Some(vault), Some(buffer)) = (tab.lang.vault(), context.buffer()) else {
+                    return empty();
+                };
+                let caret = buffer.iter_at_mark(&buffer.get_insert());
+                let (pos, trigger) = (lang::pos_of(&caret), trigger_before(&tab, &caret));
+                lang::flush(tab.clone()).await;
+                let rel = tab.rel();
+                let items = match vault.completion(&rel, pos, trigger).await {
+                    Ok(items) => items,
+                    Err(e) => {
+                        // Never an `Err`: GtkSourceView drops the whole popup on a failing
+                        // provider, and a server that is still indexing fails a lot.
+                        tracing::debug!("completion for {rel}: {e:#}");
+                        Vec::new()
+                    }
+                };
+                tracing::debug!("completion for {rel} at {pos:?}: {} items", items.len());
+                *me.items.borrow_mut() = items;
+                Ok(me.matching(&context).upcast())
+            })
         }
 
         fn refilter(&self, context: &CompletionContext, _model: &gio::ListModel) {
-            // The prefix grew or shrank; recompute and hand the new model back through the context.
-            let store = self.proposals(context);
+            // Narrowed here rather than at the server: the ranking was done for the position the
+            // popup opened at, and typing one more character does not change it.
+            let store = self.matching(context);
             context.set_proposals_for_provider(
                 self.obj().upcast_ref::<CompletionProvider>(),
                 Some(&store),
@@ -199,58 +219,117 @@ mod provider_imp {
 
         fn display(
             &self,
-            _context: &CompletionContext,
+            context: &CompletionContext,
             proposal: &CompletionProposal,
             cell: &CompletionCell,
         ) {
-            if cell.column() != CompletionColumn::TypedText {
+            let Some(proposal) = proposal.downcast_ref::<Proposal>() else {
                 return;
-            }
-            if let Some(proposal) = proposal.downcast_ref::<Proposal>() {
-                cell.set_text(Some(&proposal.text()));
+            };
+            let Some(item) = proposal.item() else {
+                return;
+            };
+            match cell.column() {
+                CompletionColumn::Icon => cell.set_icon_name(lang::icon_name(item.kind)),
+                CompletionColumn::TypedText => {
+                    let typed = Self::typed(context, &item).to_lowercase();
+                    match sourceview5::Completion::fuzzy_highlight(&item.label, &typed) {
+                        Some(attrs) => cell.set_text_with_attributes(&item.label, &attrs),
+                        None => cell.set_text(Some(&item.label)),
+                    }
+                }
+                CompletionColumn::After => cell.set_text(item.detail.as_deref()),
+                CompletionColumn::Details => {
+                    self.showing.replace(Some(proposal.clone()));
+                    let doc = proposal.imp().doc.borrow().clone();
+                    if let Some(doc) = doc.filter(|d| !d.is_empty()) {
+                        return cell.set_markup(&hover::markup_of(&doc));
+                    }
+                    cell.set_text(None);
+                    // The server keeps the documentation back until an item is looked at, which
+                    // is what `completionItem/resolve` is for. Asked once per row, and written
+                    // only if that row is still the one the panel is showing.
+                    if item.resolve.is_none() || proposal.imp().resolved.replace(true) {
+                        return;
+                    }
+                    let Some(tab) = self.tab() else { return };
+                    let Some(vault) = tab.lang.vault() else {
+                        return;
+                    };
+                    let cell = cell.clone();
+                    let (me, proposal) = (self.ref_counted(), proposal.clone());
+                    glib::spawn_future_local(async move {
+                        let Ok(full) = vault.resolve_completion(&tab.rel(), item).await else {
+                            return;
+                        };
+                        proposal.imp().doc.replace(full.doc.clone());
+                        let still = me.showing.borrow().as_ref().is_some_and(|p| p == &proposal);
+                        if let (true, Some(doc)) = (still, full.doc.filter(|d| !d.is_empty())) {
+                            cell.set_markup(&hover::markup_of(&doc));
+                        }
+                    });
+                }
+                _ => {}
             }
         }
 
         fn activate(&self, context: &CompletionContext, proposal: &CompletionProposal) {
-            let Some(proposal) = proposal.downcast_ref::<Proposal>() else {
+            let (Some(proposal), Some(buffer), Some(view)) = (
+                proposal.downcast_ref::<Proposal>(),
+                context.buffer(),
+                context.view(),
+            ) else {
                 return;
             };
-            let Some(buffer) = context.buffer() else {
-                return;
-            };
-            let Some((mut end, line)) = Self::line_to_cursor(context) else {
-                return;
-            };
-            let Some((start, _)) = scan(self.kind.get(), &line, line.len()) else {
+            let Some(item) = proposal.item() else {
                 return;
             };
 
-            // `line` runs from line offset 0 to the cursor, so `start` — a byte offset into it —
-            // becomes an iter by counting the characters before it. The replaced range is
-            // [trigger, cursor): it swallows the `[[` or `#` itself, because the inserted text
-            // carries them again. Anything outside that range is untouched.
-            let mut begin = end;
-            begin.set_line_offset(line[..start].chars().count() as i32);
-            // `typing::pair` closes a `[` as it is typed, so the caret usually sits in front of
-            // the `]]` it left behind. The inserted link brings its own, so they go too.
-            if self.kind.get() == Kind::WikiLink {
-                for _ in 0..2 {
-                    if !end.ends_line() && end.char() == ']' {
-                        end.forward_char();
-                    }
-                }
-            }
-            let text = match self.kind.get() {
-                Kind::WikiLink => format!("[[{}]]", proposal.text()),
-                Kind::Tag => format!("#{}", proposal.text()),
-            };
-
+            // One user action, so Ctrl+Z takes the whole acceptance back: the replaced range, the
+            // inserted text and whatever import the item brought with it.
             buffer.begin_user_action();
-            buffer.delete(&mut begin, &mut end);
-            // `delete` leaves both iters at the deletion point, so this inserts exactly there.
-            buffer.insert(&mut begin, &text);
+            let mut start = diagnostics::iter_at(&buffer, item.replace.start);
+            let mut end = diagnostics::iter_at(&buffer, item.replace.end);
+            buffer.delete(&mut start, &mut end);
+            // `delete` leaves both iters at the deletion point, so this writes exactly there.
+            match item.is_snippet {
+                // A snippet parked in the view: its tab stops are what makes `add($1, $2)` worth
+                // accepting. A snippet the parser refuses goes in as the text it is, which is
+                // wrong in a small way rather than losing the acceptance altogether.
+                true => match sourceview5::Snippet::new_parsed(&item.insert) {
+                    Ok(snippet) => view.push_snippet(&snippet, Some(&mut start)),
+                    Err(e) => {
+                        tracing::debug!("cannot parse the snippet {:?}: {e}", item.insert);
+                        buffer.insert(&mut start, &item.insert);
+                    }
+                },
+                false => buffer.insert(&mut start, &item.insert),
+            }
+            // Last in the document first, so applying one does not move the next. They sit
+            // before the caret in practice — an import at the top of the file — which is why
+            // they can be applied after the insert at all.
+            for edit in ordered(item.extra_edits) {
+                let mut from = diagnostics::iter_at(&buffer, edit.range.start);
+                let mut to = diagnostics::iter_at(&buffer, edit.range.end);
+                buffer.delete(&mut from, &mut to);
+                buffer.insert(&mut from, &edit.text);
+            }
             buffer.end_user_action();
         }
+    }
+
+    /// The character just typed, when it is one the provider asked to be told about. What the
+    /// server needs to tell a member access from a plain word.
+    fn trigger_before(tab: &Rc<Tab>, caret: &gtk::TextIter) -> Option<char> {
+        let mut before = *caret;
+        if !before.backward_char() {
+            return None;
+        }
+        let c = before.char();
+        tab.lang
+            .support()
+            .filter(|s| s.completion_triggers.contains(&c))
+            .map(|_| c)
     }
 }
 
@@ -259,99 +338,40 @@ glib::wrapper! {
         @implements sourceview5::CompletionProvider;
 }
 
-/// `candidates(prefix)` returns already-ranked, already-capped completions.
-pub fn provider(
-    kind: Kind,
-    candidates: impl Fn(&str) -> Vec<String> + 'static,
-) -> sourceview5::CompletionProvider {
-    let obj: Provider = glib::Object::new();
-    obj.imp().kind.set(kind);
-    obj.imp().candidates.replace(Some(Box::new(candidates)));
-    obj.upcast()
-}
-
-/// Attach both providers to a view.
-pub fn install(
-    view: &sourceview5::View,
-    notes: impl Fn(&str) -> Vec<String> + 'static,
-    tags: impl Fn(&str) -> Vec<String> + 'static,
-) {
-    let completion = view.completion();
+/// Attach the provider to a tab's view. Called by [`lang::attach`], which is what decides that
+/// this tab has a vault to ask at all.
+pub fn install(tab: &Rc<Tab>) {
+    let completion = tab.view.completion();
     completion.set_page_size(PAGE_SIZE);
-    // Neither provider has an icon to show, and the empty icon cell with its padding is most of
-    // what makes the popup look cramped.
-    completion.set_show_icons(false);
-    completion.add_provider(&provider(Kind::WikiLink, notes));
-    completion.add_provider(&provider(Kind::Tag, tags));
+    // Every item now has a kind, and the glyph is what makes a list of thirty members scannable.
+    completion.set_show_icons(true);
+    let provider: Provider = glib::Object::new();
+    *provider.imp().tab.borrow_mut() = Rc::downgrade(tab);
+    completion.add_provider(&provider);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, scan};
+    use super::*;
+    use accent_api::{Pos, Range};
 
-    #[test]
-    fn scan_finds_a_wikilink_prefix() {
-        let line = "see [[Dee";
-        assert_eq!(scan(Kind::WikiLink, line, line.len()), Some((4, "Dee")));
-    }
-
-    #[test]
-    fn scan_keeps_a_wikilink_prefix_with_a_space() {
-        let line = "[[Deep Work";
-        assert_eq!(
-            scan(Kind::WikiLink, line, line.len()),
-            Some((0, "Deep Work"))
-        );
-    }
-
-    #[test]
-    fn scan_needs_two_brackets() {
-        let line = "a [Dee";
-        assert_eq!(scan(Kind::WikiLink, line, line.len()), None);
-    }
-
-    #[test]
-    fn scan_stops_at_a_closed_wikilink() {
-        let line = "[[Deep Work]] and";
-        assert_eq!(scan(Kind::WikiLink, line, line.len()), None);
-    }
-
-    #[test]
-    fn scan_finds_a_tag_prefix() {
-        let line = "note about #area/";
-        assert_eq!(scan(Kind::Tag, line, line.len()), Some((11, "area/")));
-    }
-
-    #[test]
-    fn scan_ignores_a_heading() {
-        let line = "# Heading";
-        assert_eq!(scan(Kind::Tag, line, line.len()), None);
-    }
-
-    #[test]
-    fn scan_ignores_an_indented_heading() {
-        for line in ["##", "  #", "\t### "] {
-            assert_eq!(scan(Kind::Tag, line, line.len()), None, "{line:?}");
+    fn edit(line: u32, text: &str) -> TextEdit {
+        let at = Pos { line, character: 0 };
+        TextEdit {
+            range: Range { start: at, end: at },
+            text: text.to_string(),
         }
     }
 
-    /// A `#` with nothing typed after it yet is the trigger case: this is what `is_trigger`
-    /// asks `scan` about, and it has to say yes there and only there.
+    /// Applying an edit moves everything after it, so the extra edits an item brings are applied
+    /// from the end of the document backwards and none of them is ever asked about a stale
+    /// position.
     #[test]
-    fn scan_accepts_a_tag_that_has_only_been_opened() {
-        assert_eq!(scan(Kind::Tag, "a #", 3), Some((2, "")));
-        assert_eq!(scan(Kind::Tag, "a #x", 4), Some((2, "x")));
-    }
-
-    #[test]
-    fn scan_ends_a_tag_at_whitespace() {
-        let line = "a #area and more";
-        assert_eq!(scan(Kind::Tag, line, line.len()), None);
-    }
-
-    #[test]
-    fn scan_reads_only_up_to_the_cursor() {
-        let line = "a #area/work";
-        assert_eq!(scan(Kind::Tag, line, 7), Some((2, "area")));
+    fn extra_edits_are_applied_last_first() {
+        let order: Vec<String> = ordered(vec![edit(0, "a"), edit(12, "c"), edit(4, "b")])
+            .into_iter()
+            .map(|e| e.text)
+            .collect();
+        assert_eq!(order, ["c", "b", "a"]);
     }
 }
