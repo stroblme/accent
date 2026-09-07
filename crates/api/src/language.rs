@@ -29,6 +29,7 @@ use crate::{Backend, Event, Local, LspConfig, Vault, locked, remote_err};
 
 pub(crate) mod external;
 pub(crate) mod notes;
+pub(crate) mod words;
 
 use notes::Notes;
 
@@ -140,6 +141,15 @@ pub struct Completion {
     pub resolve: Option<serde_json::Value>,
 }
 
+/// A completion answer. `incomplete` is the server saying it stopped at a cap: the list has to
+/// be asked for again as the word grows, because narrowing what it sent would miss items it
+/// left out.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Completions {
+    pub items: Vec<Completion>,
+    pub incomplete: bool,
+}
+
 /// The signature the caret is inside a call of.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
@@ -237,10 +247,6 @@ impl<T: Send + 'static> Task<T> {
     pub(crate) fn blocking(f: impl FnOnce() -> Result<T> + Send + 'static) -> Task<T> {
         Task(accent_lsp::runtime().spawn_blocking(f))
     }
-
-    pub(crate) fn ready(value: Result<T>) -> Task<T> {
-        Task::spawn(async move { value })
-    }
 }
 
 // ----------------------------------------------------------------- providers
@@ -261,7 +267,7 @@ pub(crate) trait Language: Send + Sync {
         Ok(())
     }
     fn close(&self, rel: &str);
-    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Vec<Completion>>;
+    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions>;
     /// Fill in what the item was too expensive to send: `rel` says which document's text the
     /// edits it comes back with are measured against.
     fn resolve(&self, rel: &str, item: Completion) -> Fut<'_, Completion>;
@@ -369,43 +375,60 @@ impl Languages {
         cfg: &LspConfig,
     ) -> Task<Support> {
         let me = self.clone();
-        match server(cfg, &language) {
-            Some(Server::Notes) => {
-                // One notes provider per vault, whatever the note: they share the index.
-                let key = ("accent".to_string(), me.root.clone());
-                let (root, db, events) = (me.root.clone(), me.db.clone(), me.events.clone());
-                Task::spawn(async move {
+        let which = server(cfg, &language);
+        Task::spawn(async move {
+            // What speaks the file's structure, if anything does: the index for a note, a
+            // language server for code, nothing for a `.txt`.
+            let (primary, language_id, missing): (
+                Option<Arc<dyn Language>>,
+                String,
+                Option<String>,
+            ) = match which {
+                Some(Server::Notes) => {
+                    // One notes provider per vault, whatever the note: they share the index.
+                    let key = ("accent".to_string(), me.root.clone());
+                    let (root, db, events) = (me.root.clone(), me.db.clone(), me.events.clone());
                     let start =
                         async move { Ok(Arc::new(Notes::open_at(root, &db, events)?) as _) };
-                    let provider = me.session(key, start).await?;
-                    let support = provider.open(&rel, "markdown", text)?;
-                    locked(&me.docs).insert(rel, provider);
-                    Ok(support)
-                })
-            }
-            Some(Server::External { language_id, argv }) => {
-                let (root, events) = (me.root.clone(), me.events.clone());
-                Task::spawn(async move {
-                    // One session per (server, project): two crates in one vault get one server
-                    // each, and two files in one crate share it.
+                    (
+                        Some(me.session(key, start).await?),
+                        "markdown".to_string(),
+                        None,
+                    )
+                }
+                Some(Server::External { language_id, argv }) => {
+                    // One session per (server, project): two crates in one vault get one
+                    // server each, and two files in one crate share it.
+                    let (root, events) = (me.root.clone(), me.events.clone());
                     let session_root = session_root(&root, &Local::join(&root, &rel)?);
                     let key = (argv[0].clone(), session_root.clone());
                     let start = external::start(argv, session_root, root, events);
-                    let provider = me.session(key, start).await?;
-                    let support = provider.open(&rel, &language_id, text)?;
-                    locked(&me.docs).insert(rel, provider);
-                    Ok(support)
-                })
-            }
-            Some(Server::Missing(name)) => {
-                tracing::debug!("no language server for {language}: {name} is not installed");
-                Task::ready(Ok(Support {
-                    missing: Some(name),
-                    ..Support::default()
-                }))
-            }
-            None => Task::ready(Ok(Support::default())),
-        }
+                    (Some(me.session(key, start).await?), language_id, None)
+                }
+                Some(Server::Missing(name)) => {
+                    tracing::debug!("no language server for {language}: {name} is not installed");
+                    (None, language.clone(), Some(name))
+                }
+                None => (None, language.clone(), None),
+            };
+            // Prose gets its words layered under whatever the primary answers, and gets them
+            // even with no primary at all.
+            let provider: Arc<dyn Language> =
+                match (primary, words::PROSE.contains(&language.as_str())) {
+                    (Some(primary), false) => primary,
+                    (primary, true) => Arc::new(words::Layered::new(primary)),
+                    (None, false) => {
+                        return Ok(Support {
+                            missing,
+                            ..Support::default()
+                        });
+                    }
+                };
+            let mut support = provider.open(&rel, &language_id, text)?;
+            support.missing = support.missing.or(missing);
+            locked(&me.docs).insert(rel, provider);
+            Ok(support)
+        })
     }
 
     pub(crate) fn change_document(&self, rel: String, text: String) -> Task<()> {
@@ -433,7 +456,7 @@ impl Languages {
         rel: String,
         pos: Pos,
         trigger: Option<char>,
-    ) -> Task<Vec<Completion>> {
+    ) -> Task<Completions> {
         let provider = self.provider(&rel);
         Task::spawn(async move { provider?.completion(&rel, pos, trigger).await })
     }
@@ -606,7 +629,7 @@ impl Vault {
         }
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
         match &self.backend {
             Backend::Local(v) => v.completion(rel, pos, trigger),
             Backend::Remote(r) => remote_task(r.clone(), "completion", json!([rel, pos, trigger])),
@@ -696,7 +719,7 @@ impl Local {
         self.lang.close_document(rel.to_string())
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
         self.lang.completion(rel.to_string(), pos, trigger)
     }
 

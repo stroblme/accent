@@ -39,3 +39,9 @@ tempfile = "3"
 [[example]]
 name = "pdf_spike"
 required-features = ["pdf"]
+
+# Repo tooling, not a library target (see the example's own docs). `test = true` keeps its unit
+# tests in `cargo test`, which is where they were before it moved out of accent-cli.
+[[example]]
+name = "gen-vault"
+test = true

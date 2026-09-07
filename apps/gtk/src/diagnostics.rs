@@ -10,9 +10,13 @@
 //! theme foreground, so they read on a light theme and on a dark one without a hex colour outside
 //! `theme.rs`.
 
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+
 use accent_api::{Diagnostic, Pos, Severity};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
+use sourceview5::AnnotationStyle;
 use sourceview5::prelude::*;
 
 /// One tag per severity, so a re-render can lift exactly what it painted.
@@ -101,6 +105,7 @@ pub fn render(
     }
     provider.remove_all();
 
+    let mut lines: BTreeMap<i32, (AnnotationStyle, String, usize)> = BTreeMap::new();
     for item in items {
         let (from, mut to) = (
             iter_at(buffer, item.range.start),
@@ -114,18 +119,38 @@ pub fn render(
         buffer.apply_tag_by_name(tag_of(item.severity), &from, &to);
 
         let (category, style) = match item.severity {
-            Severity::Error => (MARK_ERROR, sourceview5::AnnotationStyle::Error),
-            Severity::Warning => (MARK_WARNING, sourceview5::AnnotationStyle::Warning),
+            Severity::Error => (MARK_ERROR, AnnotationStyle::Error),
+            Severity::Warning => (MARK_WARNING, AnnotationStyle::Warning),
             // Information and hints stay in the text: no gutter icon, no line-end message.
             Severity::Info | Severity::Hint => continue,
         };
         let mut line_start = from;
         line_start.set_line_offset(0);
         buffer.create_source_mark(None, category, &line_start);
+        // One annotation a line, or the messages draw over each other at the line end: the most
+        // severe one is shown and the rest are counted, and the hover lists them all.
+        match lines.entry(from.line()) {
+            Entry::Vacant(slot) => {
+                slot.insert((style, item.message.clone(), 0));
+            }
+            Entry::Occupied(mut slot) => {
+                let shown = slot.get_mut();
+                if style == AnnotationStyle::Error && shown.0 != AnnotationStyle::Error {
+                    (shown.0, shown.1) = (style, item.message.clone());
+                }
+                shown.2 += 1;
+            }
+        }
+    }
+    for (line, (style, message, more)) in lines {
+        let text = match more {
+            0 => message,
+            n => format!("{message} (+{n} more)"),
+        };
         provider.add_annotation(&sourceview5::Annotation::new(
-            Some(&item.message),
+            Some(&text),
             None::<gtk::gio::Icon>,
-            from.line(),
+            line,
             style,
         ));
     }

@@ -54,7 +54,8 @@ jobs:
       - run: cargo clippy -p accent --locked -- -D warnings
       - run: cargo test -p accent --locked
       - run: cargo build --release --locked -p accent -p accent-cli
-      - run: target/release/accent-cli gen-vault testvault --notes 200 --files 2000
+      # The generator is a core example, not a CLI subcommand; `make vault` is its only caller.
+      - run: make vault VAULT_NOTES=200 VAULT_FILES=2000
       - name: Headless smoke run
         run: |
           Xvfb :99 &

@@ -18,8 +18,8 @@ use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
 
 use super::{
-    Completion, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range, Severity,
-    Signature, Support, Symbol, byte_of, pos_of, range_of,
+    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
+    Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
 use crate::{Event, Local, locked};
 
@@ -455,9 +455,14 @@ impl Language for Notes {
         });
     }
 
-    fn completion(&self, rel: &str, pos: Pos, _trigger: Option<char>) -> Fut<'_, Vec<Completion>> {
+    fn completion(&self, rel: &str, pos: Pos, _trigger: Option<char>) -> Fut<'_, Completions> {
         let rel = rel.to_string();
-        Box::pin(async move { Ok(or_empty("completion", Notes::completion(self, &rel, pos))) })
+        Box::pin(async move {
+            Ok(Completions {
+                items: or_empty("completion", Notes::completion(self, &rel, pos)),
+                incomplete: false,
+            })
+        })
     }
 
     fn resolve(&self, _rel: &str, item: Completion) -> Fut<'_, Completion> {

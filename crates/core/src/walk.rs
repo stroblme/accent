@@ -29,6 +29,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Directory names the walk refuses whatever the options say.
@@ -271,39 +272,97 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
+/// Does the walk refuse to look inside `rel`? True for the trees [`scan`] never enters:
+/// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], and anything at or under a [`DEPENDENCY_MARKERS`] file.
+///
+/// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
+/// disagree about which paths the index holds. The vault root is the user's own choice and is
+/// never refused.
+pub fn is_unindexed(root: &Path, rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    if rel.split('/').any(|part| never_walked(part, false)) {
+        return true;
+    }
+    let mut dir = root.to_path_buf();
+    rel.split('/').any(|part| {
+        dir.push(part);
+        is_dependency_tree(&dir)
+    })
+}
+
+/// The children of the directory `rel` that `held` — the index's own listing of it — does not
+/// name, as `(rel_path, kind)`.
+///
+/// The file tree shows every folder in the vault, the ones the index deliberately does not walk
+/// included: a listing that silently leaves `node_modules` out is a listing nobody can trust.
+/// Those trees stay out of the index, the watcher and every query all the same — nothing here is
+/// stored — so the only place their contents can come from is a `read_dir`, one level at a time,
+/// when the reader opens the row.
+///
+/// Two kinds of row come back: the skipped directories themselves, listed beside their indexed
+/// siblings, and — where `rel` is already inside one — everything in it. [`ALWAYS_SKIP_DIRS`],
+/// Syncthing's temporaries and our own save temporaries are refused at every depth, exactly as
+/// [`scan`] refuses them, so `.git` and `.trash` are out of reach here too.
+///
+/// `held` is both the thing that keeps a row from being listed twice and what keeps this cheap:
+/// deciding whether a directory is a dependency tree costs a stat per [`DEPENDENCY_MARKERS`]
+/// entry, and a directory the index already holds cannot be one, so it is never asked. On the
+/// test vault's 2 400-directory `Resources/library/storage` that is the difference between 4 800
+/// stats per expansion and none.
+pub fn unindexed_children(
+    root: &Path,
+    rel: &str,
+    held: &std::collections::HashSet<&str>,
+) -> io::Result<Vec<(String, FileKind)>> {
+    let inside = is_unindexed(root, rel);
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root.join(rel))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `include_skipped`, because the skipped trees are exactly what this lists; what stays
+        // refused is `ALWAYS_SKIP_DIRS` and the temporaries.
+        if never_walked(&name, true) || name.starts_with(".accent-") {
+            continue;
+        }
+        let rel_path = match rel.is_empty() {
+            true => name.clone(),
+            false => format!("{rel}/{name}"),
+        };
+        if held.contains(rel_path.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type().ok();
+        let dir = match kind {
+            // The dirent's own `d_type`, so an ordinary file or folder costs no syscall at all.
+            Some(t) if !t.is_symlink() => t.is_dir(),
+            // A link is followed, so a package linked into `node_modules` — which npm does by the
+            // hundred — reads as the directory it points at rather than as an unopenable file. A
+            // link that loops costs nothing: this is one level, opened by hand.
+            _ => std::fs::metadata(&path).is_ok_and(|m| m.is_dir()),
+        };
+        // Outside a skipped tree, a child the index does not hold is only listed when it is one
+        // of the trees the walk refuses. Anything else missing from the index is missing for a
+        // reason of its own — a symlink pointing back into the vault, a file that vanished
+        // between the scan and now — and guessing at it here is not this function's business.
+        if !inside && !(dir && (SKIP_DIRS.contains(&name.as_str()) || is_dependency_tree(&path))) {
+            continue;
+        }
+        out.push((rel_path, if dir { FileKind::Dir } else { classify(&name) }));
+    }
+    Ok(out)
+}
+
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
 pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    // ponytail: a Mutex around the accepted-symlink-target list. There are a handful of dir
-    // symlinks in a real vault, so contention is nil; the race (two threads accepting
-    // overlapping targets simultaneously) would only cost a duplicate walk, and the
-    // (dev, ino) dedup below cleans that up anyway.
-    let followed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let mut files = Vec::new();
-    let mut skipped = Vec::new();
-    let mut queue: VecDeque<Pass> = VecDeque::new();
-    queue.push_back(Pass {
-        root: root.to_path_buf(),
-        prefix: String::new(),
-        gitignore: opts.vault_gitignore,
+    let collected: Mutex<Vec<FileMeta>> = Mutex::new(Vec::new());
+    let mut skipped = walk_passes(root, opts, &|f| {
+        collected.lock().unwrap_or_else(|e| e.into_inner()).push(f);
+        WalkState::Continue
     });
-
-    // Breadth-first over passes: the vault, then one pass per accepted symlink target, then
-    // any symlink targets found inside those. The `followed` set is shared, so a target can
-    // only ever be walked once however deep the chain of links is.
-    while let Some(pass) = queue.pop_front() {
-        let out = walk_pass(&pass, opts, &canonical_root, &followed);
-        files.extend(out.files);
-        skipped.extend(out.skipped);
-        for (target, prefix) in out.targets {
-            queue.push_back(Pass {
-                root: target,
-                prefix,
-                gitignore: opts.target_gitignore,
-            });
-        }
-    }
+    let mut files = collected.into_inner().unwrap_or_else(|e| e.into_inner());
 
     // Deterministic winner: shallowest path, then lexicographic. `build_parallel` yields in an
     // arbitrary order, so "first path wins" only means anything after a sort.
@@ -346,6 +405,78 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
     }
 }
 
+/// Hand every file [`scan`] would list to `on_file`, on the walking threads, as it is found.
+///
+/// [`scan`] answers with a [`FileMeta`] per file and nothing else, so a caller that then *reads*
+/// those files does it afterwards, one at a time, however many cores are idle: that is what
+/// [`crate::index::Index::matches_in`]'s caller in the search pane was paying for. Here the work
+/// happens inside the walk instead. `on_file` returns `false` to stop it — [`WalkState::Quit`] on
+/// the thread that said so, and the passes still queued are dropped — which is how a filled row
+/// budget stops a walk it no longer needs.
+///
+/// Two things [`scan`] does are not on offer, both because they are whole-result operations that
+/// cannot exist while the walk is still running: the `(dev, ino)` dedup, so a file reachable by
+/// two paths is handed over twice, and any order at all. A caller that needs either sorts what it
+/// kept, which is cheap exactly when the caller keeps few rows.
+pub fn visit(root: &Path, opts: &ScanOptions, on_file: &(dyn Fn(FileMeta) -> bool + Send + Sync)) {
+    walk_passes(root, opts, &|f| match on_file(f) {
+        true => WalkState::Continue,
+        false => WalkState::Quit,
+    });
+}
+
+/// The pass queue both entry points share: the vault, then one pass per accepted symlink target.
+/// Returns what was skipped; the files went to `on_file`.
+fn walk_passes(
+    root: &Path,
+    opts: &ScanOptions,
+    on_file: &(dyn Fn(FileMeta) -> WalkState + Send + Sync),
+) -> Vec<Skipped> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // ponytail: a Mutex around the accepted-symlink-target list. There are a handful of dir
+    // symlinks in a real vault, so contention is nil; the race (two threads accepting
+    // overlapping targets simultaneously) would only cost a duplicate walk, and `scan`'s
+    // (dev, ino) dedup cleans that up anyway.
+    let followed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    // `ignore` stops the pass that quit, and nothing tells us it did: the flag is what keeps a
+    // symlink target from being walked after the caller has said it has enough.
+    let quit = AtomicBool::new(false);
+    let sink = |f: FileMeta| {
+        let state = on_file(f);
+        if matches!(state, WalkState::Quit) {
+            quit.store(true, Ordering::Relaxed);
+        }
+        state
+    };
+
+    let mut skipped = Vec::new();
+    let mut queue: VecDeque<Pass> = VecDeque::new();
+    queue.push_back(Pass {
+        root: root.to_path_buf(),
+        prefix: String::new(),
+        gitignore: opts.vault_gitignore,
+    });
+
+    // Breadth-first over passes: the vault, then one pass per accepted symlink target, then
+    // any symlink targets found inside those. The `followed` set is shared, so a target can
+    // only ever be walked once however deep the chain of links is.
+    while let Some(pass) = queue.pop_front() {
+        if quit.load(Ordering::Relaxed) {
+            break;
+        }
+        let out = walk_pass(&pass, opts, &canonical_root, &followed, &sink);
+        skipped.extend(out.skipped);
+        for (target, prefix) in out.targets {
+            queue.push_back(Pass {
+                root: target,
+                prefix,
+                gitignore: opts.target_gitignore,
+            });
+        }
+    }
+    skipped
+}
+
 /// One walk root: the vault itself, or a directory-symlink target mapped under `prefix`.
 struct Pass {
     root: PathBuf,
@@ -356,14 +487,12 @@ struct Pass {
 
 #[derive(Default)]
 struct PassOut {
-    files: Vec<FileMeta>,
     skipped: Vec<Skipped>,
     /// Accepted directory symlinks: `(canonical target, vault-relative path of the link)`.
     targets: Vec<(PathBuf, String)>,
 }
 
 enum Msg {
-    File(FileMeta),
     Skip(Skipped),
     Target(PathBuf, String),
 }
@@ -373,6 +502,7 @@ fn walk_pass(
     opts: &ScanOptions,
     canonical_root: &Path,
     followed: &Arc<Mutex<Vec<PathBuf>>>,
+    on_file: &(dyn Fn(FileMeta) -> WalkState + Send + Sync),
 ) -> PassOut {
     let mut b = WalkBuilder::new(&pass.root);
     b.follow_links(false) // symlinks are admitted by hand, then walked as their own pass
@@ -479,8 +609,7 @@ fn walk_pass(
                 }
             };
 
-            let _ = tx.send(Msg::File(file_meta(rel_path, path, &meta)));
-            WalkState::Continue
+            on_file(file_meta(rel_path, path, &meta))
         })
     });
     drop(tx);
@@ -488,7 +617,6 @@ fn walk_pass(
     let mut out = PassOut::default();
     for msg in rx {
         match msg {
-            Msg::File(f) => out.files.push(f),
             Msg::Skip(s) => out.skipped.push(s),
             Msg::Target(t, rel) => out.targets.push((t, rel)),
         }
@@ -555,6 +683,7 @@ fn classify_error(err: &ignore::Error) -> Skipped {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::fs;
     use std::os::unix::fs::symlink;
 
@@ -924,5 +1053,124 @@ mod tests {
             .filter(|s| s.reason == SkipReason::SymlinkLoop)
             .collect();
         assert_eq!(loops.len(), 1, "{:?}", r.skipped);
+    }
+
+    /// A vault holding one skipped tree of each kind, beside an ordinary note.
+    fn skipped_vault() -> tempfile::TempDir {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |p: &str| vault.path().join(p);
+        fs::write(at("Note.md"), "n").unwrap();
+        fs::create_dir_all(at("node_modules/pkg")).unwrap();
+        fs::write(at("node_modules/pkg/index.js"), "js").unwrap();
+        fs::create_dir(at(".venv")).unwrap();
+        fs::write(at(".venv/pyvenv.cfg"), "").unwrap();
+        fs::create_dir(at(".git")).unwrap();
+        fs::write(at(".git/HEAD"), "").unwrap();
+        vault
+    }
+
+    #[test]
+    fn is_unindexed_covers_the_trees_the_walk_refuses() {
+        let vault = skipped_vault();
+        let un = |rel| is_unindexed(vault.path(), rel);
+        assert!(un("node_modules"));
+        assert!(un("node_modules/pkg/index.js"));
+        assert!(
+            un(".venv"),
+            "a dependency marker is checked on the path itself"
+        );
+        assert!(un(".venv/lib"));
+        assert!(un(".git"));
+        assert!(!un("Note.md"));
+        // The root is the user's own choice, marker or not.
+        assert!(!un(""));
+    }
+
+    #[test]
+    fn unindexed_children_lists_the_skipped_trees_beside_indexed_siblings() {
+        let vault = skipped_vault();
+        let names = |rel| {
+            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &HashSet::new())
+                .unwrap()
+                .into_iter()
+                .map(|(rel, _)| rel)
+                .collect();
+            n.sort();
+            n
+        };
+        // At an indexed level only the skipped directories are missing from the index; the note
+        // beside them is already in the listing this merges into, and `.git` is never reachable.
+        assert_eq!(names(""), [".venv", "node_modules"]);
+        // Inside one, everything is: nothing under it is indexed at all.
+        assert_eq!(names("node_modules"), ["node_modules/pkg"]);
+        assert_eq!(names("node_modules/pkg"), ["node_modules/pkg/index.js"]);
+    }
+
+    #[test]
+    fn unindexed_children_leaves_out_what_the_index_already_holds() {
+        let vault = skipped_vault();
+        // A directory that gained its marker since the last scan is still in the index, and must
+        // not come back a second time from the disk.
+        let held = HashSet::from(["node_modules"]);
+        let rows = unindexed_children(vault.path(), "", &held).unwrap();
+        assert_eq!(
+            rows.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+            [".venv"]
+        );
+    }
+
+    #[test]
+    fn unindexed_children_classifies_by_name_as_the_walk_does() {
+        let vault = skipped_vault();
+        fs::write(vault.path().join("node_modules/README.md"), "r").unwrap();
+        let rows = unindexed_children(vault.path(), "node_modules", &HashSet::new()).unwrap();
+        let kind = |rel: &str| rows.iter().find(|(r, _)| r == rel).map(|(_, k)| *k);
+        assert_eq!(kind("node_modules/README.md"), Some(FileKind::Markdown));
+        assert_eq!(kind("node_modules/pkg"), Some(FileKind::Dir));
+    }
+
+    /// The visitor sees what `scan` lists, symlinked target and all, and stops when it says so.
+    #[test]
+    fn visit_sees_what_scan_sees_and_stops_when_asked() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("ext.md"), "ext").unwrap();
+        let vault = tempfile::tempdir().unwrap();
+        fs::create_dir(vault.path().join("d")).unwrap();
+        for i in 0..50 {
+            fs::write(vault.path().join(format!("d/n{i:02}.md")), "n").unwrap();
+        }
+        symlink(outside.path(), vault.path().join("linked")).unwrap();
+
+        let opts = ScanOptions::default();
+        let seen = Mutex::new(Vec::new());
+        visit(vault.path(), &opts, &|f| {
+            seen.lock().unwrap().push(f.rel_path);
+            true
+        });
+        let mut seen = seen.into_inner().unwrap();
+        seen.sort();
+        let mut want: Vec<String> = rels(&scan(vault.path(), &opts))
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        want.sort();
+        assert_eq!(seen, want);
+
+        // One thread, so stopping is not a race: the walk ends on the visitor's word rather
+        // than reading the other fifty entries.
+        let single = ScanOptions {
+            threads: 1,
+            ..ScanOptions::default()
+        };
+        let count = std::sync::atomic::AtomicUsize::new(0);
+        visit(vault.path(), &single, &|_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4
+        });
+        let n = count.into_inner();
+        assert!(
+            n < want.len(),
+            "the walk did not stop: {n} of {}",
+            want.len()
+        );
     }
 }

@@ -17,7 +17,7 @@
 //!   opened at, and re-requesting per keystroke is a round trip for a narrowing list.
 
 use crate::editor::Tab;
-use accent_api::{Completion, TextEdit};
+use accent_api::{Completion, Pos, Range, TextEdit};
 use gtk::glib;
 use gtk::subclass::prelude::*;
 use sourceview5::prelude::*;
@@ -88,7 +88,7 @@ impl Proposal {
 // ------------------------------------------------------------------------------------ provider
 
 mod provider_imp {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::future::Future;
     use std::pin::Pin;
     use std::rc::{Rc, Weak};
@@ -115,6 +115,11 @@ mod provider_imp {
         /// The whole of the last answer, which is what [`refilter`] narrows. The model handed to
         /// the popup is only ever a filtered view of this.
         items: RefCell<Vec<Completion>>,
+        /// The server stopped at a cap, so `items` is not the whole answer and the next
+        /// keystroke asks again rather than narrowing.
+        incomplete: Cell<bool>,
+        /// Which ask is the latest; an earlier answer arriving later is not kept.
+        asked: Cell<u64>,
         /// The proposal whose details panel was asked for last. A resolve that lands after the
         /// selection has moved on writes nothing.
         showing: RefCell<Option<Proposal>>,
@@ -164,6 +169,54 @@ mod provider_imp {
             }
             store
         }
+
+        /// Ask the provider at the caret and keep its answer as the list to narrow.
+        ///
+        /// A later ask outranks an earlier one still in flight: the answer to where the caret
+        /// was is not the list for where it is.
+        fn fetch(
+            &self,
+            context: CompletionContext,
+        ) -> Pin<Box<dyn Future<Output = gio::ListStore>>> {
+            let (tab, me) = (self.tab(), self.ref_counted());
+            let asked = self.asked.get().wrapping_add(1);
+            self.asked.set(asked);
+            Box::pin(async move {
+                let Some(tab) = tab else {
+                    return gio::ListStore::new::<Proposal>();
+                };
+                let (Some(vault), Some(buffer)) = (tab.lang.vault(), context.buffer()) else {
+                    return gio::ListStore::new::<Proposal>();
+                };
+                let caret = buffer.iter_at_mark(&buffer.get_insert());
+                let (pos, trigger) = (lang::pos_of(&caret), trigger_before(&tab, &caret));
+                lang::flush(tab.clone()).await;
+                let rel = tab.rel();
+                let answer = match vault.completion(&rel, pos, trigger).await {
+                    Ok(answer) => answer,
+                    Err(e) => {
+                        // Never an `Err` out of here: GtkSourceView drops the whole popup on a
+                        // failing provider, and a server that is still indexing fails a lot.
+                        tracing::debug!("completion for {rel}: {e:#}");
+                        Default::default()
+                    }
+                };
+                tracing::debug!(
+                    "completion for {rel} at {pos:?}: {} items{}",
+                    answer.items.len(),
+                    if answer.incomplete {
+                        ", more where they came from"
+                    } else {
+                        ""
+                    }
+                );
+                if me.asked.get() == asked {
+                    *me.items.borrow_mut() = answer.items;
+                    me.incomplete.set(answer.incomplete);
+                }
+                me.matching(&context)
+            })
+        }
     }
 
     impl CompletionProviderImpl for Provider {
@@ -180,39 +233,30 @@ mod provider_imp {
             &self,
             context: &CompletionContext,
         ) -> Pin<Box<dyn Future<Output = Result<gio::ListModel, glib::Error>>>> {
-            let (tab, context) = (self.tab(), context.clone());
-            let me = self.ref_counted();
-            Box::pin(async move {
-                let empty = || Ok(gio::ListStore::new::<Proposal>().upcast::<gio::ListModel>());
-                let Some(tab) = tab else { return empty() };
-                let (Some(vault), Some(buffer)) = (tab.lang.vault(), context.buffer()) else {
-                    return empty();
-                };
-                let caret = buffer.iter_at_mark(&buffer.get_insert());
-                let (pos, trigger) = (lang::pos_of(&caret), trigger_before(&tab, &caret));
-                lang::flush(tab.clone()).await;
-                let rel = tab.rel();
-                let items = match vault.completion(&rel, pos, trigger).await {
-                    Ok(items) => items,
-                    Err(e) => {
-                        // Never an `Err`: GtkSourceView drops the whole popup on a failing
-                        // provider, and a server that is still indexing fails a lot.
-                        tracing::debug!("completion for {rel}: {e:#}");
-                        Vec::new()
-                    }
-                };
-                tracing::debug!("completion for {rel} at {pos:?}: {} items", items.len());
-                *me.items.borrow_mut() = items;
-                Ok(me.matching(&context).upcast())
-            })
+            let fetch = self.fetch(context.clone());
+            Box::pin(async move { Ok(fetch.await.upcast()) })
         }
 
         fn refilter(&self, context: &CompletionContext, _model: &gio::ListModel) {
             // Narrowed here rather than at the server: the ranking was done for the position the
-            // popup opened at, and typing one more character does not change it.
+            // popup opened at, and typing one more character does not change it. Unless the
+            // server stopped at a cap, in which case what it left out may be exactly what the
+            // next character asks for, so the list is fetched again for the caret as it is now.
+            let provider = self.obj().clone();
+            if self.incomplete.get() {
+                let (fetch, context) = (self.fetch(context.clone()), context.clone());
+                glib::spawn_future_local(async move {
+                    let store = fetch.await;
+                    context.set_proposals_for_provider(
+                        provider.upcast_ref::<CompletionProvider>(),
+                        Some(&store),
+                    );
+                });
+                return;
+            }
             let store = self.matching(context);
             context.set_proposals_for_provider(
-                self.obj().upcast_ref::<CompletionProvider>(),
+                provider.upcast_ref::<CompletionProvider>(),
                 Some(&store),
             );
         }
@@ -288,8 +332,10 @@ mod provider_imp {
             // One user action, so Ctrl+Z takes the whole acceptance back: the replaced range, the
             // inserted text and whatever import the item brought with it.
             buffer.begin_user_action();
-            let mut start = diagnostics::iter_at(&buffer, item.replace.start);
-            let mut end = diagnostics::iter_at(&buffer, item.replace.end);
+            let caret = lang::pos_of(&buffer.iter_at_mark(&buffer.get_insert()));
+            let replace = super::grown(item.replace, caret);
+            let mut start = diagnostics::iter_at(&buffer, replace.start);
+            let mut end = diagnostics::iter_at(&buffer, replace.end);
             buffer.delete(&mut start, &mut end);
             // `delete` leaves both iters at the deletion point, so this writes exactly there.
             match item.is_snippet {
@@ -350,10 +396,57 @@ pub fn install(tab: &Rc<Tab>) {
     completion.add_provider(&provider);
 }
 
+/// The range an accepted item replaces, once the caret has moved on: the popup opens on a
+/// trigger with an empty word (`self.` offers everything), and what is typed after that to
+/// narrow the list belongs to the word being completed. Without this `get` + `get_func` gave
+/// `getget_func`. The caret only extends the range; a range reaching past it (the `]]` a note's
+/// completion eats) is kept as it is.
+fn grown(replace: Range, caret: Pos) -> Range {
+    match caret.line == replace.end.line && caret.character > replace.end.character {
+        true => Range {
+            start: replace.start,
+            end: caret,
+        },
+        false => replace,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accent_api::{Pos, Range};
+
+    #[test]
+    fn typing_after_the_popup_opened_grows_what_is_replaced() {
+        let at = |character| Pos { line: 3, character };
+        let opened = Range {
+            start: at(5),
+            end: at(5),
+        };
+        assert_eq!(
+            grown(opened, at(8)),
+            Range {
+                start: at(5),
+                end: at(8)
+            }
+        );
+        // A range reaching past the caret is the note's paired `]]`, and stays.
+        let eats = Range {
+            start: at(2),
+            end: at(9),
+        };
+        assert_eq!(grown(eats, at(7)), eats);
+        // Another line is another story; nothing is guessed.
+        assert_eq!(
+            grown(
+                opened,
+                Pos {
+                    line: 4,
+                    character: 1
+                }
+            ),
+            opened
+        );
+    }
 
     fn edit(line: u32, text: &str) -> TextEdit {
         let at = Pos { line, character: 0 };

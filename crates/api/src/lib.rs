@@ -9,6 +9,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -42,8 +43,8 @@ pub use accent_core::index::{
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
-    Completion, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity, Signature, Support,
-    Symbol, Task, TextEdit,
+    Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity,
+    Signature, Support, Symbol, Task, TextEdit,
 };
 
 // ---------------------------------------------------------------- public data
@@ -1203,8 +1204,38 @@ impl Local {
 impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
     /// costs what it shows.
+    ///
+    /// The index's own rows, plus the trees it deliberately does not hold — `node_modules`, a
+    /// `.venv`, a cargo `target/` — read straight off the disk
+    /// ([`walk::unindexed_children`]) and merged in, so the file tree can show every folder in
+    /// the vault without any of them being indexed, watched or searched. Those rows carry
+    /// `id == 0`, which is what tells them apart. It happens here rather than in the tree so
+    /// that a vault on another machine gets it too: this runs on the host holding the files.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
-        self.index().list_files(rel)
+        let mut rows = self.index().list_files(rel)?;
+        let held: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
+        // Non-fatal: a directory that vanished mid-listing must not blank the rows the index did
+        // answer for.
+        let extra = walk::unindexed_children(&self.root, rel, &held).unwrap_or_else(|e| {
+            tracing::debug!(dir = rel, "listing the unindexed children: {e}");
+            Vec::new()
+        });
+        if extra.is_empty() {
+            return Ok(rows);
+        }
+        rows.extend(extra.into_iter().map(|(rel_path, kind)| FileRow {
+            id: 0,
+            rel_path,
+            kind,
+            title: None,
+            size: 0,
+            mtime_ns: 0,
+        }));
+        // `Index::list_files` orders directories first and then by path, case-insensitively; the
+        // merged listing has to come out the same way or the disk rows would land in a block of
+        // their own at the end. `sort_by_cached_key` folds each path once rather than per compare.
+        rows.sort_by_cached_key(|r| (r.kind != FileKind::Dir, r.rel_path.to_ascii_lowercase()));
+        Ok(rows)
     }
 
     /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
@@ -1242,10 +1273,20 @@ impl Local {
     /// skipped by path, so no file is greped twice, and the walk stops as soon as `limit` matches
     /// are in hand.
     ///
-    /// It reads from disk on the caller's thread — the sidebar's search worker — so the index
-    /// lock is released before the first file is opened. `.git` and `.trash` stay unreachable,
-    /// and so does a symlinked repository's own gitignored build output: that is somebody else's
-    /// build tree, and leaving it out is what keeps a per-query walk affordable.
+    /// The matching runs **inside** the walk ([`walk::visit`]), on its threads, rather than over
+    /// a [`walk::ScanResult`] it built first: reading 10 000 dependency files one at a time was
+    /// most of what a settled query cost. The row budget is therefore shared — an atomic every
+    /// thread reads before it opens a file and writes when it has appended — so a query whose
+    /// rows fill early stops the walk instead of finishing it. Nothing is read on the index's
+    /// connection: the guard is dropped before the walk starts, and the caller is the sidebar's
+    /// search worker either way. `.git` and `.trash` stay unreachable, and so does a symlinked
+    /// repository's own gitignored build output: that is somebody else's build tree, and leaving
+    /// it out is what keeps a per-query walk affordable.
+    ///
+    /// The rows are sorted by path before they are returned, because the walk answers in whatever
+    /// order its threads got there and the reader is looking at a list. *Which* rows survive a
+    /// full budget is no longer deterministic — the threads race for it — and cannot be: that is
+    /// the price of not reading every file, and the pane already says the list is capped.
     ///
     /// Rows only, no count beside them: nothing here can be rewritten by Replace All, which
     /// visits the indexed notes, so a number of matches past `limit` would have no reader.
@@ -1263,22 +1304,39 @@ impl Local {
             target_gitignore: true,
             ..walk::ScanOptions::default()
         };
-        let (mut out, mut seen) = (Vec::new(), 0usize);
-        for f in walk::scan(&self.root, &opts).files {
-            if out.len() >= limit {
-                break;
+        let out: Mutex<Vec<Match>> = Mutex::new(Vec::new());
+        // How many rows are in `out`. Read without the lock, so a file that matches nothing —
+        // which is nearly all of them — never touches it at all.
+        let found = AtomicUsize::new(0);
+        walk::visit(&self.root, &opts, &|f| {
+            if found.load(Ordering::Relaxed) >= limit {
+                return false;
             }
             if f.kind == FileKind::Dir || known.contains(&f.rel_path) {
-                continue;
+                return true;
             }
+            let (mut rows, mut seen) = (Vec::new(), 0usize);
             match fs::read_text(&f.canonical) {
                 Ok(fs::Read::Text(t)) if !t.lossy => {
-                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut out, &mut seen);
+                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut rows, &mut seen);
                 }
                 Ok(_) => {}
+                // A file that vanished or cannot be read is not the query's problem.
                 Err(e) => tracing::debug!("grep skipped {}: {e}", f.rel_path),
             }
-        }
+            if rows.is_empty() {
+                return true;
+            }
+            let mut out = locked(&out);
+            out.extend(rows);
+            found.store(out.len(), Ordering::Relaxed);
+            out.len() < limit
+        });
+        let mut out = out.into_inner().unwrap_or_else(|e| e.into_inner());
+        // Two threads can overshoot the budget between the load and the store; the extra rows
+        // are real matches, but the pane asked for `limit` of them.
+        out.sort_unstable_by(|a, b| (&a.rel_path, a.line).cmp(&(&b.rel_path, b.line)));
+        out.truncate(limit);
         Ok(out)
     }
 
@@ -1312,12 +1370,26 @@ impl Local {
     /// Hand the index what search leaves out, so every later query can leave it out.
     ///
     /// Called from the git refresh, which is the one place in the app that has already asked git
-    /// and where the `[search] exclude` list joins git's answer. This is the only write that does
-    /// not go through the vault worker, so it takes the write lock against the worker's; both
-    /// sides `BEGIN IMMEDIATE` (`Index::write_tx`), which is what turns that collision into a
-    /// wait rather than "database is locked".
+    /// and where the `[search] exclude` list joins git's answer. The write goes to the vault
+    /// worker rather than to the caller's connection, because the worker owns the only writing
+    /// one: on the caller's it had to wait for the worker's write lock while holding the mutex
+    /// the main thread reads through, and `list_dir` queued behind it. Measured on the 40k-entry
+    /// test vault, cold: a read waited 5 006 ms and the write then failed outright with "database
+    /// is locked", the busy handler having been starved by a reconcile that takes the write lock
+    /// back between every batch.
+    ///
+    /// It still returns only once the write has landed — the worker answers on `reply` — because
+    /// the caller re-runs the query on screen the moment it does. What the caller now waits for is
+    /// the worker reaching this message, which during a reconcile is the reconcile: a wait, but
+    /// never one a reader is behind, and one that ends in the write actually happening.
     pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
-        self.index().set_excluded(entries)
+        let (reply, answer) = channel();
+        self.tx
+            .send(Msg::SetExcluded(entries.to_vec(), reply))
+            .map_err(|_| anyhow::anyhow!("the vault worker is gone"))?;
+        answer
+            .recv()
+            .context("the vault worker stopped before it recorded the exclusion set")?
     }
 
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
@@ -1383,6 +1455,9 @@ enum Msg {
     /// The git directories to watch, as `repos()` last found them. The walk hard-skips `.git`,
     /// so these are never in the index's directory list and the watcher has to be told.
     WatchGit(Vec<PathBuf>),
+    /// What search leaves out, and where to say it has been written. See
+    /// [`Local::set_excluded`]: the worker holds the only writing connection.
+    SetExcluded(Vec<String>, Sender<Result<()>>),
     Rescan,
     Shutdown,
 }
@@ -1464,6 +1539,14 @@ impl Worker {
                 self.rebuild_watcher();
             }
         }
+        // Before the rescan test below, which returns early: a caller is waiting for this answer
+        // and would otherwise be told the worker had gone. A walk in the same batch can only
+        // clear the flag on rows it adds, and those are files git had not seen when it listed.
+        for msg in &batch {
+            if let Msg::SetExcluded(entries, reply) = msg {
+                let _ = reply.send(self.index.set_excluded(entries));
+            }
+        }
         if batch.iter().any(|m| self.needs_rescan(m)) {
             // The walk replaces the index wholesale, but the moves in this batch are still news:
             // a tab open on a path that was renamed under it has to follow.
@@ -1480,7 +1563,7 @@ impl Worker {
         let mut batched = Batch::default();
         for msg in batch {
             match msg {
-                Msg::Rescan | Msg::Shutdown | Msg::WatchGit(_) => {}
+                Msg::Rescan | Msg::Shutdown | Msg::WatchGit(_) | Msg::SetExcluded(..) => {}
                 Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
             }
@@ -1938,6 +2021,37 @@ mod tests {
         assert_eq!(names(&f.vault.list_dir("sub").unwrap()), ["sub/Deep.md"]);
     }
 
+    #[test]
+    fn list_dir_merges_the_trees_the_index_does_not_hold() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Note.md", "hello");
+        f.write("node_modules/pkg/index.js", "js");
+        f.write("apples/a.md", "a");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let root = f.vault.list_dir("").unwrap();
+        assert_eq!(
+            names(&root),
+            ["apples", "node_modules", "Note.md"],
+            "the skipped tree sorts among the indexed rows, not after them"
+        );
+        // Which of them is in the index is what the file tree reads to decide whether a row may
+        // be renamed, moved or dropped onto.
+        let id = |rel: &str| root.iter().find(|r| r.rel_path == rel).unwrap().id;
+        assert_eq!(id("node_modules"), 0);
+        assert!(id("apples") > 0);
+        // Its contents come from the disk, one level at a time.
+        assert_eq!(
+            names(&f.vault.list_dir("node_modules").unwrap()),
+            ["node_modules/pkg"]
+        );
+        assert_eq!(
+            names(&f.vault.list_dir("node_modules/pkg").unwrap()),
+            ["node_modules/pkg/index.js"]
+        );
+    }
+
     /// Depends on real inotify events.
     #[test]
     fn external_write_emits_file_changed_and_becomes_searchable() {
@@ -2185,6 +2299,51 @@ mod tests {
         );
     }
 
+    /// The row budget is shared by the walking threads, so a cap is a cap however many of them
+    /// matched at once, and the rows come back in path order rather than in finishing order.
+    #[test]
+    fn grep_unindexed_honours_the_row_budget_and_answers_in_path_order() {
+        let f = Fixture::open(VaultConfig::default());
+        for i in 0..50 {
+            f.write(&format!("node_modules/pkg{i:02}/dep.js"), "// zorblat\n");
+        }
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let plain = Options::default();
+        let hits = f.vault.grep_unindexed("zorblat", plain, 7).unwrap();
+        assert_eq!(hits.len(), 7, "{hits:?}");
+        let paths: Vec<&str> = hits.iter().map(|h| h.rel_path.as_str()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort_unstable();
+        assert_eq!(paths, sorted, "rows must be ordered for the reader");
+    }
+
+    /// The exclusion set is written by the vault worker, and the call still means it is written:
+    /// the next query must already leave the excluded file out.
+    #[test]
+    fn set_excluded_has_landed_when_it_returns() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("keep.txt", "keep");
+        // Not a note: a note is listed whether or not git ignores it.
+        f.write("build/out.txt", "out");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        f.vault.set_excluded(&["build/".to_string()]).unwrap();
+        let paths = f.vault.file_paths(false).unwrap();
+        assert!(paths.contains(&"keep.txt".to_string()), "{paths:?}");
+        assert!(!paths.contains(&"build/out.txt".to_string()), "{paths:?}");
+
+        f.vault.set_excluded(&[]).unwrap();
+        assert!(
+            f.vault
+                .file_paths(false)
+                .unwrap()
+                .contains(&"build/out.txt".to_string())
+        );
+    }
+
     /// Bodies outside the notes are in the index now, so the one grep reaches them.
     #[test]
     fn grep_reaches_text_outside_notes() {
@@ -2418,7 +2577,7 @@ mod tests {
                 .await
                 .unwrap();
             let at = |character| Pos { line: 0, character };
-            let items = f.vault.completion("a.md", at(8), None).await.unwrap();
+            let items = f.vault.completion("a.md", at(8), None).await.unwrap().items;
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].label, "Beta");
             assert_eq!(items[0].insert, "[[Beta]]");
@@ -2435,7 +2594,7 @@ mod tests {
                 .change_document("a.md", "a #ru".to_string())
                 .await
                 .unwrap();
-            let items = f.vault.completion("a.md", at(5), None).await.unwrap();
+            let items = f.vault.completion("a.md", at(5), None).await.unwrap().items;
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].insert, "#rust");
             assert_eq!(items[0].kind, Kind::Tag);
