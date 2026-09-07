@@ -13,9 +13,8 @@ use crate::pdfview::Mode;
 const ORBIT: f64 = 52.0;
 /// The whole ring's box, wide enough for the orbit plus a button either side of it.
 const SIZE: i32 = 144;
-/// Where the ring sits when a window has not moved it yet: clear of the page's left edge and
-/// below the tab bar, which is where a right-handed reader's hand is not.
-pub const HOME: (f64, f64) = (24.0, 96.0);
+/// How far the ring sits from the corner it starts in.
+const INSET: f64 = 24.0;
 
 /// The three tools, in the order they sit on the ring: pen at the top, then clockwise.
 const TOOLS: [(Mode, &str, &str); 3] = [
@@ -35,6 +34,10 @@ pub struct Ring {
     /// Where the ring's top-left corner sits in the pane, which is what the overlay's margins are
     /// set from.
     at: std::cell::Cell<(f64, f64)>,
+    /// Whether the reader has dragged it. Until they have, the ring goes back to its corner
+    /// every time it is shown, which is how it finds that corner at all: the pane has no width to
+    /// measure against until it has been allocated.
+    moved: std::cell::Cell<bool>,
 }
 
 impl Ring {
@@ -84,7 +87,8 @@ impl Ring {
         let ring = std::rc::Rc::new(Ring {
             root,
             buttons,
-            at: std::cell::Cell::new(HOME),
+            at: std::cell::Cell::new((INSET, INSET)),
+            moved: std::cell::Cell::new(false),
         });
         ring.wire_drag(&hub);
         ring
@@ -103,6 +107,7 @@ impl Ring {
                 // Claimed on the first motion, not on the press, so the hub can still be clicked
                 // without the ring jumping.
                 gesture.set_state(gtk::EventSequenceState::Claimed);
+                ring.moved.set(true);
                 // Added to where the ring *is*, not to where it was when the hand took hold. The
                 // gesture measures its offset inside the hub, and the hub is what this moves, so
                 // the moment the ring catches up the reported offset is zero again — treating it
@@ -133,12 +138,32 @@ impl Ring {
         self.root.set_margin_top(at.1 as i32);
     }
 
-    /// Where the ring is, so the window can put the next one in the same place.
-    pub fn at(&self) -> (f64, f64) {
-        self.at.get()
+    /// Where the reader dragged the ring, so the next one opens there. `None` while they have
+    /// not moved it, which leaves the next one free to find its own corner.
+    pub fn at(&self) -> Option<(f64, f64)> {
+        self.moved.get().then(|| self.at.get())
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    /// Put the ring where the window last had it, or in its own corner if nobody has moved it.
+    ///
+    /// The top right: the page is read from the left, and a right-handed reader's hand comes in
+    /// from the bottom right, so the top right is the corner in the way of neither.
+    fn place(&self, remembered: Option<(f64, f64)>) {
+        let (x, y) = match remembered.filter(|_| self.moved.get()) {
+            Some(at) => at,
+            None => {
+                let width = self.root.parent().map_or(0.0, |p| f64::from(p.width()));
+                ((width - f64::from(SIZE) - INSET).max(INSET), INSET)
+            }
+        };
+        self.move_to(x, y);
+    }
+
+    /// Show or hide the ring, putting it where the window says when it comes out.
+    pub fn set_visible(&self, visible: bool, at: Option<(f64, f64)>) {
+        if visible {
+            self.place(at);
+        }
         self.root.set_visible(visible);
     }
 

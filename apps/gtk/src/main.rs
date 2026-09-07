@@ -975,8 +975,9 @@ struct App {
     drawing: Cell<bool>,
     /// The tool the ring offers when it comes back.
     tool: Cell<pdfview::Mode>,
-    /// Where this window last left the ring.
-    ring_at: Cell<(f64, f64)>,
+    /// Where this window last left the ring, once the reader has moved it. `None` until then,
+    /// which leaves each ring free to open in its own corner.
+    ring_at: Cell<Option<(f64, f64)>>,
     menu: gtk::MenuButton,
     paned: gtk::Paned,
     /// Swaps the pane tree for a placeholder while no note is open (DESIGN.md, States).
@@ -1693,7 +1694,9 @@ impl App {
     fn sync_drawing(&self) {
         if let Some(pdf) = self.active_pdf() {
             // Whatever this tab's ring was dragged to is where the next one starts.
-            self.ring_at.set(pdf.ring_at());
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
             pdf.set_drawing(self.drawing.get(), self.ring_at.get());
             let showing = self.drawing.get();
             pdf.set_mode(match showing {
@@ -2618,7 +2621,9 @@ impl App {
         // the write still happens after the tab is gone.
         if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
             pdf.flush();
-            self.ring_at.set(pdf.ring_at());
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
@@ -4870,7 +4875,7 @@ fn build_window(
         drawing_button: drawing.clone(),
         drawing: Cell::new(false),
         tool: Cell::new(pdfview::Mode::Pen),
-        ring_at: Cell::new(ring::HOME),
+        ring_at: Cell::new(None),
         menu,
         paned,
         content: content.clone(),

@@ -722,10 +722,12 @@ impl PdfView {
 
     pub fn set_mode(&self, mode: Mode) {
         self.imp().mode.set(mode);
+        // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
+        // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
+        // exactly the thing that will not happen.
         self.set_cursor_from_name(match mode {
             Mode::Select => None,
-            Mode::Eraser => Some("cell"),
-            _ => Some("crosshair"),
+            _ => Some("default"),
         });
     }
 

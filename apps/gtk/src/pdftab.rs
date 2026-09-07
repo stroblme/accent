@@ -583,15 +583,12 @@ impl PdfTab {
     }
 
     /// Show or hide the ring of tools.
-    pub fn set_drawing(&self, showing: bool, at: (f64, f64)) {
-        if showing {
-            self.ring.move_to(at.0, at.1);
-        }
-        self.ring.set_visible(showing);
+    pub fn set_drawing(&self, showing: bool, at: Option<(f64, f64)>) {
+        self.ring.set_visible(showing, at);
     }
 
     /// Where the reader has dragged the ring, so the next tab to show one puts it there.
-    pub fn ring_at(&self) -> (f64, f64) {
+    pub fn ring_at(&self) -> Option<(f64, f64)> {
         self.ring.at()
     }
 
@@ -927,6 +924,11 @@ impl PdfTab {
             move |view, x, y| {
                 // The pointer only changes when the answer does: a GDK call per pixel of travel
                 // is what the editor's link hover deliberately avoids too.
+                // While a tool is out, the cursor says so and nothing here takes it back: the
+                // page is not text to be selected, and a link is not to be followed.
+                if view.mode() != pdfview::Mode::Select {
+                    return;
+                }
                 let over = tab.link_at(view, x, y).is_some();
                 let on_page = view.page_point(x, y).is_some();
                 view.set_cursor_from_name(Some(match (over, on_page) {
