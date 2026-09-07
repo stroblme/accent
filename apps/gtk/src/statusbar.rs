@@ -6,8 +6,9 @@
 //! note path; a document's own facts belong under it, not beside its title. The branch is the
 //! repository the document sits in, which is not always the vault's own.
 //!
-//! Nothing here fades with the chrome: the bar is one line of text the reader glances at, and a
-//! word count that disappears while you type is a word count nobody can use.
+//! The whole bar fades with the chrome, the unsaved dot included: it is a footer of facts about a
+//! document nobody is looking at while they are writing into it, and an exception would be one
+//! thing left lit under a window that is otherwise out of the way.
 
 use gtk::prelude::*;
 
@@ -23,6 +24,8 @@ pub struct Bar {
     /// faded rather than hidden, so the bar never changes width mid-sync.
     branch_spinner: adw::Spinner,
     kind: gtk::Label,
+    /// The dot a dirty tab wears, so one symbol means "unsaved" wherever it appears.
+    unsaved: gtk::Label,
     words: gtk::Label,
     /// The zoom readout, which is also the control that resets it.
     zoom: gtk::Button,
@@ -33,6 +36,8 @@ impl Bar {
     pub fn new() -> Bar {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         row.add_css_class("accent-flat");
+        // The bar goes with the rest of the chrome while the user types (DESIGN.md).
+        row.add_css_class("chrome-fade");
         row.set_margin_start(12);
         row.set_margin_end(12);
         row.set_margin_top(6);
@@ -54,6 +59,12 @@ impl Bar {
         branch_body.add_overlay(&branch_spinner);
         let branch = bar_button(&branch_body, "win.git-sync", "Sync");
         let kind = label(false);
+        // Between what the file is and how long it is, so the right-hand group still reads left
+        // to right: Markdown, unsaved, 12 words. Its own label rather than a prefix on the kind,
+        // because the two facts change for different reasons.
+        let unsaved = label(false);
+        unsaved.set_label("•");
+        unsaved.set_tooltip_text(Some("Unsaved changes"));
         let words = label(true);
 
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
@@ -67,6 +78,7 @@ impl Bar {
         kind.set_hexpand(true);
         kind.set_halign(gtk::Align::End);
         row.append(&kind);
+        row.append(&unsaved);
         row.append(&words);
         row.append(&zoom);
 
@@ -77,6 +89,7 @@ impl Bar {
             branch_label,
             branch_spinner,
             kind,
+            unsaved,
             words,
             zoom,
             zoom_label,
@@ -111,9 +124,16 @@ impl Bar {
     }
 
     /// The document's own count, whatever it counts: a note's words, a code tab's errors and
-    /// warnings. One slot, because a tab has one such fact and it is the same corner of the bar.
+    /// warnings, a PDF's page. One slot, because a tab has one such fact and it is the same
+    /// corner of the bar.
     pub fn set_facts(&self, text: Option<&str>) {
         set(&self.words, text);
+    }
+
+    /// Whether the document has edits the disk does not. Nothing is shown when it is saved: a
+    /// bar that says "Saved" all day is a bar nobody reads.
+    pub fn set_unsaved(&self, unsaved: bool) {
+        self.unsaved.set_visible(unsaved);
     }
 
     /// The zoom, while it is worth saying: "110 %", or a PDF's "Fit Width" / "Fit Page".
@@ -184,6 +204,15 @@ pub fn words_label(count: usize) -> String {
     }
 }
 
+/// Where the reader is in a PDF, which is what that tab has to say where a note has its word
+/// count. `page` is 0-based, the way the viewer counts them, and the readout is not.
+///
+/// `None` until the document is open: a PDF whose pages are not known yet would otherwise read
+/// "Page 1 of 0" for as long as it takes to load.
+pub fn page_label(page: usize, count: usize) -> Option<String> {
+    (count > 0).then(|| format!("Page {} of {count}", page + 1))
+}
+
 /// The readout for a code tab: what the language is, then how the bytes are encoded and how the
 /// lines end. Only code says the last two — a note is UTF-8 with LF endings or it would not be a
 /// note, and a readout that never changes is chrome for nothing.
@@ -210,6 +239,14 @@ mod tests {
         assert_eq!(words_label(0), "0 words");
         assert_eq!(words_label(1), "1 word");
         assert_eq!(words_label(42), "42 words");
+    }
+
+    #[test]
+    fn page_label_counts_from_one_and_says_nothing_until_the_pages_are_known() {
+        assert_eq!(page_label(0, 12).as_deref(), Some("Page 1 of 12"));
+        assert_eq!(page_label(11, 12).as_deref(), Some("Page 12 of 12"));
+        assert_eq!(page_label(0, 1).as_deref(), Some("Page 1 of 1"));
+        assert_eq!(page_label(0, 0), None);
     }
 
     #[test]

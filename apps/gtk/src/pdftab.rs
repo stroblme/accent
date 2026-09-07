@@ -293,6 +293,12 @@ impl PdfTab {
         pdfview::zoom_label(self.view.zoom())
     }
 
+    /// The status bar's other readout: where in the document the reader is, which is what a PDF
+    /// has to say in the slot a note fills with its word count.
+    pub fn page_label(&self) -> Option<String> {
+        crate::statusbar::page_label(self.view.current_page(), self.view.page_count())
+    }
+
     /// Presentation mode shows one whole page and puts the zoom back on the way out.
     pub fn set_presenting(self: &Rc<Self>, on: bool) {
         match (on, self.presenting.get()) {
