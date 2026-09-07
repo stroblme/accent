@@ -13,7 +13,7 @@ pub struct Cell {
 }
 
 /// The candidates, in the order that breaks a tie.
-const CANDIDATES: [u8; 3] = [b',', b';', b'\t'];
+const CANDIDATES: [u8; 3] = *b",;\t";
 
 /// The delimiter in use: whichever of `,`, `;` or tab occurs most on the first line outside
 /// quotes. `,` when the line has none of them, and when two of them tie.

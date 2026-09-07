@@ -21,12 +21,11 @@ const COLUMN_WIDTH: i32 = 360;
 const CONNECT: &str = "connect";
 
 /// The window shown when `accent` is launched without a vault path.
-/// `on_open` receives the chosen vault directory, `on_open_remote` an `ssh://` address.
+/// `on_open` receives the chosen vault directory; a remote is `app.open-remote`'s job.
 pub fn present(
     app: &adw::Application,
     config: Rc<RefCell<Config>>,
     on_open: impl Fn(PathBuf) + 'static,
-    on_open_remote: impl Fn(String) + 'static,
 ) -> adw::ApplicationWindow {
     // The start screen is a window like any other, so it follows the same theme preference.
     crate::theme::apply(config.borrow().theme);
@@ -39,7 +38,6 @@ pub fn present(
         .height_request(MIN_HEIGHT)
         .build();
     let on_open: Rc<dyn Fn(PathBuf)> = Rc::new(on_open);
-    let on_open_remote: Rc<dyn Fn(String)> = Rc::new(on_open_remote);
 
     // Ellipsis: the label needs a folder before it can act.
     let open = gtk::Button::builder()
@@ -76,19 +74,16 @@ pub fn present(
 
     // A pill like its neighbour but not suggested: opening a folder on this machine stays the
     // primary action, and two suggested buttons side by side would name neither of them.
+    //
+    // The action rather than a handler of its own: `app.open-remote` opens the same dialog from
+    // the primary menu and the Open Recent picker, and this window is built with an application,
+    // so the button reaches it through its own muxer.
     let remote = gtk::Button::builder()
         .label("Open Remote…")
         .halign(gtk::Align::Center)
+        .action_name("app.open-remote")
         .build();
     remote.add_css_class("pill");
-    remote.connect_clicked({
-        let (window, on_open_remote) = (window.downgrade(), on_open_remote.clone());
-        move |_| {
-            if let Some(window) = window.upgrade() {
-                connect_dialog(&window, &on_open_remote);
-            }
-        }
-    });
 
     // 12 px, the spacing DESIGN.md gives two related widgets.
     let buttons = gtk::Box::builder()
@@ -214,7 +209,7 @@ fn recent_row(
 /// path, a remote one by its host and by the path on that host — two vaults called `Notes` on two
 /// machines have to read differently. An address that will not parse is shown as it was stored,
 /// since anything else would be a guess about what the user meant.
-fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
+pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
     if ssh::is_remote_path(path) {
         return match ssh::parse(&path.to_string_lossy()) {
             Ok(url) => (url.host, url.path.display().to_string()),
@@ -245,11 +240,25 @@ pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
 ///
 /// A remote is kept whatever state it is in: the only way to find out is to connect, and dialling
 /// out to draw a start screen would be far worse than an entry that might not answer.
-fn existing(recent: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn existing(recent: &[PathBuf]) -> Vec<PathBuf> {
     recent
         .iter()
         .filter(|p| ssh::is_remote_path(p) || p.is_dir())
         .cloned()
+        .collect()
+}
+
+/// The recent vaults a window can switch to: the ones still worth offering, minus the one it is
+/// already on. Keys, not paths — `Vault::key`, `Config::touch_recent` and this list all spell a
+/// vault the same way, a canonical path or an `ssh://` address, so plain equality is the answer.
+///
+/// A vault that already has a window of its own stays in: picking it raises that window, which is
+/// the one-vault-one-window rule doing its job rather than a row that fails.
+pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<String> {
+    existing(recent)
+        .into_iter()
+        .filter(|p| Some(p.as_path()) != current)
+        .map(|p| p.to_string_lossy().into_owned())
         .collect()
 }
 
@@ -262,7 +271,10 @@ fn existing(recent: &[PathBuf]) -> Vec<PathBuf> {
 /// keeping Connect insensitive and saying why under the fields, rather than by closing on a
 /// failure the user would then have to reopen the dialog to correct. The start screen has no
 /// toast overlay, so there is nowhere else for that sentence to go anyway.
-fn connect_dialog(window: &adw::ApplicationWindow, on_open_remote: &Rc<dyn Fn(String)>) {
+pub(crate) fn connect_dialog(
+    window: &impl IsA<gtk::Widget>,
+    on_open_remote: impl Fn(String) + 'static,
+) {
     let host = gtk::Entry::builder()
         .placeholder_text("server.example.com")
         .activates_default(true)
@@ -323,7 +335,7 @@ fn connect_dialog(window: &adw::ApplicationWindow, on_open_remote: &Rc<dyn Fn(St
     }
 
     dialog.choose(Some(window), gio::Cancellable::NONE, {
-        let (host, path, on_open_remote) = (host.clone(), path.clone(), on_open_remote.clone());
+        let (host, path) = (host.clone(), path.clone());
         move |response| {
             if response != CONNECT {
                 return;
@@ -487,6 +499,25 @@ mod tests {
         let remote = PathBuf::from("ssh://box/srv/vault");
         let gone = PathBuf::from("/no/such/vault/on/this/machine");
         assert_eq!(existing(&[remote.clone(), gone]), [remote]);
+    }
+
+    #[test]
+    fn other_vaults_leaves_out_the_one_this_window_is_on() {
+        let here = PathBuf::from("/tmp");
+        let remote = PathBuf::from("ssh://box/srv/vault");
+        let gone = PathBuf::from("/no/such/vault/on/this/machine");
+        let recent = [remote.clone(), here.clone(), gone];
+        // Recency order kept, the missing directory dropped, the remote kept unchecked.
+        assert_eq!(
+            other_vaults(&recent, Some(&here)),
+            ["ssh://box/srv/vault".to_string()]
+        );
+        assert_eq!(other_vaults(&recent, Some(&remote)), ["/tmp".to_string()]);
+        // No vault at all — a loose window — leaves every surviving entry in.
+        assert_eq!(
+            other_vaults(&recent, None),
+            ["ssh://box/srv/vault".to_string(), "/tmp".to_string()]
+        );
     }
 
     #[test]

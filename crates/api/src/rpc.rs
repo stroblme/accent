@@ -464,7 +464,6 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "file_paths" => any(vault.file_paths(arg(p, 0)?)),
         "set_excluded" => any(vault.set_excluded(&paths(0)?)),
         "recent_notes" => any(vault.recent_notes(arg(p, 0)?)),
-        "headings" => any(vault.headings(&arg::<String>(p, 0)?)),
         "resolve_link" => any(vault.resolve_link(&arg::<String>(p, 0)?)),
         "conflicts" => any(vault.conflicts()),
         "conflicts_of" => any(vault.conflicts_of(&arg::<String>(p, 0)?)),
@@ -474,6 +473,35 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             vault.rescan();
             ok(())
         }
+
+        // --------------------------------------------------------- language
+        // Every request runs on its own thread here (`serve_local`), so blocking on the runtime
+        // is a wait for one answer and never a nested one.
+        "open_document" => any(block(vault.open_document(
+            &arg::<String>(p, 0)?,
+            &arg::<String>(p, 1)?,
+            arg(p, 2)?,
+        ))),
+        "change_document" => any(block(
+            vault.change_document(&arg::<String>(p, 0)?, arg(p, 1)?),
+        )),
+        "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
+        "completion" => any(block(vault.completion(
+            &arg::<String>(p, 0)?,
+            arg(p, 1)?,
+            arg(p, 2)?,
+        ))),
+        "resolve_completion" => any(block(
+            vault.resolve_completion(&arg::<String>(p, 0)?, arg(p, 1)?),
+        )),
+        "signature_help" => any(block(
+            vault.signature_help(&arg::<String>(p, 0)?, arg(p, 1)?),
+        )),
+        "hover" => any(block(vault.hover(&arg::<String>(p, 0)?, arg(p, 1)?))),
+        "definition" => any(block(vault.definition(&arg::<String>(p, 0)?, arg(p, 1)?))),
+        "references" => any(block(vault.references(&arg::<String>(p, 0)?, arg(p, 1)?))),
+        "symbols" => any(block(vault.symbols(&arg::<String>(p, 0)?))),
+        "folds" => any(block(vault.folds(&arg::<String>(p, 0)?))),
 
         // -------------------------------------------------------------- git
         "repos" => ok(vault.repos()),
@@ -494,6 +522,12 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
 
         _ => Err(RpcError::failed(format!("no such method: {method}"))),
     }
+}
+
+/// Wait for a language request. The task is not dropped before it answers, so nothing is
+/// cancelled: the caller on the other end of the pipe is already waiting for this one.
+fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
+    accent_lsp::runtime().block_on(task)
 }
 
 /// The two arguments every exact-search method carries, compiled where the files are. A pattern
@@ -635,6 +669,31 @@ mod tests {
         assert!(
             w.wait(|e| matches!(e, Event::DirsChanged(dirs) if dirs.iter().any(|d| d.is_empty()))),
             "the vault's own worker has to reach the client"
+        );
+    }
+
+    /// A language request runs where the files are, and what the provider has to say about the
+    /// document comes back the way any other event does.
+    #[test]
+    fn a_document_is_opened_and_answered_for_across_the_wire() {
+        let w = Wired::open();
+        assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
+
+        let text = "# Title\n\nsee [[nope]]\n";
+        let support: crate::Support = w
+            .client
+            .call("open_document", json!(["a.md", "markdown", text]))
+            .unwrap();
+        assert_eq!(support.completion_triggers, ['[', '#']);
+
+        let symbols: Vec<crate::Symbol> = w.client.call("symbols", json!(["a.md"])).unwrap();
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "Title");
+
+        assert!(
+            w.wait(|e| matches!(e, Event::Diagnostics { rel, items }
+                if rel == "a.md" && items.len() == 1)),
+            "the dangling link has to reach the client as a notification"
         );
     }
 

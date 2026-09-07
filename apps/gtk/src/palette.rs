@@ -1,4 +1,4 @@
-//! Command palette and file switcher: one dialog, three modes.
+//! Command palette, file switcher and vault switcher: one dialog, four modes.
 //!
 //! The caller says which mode the palette opens in, so `Ctrl+P` and `Ctrl+Shift+P` both land on an
 //! empty entry that is already searching the right thing. A typed leading `>` or `#` still switches
@@ -11,6 +11,7 @@
 //! types something. Keystrokes are debounced, so holding a key down cannot queue up one full match
 //! per character.
 
+use crate::start;
 use adw::prelude::*;
 use gtk::glib;
 use gtk::{gdk, gio, pango};
@@ -18,8 +19,12 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
+
+/// The two rows that close the Open Recent list: the ways to a vault that is not in it.
+const OPENERS: [&str; 2] = ["app.open-vault", "app.open-remote"];
 
 /// Beyond this the list stops being scannable and nucleo's single-threaded matcher starts to show.
 const MAX_RESULTS: usize = 200;
@@ -43,6 +48,9 @@ pub enum Item {
     },
     /// A tag to filter by.
     Tag(String),
+    /// A recent vault to switch to, by the key it is stored under: a canonical path, or an
+    /// `ssh://` address for one on another machine.
+    Vault(String),
 }
 
 impl Item {
@@ -52,6 +60,7 @@ impl Item {
             Item::File(rel) => rel,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
+            Item::Vault(key) => key,
         }
     }
 }
@@ -68,6 +77,9 @@ pub struct Sources {
     pub load_files: Box<dyn Fn() -> Vec<String>>,
     pub commands: Vec<Item>,
     pub load_tags: Box<dyn Fn() -> Vec<String>>,
+    /// The recent vaults this window can switch to, newest first, the one it is on left out.
+    /// Short and already filtered, so it is passed whole rather than behind a loader.
+    pub vaults: Vec<String>,
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
@@ -85,6 +97,7 @@ pub enum Mode {
     Files,
     Commands,
     Tags,
+    Vaults,
 }
 
 impl Mode {
@@ -94,6 +107,7 @@ impl Mode {
             Mode::Files => "Go to File",
             Mode::Commands => "Run Command",
             Mode::Tags => "Filter by Tag",
+            Mode::Vaults => "Open Recent",
         }
     }
 
@@ -102,6 +116,7 @@ impl Mode {
             Mode::Files => "Search files…",
             Mode::Commands => "Run a command…",
             Mode::Tags => "Filter by tag…",
+            Mode::Vaults => "Search recent vaults…",
         }
     }
 }
@@ -302,6 +317,7 @@ fn row_factory(
             .expect("list item")
             .set_child(Some(&row));
     });
+    let home = glib::home_dir();
     factory.connect_bind(move |_, item| {
         let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
         let (Some(row), Some(boxed)) = (
@@ -342,6 +358,13 @@ fn row_factory(
             Item::Tag(tag) => {
                 name.set_text(tag);
                 dir.set_text("");
+            }
+            // The reading the start screen's recent list gives a vault: a local one named by its
+            // folder and placed by its path, a remote one by its host and the path on that host.
+            Item::Vault(key) => {
+                let (title, subtitle) = start::labels(Path::new(key), Some(home.as_path()));
+                name.set_text(&title);
+                dir.set_text(&subtitle);
             }
         }
     });
@@ -448,10 +471,14 @@ pub fn present(
         load_files,
         commands,
         load_tags,
+        vaults,
         on_rebind,
     } = sources;
     let recent = Rc::new(recent);
     let mru = Rc::new(mru);
+    // Ranked against itself, so a typed query still breaks ties by how recently a vault was open.
+    let vault_places = Rc::new(places(&vaults, &vaults));
+    let vaults = Rc::new(vaults);
     // Behind a cell because a rebind rewrites one row's accelerators without closing the dialog.
     let commands: Rc<RefCell<Vec<Rc<Item>>>> =
         Rc::new(RefCell::new(commands.into_iter().map(Rc::new).collect()));
@@ -548,6 +575,7 @@ pub fn present(
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, notes, tags) = (recent.clone(), notes.clone(), tags.clone());
         let (mru, note_recent) = (mru.clone(), note_recent.clone());
+        let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
         let (commands, command_text, command_recent, matcher) = (
             commands.clone(),
             command_text.clone(),
@@ -558,43 +586,72 @@ pub fn present(
             let t0 = Instant::now();
             let (mode, query) = parse_query(raw, mode);
             let empty_query = query.trim().is_empty();
-            let hits: Vec<Rc<Item>> = match mode {
-                // No corpus and no matching until the user actually types: the dialog is up in the
-                // time one indexed query takes, not the 11 s a full vault walk took.
-                Mode::Files if empty_query => recent
-                    .iter()
-                    .take(MAX_RESULTS)
-                    .map(|rel| Rc::new(Item::File(rel.clone())))
-                    .collect(),
-                Mode::Files => {
-                    let corpus = cache(&notes, &load_files);
-                    let used = cache(&note_recent, &|| places(&corpus, &mru));
-                    let mut m = matcher.borrow_mut();
-                    m.config = Config::DEFAULT.match_paths();
-                    rank(&corpus, &used, query, &mut m)
-                        .into_iter()
-                        .map(|i| Rc::new(Item::File(corpus[i].clone())))
-                        .collect()
-                }
-                // Labels and tags are not paths, so they score better under the plain config.
-                Mode::Commands => {
-                    let mut m = matcher.borrow_mut();
-                    m.config = Config::DEFAULT;
-                    rank(&command_text, &command_recent, query, &mut m)
-                        .into_iter()
-                        .map(|i| commands.borrow()[i].clone())
-                        .collect()
-                }
-                Mode::Tags => {
-                    let corpus = cache(&tags, &load_tags);
-                    let mut m = matcher.borrow_mut();
-                    m.config = Config::DEFAULT;
-                    rank(&corpus, &[], query, &mut m)
-                        .into_iter()
-                        .map(|i| Rc::new(Item::Tag(corpus[i].clone())))
-                        .collect()
-                }
-            };
+            let hits: Vec<Rc<Item>> =
+                match mode {
+                    // No corpus and no matching until the user actually types: the dialog is up in the
+                    // time one indexed query takes, not the 11 s a full vault walk took.
+                    Mode::Files if empty_query => recent
+                        .iter()
+                        .take(MAX_RESULTS)
+                        .map(|rel| Rc::new(Item::File(rel.clone())))
+                        .collect(),
+                    Mode::Files => {
+                        let corpus = cache(&notes, &load_files);
+                        let used = cache(&note_recent, &|| places(&corpus, &mru));
+                        let mut m = matcher.borrow_mut();
+                        m.config = Config::DEFAULT.match_paths();
+                        rank(&corpus, &used, query, &mut m)
+                            .into_iter()
+                            .map(|i| Rc::new(Item::File(corpus[i].clone())))
+                            .collect()
+                    }
+                    // Labels and tags are not paths, so they score better under the plain config.
+                    Mode::Commands => {
+                        let mut m = matcher.borrow_mut();
+                        m.config = Config::DEFAULT;
+                        rank(&command_text, &command_recent, query, &mut m)
+                            .into_iter()
+                            .map(|i| commands.borrow()[i].clone())
+                            .collect()
+                    }
+                    Mode::Tags => {
+                        let corpus = cache(&tags, &load_tags);
+                        let mut m = matcher.borrow_mut();
+                        m.config = Config::DEFAULT;
+                        rank(&corpus, &[], query, &mut m)
+                            .into_iter()
+                            .map(|i| Rc::new(Item::Tag(corpus[i].clone())))
+                            .collect()
+                    }
+                    // The two ways of opening a vault that is *not* in the list end the rows, and are
+                    // never filtered out: one surface reaches every way of changing vault, and the
+                    // picker is never the empty status page even in a window on the only vault known.
+                    Mode::Vaults => {
+                        let mut hits: Vec<Rc<Item>> = if empty_query {
+                            vaults
+                                .iter()
+                                .take(MAX_RESULTS)
+                                .map(|key| Rc::new(Item::Vault(key.clone())))
+                                .collect()
+                        } else {
+                            let mut m = matcher.borrow_mut();
+                            m.config = Config::DEFAULT.match_paths();
+                            rank(&vaults, &vault_places, query, &mut m)
+                                .into_iter()
+                                .map(|i| Rc::new(Item::Vault(vaults[i].clone())))
+                                .collect()
+                        };
+                        // Read on every refresh rather than captured, so a rebind made from one of
+                        // these rows redraws with the accelerator it was just given.
+                        for action in OPENERS {
+                            let found = commands.borrow().iter().find(|c| {
+                            matches!(&***c, Item::Command { action: a, .. } if a == action)
+                        }).cloned();
+                            hits.extend(found);
+                        }
+                        hits
+                    }
+                };
 
             let objects: Vec<glib::BoxedAnyObject> =
                 hits.into_iter().map(glib::BoxedAnyObject::new).collect();

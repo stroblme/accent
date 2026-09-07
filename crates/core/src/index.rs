@@ -643,9 +643,9 @@ impl Index {
     /// The file one link target points at, by the rules of [`resolve_links`](Self::resolve_links).
     /// `None` means the link dangles, which is what the UI offers to create.
     ///
-    /// ponytail: one pass over the file paths, not the key map `resolve_links` builds, because a
-    /// map costs four strings per file and this answers a single click. If a caller ever needs
-    /// hundreds of targets at once, give it a batch method that builds the map once.
+    /// One pass over the file paths, not the key map `resolve_links` builds, because a map costs
+    /// four strings per file and this answers a single click;
+    /// [`resolve_targets`](Self::resolve_targets) is the one to ask for a whole note's links.
     pub fn resolve_target(&self, target: &str) -> Result<Option<String>> {
         let key = markdown::link_key(target);
         let mut st = self
@@ -661,6 +661,35 @@ impl Index {
             }
         }
         Ok(best)
+    }
+
+    /// [`resolve_target`](Self::resolve_target) for many targets at once, for the note whose
+    /// every wikilink has to be checked on each keystroke: the key map is built once and then
+    /// answers every target, instead of one full scan per link.
+    pub fn resolve_targets(&self, targets: &[String]) -> Result<Vec<Option<String>>> {
+        let mut by_key: HashMap<String, String> = HashMap::new();
+        {
+            let mut st = self
+                .conn
+                .prepare_cached("SELECT rel_path FROM files WHERE kind <> 0")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let rel: String = r.get(0)?;
+                for key in markdown::path_keys(&rel) {
+                    // The shortest path answering to a key wins, as in `resolve_links`.
+                    match by_key.get(&key) {
+                        Some(best) if best.len() <= rel.len() => {}
+                        _ => {
+                            by_key.insert(key, rel.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(targets
+            .iter()
+            .map(|t| by_key.get(&markdown::link_key(t)).cloned())
+            .collect())
     }
 
     /// Headings of one note in document order: the outline pane and heading-scoped edits.
@@ -2149,6 +2178,20 @@ mod tests {
             ix.resolve_target("beta").unwrap().as_deref(),
             Some("sub/Beta.md")
         );
+    }
+
+    #[test]
+    fn resolve_targets_answers_many_at_once() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let targets = ["beta".to_string(), "Nope".to_string(), "a.md".to_string()];
+        assert_eq!(
+            ix.resolve_targets(&targets).unwrap(),
+            [Some("sub/Beta.md".to_string()), None, Some("a.md".into())]
+        );
+        assert!(ix.resolve_targets(&[]).unwrap().is_empty());
     }
 
     /// The incremental path must produce the rows a full reconcile would, or the index slowly

@@ -10,6 +10,8 @@ default = []
 
 [dependencies]
 accent-core.workspace = true
+accent-lsp.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
