@@ -12,7 +12,7 @@
 use crate::{comment, diagnostics, fold, highlight, lang, multicaret, typing};
 use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
-use accent_core::markdown::{Heading, Link};
+use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene, pango};
 use sourceview5::prelude::*;
@@ -227,9 +227,6 @@ pub struct Tab {
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
     fold_renderer: fold::Renderer,
-    /// The note's headings, for the Outline pane. Produced by the same analysis as the links, so
-    /// keeping them costs nothing over throwing them away.
-    headings: RefCell<Vec<Heading>>,
     font: RefCell<Option<gtk::CssProvider>>,
     /// A watch on the file itself, for a tab no vault watcher covers. `None` for everything
     /// inside a vault, which the worker already reports on.
@@ -468,7 +465,6 @@ pub fn open(
         annotations,
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
-        headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
@@ -992,11 +988,6 @@ impl Tab {
             }
         ));
         *self.monitor.borrow_mut() = Some(monitor);
-    }
-
-    /// The note's headings, most recent analysis, for the Outline pane.
-    pub fn headings(&self) -> Vec<Heading> {
-        self.headings.borrow().clone()
     }
 
     /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and
@@ -1868,11 +1859,7 @@ impl Tab {
     /// table; code gets nothing, because the style scheme colours it from the language.
     fn analyse(&self) {
         match self.flavour {
-            Flavour::Note => {
-                let analysis = highlight::apply(&self.buffer);
-                *self.links.borrow_mut() = analysis.links;
-                *self.headings.borrow_mut() = analysis.headings;
-            }
+            Flavour::Note => *self.links.borrow_mut() = highlight::apply(&self.buffer).links,
             Flavour::Csv => highlight::apply_csv(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}

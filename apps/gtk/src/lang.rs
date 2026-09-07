@@ -66,8 +66,6 @@ impl State {
         self.support.borrow().clone()
     }
 
-    // The Outline pane and the sticky title are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn symbols(&self) -> Vec<Symbol> {
         self.symbols.borrow().clone()
     }
@@ -238,6 +236,21 @@ async fn refresh(tab: Rc<Tab>) {
     }
 }
 
+/// The symbol tree as the Outline pane reads it: one row per symbol, depth first, carrying how
+/// deep it is (1 for a top-level one, which is what the pane indents from) and where a click on
+/// it should land.
+pub fn flatten(symbols: &[Symbol]) -> Vec<(u8, String, Pos)> {
+    fn walk(rows: &mut Vec<(u8, String, Pos)>, symbols: &[Symbol], depth: u8) {
+        for symbol in symbols {
+            rows.push((depth, symbol.name.clone(), symbol.selection.start));
+            walk(rows, &symbol.children, depth.saturating_add(1));
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&mut rows, symbols, 1);
+    rows
+}
+
 /// The icon for a completion kind. The names are the app's own, shipped in the GResource
 /// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
 /// a type parameter. Kinds that mean the same thing to a reader share one drawing: a constructor
@@ -268,6 +281,47 @@ pub fn icon_name(kind: Kind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accent_api::Range;
+
+    fn symbol(name: &str, line: u32, children: Vec<Symbol>) -> Symbol {
+        let at = Range {
+            start: Pos { line, character: 0 },
+            end: Pos { line, character: 0 },
+        };
+        Symbol {
+            name: name.to_string(),
+            range: at,
+            selection: at,
+            children,
+        }
+    }
+
+    /// Depth first, and a child is one step deeper than its parent: the pane indents from that
+    /// number and reads top to bottom, so the order is the order of the file.
+    #[test]
+    fn flatten_walks_the_tree_in_reading_order() {
+        let tree = vec![
+            symbol(
+                "Title",
+                0,
+                vec![symbol("Section", 4, vec![symbol("Deeper", 8, vec![])])],
+            ),
+            symbol("Next", 12, vec![]),
+        ];
+        let rows: Vec<(u8, String)> = flatten(&tree)
+            .into_iter()
+            .map(|(depth, name, _)| (depth, name))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (1, "Title".to_string()),
+                (2, "Section".to_string()),
+                (3, "Deeper".to_string()),
+                (1, "Next".to_string()),
+            ]
+        );
+    }
 
     /// Every kind names a file that is actually in the GResource directory: a missing icon is a
     /// blank cell in the completion list and nothing on the console.

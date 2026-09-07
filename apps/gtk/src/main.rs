@@ -2030,31 +2030,32 @@ impl App {
         let Some(tab) = doc.tab() else {
             return sidebar.set_outline(None);
         };
-        if !tab.flavour().is_note() {
-            // ponytail: an outline of code is a symbol list, which is the language server's job.
-            return sidebar.set_outline(Some(&sidebar::outline_note(
-                "No Outline",
-                "Symbols arrive with language server support.",
-            )));
+        // The same list whatever the tab holds: a note's headings and a source file's functions
+        // are both what the language layer calls symbols.
+        let rows = lang::flatten(&tab.lang.symbols());
+        if rows.is_empty() {
+            let language = tab.language().unwrap_or_else(|| "this file".to_string());
+            let (title, body) = match tab.lang.support().and_then(|s| s.missing) {
+                Some(_) => (
+                    "No Language Server",
+                    format!("Symbols need a language server for {language}."),
+                ),
+                None if tab.flavour().is_note() => {
+                    ("No Headings", "This note has no headings yet.".to_string())
+                }
+                None => (
+                    "No Symbols",
+                    "Nothing in this file has a name to list.".to_string(),
+                ),
+            };
+            return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
-        let headings: Vec<(u8, String, usize)> = tab
-            .headings()
-            .into_iter()
-            .map(|h| (h.level, h.text, h.range.start))
-            .collect();
-        if headings.is_empty() {
-            return sidebar.set_outline(Some(&sidebar::outline_note(
-                "No Headings",
-                "This note has no headings yet.",
-            )));
-        }
-        let key = doc.key();
         sidebar.set_outline(Some(&sidebar::outline_list(
-            &headings,
+            &rows,
             glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |at| app.open_note_at(&key, Some(at))
+                #[weak]
+                tab,
+                move |at| tab.goto_pos(at)
             ),
         )));
     }
