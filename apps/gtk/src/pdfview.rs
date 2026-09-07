@@ -12,7 +12,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Tile edge in device pixels. 512 is 1 MiB of RGBA, small enough that a scroll never waits on
 /// one page-sized render and large enough that a screen is a handful of them.
@@ -42,6 +42,58 @@ const PT_TO_PX: f32 = 96.0 / 72.0;
 
 /// What a page may be zoomed between, and what an image tab borrows: 10 % is a letter page
 /// about 80 px wide, and past 800 % one page is more tiles than the budget holds.
+/// How wide a stroke is, in page points. One width per tool: a stylus reports pressure and this
+/// ignores it.
+///
+// ponytail: uniform width because varying it means storing a width per point and drawing the
+// stroke as a filled outline rather than a stroked path. A `GestureStylus` reading pressure and
+// the eraser tip is the upgrade; `GestureDrag` already receives a stylus as an ordinary pointer,
+// which is why there is no second controller here. The ring is where a width *setting* will go.
+pub const PEN_WIDTH: f32 = 2.0;
+/// A highlighter is the width of a line of text, near enough.
+pub const HIGHLIGHTER_WIDTH: f32 = 14.0;
+/// How much of the page a highlighter lets through. It also multiplies rather than covers, so
+/// this is about how strong the colour is, not about whether the text survives.
+pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
+
+/// What a drag over the page does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Select the text under it, which is what a drag has always done.
+    #[default]
+    Select,
+    /// Draw on the page.
+    Pen,
+    /// Draw over it in a wide translucent stroke that darkens rather than covers.
+    Highlighter,
+    /// Take a stroke off it.
+    Eraser,
+}
+
+impl Mode {
+    /// Whether a drag draws, which is the pen and the highlighter but not the eraser.
+    pub fn draws(self) -> bool {
+        matches!(self, Mode::Pen | Mode::Highlighter)
+    }
+
+    /// How this tool's stroke is drawn, given the accent it is drawn in.
+    pub fn ink(self, accent: [u8; 3]) -> accent_core::pdf::InkStyle {
+        let [r, g, b] = accent;
+        match self {
+            Mode::Highlighter => accent_core::pdf::InkStyle {
+                width: HIGHLIGHTER_WIDTH,
+                rgba: [r, g, b, (HIGHLIGHTER_ALPHA * 255.0) as u8],
+                multiply: true,
+            },
+            _ => accent_core::pdf::InkStyle {
+                width: PEN_WIDTH,
+                rgba: [r, g, b, 255],
+                multiply: false,
+            },
+        }
+    }
+}
+
 pub const MIN_SCALE: f64 = 0.1;
 pub const MAX_SCALE: f64 = 8.0;
 
@@ -186,6 +238,34 @@ impl Cache {
         self.bytes = 0;
         self.lowres_bytes = 0;
     }
+
+    /// Forget what was rendered of one page, **except** its tiles at the scale and scheme now on
+    /// screen, which stay to be painted while their replacements render.
+    ///
+    /// What a stroke or an exported highlight invalidates: the page it landed on is drawn
+    /// differently now and every other page is exactly as it was, so dropping the whole cache
+    /// would re-render the viewport and its prefetch after every stroke. What is kept is stale
+    /// and is asked for again — see [`PdfView::refresh_page`] — but painting yesterday's render
+    /// of a page for the 30 ms its replacement takes is invisible, where painting blank paper is
+    /// the flash this exists to avoid. Everything else is going spare: nobody is looking at a
+    /// render at another zoom, and keeping it would paint the old page after the next one.
+    pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, dark: bool) {
+        let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
+        self.tiles.retain(|key, (texture, _)| {
+            let keep = key.page != page || (key.scale_milli == scale_milli && key.dark == dark);
+            if !keep {
+                *tiles -= bytes_of(texture);
+            }
+            keep
+        });
+        self.lowres.retain(|(at, _), (texture, _)| {
+            let keep = *at != page;
+            if !keep {
+                *lowres -= bytes_of(texture);
+            }
+            keep
+        });
+    }
 }
 
 /// Drop the least recently used entries of `map` until it is comfortably under `budget`, and
@@ -250,6 +330,21 @@ impl Want {
     }
 }
 
+/// A stroke as the widget holds it while it is being drawn.
+pub struct Stroke {
+    pub page: usize,
+    /// The points, in that page's own points.
+    pub points: Vec<(f32, f32)>,
+    /// The tool that drew it, which is what the overlay is painted like.
+    pub tool: Mode,
+    /// Whether the hand has let go. A finished stroke stays painted until a tile carries it.
+    pub done: bool,
+}
+
+/// Where every note link that highlights a document lands, per page: the quads to paint and the
+/// index of the link each came from.
+pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
+
 /// What the render thread sends back. Every variant is `Send`, because each one travels to the
 /// main loop inside its own idle callback.
 pub enum Reply {
@@ -272,6 +367,16 @@ pub enum Reply {
     /// The file was read: these are its page sizes. The first one arrives when the document is
     /// opened, which is why a tab can be on screen before anything is known about it.
     Reloaded(Vec<(f32, f32)>),
+    /// Where every note link that highlights this document lands on the page today, and which
+    /// link each one is. The whole map every time, so a stale page cannot survive underneath.
+    Highlights(Highlights),
+    /// An export finished: how many annotations it wrote, or why it could not.
+    Exported(Result<usize, String>),
+    /// This page's annotations changed, so what is cached of it is of the old page.
+    PageChanged(usize),
+    /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
+    /// write from someone else's and does not reload over strokes drawn since.
+    Saved(accent_core::fs::Etag),
     /// The document could not be opened at all, with the reason to show in its place.
     Failed(String),
 }
@@ -490,7 +595,12 @@ impl PdfView {
 
     /// Take a rendered tile. Ignored if the document has moved on from the scale it was for.
     pub fn insert_tile(&self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
+        self.imp().stale_tiles.borrow_mut().remove(&key);
         self.cache().borrow_mut().insert(key, texture, bytes);
+        // Whatever was drawn on this page is in its pixels now, so the stroke painted over the
+        // top can go. Here rather than when the stroke was sent: the render is what replaces it,
+        // and dropping it any earlier is a gap the reader sees.
+        self.settle_stroke(key.page as usize);
         self.queue_draw();
     }
 
@@ -550,6 +660,15 @@ impl PdfView {
         *self.imp().on_pressed.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called when a press turns out to have been a click rather than the start of a drag.
+    ///
+    /// A highlight opens the note that holds it, and that must not fire on every drag that
+    /// happens to begin inside one — so it waits for the release, unlike the link handler above,
+    /// which answers on the press because following a link is what a press on one means.
+    pub fn connect_clicked(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
+        *self.imp().on_clicked.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Called on pointer motion, so the tab can show a hand over a link.
     pub fn connect_motion(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
         *self.imp().on_motion.borrow_mut() = Some(Box::new(f));
@@ -575,6 +694,110 @@ impl PdfView {
     pub fn set_marks(&self, marks: HashMap<usize, Vec<accent_core::pdf::Rect>>) {
         *self.imp().marks.borrow_mut() = marks;
         self.queue_draw();
+    }
+
+    /// Where the note links that highlight this document land, per page, each with the index of
+    /// the link it came from.
+    pub fn set_highlights(&self, highlights: Highlights) {
+        *self.imp().highlights.borrow_mut() = highlights;
+        self.queue_draw();
+    }
+
+    /// Which highlight is under this widget coordinate, if any.
+    pub fn highlight_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (page, px, py) = self.page_point(x, y)?;
+        let highlights = self.imp().highlights.borrow();
+        highlights.get(&page)?.iter().find_map(|(quads, link)| {
+            let inside = quads
+                .iter()
+                .any(|q| (q.left..=q.right).contains(&px) && (q.top..=q.bottom).contains(&py));
+            inside.then_some(*link)
+        })
+    }
+
+    /// What a drag over the page does.
+    pub fn mode(&self) -> Mode {
+        self.imp().mode.get()
+    }
+
+    pub fn set_mode(&self, mode: Mode) {
+        self.imp().mode.set(mode);
+        // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
+        // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
+        // exactly the thing that will not happen.
+        self.set_cursor_from_name(match mode {
+            Mode::Select => None,
+            _ => Some("default"),
+        });
+    }
+
+    /// Called with a finished stroke: the page and its points, in that page's own points.
+    pub fn connect_ink(&self, f: impl Fn(usize, Vec<(f32, f32)>) + 'static) {
+        *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with a point the eraser passed over.
+    pub fn connect_erase(&self, f: impl Fn(usize, (f32, f32)) + 'static) {
+        *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Tell the tab the eraser passed over this point of whichever page is under it.
+    fn erase_at(&self, x: f64, y: f64) {
+        let Some((page, _)) = self.nearest_page_point(x, y) else {
+            return;
+        };
+        let at = self.point_on(page, x, y);
+        if let Some(f) = self.imp().on_erase.borrow().as_ref() {
+            f(page, at);
+        }
+    }
+
+    /// Drop the finished strokes of a page that is now rendered with them.
+    pub fn settle_stroke(&self, page: usize) {
+        let mut strokes = self.imp().strokes.borrow_mut();
+        let before = strokes.len();
+        strokes.retain(|stroke| !(stroke.done && stroke.page == page));
+        if strokes.len() != before {
+            drop(strokes);
+            self.queue_draw();
+        }
+    }
+
+    /// A point on a page in that page's own points, clamped into the paper.
+    ///
+    /// The clamp is the page edge: a stroke pulled off the paper stops at it rather than being
+    /// drawn where no viewer would show it.
+    fn point_on(&self, page: usize, x: f64, y: f64) -> (f32, f32) {
+        let (cx, cy) = self.content_at(x, y);
+        let layout = self.imp().layout.borrow();
+        let (size, rect) = (self.page_size(page), layout.pages.get(page).copied());
+        let Some((rect, (pw, ph))) = rect.zip(size) else {
+            return (0.0, 0.0);
+        };
+        (
+            ((cx - rect.x) / layout.scale).clamp(0.0, pw),
+            ((cy - rect.y) / layout.scale).clamp(0.0, ph),
+        )
+    }
+
+    /// Draw one page again, because what it holds changed — a stroke, an erase, an export.
+    ///
+    /// Deliberately not an eviction. What is on screen keeps being painted until its replacement
+    /// arrives, so a stroke costs one re-render and no blank page in between.
+    pub fn refresh_page(&self, page: usize) {
+        let (scale_milli, dark) = self.stamp();
+        self.cache()
+            .borrow_mut()
+            .forget_page_except(page as u32, scale_milli, dark);
+        self.imp().stale_pages.borrow_mut().insert(page as u32);
+        self.queue_draw();
+    }
+
+    /// The scale and colour scheme the page is being painted at, which is what a cached tile is
+    /// keyed by. One definition, shared by the snapshot and by [`PdfView::refresh_page`].
+    fn stamp(&self) -> (u32, bool) {
+        let scale = self.imp().layout.borrow().scale * self.scale_factor().max(1) as f32;
+        ((scale * 1000.0).round() as u32, self.imp().dark.get())
     }
 
     /// The one match to draw more strongly than the rest.
@@ -753,12 +976,16 @@ impl PdfView {
 }
 
 /// Point an adjustment at a content size without disturbing where it is scrolled to.
+///
+/// The upper bound is never below the page size, which GTK asserts on and which a document
+/// smaller than the window otherwise breaks — an A4 sketch in a split pane, or any small page in
+/// a large one. There is nothing to scroll in that case either way: the value clamps to zero.
 fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     let Some(adjustment) = adjustment else {
         return;
     };
     let value = adjustment.value().min((upper - page).max(0.0));
-    adjustment.configure(value, 0.0, upper, page * 0.1, page * 0.9, page);
+    adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
 mod imp {
@@ -772,6 +999,8 @@ mod imp {
     type OnReply = Box<dyn Fn(&super::PdfView, Reply)>;
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
+    type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
+    type At = Box<dyn Fn(usize, (f32, f32))>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -795,10 +1024,28 @@ mod imp {
         pub dark: Cell<bool>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
+        /// Where the note links that highlight this document land, per page, each with the index
+        /// of the link it came from so a click on one can open the note that holds it.
+        pub highlights: RefCell<super::Highlights>,
         /// The selected glyphs' boxes, per page the selection covers.
         pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
         pub drag_from: Cell<Option<(f64, f64)>>,
+        /// What a drag over the page does: select, draw, or erase.
+        pub mode: Cell<super::Mode>,
+        /// Pages whose content changed and whose visible tiles are therefore out of date. The
+        /// next frame turns each into the set of tile keys below, and forgets the page here.
+        pub stale_pages: RefCell<HashSet<u32>>,
+        /// Tiles that are painted but out of date: asked for again every frame until the render
+        /// that replaces them arrives, which is what makes an abandoned batch heal itself.
+        pub stale_tiles: RefCell<HashSet<TileKey>>,
+        /// The stroke being drawn, and any drawn before it whose render has not arrived yet.
+        /// The live one, if there is one, is last.
+        ///
+        // ponytail: a stroke leaves this list when a tile of its page lands, so the list is as
+        // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
+        // a stroke with no render to replace it is one that still has to be painted.
+        pub strokes: RefCell<Vec<super::Stroke>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -816,6 +1063,9 @@ mod imp {
         pub on_select: RefCell<Option<OnSelect>>,
         pub on_goto: RefCell<Option<Page>>,
         pub on_pressed: RefCell<Option<Coords>>,
+        pub on_clicked: RefCell<Option<Coords>>,
+        pub on_ink: RefCell<Option<Stroke>>,
+        pub on_erase: RefCell<Option<At>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
         pub on_zoom: RefCell<Option<Zoomed>>,
@@ -838,8 +1088,13 @@ mod imp {
                 dark: Cell::new(false),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
+                highlights: RefCell::new(HashMap::new()),
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
+                mode: Cell::new(super::Mode::default()),
+                stale_pages: RefCell::new(HashSet::new()),
+                stale_tiles: RefCell::new(HashSet::new()),
+                strokes: RefCell::new(Vec::new()),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
@@ -851,6 +1106,9 @@ mod imp {
                 on_select: RefCell::new(None),
                 on_goto: RefCell::new(None),
                 on_pressed: RefCell::new(None),
+                on_clicked: RefCell::new(None),
+                on_ink: RefCell::new(None),
+                on_erase: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -979,7 +1237,32 @@ mod imp {
             drag.connect_drag_begin(glib::clone!(
                 #[weak]
                 obj,
-                move |_, x, y| obj.imp().drag_from.set(Some((x, y)))
+                move |gesture, x, y| {
+                    obj.imp().drag_from.set(Some((x, y)));
+                    // A pen or an eraser claims the sequence at once, unlike a selection, which
+                    // waits to see whether the pointer moves: a stroke that let the scrolled
+                    // window have the first few pixels would scroll the page under the hand.
+                    match obj.imp().mode.get() {
+                        super::Mode::Select => {}
+                        mode if mode.draws() => {
+                            let Some((page, _, _)) = obj.page_point(x, y) else {
+                                return;
+                            };
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
+                            let at = obj.point_on(page, x, y);
+                            obj.imp().strokes.borrow_mut().push(super::Stroke {
+                                page,
+                                points: vec![at],
+                                tool: mode,
+                                done: false,
+                            });
+                        }
+                        _ => {
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
+                            obj.erase_at(x, y);
+                        }
+                    }
+                }
             ));
             drag.connect_drag_update(glib::clone!(
                 #[weak]
@@ -988,18 +1271,68 @@ mod imp {
                     let Some((x, y)) = obj.imp().drag_from.get() else {
                         return;
                     };
-                    // A few pixels of travel is a click with a shaky hand, not a selection.
-                    if dx.abs() < 3.0 && dy.abs() < 3.0 {
-                        return;
+                    match obj.imp().mode.get() {
+                        super::Mode::Select => {
+                            // A few pixels of travel is a click with a shaky hand, not a
+                            // selection.
+                            if dx.abs() < 3.0 && dy.abs() < 3.0 {
+                                return;
+                            }
+                            gesture.set_state(gtk::EventSequenceState::Claimed);
+                            obj.select_between(x, y, x + dx, y + dy);
+                        }
+                        mode if mode.draws() => {
+                            // The page is whichever one the stroke began on: a hand that runs
+                            // over the edge keeps drawing on the paper it started on.
+                            let page = match obj.imp().strokes.borrow().last() {
+                                Some(stroke) if !stroke.done => stroke.page,
+                                _ => return,
+                            };
+                            let at = obj.point_on(page, x + dx, y + dy);
+                            if let Some(stroke) = obj.imp().strokes.borrow_mut().last_mut()
+                                && !stroke.done
+                            {
+                                stroke.points.push(at);
+                            }
+                            obj.queue_draw();
+                        }
+                        _ => obj.erase_at(x + dx, y + dy),
                     }
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    obj.select_between(x, y, x + dx, y + dy);
                 }
             ));
             drag.connect_drag_end(glib::clone!(
                 #[weak]
                 obj,
-                move |_, _, _| obj.imp().drag_from.set(None)
+                move |_, dx, dy| {
+                    let from = obj.imp().drag_from.replace(None);
+                    if obj.imp().mode.get().draws() {
+                        // The stroke stays painted until a tile carries it, so the page never
+                        // blinks between the hand letting go and pdfium answering.
+                        let finished = match obj.imp().strokes.borrow_mut().last_mut() {
+                            Some(stroke) if !stroke.done => {
+                                stroke.done = true;
+                                Some((stroke.page, stroke.points.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some((page, points)) = finished
+                            && let Some(f) = obj.imp().on_ink.borrow().as_ref()
+                        {
+                            f(page, points);
+                        }
+                        return;
+                    }
+                    // The same few pixels the update handler calls a shaky hand rather than a
+                    // selection: what is left is a click, and a click can be on a highlight.
+                    if let Some((x, y)) = from
+                        && dx.abs() < 3.0
+                        && dy.abs() < 3.0
+                        && !obj.imp().thumbnails.get()
+                        && let Some(f) = obj.imp().on_clicked.borrow().as_ref()
+                    {
+                        f(&obj, x, y);
+                    }
+                }
             ));
             obj.add_controller(drag);
 
@@ -1009,6 +1342,10 @@ mod imp {
                 obj,
                 move |gesture, _, x, y| {
                     obj.grab_focus();
+                    // While a pen is out, a press is the start of a mark, not a link to follow.
+                    if obj.imp().mode.get() != super::Mode::Select {
+                        return;
+                    }
                     match gesture.current_button() {
                         // A thumbnail is a button: clicking one goes to its page.
                         1 if obj.imp().thumbnails.get() => {
@@ -1064,6 +1401,8 @@ mod imp {
             let mut wanted: Vec<Want> = Vec::new();
             let cache = obj.cache();
             let marks = self.marks.borrow();
+            let highlights = self.highlights.borrow();
+            let strokes = self.strokes.borrow();
             let selection = self.selection.borrow();
             for (index, rect) in layout.pages.iter().enumerate() {
                 // One viewport of prefetch above and below, so scrolling meets ready tiles.
@@ -1079,6 +1418,9 @@ mod imp {
                 let page = index as u32;
                 let low = cache.borrow_mut().lowres(page, dark);
                 let mut missing = false;
+                // A page whose content changed becomes the set of tiles that are out of date,
+                // once, here — this is where what is actually on screen is known.
+                let refreshing = self.stale_pages.borrow_mut().remove(&page);
                 if !thumbnails {
                     let device_w = (rect.w * sf as f32).round() as i32;
                     let device_h = (rect.h * sf as f32).round() as i32;
@@ -1091,7 +1433,15 @@ mod imp {
                                 ty: ty as u16,
                                 dark,
                             };
+                            if refreshing {
+                                self.stale_tiles.borrow_mut().insert(key);
+                            }
                             let tile = cache.borrow_mut().get(&key);
+                            let want = Want {
+                                page,
+                                tx: tx as u16,
+                                ty: ty as u16,
+                            };
                             match tile {
                                 Some(texture) => {
                                     let x = rect.x + (tx * TILE) as f32 / sf as f32;
@@ -1100,14 +1450,16 @@ mod imp {
                                     let h = texture.height() as f32 / sf as f32;
                                     snapshot
                                         .append_texture(&texture, &graphene::Rect::new(x, y, w, h));
+                                    // Painted, and still the old render: ask again, and keep
+                                    // asking until the replacement lands, so a batch pushed
+                                    // aside by a scroll is picked up by the next one.
+                                    if self.stale_tiles.borrow().contains(&key) {
+                                        wanted.push(want);
+                                    }
                                 }
                                 None => {
                                     missing = true;
-                                    wanted.push(Want {
-                                        page,
-                                        tx: tx as u16,
-                                        ty: ty as u16,
-                                    });
+                                    wanted.push(want);
                                 }
                             }
                         }
@@ -1143,6 +1495,22 @@ mod imp {
                     );
                 }
 
+                // Under the selection and the search marks: a highlight is what the page says,
+                // the other two are what the reader is doing to it right now.
+                if let Some(page_highlights) = highlights.get(&index) {
+                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.2);
+                    for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
+                        snapshot.append_color(
+                            &colour,
+                            &graphene::Rect::new(
+                                rect.x + quad.left * layout.scale,
+                                rect.y + quad.top * layout.scale,
+                                quad.width() * layout.scale,
+                                quad.height() * layout.scale,
+                            ),
+                        );
+                    }
+                }
                 if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
                     let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
                     for glyph in boxes {
@@ -1156,6 +1524,38 @@ mod imp {
                             ),
                         );
                     }
+                }
+                for stroke in strokes.iter().filter(|s| s.page == index) {
+                    let builder = gsk::PathBuilder::new();
+                    let point = |&(x, y): &(f32, f32)| {
+                        graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
+                    };
+                    let points = &stroke.points;
+                    if let Some(first) = points.first() {
+                        builder.move_to(point(first).x(), point(first).y());
+                        for p in &points[1..] {
+                            builder.line_to(point(p).x(), point(p).y());
+                        }
+                        // A stroke of one point is a dot, which a round cap draws from a
+                        // zero-length line.
+                        if points.len() == 1 {
+                            builder.line_to(point(first).x(), point(first).y());
+                        }
+                    }
+                    // The tool's own width and alpha, so what the hand sees is what the render
+                    // puts on the page. The blend mode is not reproduced here: over paper at this
+                    // alpha it reads the same, and only the render is kept.
+                    let (width, alpha) = match stroke.tool {
+                        super::Mode::Highlighter => {
+                            (super::HIGHLIGHTER_WIDTH, super::HIGHLIGHTER_ALPHA)
+                        }
+                        _ => (super::PEN_WIDTH, 1.0),
+                    };
+                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
+                    let stroke_style = gsk::Stroke::new(width * layout.scale);
+                    stroke_style.set_line_cap(gsk::LineCap::Round);
+                    stroke_style.set_line_join(gsk::LineJoin::Round);
+                    snapshot.append_stroke(&builder.to_path(), &stroke_style, &colour);
                 }
                 if let Some(page_marks) = marks.get(&index) {
                     for (n, mark) in page_marks.iter().enumerate() {

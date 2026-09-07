@@ -628,6 +628,35 @@ pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     }
 }
 
+/// The repository's local branches, alphabetically, as `git branch` would list them.
+pub fn branches(repo: &Repo) -> Result<Vec<String>, Error> {
+    let out = run(
+        &repo.root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        None,
+        true,
+    )?;
+    Ok(parse_branches(&out))
+}
+
+pub fn parse_branches(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Move HEAD to a local branch.
+///
+/// `switch` and not `checkout`: it takes branches alone, so a name that also happens to be a file
+/// or a tag cannot quietly detach HEAD instead. Whether the switch is safe is git's decision, not
+/// ours — it refuses where the working tree would be clobbered, and that refusal is the answer.
+pub fn checkout(repo: &Repo, branch: &str) -> Result<(), Error> {
+    run(&repo.root, &["switch", "--", branch], None, false)?;
+    Ok(())
+}
+
 pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
     write(repo, &["add"], paths)
 }
@@ -1211,6 +1240,48 @@ mod tests {
         write_file(dir, "a.md", "clobbered\n");
         discard(&repo, &["a.md"]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn branches_lists_the_local_ones_and_checkout_refuses_to_clobber() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "root");
+        ok(dir, &["branch", "side"]);
+        let repo = open(dir);
+
+        assert_eq!(branches(&repo).unwrap(), ["main", "side"]);
+
+        checkout(&repo, "side").unwrap();
+        assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("side"));
+
+        // A change that the other branch would overwrite is git's own refusal, and the whole
+        // point of driving `git switch`: nothing here decides whether a checkout is safe.
+        write_file(dir, "a.md", "two\n");
+        commit_all(dir, "side moves on");
+        checkout(&repo, "main").unwrap();
+        write_file(dir, "a.md", "uncommitted\n");
+        let refused = checkout(&repo, "side").unwrap_err();
+        assert!(
+            refused.to_string().contains("would be overwritten"),
+            "{refused}"
+        );
+        assert_eq!(
+            status(&repo).unwrap().branch.head.as_deref(),
+            Some("main"),
+            "a refused switch leaves HEAD where it was"
+        );
+    }
+
+    #[test]
+    fn parse_branches_drops_the_blank_line_git_ends_with() {
+        assert_eq!(parse_branches(b"main\nfeature/x\n"), ["main", "feature/x"]);
+        assert!(parse_branches(b"").is_empty());
     }
 
     #[test]

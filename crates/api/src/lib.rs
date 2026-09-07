@@ -38,7 +38,7 @@ pub use accent_core::fs::{Etag, Read, SaveError, Text};
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
-    Backlink, FileRow, Match, Progress, ReconcileStats, SearchHit, Stats,
+    Backlink, FileRow, Match, PdfLink, Progress, ReconcileStats, SearchHit, Stats,
 };
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
@@ -537,6 +537,17 @@ impl Vault {
         )
     }
 
+    /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
+    /// because that is where the notes and the index are.
+    pub fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
+        ask!(
+            self,
+            |v: &Local| v.pdf_links(rel),
+            "pdf_links",
+            json!([rel])
+        )
+    }
+
     pub fn note_paths(&self) -> Result<Vec<String>> {
         ask!(self, |v: &Local| v.note_paths(), "note_paths", json!([]))
     }
@@ -660,6 +671,24 @@ impl Vault {
             |_: &Local| git::submodules(repo).map_err(anyhow::Error::from),
             "git_submodules",
             json!([repo])
+        )
+    }
+
+    pub fn git_branches(&self, repo: &Repo) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |_: &Local| git::branches(repo).map_err(anyhow::Error::from),
+            "git_branches",
+            json!([repo])
+        )
+    }
+
+    pub fn git_checkout(&self, repo: &Repo, branch: &str) -> Result<()> {
+        ask!(
+            self,
+            |_: &Local| git::checkout(repo, branch).map_err(anyhow::Error::from),
+            "git_checkout",
+            json!([repo, branch])
         )
     }
 
@@ -1350,6 +1379,10 @@ impl Local {
 
     pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
         self.index().backlinks(rel)
+    }
+
+    fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
+        self.index().pdf_links(rel)
     }
 
     pub fn note_paths(&self) -> Result<Vec<String>> {

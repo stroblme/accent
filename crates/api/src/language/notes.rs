@@ -382,10 +382,19 @@ impl Notes {
             .as_ref()
             .and_then(|anchor| self.heading(&target, anchor))
             .unwrap_or_default();
-        Ok(vec![Location {
-            path: target,
-            range,
-        }])
+        // A PDF anchor rides along in the path, `paper.pdf#page=3&selection=…`, so following the
+        // link reaches the page and the selection rather than the first page.
+        //
+        // ponytail: in the path rather than in a field of its own, because `Location` is built in
+        // eleven places across the api and lsp crates and every one of them would have to name a
+        // field that only a PDF ever fills. `Location::is_url` already reads `path` for a `://`,
+        // so a path that is not only a path is the shape this type has. A field is the upgrade if
+        // anything else ever needs an anchor.
+        let path = match link.anchor.as_deref() {
+            Some(a) if markdown::pdf_anchor(a).is_some() => format!("{target}#{a}"),
+            _ => target,
+        };
+        Ok(vec![Location { path, range }])
     }
 
     /// Where the heading an anchor names sits in `rel`, if it is there at all.

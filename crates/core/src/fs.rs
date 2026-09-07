@@ -137,6 +137,14 @@ pub enum SaveError {
 /// Passing `expected: None` forces the write (the "overwrite anyway" branch in the UI).
 /// Returns the etag of the file just written, ready for the next save.
 pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Etag, SaveError> {
+    write_bytes(path, text.as_bytes(), expected)
+}
+
+/// The same atomic save for bytes: a PDF an annotation was written into, and nothing else so far.
+///
+/// Split out of [`write_note`] rather than duplicated, so a PDF gets the etag gate, the symlink
+/// resolution and the preserved ownership a note has always had.
+pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag, SaveError> {
     // Resolve symlinks first: writing through a link must replace the link *target*, otherwise the
     // rename below would silently turn a symlinked note into a regular file in the vault.
     let canonical = canonical_target(path)?;
@@ -167,7 +175,7 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
         .prefix(".accent-")
         .tempfile_in(parent)
         .map_err(SaveError::Io)?;
-    tmp.write_all(text.as_bytes())?;
+    tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
 
     if let Some(m) = &existing {

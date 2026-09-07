@@ -124,6 +124,18 @@ pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
     }
 }
 
+/// The system accent as bytes, for the two places a colour has to end up inside a file rather
+/// than on screen: a highlight's `/C` and an ink stroke's colour.
+///
+/// The same exception a rendered page already is — pixels in a PDF cannot read a CSS variable —
+/// so the value is resolved here and handed over, and this stays the only file that says what a
+/// colour is.
+pub fn accent_rgb() -> [u8; 3] {
+    let c = adw::StyleManager::default().accent_color_rgba();
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    [byte(c.red()), byte(c.green()), byte(c.blue())]
+}
+
 /// One of this module's own `#rrggbb` constants as bytes. Nothing else parses colours: this file
 /// is the only one allowed to write them down (DESIGN.md, Colour).
 fn rgb(hex: &str) -> [u8; 3] {

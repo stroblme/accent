@@ -28,6 +28,7 @@ mod panes;
 mod pdftab;
 mod pdfview;
 mod preview;
+mod ring;
 mod settings;
 mod sidebar;
 mod signature;
@@ -48,6 +49,7 @@ use editor::{Alert, Flavour, Prefs, Tab};
 use gtk::{gdk, gio, glib};
 use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -63,7 +65,8 @@ const RECENT_NOTES: usize = 50;
 const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
-/// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
+/// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit, and the status bar's
+/// word count is read again on the same beat.
 const RENDER: Duration = Duration::from_millis(300);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
@@ -196,6 +199,14 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
+    ("win.pdf-copy", "Copy Selection", &[]),
+    ("win.pdf-copy-link", "Copy Link to Selection", &[]),
+    ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
+    ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),
+    ("win.pdf-pen", "Pen", &[]),
+    ("win.pdf-highlighter", "Highlighter", &[]),
+    ("win.pdf-eraser", "Eraser", &[]),
+    ("win.insert-sketch", "Insert Sketch", &[]),
     (
         "win.pane-references",
         "References Pane",
@@ -958,6 +969,15 @@ struct App {
     toolbar: adw::ToolbarView,
     header: adw::HeaderBar,
     modes: gtk::ToggleButton,
+    /// The header's Drawing toggle, shown only over a PDF.
+    drawing_button: gtk::ToggleButton,
+    /// Whether the ring of tools is out, which is the window's state and not the tab's.
+    drawing: Cell<bool>,
+    /// The tool the ring offers when it comes back.
+    tool: Cell<pdfview::Mode>,
+    /// Where this window last left the ring, once the reader has moved it. `None` until then,
+    /// which leaves each ring free to open in its own corner.
+    ring_at: Cell<Option<(f64, f64)>>,
     menu: gtk::MenuButton,
     paned: gtk::Paned,
     /// Swaps the pane tree for a placeholder while no note is open (DESIGN.md, States).
@@ -977,7 +997,8 @@ struct App {
     menu_page: RefCell<Option<adw::TabPage>>,
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
-    render: RefCell<Option<glib::SourceId>>,
+    /// The pending post-edit refresh: the preview's re-render and the status bar's word count.
+    refresh: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
@@ -1495,7 +1516,13 @@ impl App {
         pdf.connect_page(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.save_session_soon()
+            move |_| {
+                // Edge-triggered: `PdfView` reports the page under the middle of the viewport
+                // only when it changes, so this is once per page boundary crossed, not once per
+                // scrolled pixel, and needs no debounce of its own.
+                app.sync_status();
+                app.save_session_soon();
+            }
         ));
         pdf.connect_outline(glib::clone!(
             #[weak(rename_to = app)]
@@ -1505,10 +1532,30 @@ impl App {
         pdf.connect_opened(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| {
+            move |pdf| {
                 app.sync_opening();
                 app.sync_outline();
+                // The page count is known now, so the readout has something to say at last.
+                app.sync_status();
+                // And the pages are there to paint the notes' highlights onto.
+                app.sync_pdf_links(pdf);
             }
+        ));
+        pdf.connect_mode(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_status()
+        ));
+        pdf.connect_note(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            // A zero-length range: the caret goes to the `[[`, nothing is selected.
+            move |rel, at| app.open_note_at(rel, Some(at..at))
+        ));
+        pdf.connect_export(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, result| app.exported(pdf, result)
         ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
@@ -1535,6 +1582,202 @@ impl App {
     /// The PDF in the active tab, for the actions that only mean something in one.
     fn active_pdf(&self) -> Option<Rc<pdftab::PdfTab>> {
         self.active_doc()?.pdf().cloned()
+    }
+
+    /// Whether a PDF tab's file is one this machine may write to.
+    ///
+    /// On a remote vault `PdfTab::path()` is the ssh cache copy, and writing annotations there
+    /// would change a scratch file nobody reads. A loose tab is an absolute path here, so it is
+    /// writable whatever vault the window is on.
+    fn pdf_is_writable(&self, pdf: &Rc<pdftab::PdfTab>) -> bool {
+        doc::is_loose_key(&pdf.key()) || !self.vault().is_some_and(|v| v.is_remote())
+    }
+
+    /// A blank page to draw on, beside the note that embeds it.
+    ///
+    /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
+    /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    fn insert_sketch(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to put a sketch in");
+        };
+        let rel = tab.rel();
+        if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
+            return self.toast("A sketch needs a note in a local vault");
+        }
+        let Some(vault) = self.vault() else { return };
+        // Beside the note, numbered from one: there is no attachments directory to put it in, and
+        // inventing one would be a setting nobody asked for.
+        let stem = Path::new(&rel)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let dir = Path::new(&rel)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty());
+        let key = (1..)
+            .map(|n| match dir {
+                Some(dir) => format!("{}/{stem}-sketch-{n}.pdf", dir.display()),
+                None => format!("{stem}-sketch-{n}.pdf"),
+            })
+            .find(|key| !vault.exists(key));
+        let Some(key) = key else { return };
+
+        let bytes = match accent_core::pdf::blank_pdf() {
+            Ok(bytes) => bytes,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e:#}")),
+        };
+        let path = match vault.resolve(&key) {
+            Ok(path) => path,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e}")),
+        };
+        if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
+            return self.toast(&format!("Cannot write {key}: {e}"));
+        }
+
+        tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
+        let at = self.pane_of(&tab.page).unwrap_or_else(|| self.pane());
+        self.open_beside(&at, Side::Right, &key);
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(&key) {
+            pdf.set_mode(pdfview::Mode::Pen);
+        }
+    }
+
+    /// Show or hide the ring of drawing tools over the page.
+    ///
+    /// The window's state rather than the tab's: the button is in the header, and moving between
+    /// two PDFs with the tools out should not put them away.
+    fn set_drawing(self: &Rc<Self>, showing: bool) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if showing && !self.pdf_is_writable(&pdf) {
+            self.drawing_button.set_active(false);
+            return self.toast("Drawing needs a local vault");
+        }
+        self.drawing.set(showing);
+        self.drawing_button.set_active(showing);
+        // Putting the tools away puts the pen down with them; taking them out arms the last tool.
+        let tool = match showing {
+            true => self.tool.get(),
+            false => pdfview::Mode::Select,
+        };
+        pdf.set_drawing(showing, self.ring_at.get());
+        pdf.set_mode(tool);
+        self.sync_status();
+    }
+
+    /// Pick up one of the tools. The same one twice goes back to reading, the tools staying out.
+    fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Drawing needs a local vault");
+        }
+        let wanted = match pdf.mode() == mode {
+            true => pdfview::Mode::Select,
+            false => mode,
+        };
+        // Remembered even when it is put down, so the ring coming back offers the same tool.
+        if wanted != pdfview::Mode::Select {
+            self.tool.set(wanted);
+        }
+        // Reaching a tool from the palette with the ring away is what takes it out.
+        if wanted != pdfview::Mode::Select && !self.drawing.get() {
+            self.drawing.set(true);
+            self.drawing_button.set_active(true);
+            pdf.set_drawing(true, self.ring_at.get());
+        }
+        pdf.set_mode(wanted);
+        self.sync_status();
+    }
+
+    /// Put the active PDF's tools where this window last had them, and take the position back
+    /// from whichever tab is losing them.
+    fn sync_drawing(&self) {
+        if let Some(pdf) = self.active_pdf() {
+            // Whatever this tab's ring was dragged to is where the next one starts.
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
+            pdf.set_drawing(self.drawing.get(), self.ring_at.get());
+            let showing = self.drawing.get();
+            pdf.set_mode(match showing {
+                true => self.tool.get(),
+                false => pdfview::Mode::Select,
+            });
+        }
+        // Only a PDF can be drawn on, so the button goes with the tab.
+        self.drawing_button.set_visible(self.active_pdf().is_some());
+        self.drawing_button.set_active(self.drawing.get());
+    }
+
+    /// Write the note links that highlight the open PDF into the file, as real annotations.
+    fn export_highlights(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Exporting highlights needs a local vault");
+        }
+        pdf.export_highlights(theme::accent_rgb());
+    }
+
+    /// What an export came back with.
+    fn exported(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, result: Result<usize, String>) {
+        match result {
+            Err(e) => self.toast(&format!("Cannot export: {e}")),
+            Ok(0) => self.toast("Nothing new to export"),
+            Ok(n) => {
+                let name = doc::file_name(&pdf.key()).to_string();
+                let plural = if n == 1 { "highlight" } else { "highlights" };
+                self.toast(&format!("Exported {n} {plural} into {name}"));
+                // Ask again: the ones now in the file drop out of the painted overlay, because
+                // the page's own pixels carry them.
+                self.sync_pdf_links(pdf);
+            }
+        }
+    }
+
+    /// Tell a PDF tab which note links highlight it.
+    fn sync_pdf_links(&self, pdf: &Rc<pdftab::PdfTab>) {
+        let key = pdf.key();
+        // A file outside every vault has no index to ask.
+        if doc::is_loose_key(&key) {
+            return;
+        }
+        let Some(vault) = self.vault() else { return };
+        match vault.pdf_links(&key) {
+            Ok(links) => pdf.set_note_links(links),
+            Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
+        }
+    }
+
+    /// The same, once the notes that just changed have reached the index.
+    ///
+    /// A moment later, and not at once, because the link rows are resolved at the end of the
+    /// worker's batch while the event that a file changed is emitted inside it — and our own
+    /// saves emit nothing at all, by design.
+    ///
+    // ponytail: a timer, because there is no event for "the index is current now". The ceiling
+    // is a highlight that appears a third of a second after the note is written; an
+    // `Event::Indexed` from the worker is the upgrade.
+    fn sync_pdf_links_soon(self: &Rc<Self>) {
+        if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
+            return;
+        }
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(300),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.sync_all_pdf_links()
+            ),
+        );
+    }
+
+    /// The same for every open PDF, after something changed the notes.
+    fn sync_all_pdf_links(&self) {
+        for doc in self.docs() {
+            if let Doc::Pdf(pdf) = doc {
+                self.sync_pdf_links(&pdf);
+            }
+        }
     }
 
     /// An image, in a tab that only looks at it.
@@ -1657,25 +1900,19 @@ impl App {
         viewer
     }
 
-    /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
-    /// exact match rather than the top of the note.
+    /// Open a note over the byte range a sidebar search result matched, so it opens on the match
+    /// rather than at the top and the match is marked where it lands.
     ///
     /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
-    /// the note opens as a preview.
-    ///
-    /// ponytail: the offset is turned into a character offset by counting the text in front of it,
-    /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
-    /// belongs on `Tab` if anything ever needs it per keystroke.
-    fn open_note_at(self: &Rc<Self>, rel: &str, offset: Option<usize>) {
+    /// the note opens as a preview and the next such click takes the same tab.
+    fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.open_preview(rel);
-        let (Some(offset), Some(tab)) = (offset, self.tab_for(rel)) else {
-            return;
-        };
-        let text = tab.text();
-        let Some(head) = text.get(..offset.min(text.len())) else {
-            return;
-        };
-        tab.goto_offset(head.chars().count());
+        let Some(at) = at else { return };
+        self.on_tab(rel.to_string(), move |tab| {
+            if let Some(chars) = char_range(&tab.text(), at.clone()) {
+                tab.goto_range(chars);
+            }
+        });
     }
 
     /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
@@ -1734,10 +1971,28 @@ impl App {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
         };
+        // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
+        let (target, anchor) = split_pdf_anchor(target);
         match vault.resolve_link(target) {
-            Ok(Some(rel)) => self.open_preview(&rel),
+            Ok(Some(rel)) => {
+                self.open_preview(&rel);
+                self.show_pdf_anchor(&rel, anchor);
+            }
             Ok(None) => self.toast(&format!("No note called {target}")),
             Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
+        }
+    }
+
+    /// Show the page and selection an anchor names, if the tab just opened is that PDF.
+    ///
+    /// Called straight after the tab is opened rather than through `on_tab`, which waits for a
+    /// *text* tab: `open_pdf` has already pushed the document by the time it returns.
+    fn show_pdf_anchor(&self, key: &str, anchor: Option<PdfAnchor>) {
+        let Some((page, selection)) = anchor else {
+            return;
+        };
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(key) {
+            pdf.show_link(page, selection);
         }
     }
 
@@ -1830,7 +2085,7 @@ impl App {
             self,
             move |tab| {
                 lang::changed(tab);
-                app.queue_render(tab);
+                app.queue_refresh(tab);
                 if app.is_active(tab) {
                     app.sync_outline();
                 }
@@ -1922,6 +2177,8 @@ impl App {
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
+        // The tools belong to the window, so they follow the tab in front.
+        self.sync_drawing();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
@@ -1935,6 +2192,11 @@ impl App {
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
             self.refresh_references();
+            // The bar speaks for the tab in front, so with none it says nothing: the last
+            // document's "Markdown · 2 words" used to stay under an empty document column,
+            // because this path returned before either readout was asked again.
+            self.sync_status();
+            self.refresh_zoom();
             return;
         };
         let key = doc.key();
@@ -2148,6 +2410,7 @@ impl App {
         }
         match self.write_tab(tab, tab.etag.get()) {
             Ok(()) => {
+                self.sync_pdf_links_soon();
                 if explicit {
                     self.toast("Saved");
                 }
@@ -2188,6 +2451,8 @@ impl App {
         let etag = written?;
         tab.mark_clean(etag);
         tab.clear_disk_alert();
+        // The tab is clean again, so the bar's dot goes with the one on the tab title.
+        self.sync_status();
         lang::saved(tab);
         // Our own writes go through the vault, which tells the watcher they were ours, so no
         // event comes back to say the working tree moved. The pane is told here instead.
@@ -2257,6 +2522,9 @@ impl App {
         if let Err(e) = tab.reload_keep_cursor() {
             self.toast(&format!("Reload failed: {e}"));
         }
+        // A reload writes the buffer without an edit event, so the count and the dot are asked
+        // for here rather than waiting for the next keystroke.
+        self.sync_status();
         true
     }
 
@@ -2349,6 +2617,14 @@ impl App {
     /// Forget a page that is really closing. Called on every path that closes one, because
     /// `close_page_finish` does not come back through the `close-page` handler.
     fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
+        // A drawn-on document leaving: the render thread drains its channel before it ends, so
+        // the write still happens after the tab is gone.
+        if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
+            pdf.flush();
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
+        }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
         self.save_session_soon();
@@ -2454,9 +2730,12 @@ impl App {
                 | Event::FileChanged(_)
                 | Event::FileRemoved(_)
                 | Event::FileRenamed { .. }
-        ) && let Some(git) = self.git.get()
-        {
-            git.schedule_refresh();
+        ) {
+            if let Some(git) = self.git.get() {
+                git.schedule_refresh();
+            }
+            // The same events mean a note may have gained or lost a link into an open PDF.
+            self.sync_pdf_links_soon();
         }
         match event {
             Event::Progress(p) => {
@@ -2914,11 +3193,19 @@ impl App {
         }
     }
 
-    fn queue_render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if !self.shows_preview() || !self.is_active(tab) {
+    /// What follows an edit into the tab in front, [`RENDER`] after the last keystroke: the
+    /// preview is re-rendered, and the status bar is asked for the word count again.
+    ///
+    /// One timer for both, because they are the same question — what does the buffer say now.
+    /// The count used to be read only when a tab was opened or switched to, so a draft grew
+    /// under a number that never moved; counting per keystroke instead would copy the whole
+    /// buffer out on every key, and a number that settles a third of a second later reads the
+    /// same to anyone watching it.
+    fn queue_refresh(self: &Rc<Self>, tab: &Rc<Tab>) {
+        if !self.is_active(tab) {
             return;
         }
-        if let Some(id) = self.render.borrow_mut().take() {
+        if let Some(id) = self.refresh.borrow_mut().take() {
             id.remove();
         }
         let id = glib::timeout_add_local_once(
@@ -2927,14 +3214,15 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move || {
-                    *app.render.borrow_mut() = None;
-                    if let Some(tab) = app.active() {
+                    *app.refresh.borrow_mut() = None;
+                    app.sync_status();
+                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
                         app.render(&tab);
                     }
                 }
             ),
         );
-        *self.render.borrow_mut() = Some(id);
+        *self.refresh.borrow_mut() = Some(id);
     }
 
     /// The find bar addressing the rendered preview, which is what it does while presenting.
@@ -3007,6 +3295,7 @@ impl App {
         self.chrome_hidden.set(true);
         self.sidebar_header.add_css_class("chrome-hidden");
         self.header.add_css_class("chrome-hidden");
+        self.statusbar.widget().add_css_class("chrome-hidden");
         for pane in self.panes.borrow().iter() {
             pane.bar.add_css_class("chrome-hidden");
         }
@@ -3025,6 +3314,7 @@ impl App {
         }
         self.sidebar_header.remove_css_class("chrome-hidden");
         self.header.remove_css_class("chrome-hidden");
+        self.statusbar.widget().remove_css_class("chrome-hidden");
         for pane in self.panes.borrow().iter() {
             pane.bar.remove_css_class("chrome-hidden");
         }
@@ -3179,6 +3469,22 @@ impl App {
                     pdf.toggle_invert();
                 }
             }
+            "pdf-copy" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.copy_selection();
+                }
+            }
+            "pdf-copy-link" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.copy_link();
+                }
+            }
+            "pdf-export-highlights" => self.export_highlights(),
+            "pdf-draw" => self.set_drawing(!self.drawing.get()),
+            "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
+            "pdf-highlighter" => self.pdf_mode(pdfview::Mode::Highlighter),
+            "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),
+            "insert-sketch" => self.insert_sketch(),
             "pdf-fit-width" | "pdf-fit-page" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.set_zoom(match name {
@@ -3216,9 +3522,15 @@ impl App {
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
             "pane-files" => self.show_pane("files"),
-            "pane-search" => self.show_pane("search"),
+            "pane-search" => {
+                self.seed_search();
+                self.show_pane("search");
+            }
             "replace-in-files" => {
                 self.sidebar_column.set_visible(true);
+                // Before the pane opens: it focuses the replace box when there is a query to
+                // replace, and the selection is what makes one.
+                self.seed_search();
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.show_replace();
                 }
@@ -3379,9 +3691,11 @@ impl App {
     /// The same thin bar indexing uses, for the same reason: something is being read and the
     /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
     /// that exists only while an open is in flight.
-    /// The file's own facts in the status bar: what it is, and for a note how long it is.
+    /// The file's own facts in the status bar: what it is, whether it is saved, and its one
+    /// count — a note's words, a code tab's diagnostics, a PDF's page.
     fn sync_status(&self) {
-        let (kind, facts) = match self.active_doc() {
+        let doc = self.active_doc();
+        let (kind, facts) = match &doc {
             Some(Doc::Text(tab)) => match tab.flavour() {
                 editor::Flavour::Note => (
                     Some("Markdown".to_string()),
@@ -3400,13 +3714,28 @@ impl App {
                     None,
                 ),
             },
-            Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
+            // Where the reader is, in the slot a note fills with its word count — and what the
+            // pointer is doing to the page, while it is doing anything but reading.
+            Some(Doc::Pdf(pdf)) => {
+                let facts = match (pdf.page_label(), pdf.mode_label()) {
+                    (Some(page), Some(mode)) => Some(format!("{page} · {mode}")),
+                    (page, mode) => page.or_else(|| mode.map(str::to_string)),
+                };
+                (Some("PDF".to_string()), facts)
+            }
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_facts(facts.as_deref());
+        // Only a text tab has a buffer that can be ahead of the disk; the dot is the tab's own,
+        // so one symbol means "unsaved" in both places.
+        self.statusbar.set_unsaved(
+            doc.as_ref()
+                .and_then(Doc::tab)
+                .is_some_and(|t| t.modified.get()),
+        );
         self.sync_branch();
     }
 
@@ -3659,26 +3988,39 @@ impl App {
     }
 
     /// Open a location and put the caret on it: a URL in the browser, a path in a tab.
-    ///
-    /// A file that is not open yet is read on a worker thread, so its tab arrives a turn or two
-    /// later; the jump waits for it rather than being dropped on the floor.
     fn open_at(self: &Rc<Self>, loc: &Location) {
         if loc.is_url() {
             return self.launch(&loc.path);
         }
-        let (key, at) = (loc.path.clone(), loc.range.start);
+        // A definition into a PDF carries its anchor in the path, so that a wikilink into a
+        // page reaches the page (`language/notes.rs`, `definition`).
+        let (path, anchor) = split_pdf_anchor(&loc.path);
+        let (key, at) = (path.to_string(), loc.range.start);
         match doc::is_loose_key(&key) {
             // Outside the vault: the same door a file dropped on the window comes through, and
             // the tab it opens gets no language server of its own.
             true => self.open_path(&key),
             false => self.open_preview(&key),
         }
+        if anchor.is_some() {
+            return self.show_pdf_anchor(&key, anchor);
+        }
+        self.on_tab(key, move |tab| tab.goto_pos(at));
+    }
+
+    /// Do something to the tab holding `key`, once there is one.
+    ///
+    /// The one door for every jump that follows an open. A file that is not open yet is read on a
+    /// worker thread, so its tab arrives a turn or two later; this waits for it rather than
+    /// dropping the jump on the floor, and gives up rather than waiting on a file that will not
+    /// open at all.
+    fn on_tab(self: &Rc<Self>, key: String, f: impl Fn(&Rc<Tab>) + 'static) {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             for _ in 0..OPEN_TRIES {
                 let Some(app) = weak.upgrade() else { return };
                 if let Some(tab) = app.tab_for(&key) {
-                    return tab.goto_pos(at);
+                    return f(&tab);
                 }
                 drop(app);
                 glib::timeout_future(OPEN_POLL).await;
@@ -3693,6 +4035,18 @@ impl App {
                 tracing::warn!("cannot open link in browser: {e}");
             }
         });
+    }
+
+    /// Hand the Search pane what the editor has selected, so Ctrl+Shift+F and Ctrl+Shift+H search
+    /// for it. With nothing selected the box keeps what it holds, the way VS Code does: the word
+    /// under the caret is deliberately not a fallback.
+    fn seed_search(&self) {
+        let Some(text) = self.active().and_then(|tab| tab.selected_search()) else {
+            return;
+        };
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_search_text(&text);
+        }
     }
 
     fn show_pane(&self, name: &str) {
@@ -4425,9 +4779,20 @@ fn build_window(
         .sync_create()
         .build();
     let modes = mode_switcher();
+    // Split View keeps its action, its chord and its place in the primary menu; what it loses is
+    // the header button, whose place the drawing tools take. The widget stays because the window
+    // still reads and writes its pressed state.
+    let drawing = gtk::ToggleButton::builder()
+        .icon_name("document-edit-symbolic")
+        .tooltip_text(label_of("win.pdf-draw"))
+        .action_name("win.pdf-draw")
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    drawing.add_css_class("flat");
     let menu = menu_button();
     header.pack_end(&menu);
-    header.pack_end(&modes);
+    header.pack_end(&drawing);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -4525,6 +4890,10 @@ fn build_window(
         toolbar,
         header,
         modes: modes.clone(),
+        drawing_button: drawing.clone(),
+        drawing: Cell::new(false),
+        tool: Cell::new(pdfview::Mode::Pen),
+        ring_at: Cell::new(None),
         menu,
         paned,
         content: content.clone(),
@@ -4535,7 +4904,7 @@ fn build_window(
         reconciled: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
-        render: RefCell::new(None),
+        refresh: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
@@ -4786,7 +5155,7 @@ fn adopt_sidebar(
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
+            move |rel: &str, at: Option<Range<usize>>| app.open_note_at(rel, at)
         ),
         glib::clone!(
             #[weak]
@@ -5265,6 +5634,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                 });
                 return glib::Propagation::Stop;
             }
+            // The process ends when this returns, and a drawn-on PDF's write lives on the
+            // render thread, so it is waited for rather than left to be killed.
+            for doc in app.docs() {
+                if let Doc::Pdf(pdf) = doc {
+                    pdf.flush_blocking();
+                }
+            }
             app.save_session();
             glib::Propagation::Proceed
         }
@@ -5309,6 +5685,27 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         }
     ));
     app.window.add_controller(keys);
+
+    // The other half of the find bar's Escape: the bar has one of its own, but only for a key
+    // pressed inside it, and the user who typed a query and went back to reading has the focus in
+    // the document. Bubble phase, and a separate controller from the capture one above, so
+    // everything that answers to Escape closer to the focus still gets it first — the signature
+    // popover dismissing itself, a popover, a menu.
+    let dismiss = gtk::EventControllerKey::new();
+    dismiss.connect_key_pressed(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, _| match key == gdk::Key::Escape && app.find.is_open() {
+            true => {
+                app.find.close();
+                glib::Propagation::Stop
+            }
+            false => glib::Propagation::Proceed,
+        }
+    ));
+    app.window.add_controller(dismiss);
     app.window.connect_notify_local(
         Some("focus-widget"),
         glib::clone!(
@@ -6004,6 +6401,11 @@ fn install_chrome_css() {
                background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
+               box-shadow: 0 1px 4px var(--shade-color); }} \
+             .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
+               color: var(--accent-fg-color); }} \
+             .accent-ring-hub {{ opacity: 0.75; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
@@ -6078,6 +6480,37 @@ fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
     }
 }
 
+/// The character range `bytes` names in `text`, or `None` when it names no range this text has.
+///
+/// The index reports byte offsets and `GtkTextBuffer` addresses characters, so a search hit has to
+/// be counted across before it can be pointed at. Out of bounds and mid-character are both `None`
+/// rather than a guess: the file on disk has moved on from what was indexed, and a caret dropped
+/// somewhere near the old place is worse than one left where it was.
+///
+/// ponytail: counting the text in front of the match is fine for a note opened by a click; a real
+/// byte-to-iter map belongs on `Tab` if anything ever needs one per keystroke.
+/// A place in a PDF a link names: the page, and the selection on it if it names one.
+type PdfAnchor = (usize, Option<[usize; 4]>);
+
+/// Split a link target into the path and the PDF anchor it carries, if it carries one.
+///
+/// `paper.pdf#page=3&selection=4,0,4,11` is a path *and* a place in it; a heading anchor is not
+/// this function's business and stays with the path it came in on.
+fn split_pdf_anchor(target: &str) -> (&str, Option<PdfAnchor>) {
+    match target.split_once('#') {
+        Some((path, anchor)) => match accent_core::markdown::pdf_anchor(anchor) {
+            Some(at) => (path, Some(at)),
+            None => (target, None),
+        },
+        None => (target, None),
+    }
+}
+
+fn char_range(text: &str, bytes: Range<usize>) -> Option<Range<usize>> {
+    let start = text.get(..bytes.start)?.chars().count();
+    Some(start..start + text.get(bytes)?.chars().count())
+}
+
 /// What the toast says after a Replace All: what it wrote, what it could not, and what is still
 /// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
 fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
@@ -6144,6 +6577,19 @@ mod reference_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_hit_counts_across_to_the_characters_the_buffer_addresses() {
+        // Two bytes a character, so the byte range and the character range differ.
+        let text = "αβγ match δε";
+        assert_eq!(&text[7..12], "match");
+        assert_eq!(char_range(text, 7..12), Some(4..9));
+        // ASCII is the identity.
+        assert_eq!(char_range("hello world", 6..11), Some(6..11));
+        // The file has changed since it was indexed: past the end, or mid-character.
+        assert_eq!(char_range("short", 4..99), None);
+        assert_eq!(char_range("αβγ", 1..3), None);
+    }
 
     #[test]
     fn replace_toast_counts_matches_notes_and_what_went_wrong() {
