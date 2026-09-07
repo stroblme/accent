@@ -140,6 +140,23 @@ pub fn changed(tab: &Rc<Tab>) {
     restart(tab, REFRESH);
 }
 
+/// The buffer reached the disk. The server hears the edit first, then the save: rust-analyzer
+/// runs `cargo check` on a save and nothing else, so without this a Rust file never gets its
+/// compiler diagnostics.
+pub fn saved(tab: &Rc<Tab>) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let tab = tab.clone();
+    glib::spawn_future_local(async move {
+        flush(tab.clone()).await;
+        let rel = tab.rel();
+        if let Err(e) = vault.save_document(&rel).await {
+            tracing::debug!("saved {rel}: {e:#}");
+        }
+    });
+}
+
 /// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
 /// the future it spawns holds the vault handle and the path and nothing else.
 pub fn detach(tab: &Tab) {

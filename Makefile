@@ -42,7 +42,7 @@ VAULT_FILES ?= 40000
 
 # Headless runs need an X server; :99 is what ROADMAP.md and CI use.
 DISPLAY_NUM ?= 99
-XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
+XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
