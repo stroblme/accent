@@ -167,6 +167,9 @@ pub struct ReconcileStats {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileRow {
+    /// The row's id in the index, or `0` for a row the index does not hold at all: the file tree
+    /// lists the trees the walk refuses (`crate::walk::unindexed_children`) beside the ones it
+    /// holds, and this is what tells the two apart.
     pub id: i64,
     pub rel_path: String,
     pub kind: FileKind,

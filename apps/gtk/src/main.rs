@@ -935,10 +935,6 @@ struct App {
     sidebar: OnceCell<sidebar::Sidebar>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
-    /// The pane the session asked for and the sidebar could not show yet. Only the Git page is
-    /// ever missing at restore time — it does not exist until the first refresh finds a
-    /// repository — so the first refresh reads this and then clears it for good.
-    pane_wanted: RefCell<String>,
     /// The References request in flight. Replaced rather than queued: the caret moves faster
     /// than a server answers.
     references: RefCell<Option<glib::JoinHandle<()>>>,
@@ -1926,6 +1922,16 @@ impl App {
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
+        // The tree's selection follows the tab in front, so the sidebar says which file is open
+        // rather than which row the pointer last crossed. A diff, a terminal and a file from
+        // outside the vault have no row to point at, and clear it.
+        if let Some(tree) = self.tree.get() {
+            let open = self
+                .active_doc()
+                .filter(|doc| !doc.is_transient() && !doc.is_loose())
+                .map(|doc| doc.key());
+            tree.set_active(open.as_deref());
+        }
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
             self.refresh_references();
@@ -3274,7 +3280,7 @@ impl App {
             "rename" => {
                 let target = self
                     .selected_row()
-                    .map(|(_, rel)| rel)
+                    .map(|row| row.rel)
                     .or_else(|| self.active().map(|tab| tab.rel()));
                 if let (Some(rel), Some(ops)) = (target, self.need_ops("rename a file")) {
                     fileops::rename(ops, &rel);
@@ -3497,11 +3503,6 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
-        // The session ended on Git and the page has only just appeared. Taken whatever it says,
-        // so a later refresh cannot pull the user back to a pane they have since left.
-        if self.pane_wanted.take() == "git" {
-            self.show_pane("git");
-        }
         // What search leaves out: git's answer and the `[search] exclude` list, as one set. This
         // is where the two meet, and it is also what gives a vault with no repository an exclusion
         // mechanism at all — a refresh lands here whether or not it found one.
@@ -3731,17 +3732,21 @@ impl App {
         }
     }
 
-    fn selected_row(&self) -> Option<(char, String)> {
-        self.tree.get()?.selected()
+    /// The selected tree row, where it is one the app may act on. A row inside a tree the index
+    /// does not hold lists and opens but is never changed, so it is no target for a rename, a new
+    /// note or a trash (`tree::Row::indexed`).
+    fn selected_row(&self) -> Option<tree::Row> {
+        self.tree.get()?.selected().filter(|row| row.indexed)
     }
 
     /// The directory the tree selection points at: the folder itself, or the one a file sits in.
     fn selected_dir(&self) -> Option<String> {
-        let (kind, rel) = self.selected_row()?;
-        match kind {
-            'd' => Some(rel),
-            _ => Some(
-                rel.rsplit_once('/')
+        let row = self.selected_row()?;
+        match row.is_dir() {
+            true => Some(row.rel),
+            false => Some(
+                row.rel
+                    .rsplit_once('/')
                     .map(|(dir, _)| dir)
                     .unwrap_or("")
                     .to_string(),
@@ -4051,11 +4056,6 @@ impl App {
             },
             sidebar_width: sidebar_width(self.split.position()),
             view: self.mode.get().name().to_string(),
-            pane: self
-                .sidebar
-                .get()
-                .map(|s| s.pane())
-                .unwrap_or_else(|| Session::default().pane),
             zoom: self.zoom.get(),
             recent_notes: self.recent_notes.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
@@ -4099,20 +4099,9 @@ impl App {
         if let Some(doc) = session.active.as_deref().and_then(|key| self.doc_for(key)) {
             self.tabs().set_selected_page(doc.page());
         }
-        // A state file written before panes were saved leaves the name empty; that keeps
-        // whichever pane the sidebar was built showing.
-        //
-        // Remembered as well as shown: the Git page is still hidden here, so asking for it is a
-        // no-op until the first refresh finds a repository (`on_git_changed`).
-        // A state file written while the pane was still called Backlinks names it that way.
-        let pane = match session.pane.as_str() {
-            "backlinks" => "references".to_string(),
-            _ => session.pane.clone(),
-        };
-        self.pane_wanted.replace(pane.clone());
-        if let Some(sidebar) = self.sidebar.get().filter(|_| !pane.is_empty()) {
-            sidebar.show_pane(&pane);
-        }
+        // Which pane was showing is deliberately not restored: Files is where a vault is opened,
+        // every time. A window that came back on Search or Git left the reader looking at the
+        // answer to a question they asked in another sitting.
         self.sidebar_column.set_visible(session.sidebar);
         self.split
             .set_position(sidebar_width(session.sidebar_width));
@@ -4526,7 +4515,6 @@ fn build_window(
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
-        pane_wanted: RefCell::new(String::new()),
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
@@ -5407,8 +5395,12 @@ fn wire_tree(app: &Rc<App>) {
             let Some(tree) = app.tree.get() else { return };
             gesture.set_state(gtk::EventSequenceState::Claimed);
             // No row under the pointer is the blank area below the last one, and that gets a menu
-            // too: it is where a note is created in the vault root.
+            // too: it is where a note is created in the vault root. A row the index does not hold
+            // gets none: nothing in that menu may happen inside a tree nothing is watching.
             let row = tree.row_at(x, y);
+            if row.as_ref().is_some_and(|row| !row.indexed) {
+                return;
+            }
             // The menu hangs off the host box, so the click has to be translated out of the
             // list's coordinates or it would point at the wrong row once the list is scrolled.
             let Some(at) = tree.view().compute_point(
@@ -5436,13 +5428,19 @@ fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Proceed;
             };
             let row = tree.selected();
+            // The same rule the pointer path follows: a row the index does not hold is listed and
+            // opened, never changed. Both keys stop here rather than falling through to the
+            // vault-root menu an empty selection would get.
+            if row.as_ref().is_some_and(|row| !row.indexed) {
+                return glib::Propagation::Proceed;
+            }
             match key {
                 gdk::Key::Delete => {
-                    let Some((_, rel)) = &row else {
+                    let Some(row) = &row else {
                         return glib::Propagation::Proceed;
                     };
                     if let Some(ops) = app.ops() {
-                        fileops::trash(ops, rel);
+                        fileops::trash(ops, &row.rel);
                     }
                 }
                 // Nothing selected is the keyboard's version of a click on blank space, and it
@@ -5482,8 +5480,8 @@ fn written_at(rel: &str, etag: &Etag) -> String {
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays
 /// `None`, which is what the menu reads as the vault root.
-fn clicked(row: &Option<(char, String)>) -> Option<(&str, bool)> {
-    row.as_ref().map(|(kind, rel)| (rel.as_str(), *kind == 'd'))
+fn clicked(row: &Option<tree::Row>) -> Option<(&str, bool)> {
+    row.as_ref().map(|row| (row.rel.as_str(), row.is_dir()))
 }
 
 /// Where a Menu-key popover points: the focused row, or the top of the list. In `host`'s
