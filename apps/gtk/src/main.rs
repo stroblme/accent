@@ -1893,6 +1893,9 @@ impl App {
                         #[weak(rename_to = app)]
                         self,
                         move |tab: &Rc<Tab>| {
+                            // The pinned title is drawn from the same symbols, so it is redrawn
+                            // whether or not this tab is the one being looked at.
+                            tab.update_sticky();
                             if app.is_active(tab) {
                                 app.sync_outline();
                             }
