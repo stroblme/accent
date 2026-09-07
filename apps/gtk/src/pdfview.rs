@@ -42,14 +42,19 @@ const PT_TO_PX: f32 = 96.0 / 72.0;
 
 /// What a page may be zoomed between, and what an image tab borrows: 10 % is a letter page
 /// about 80 px wide, and past 800 % one page is more tiles than the budget holds.
-/// How wide a pen stroke is, in page points. One width for every stroke: a stylus reports
-/// pressure and this ignores it.
+/// How wide a stroke is, in page points. One width per tool: a stylus reports pressure and this
+/// ignores it.
 ///
 // ponytail: uniform width because varying it means storing a width per point and drawing the
 // stroke as a filled outline rather than a stroked path. A `GestureStylus` reading pressure and
 // the eraser tip is the upgrade; `GestureDrag` already receives a stylus as an ordinary pointer,
-// which is why there is no second controller here.
+// which is why there is no second controller here. The ring is where a width *setting* will go.
 pub const PEN_WIDTH: f32 = 2.0;
+/// A highlighter is the width of a line of text, near enough.
+pub const HIGHLIGHTER_WIDTH: f32 = 14.0;
+/// How much of the page a highlighter lets through. It also multiplies rather than covers, so
+/// this is about how strong the colour is, not about whether the text survives.
+pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 
 /// What a drag over the page does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,8 +64,34 @@ pub enum Mode {
     Select,
     /// Draw on the page.
     Pen,
+    /// Draw over it in a wide translucent stroke that darkens rather than covers.
+    Highlighter,
     /// Take a stroke off it.
     Eraser,
+}
+
+impl Mode {
+    /// Whether a drag draws, which is the pen and the highlighter but not the eraser.
+    pub fn draws(self) -> bool {
+        matches!(self, Mode::Pen | Mode::Highlighter)
+    }
+
+    /// How this tool's stroke is drawn, given the accent it is drawn in.
+    pub fn ink(self, accent: [u8; 3]) -> accent_core::pdf::InkStyle {
+        let [r, g, b] = accent;
+        match self {
+            Mode::Highlighter => accent_core::pdf::InkStyle {
+                width: HIGHLIGHTER_WIDTH,
+                rgba: [r, g, b, (HIGHLIGHTER_ALPHA * 255.0) as u8],
+                multiply: true,
+            },
+            _ => accent_core::pdf::InkStyle {
+                width: PEN_WIDTH,
+                rgba: [r, g, b, 255],
+                multiply: false,
+            },
+        }
+    }
 }
 
 pub const MIN_SCALE: f64 = 0.1;
@@ -299,9 +330,16 @@ impl Want {
     }
 }
 
-/// A stroke as the widget holds it while it is being drawn: the page it is on, its points in
-/// that page's own points, and whether the hand has let go.
-pub type Stroke = (usize, Vec<(f32, f32)>, bool);
+/// A stroke as the widget holds it while it is being drawn.
+pub struct Stroke {
+    pub page: usize,
+    /// The points, in that page's own points.
+    pub points: Vec<(f32, f32)>,
+    /// The tool that drew it, which is what the overlay is painted like.
+    pub tool: Mode,
+    /// Whether the hand has let go. A finished stroke stays painted until a tile carries it.
+    pub done: bool,
+}
 
 /// Where every note link that highlights a document lands, per page: the quads to paint and the
 /// index of the link each came from.
@@ -686,8 +724,8 @@ impl PdfView {
         self.imp().mode.set(mode);
         self.set_cursor_from_name(match mode {
             Mode::Select => None,
-            Mode::Pen => Some("crosshair"),
             Mode::Eraser => Some("cell"),
+            _ => Some("crosshair"),
         });
     }
 
@@ -716,7 +754,7 @@ impl PdfView {
     pub fn settle_stroke(&self, page: usize) {
         let mut strokes = self.imp().strokes.borrow_mut();
         let before = strokes.len();
-        strokes.retain(|(at, _, done)| !(*done && *at == page));
+        strokes.retain(|stroke| !(stroke.done && stroke.page == page));
         if strokes.len() != before {
             drop(strokes);
             self.queue_draw();
@@ -1204,15 +1242,20 @@ mod imp {
                     // window have the first few pixels would scroll the page under the hand.
                     match obj.imp().mode.get() {
                         super::Mode::Select => {}
-                        super::Mode::Pen => {
+                        mode if mode.draws() => {
                             let Some((page, _, _)) = obj.page_point(x, y) else {
                                 return;
                             };
                             gesture.set_state(gtk::EventSequenceState::Claimed);
                             let at = obj.point_on(page, x, y);
-                            obj.imp().strokes.borrow_mut().push((page, vec![at], false));
+                            obj.imp().strokes.borrow_mut().push(super::Stroke {
+                                page,
+                                points: vec![at],
+                                tool: mode,
+                                done: false,
+                            });
                         }
-                        super::Mode::Eraser => {
+                        _ => {
                             gesture.set_state(gtk::EventSequenceState::Claimed);
                             obj.erase_at(x, y);
                         }
@@ -1236,22 +1279,22 @@ mod imp {
                             gesture.set_state(gtk::EventSequenceState::Claimed);
                             obj.select_between(x, y, x + dx, y + dy);
                         }
-                        super::Mode::Pen => {
+                        mode if mode.draws() => {
                             // The page is whichever one the stroke began on: a hand that runs
                             // over the edge keeps drawing on the paper it started on.
                             let page = match obj.imp().strokes.borrow().last() {
-                                Some((page, _, false)) => *page,
+                                Some(stroke) if !stroke.done => stroke.page,
                                 _ => return,
                             };
                             let at = obj.point_on(page, x + dx, y + dy);
-                            if let Some((_, points, false)) =
-                                obj.imp().strokes.borrow_mut().last_mut()
+                            if let Some(stroke) = obj.imp().strokes.borrow_mut().last_mut()
+                                && !stroke.done
                             {
-                                points.push(at);
+                                stroke.points.push(at);
                             }
                             obj.queue_draw();
                         }
-                        super::Mode::Eraser => obj.erase_at(x + dx, y + dy),
+                        _ => obj.erase_at(x + dx, y + dy),
                     }
                 }
             ));
@@ -1260,13 +1303,13 @@ mod imp {
                 obj,
                 move |_, dx, dy| {
                     let from = obj.imp().drag_from.replace(None);
-                    if obj.imp().mode.get() == super::Mode::Pen {
+                    if obj.imp().mode.get().draws() {
                         // The stroke stays painted until a tile carries it, so the page never
                         // blinks between the hand letting go and pdfium answering.
                         let finished = match obj.imp().strokes.borrow_mut().last_mut() {
-                            Some((page, points, done)) if !*done => {
-                                *done = true;
-                                Some((*page, points.clone()))
+                            Some(stroke) if !stroke.done => {
+                                stroke.done = true;
+                                Some((stroke.page, stroke.points.clone()))
                             }
                             _ => None,
                         };
@@ -1480,11 +1523,12 @@ mod imp {
                         );
                     }
                 }
-                for (_, points, _) in strokes.iter().filter(|(at, _, _)| *at == index) {
+                for stroke in strokes.iter().filter(|s| s.page == index) {
                     let builder = gsk::PathBuilder::new();
                     let point = |&(x, y): &(f32, f32)| {
                         graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
                     };
+                    let points = &stroke.points;
                     if let Some(first) = points.first() {
                         builder.move_to(point(first).x(), point(first).y());
                         for p in &points[1..] {
@@ -1496,10 +1540,20 @@ mod imp {
                             builder.line_to(point(first).x(), point(first).y());
                         }
                     }
-                    let stroke_style = gsk::Stroke::new(super::PEN_WIDTH * layout.scale);
+                    // The tool's own width and alpha, so what the hand sees is what the render
+                    // puts on the page. The blend mode is not reproduced here: over paper at this
+                    // alpha it reads the same, and only the render is kept.
+                    let (width, alpha) = match stroke.tool {
+                        super::Mode::Highlighter => {
+                            (super::HIGHLIGHTER_WIDTH, super::HIGHLIGHTER_ALPHA)
+                        }
+                        _ => (super::PEN_WIDTH, 1.0),
+                    };
+                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
+                    let stroke_style = gsk::Stroke::new(width * layout.scale);
                     stroke_style.set_line_cap(gsk::LineCap::Round);
                     stroke_style.set_line_join(gsk::LineJoin::Round);
-                    snapshot.append_stroke(&builder.to_path(), &stroke_style, &accent);
+                    snapshot.append_stroke(&builder.to_path(), &stroke_style, &colour);
                 }
                 if let Some(page_marks) = marks.get(&index) {
                     for (n, mark) in page_marks.iter().enumerate() {

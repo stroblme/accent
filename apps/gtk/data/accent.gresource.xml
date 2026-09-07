@@ -24,5 +24,8 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-text-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-type-parameter-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-variable-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-pen-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-highlighter-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-eraser-symbolic.svg</file>
   </gresource>
 </gresources>

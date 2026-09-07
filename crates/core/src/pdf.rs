@@ -169,6 +169,19 @@ impl Rect {
     }
 }
 
+/// How a free-hand stroke is drawn: what the pen, the highlighter and anything later put on the
+/// page differ by.
+///
+/// `multiply` is what makes a highlighter one: the stroke darkens what is under it instead of
+/// covering it, so the text stays readable through the colour.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InkStyle {
+    /// Stroke width in page points.
+    pub width: f32,
+    pub rgba: [u8; 4],
+    pub multiply: bool,
+}
+
 /// One `/Ink` annotation as the eraser sees it: where it sits in the page's `/Annots`, and the
 /// points of the path it draws.
 pub type InkPath = (usize, Vec<(f32, f32)>);
@@ -586,13 +599,12 @@ impl PdfDoc {
     // bindings and pdfium-render keeps the annotation handle private. Every viewer renders the
     // appearance stream, so this draws correctly everywhere; what it costs is an editor that
     // wants to reshape the stroke, which would need `/InkList`. Raw bindings are the upgrade.
-    pub fn add_ink(
-        &mut self,
-        page: usize,
-        points: &[(f32, f32)],
-        width: f32,
-        rgb: [u8; 3],
-    ) -> Result<()> {
+    pub fn add_ink(&mut self, page: usize, points: &[(f32, f32)], style: InkStyle) -> Result<()> {
+        let InkStyle {
+            width,
+            rgba,
+            multiply,
+        } = style;
         let thinned = thin(points, 1.5);
         let Some(&first) = thinned.first() else {
             return Ok(());
@@ -602,7 +614,7 @@ impl PdfDoc {
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
         let height = p.height().value;
         let y = |v: f32| PdfPoints::new(height - v);
-        let colour = PdfColor::new(rgb[0], rgb[1], rgb[2], 255);
+        let colour = PdfColor::new(rgba[0], rgba[1], rgba[2], rgba[3]);
 
         let bounds = thinned
             .iter()
@@ -637,6 +649,10 @@ impl PdfDoc {
             .context("ink line cap")?;
         path.set_line_join(PdfPageObjectLineJoin::Round)
             .context("ink line join")?;
+        if multiply {
+            path.set_blend_mode(PdfPageObjectBlendMode::Multiply)
+                .context("ink blend mode")?;
+        }
         match thinned.len() {
             // A stroke that never moved: a zero-length segment, which the round cap draws as the
             // dot the reader meant.
@@ -1371,13 +1387,13 @@ mod tests {
             return;
         };
         let before = doc.annotation_count(0).unwrap();
-        doc.add_ink(
-            0,
-            &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)],
-            4.0,
-            [255, 0, 0],
-        )
-        .unwrap();
+        let red = InkStyle {
+            width: 4.0,
+            rgba: [255, 0, 0, 255],
+            multiply: false,
+        };
+        doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], red)
+            .unwrap();
         assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
 
         let strokes = doc.ink_paths(0).unwrap();
