@@ -251,6 +251,23 @@ pub fn flatten(symbols: &[Symbol]) -> Vec<(u8, String, Pos)> {
     rows
 }
 
+/// The line to pin above the view when `top` is the first line on screen: the line naming the
+/// deepest symbol whose body the reader is inside and whose own head has scrolled away.
+///
+/// The *selection* line rather than the range's first, because a server includes a symbol's doc
+/// comment in its range: what a reader has lost sight of is the signature, not the paragraph
+/// above it. `None` when nothing has been scrolled out of sight, which takes the bar down again.
+pub fn innermost(symbols: &[Symbol], top: u32) -> Option<u32> {
+    symbols.iter().find_map(|symbol| {
+        let head = symbol.selection.start.line;
+        match head < top && top <= symbol.range.end.line {
+            // Deepest first: a method inside a class is the better answer of the two.
+            true => innermost(&symbol.children, top).or(Some(head)),
+            false => None,
+        }
+    })
+}
+
 /// The icon for a completion kind. The names are the app's own, shipped in the GResource
 /// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
 /// a type parameter. Kinds that mean the same thing to a reader share one drawing: a constructor
@@ -294,6 +311,22 @@ mod tests {
             selection: at,
             children,
         }
+    }
+
+    /// The deepest symbol wins, and a reader who can still see a symbol's first line is told
+    /// nothing about it.
+    #[test]
+    fn the_sticky_line_is_the_innermost_block_whose_head_is_off_screen() {
+        let mut outer = symbol("Class", 0, vec![]);
+        outer.range.end.line = 40;
+        let mut inner = symbol("method", 10, vec![]);
+        inner.range.end.line = 20;
+        outer.children = vec![inner];
+        let tree = [outer];
+        assert_eq!(innermost(&tree, 15), Some(10));
+        assert_eq!(innermost(&tree, 30), Some(0));
+        assert_eq!(innermost(&tree, 0), None);
+        assert_eq!(innermost(&tree, 41), None);
     }
 
     /// Depth first, and a child is one step deeper than its parent: the pane indents from that

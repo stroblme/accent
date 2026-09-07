@@ -13,6 +13,7 @@
 
 use gtk::prelude::*;
 use gtk::{gdk, glib};
+use sourceview5::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -388,6 +389,13 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             let mut back = buffer.iter_at_mark(&buffer.get_insert());
             back.backward_char();
             buffer.place_cursor(&back);
+            // The pair lands as one two-character insert, and GtkSourceCompletion only asks
+            // `is_trigger` about single characters, so the second `[` of a wikilink has to open
+            // the note list by hand.
+            let mut before = back;
+            if open == '[' && before.backward_chars(2) && before.char() == '[' {
+                view.completion().show();
+            }
         }
         Pair::StepOver => {
             let mut at = caret;

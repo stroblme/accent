@@ -37,7 +37,8 @@ const OUTLINE_ICON: &str = "view-list-bullet-symbolic";
 /// draws as two arrows in Adwaita but as a boxed device in WhiteSur, where the Git tab read as a
 /// network port — the artwork is the theme's, so a name whose glyph is arrows in both is the one
 /// to hold (DESIGN.md, Iconography). Adwaita 50 has no git, branch or history glyph at all, so
-/// this follows the precedent References set: a mail name whose drawing says the right thing.
+/// this follows the precedent the References pane set: a mail name whose drawing says the
+/// right thing.
 const GIT_ICON: &str = "mail-send-receive-symbolic";
 /// Two machines wired together, which is what a forward is: a port on one cabled to a port on the
 /// other. The rest of Adwaita's network names are signal strengths, a server tower or a VPN
@@ -109,7 +110,7 @@ pub struct Sidebar {
     outline_bin: adw::Bin,
 }
 
-/// The four panes that read the vault's index.
+/// The panes that read the vault's index.
 struct VaultPanes {
     search_entry: gtk::SearchEntry,
     replace_toggle: gtk::ToggleButton,

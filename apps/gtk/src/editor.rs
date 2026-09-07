@@ -514,7 +514,10 @@ pub fn open(
     width.connect_resize(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_, _, _| tab.set_clamp()
+        move |_, _, _| {
+            tab.set_clamp();
+            tab.update_sticky();
+        }
     ));
 
     // What the top of the view is inside changes on every scroll, and the widget the title has
@@ -1540,21 +1543,9 @@ impl Tab {
         adjustment.set_value(adjustment.value() + f64::from(n * height));
     }
 
-    /// Pin the opening line of whatever block the top of the view is inside above the view, or
-    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
-    /// this, now that its first line has gone off the top.
-    ///
-    /// A block is a markdown heading or a fenced code block, which is exactly what the styling
-    /// pass has already marked on the buffer — so the answer is two tag-toggle searches through
-    /// the buffer's own index rather than a second parse or a walk back through the lines.
-    /// Nothing here reads a language's structure, so a function inside a `.py` tab has no title
-    /// to pin; that needs a parser this editor does not have.
-    fn update_sticky(&self) {
-        if !self.flavour.is_note() {
-            return;
-        }
-        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
-        let top = first.line();
+    /// The note's own answer to what the top of the view is inside: the nearest heading or the
+    /// fence the reader is inside, whichever is lower down.
+    fn sticky_note_line(&self, first: gtk::TextIter, top: i32) -> Option<i32> {
         // From the *end* of the top line, so a heading or a fence opening on that line is found
         // and then discarded by `sticky_opener` for being on screen already, rather than passed
         // over in favour of the one above it.
@@ -1579,7 +1570,40 @@ impl Tab {
             }
             at.starts_tag(Some(&tag)).then(|| at.line())
         });
-        let Some(line) = sticky_opener(top, heading, fence) else {
+        sticky_opener(top, heading, fence)
+    }
+
+    /// Pin the opening line of whatever block the top of the view is inside above the view, or
+    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
+    /// this, now that its first line has gone off the top.
+    ///
+    /// In a note a block is a markdown heading or a fenced code block, which is exactly what the
+    /// styling pass has already marked on the buffer — so the answer is two tag-toggle searches
+    /// through the buffer's own index rather than a second parse or a walk back through the
+    /// lines. In a source file it is the innermost symbol the language server named, which is the
+    /// same question asked of the only thing that knows a language's structure. A CSV has no
+    /// blocks at all.
+    pub fn update_sticky(&self) {
+        if self.flavour == Flavour::Csv {
+            return;
+        }
+        // Before the view is allocated its visible rect is empty and `line_at_y` answers with
+        // whatever line the layout happens to be at, which pinned a heading over a note that was
+        // at its very top. The resize hook recomputes once there is a height.
+        if self.view.height() == 0 {
+            self.sticky_bar.set_visible(false);
+            return;
+        }
+        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
+        let top = first.line();
+        let line = match self.flavour {
+            Flavour::Note => self.sticky_note_line(first, top),
+            Flavour::Code => {
+                lang::innermost(&self.lang.symbols(), top.max(0) as u32).map(|line| line as i32)
+            }
+            Flavour::Csv => None,
+        };
+        let Some(line) = line else {
             self.sticky_bar.set_visible(false);
             return;
         };
