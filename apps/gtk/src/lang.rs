@@ -112,6 +112,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     *tab.lang.vault.borrow_mut() = Some(vault.clone());
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
     crate::completion::install(tab);
+    crate::hover::install(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);

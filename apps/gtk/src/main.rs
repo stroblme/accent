@@ -5855,9 +5855,10 @@ fn install_chrome_css() {
                background-color: var(--view-bg-color); }} \
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
              textview border gutter {{ background-color: var(--view-bg-color); }} \
-             GtkSourceAssistant.completion {{ background-color: var(--popover-bg-color); \
-               color: var(--popover-fg-color); min-width: 240px; \
+             GtkSourceAssistant {{ background-color: var(--popover-bg-color); \
+               color: var(--popover-fg-color); \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
+             GtkSourceAssistant.completion {{ min-width: 240px; }} \
              GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
              GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
                margin-right: 12px; min-height: 30px; }} \
