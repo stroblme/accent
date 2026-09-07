@@ -172,6 +172,11 @@ mod imp {
                 // `y` is already in the renderer's own coordinates, so nothing to translate.
                 let (y, height) =
                     lines.line_yrange(line, sourceview5::GutterRendererAlignmentMode::Cell);
+                // A line hidden inside a fold is laid out with no height; its bar or wedge would
+                // land on the header's own row.
+                if height <= 0 {
+                    return;
+                }
                 let (y, height) = (y as f32, height as f32);
                 match mark {
                     Mark::Added => (colours[0], graphene::Rect::new(0.0, y, BAR, height)),

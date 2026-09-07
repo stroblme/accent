@@ -15,6 +15,7 @@ mod doc;
 mod editor;
 mod fileops;
 mod find;
+mod fold;
 mod git;
 mod highlight;
 mod hover;
@@ -201,6 +202,12 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Follow Link",
         &["<Control><Shift>Return"],
     ),
+    // Control+Shift chords, which the terminal's reserved set already lets through, and which no
+    // GtkSourceView built-in claims.
+    ("win.fold", "Fold", &["<Control><Shift>bracketleft"]),
+    ("win.unfold", "Unfold", &["<Control><Shift>bracketright"]),
+    ("win.fold-all", "Fold All", &[]),
+    ("win.unfold-all", "Unfold All", &[]),
     ("win.rename", "Rename", &["F2"]),
     ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
     ("win.present", "Presentation Mode", &["F5"]),
@@ -1688,11 +1695,7 @@ impl App {
         let Some(head) = text.get(..offset.min(text.len())) else {
             return;
         };
-        let iter = tab.buffer.iter_at_offset(head.chars().count() as i32);
-        tab.buffer.place_cursor(&iter);
-        tab.view
-            .scroll_to_mark(&tab.buffer.get_insert(), 0.0, true, 0.0, 0.3);
-        tab.view.grab_focus();
+        tab.goto_offset(head.chars().count());
     }
 
     /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
@@ -3197,6 +3200,26 @@ impl App {
             "follow-link" => {
                 if let Some(link) = self.active().and_then(|tab| tab.link_at_cursor()) {
                     self.follow(&link);
+                }
+            }
+            "fold" => {
+                if let Some(tab) = self.active() {
+                    tab.fold_at_caret();
+                }
+            }
+            "unfold" => {
+                if let Some(tab) = self.active() {
+                    tab.unfold_at_caret();
+                }
+            }
+            "fold-all" => {
+                if let Some(tab) = self.active() {
+                    tab.fold_all();
+                }
+            }
+            "unfold-all" => {
+                if let Some(tab) = self.active() {
+                    tab.unfold_all();
                 }
             }
             "rename" => {
