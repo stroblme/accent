@@ -1849,6 +1849,7 @@ impl App {
             #[weak(rename_to = app)]
             self,
             move |tab| {
+                lang::changed(tab);
                 app.queue_render(tab);
                 if app.is_active(tab) {
                     app.sync_outline();
@@ -1878,6 +1879,30 @@ impl App {
             tab,
             move |_| app.on_edit(&tab)
         ));
+
+        // A file inside the vault gets a document on the language layer; a loose file has no
+        // vault to open it on.
+        if let Some(vault) = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned()
+        {
+            lang::attach(
+                &tab,
+                vault,
+                lang::Hooks {
+                    on_symbols: Rc::new(glib::clone!(
+                        #[weak(rename_to = app)]
+                        self,
+                        move |tab: &Rc<Tab>| {
+                            if app.is_active(tab) {
+                                app.sync_outline();
+                            }
+                        }
+                    )),
+                },
+            );
+        }
 
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(&tab.rel()) {

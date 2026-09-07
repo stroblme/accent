@@ -1,8 +1,226 @@
 //! What the editor knows about a language server's answers.
 //!
-//! Only the icon table lives here so far: the per-tab wiring lands beside it.
+//! One tab, one document on the vault's language layer. [`attach`] opens it and installs the
+//! providers that ask questions about it; [`changed`] keeps the server's copy in step with the
+//! buffer and re-reads what an edit invalidates; [`detach`] closes it.
+//!
+//! Nothing here blocks: every request is a `Task` awaited with `glib::spawn_future_local`, and
+//! dropping the future cancels the request at the server. The refresh after an edit is one
+//! coalescing rule for a local vault and a remote one alike — the latest edit wins, and a burst
+//! of keystrokes costs one round trip rather than one per key.
 
-use accent_api::Kind;
+use crate::editor::{Flavour, Tab};
+use accent_api::{Kind, Support, Symbol, Vault};
+use gtk::glib;
+use sourceview5::prelude::*;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+/// DESIGN.md, Motion: the symbols and folds behind the Outline pane, the sticky title and the
+/// gutter chevrons follow the last edit by 300 ms, as the preview does.
+const REFRESH: Duration = Duration::from_millis(300);
+
+/// A callback the window registered, in the shape `editor.rs` uses for its own.
+pub type Hook = Rc<dyn Fn(&Rc<Tab>)>;
+
+/// What the language layer hands back to the window when an answer arrives.
+pub struct Hooks {
+    /// New symbols for this tab: the Outline pane and the sticky title are drawn from them.
+    pub on_symbols: Hook,
+}
+
+/// Everything one tab knows about its document on the language layer.
+///
+/// A field on [`Tab`] rather than a map keyed by path: a tab is what opens a document and what
+/// closes it, and two tabs on one file would otherwise share one entry.
+#[derive(Default)]
+pub struct State {
+    /// What the provider said it could do, once the document was open. `None` until then.
+    support: RefCell<Option<Support>>,
+    /// The document's symbols, most recent answer.
+    symbols: RefCell<Vec<Symbol>>,
+    /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
+    refresh: RefCell<Option<glib::JoinHandle<()>>>,
+    /// The buffer has changed since the server was last told.
+    dirty: Cell<bool>,
+    /// The "no language server" toast has been said for this tab; it is not said again.
+    toasted: Cell<bool>,
+    /// The vault this document is open on. `None` for a tab outside every vault, which has
+    /// nobody to ask and gets no providers.
+    vault: RefCell<Option<Arc<Vault>>>,
+    hooks: RefCell<Option<Rc<Hooks>>>,
+}
+
+impl State {
+    /// The vault to ask, for a tab that has one.
+    pub fn vault(&self) -> Option<Arc<Vault>> {
+        self.vault.borrow().clone()
+    }
+
+    /// What the provider can do; `None` while the document is still opening.
+    // The completion, hover and signature providers are the callers, and arrive with them.
+    #[allow(dead_code)]
+    pub fn support(&self) -> Option<Support> {
+        self.support.borrow().clone()
+    }
+
+    // The Outline pane and the sticky title are the callers, and arrive with them.
+    #[allow(dead_code)]
+    pub fn symbols(&self) -> Vec<Symbol> {
+        self.symbols.borrow().clone()
+    }
+
+    /// Whether the "no language server" toast still has to be said, marking it said.
+    // Go to Definition is the caller and arrives with it.
+    #[allow(dead_code)]
+    pub fn claim_toast(&self) -> bool {
+        !self.toasted.replace(true)
+    }
+}
+
+/// The LSP language id for a tab: the GtkSourceView language's own id, which is the same name
+/// (`rust`, `c`, `python`), and `markdown` for a note, whose buffer carries no language because
+/// our own styling pass does that job.
+pub fn language_id(tab: &Tab) -> String {
+    match tab.flavour() {
+        Flavour::Note => "markdown".to_string(),
+        _ => tab
+            .buffer
+            .language()
+            .map(|l| l.id().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// Open this tab's document on `vault` and wire the providers that read it.
+///
+/// A CSV is skipped: its columns are coloured by us and no language server speaks the format, so
+/// opening it would only cost a round trip to be told nothing.
+pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
+    if tab.flavour() == Flavour::Csv {
+        return;
+    }
+    *tab.lang.vault.borrow_mut() = Some(vault.clone());
+    *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
+
+    let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
+    let weak = Rc::downgrade(tab);
+    glib::spawn_future_local(async move {
+        let support = vault.open_document(&rel, &id, text).await;
+        let Some(tab) = weak.upgrade() else { return };
+        match support {
+            Ok(support) => {
+                tracing::debug!("opened {rel} as {id}: {support:?}");
+                *tab.lang.support.borrow_mut() = Some(support);
+                restart(&tab, Duration::ZERO);
+            }
+            Err(e) => tracing::warn!("cannot open {rel} on the language layer: {e:#}"),
+        }
+    });
+}
+
+/// The buffer changed: the server's copy is stale and everything derived from it is too.
+pub fn changed(tab: &Rc<Tab>) {
+    tab.lang.dirty.set(true);
+    restart(tab, REFRESH);
+}
+
+/// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
+/// the future it spawns holds the vault handle and the path and nothing else.
+pub fn detach(tab: &Tab) {
+    if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
+        handle.abort();
+    }
+    let Some(vault) = tab.lang.vault.borrow_mut().take() else {
+        return;
+    };
+    let rel = tab.rel();
+    glib::spawn_future_local(async move {
+        tracing::debug!("closing {rel}");
+        if let Err(e) = vault.close_document(&rel).await {
+            tracing::debug!("closing {rel}: {e:#}");
+        }
+    });
+}
+
+/// A rename landed: the old path is closed and the new one opened, because a language server
+/// keys its documents by URI and knows nothing of the move.
+pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let old = old_rel.to_string();
+    let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
+    let weak = Rc::downgrade(tab);
+    glib::spawn_future_local(async move {
+        let _ = vault.close_document(&old).await;
+        let support = vault.open_document(&rel, &id, text).await;
+        let Some(tab) = weak.upgrade() else { return };
+        if let Ok(support) = support {
+            *tab.lang.support.borrow_mut() = Some(support);
+            restart(&tab, Duration::ZERO);
+        }
+    });
+}
+
+/// Send the pending edit and wait for the server to have it. Every positional request awaits
+/// this first: an answer about a text the server has not been given is an answer about the wrong
+/// characters.
+pub async fn flush(tab: Rc<Tab>) {
+    let pending = match tab.lang.dirty.replace(false) {
+        false => None,
+        true => tab.lang.vault().map(|v| (v, tab.rel(), tab.text())),
+    };
+    let Some((vault, rel, text)) = pending else {
+        return;
+    };
+    tracing::debug!("changed {rel}, {} chars", text.chars().count());
+    if let Err(e) = vault.change_document(&rel, text).await {
+        tracing::debug!("changing {rel}: {e:#}");
+    }
+}
+
+/// Re-arm the post-edit refresh, dropping whatever was pending. Aborting the old future is what
+/// cancels its requests at the server, so a fast typist leaves one in flight rather than one per
+/// keystroke.
+fn restart(tab: &Rc<Tab>, delay: Duration) {
+    if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
+        handle.abort();
+    }
+    let weak = Rc::downgrade(tab);
+    let handle = glib::spawn_future_local(async move {
+        if !delay.is_zero() {
+            glib::timeout_future(delay).await;
+        }
+        let Some(tab) = weak.upgrade() else { return };
+        refresh(tab).await;
+    });
+    *tab.lang.refresh.borrow_mut() = Some(handle);
+}
+
+/// Give the server the edit, then re-read what it implies: the symbols the Outline pane and the
+/// sticky title are drawn from, and the blocks that can be folded.
+async fn refresh(tab: Rc<Tab>) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    flush(tab.clone()).await;
+    let rel = tab.rel();
+    match vault.symbols(&rel).await {
+        Ok(symbols) => *tab.lang.symbols.borrow_mut() = symbols,
+        Err(e) => tracing::debug!("symbols for {rel}: {e:#}"),
+    }
+    match vault.folds(&rel).await {
+        Ok(folds) => tab.set_folds(folds),
+        Err(e) => tracing::debug!("folds for {rel}: {e:#}"),
+    }
+    let hooks = tab.lang.hooks.borrow().clone();
+    if let Some(hooks) = hooks {
+        (hooks.on_symbols)(&tab);
+    }
+}
 
 /// The icon for a completion kind. The names are the app's own, shipped in the GResource
 /// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
