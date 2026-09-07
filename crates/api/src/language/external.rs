@@ -1030,6 +1030,49 @@ mod tests {
         assert!(left.is_empty(), "clangd still running: {left:?}");
     }
 
+    /// pylsp is the fallback of the Python row; pyright is tried first where it is installed.
+    /// Completion is what the bare install answers (jedi is a hard dependency, the linters are
+    /// extras), so that is what proves the session rather than a diagnostic.
+    #[test]
+    fn pylsp_answers_about_a_python_file() {
+        if super::super::in_path("pyright-langserver") || !super::super::in_path("pylsp") {
+            eprintln!("pylsp is not the Python server here: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let py = "import os\nos.\n";
+        std::fs::write(root.path().join("tool.py"), py).unwrap();
+        let (vault, _events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        accent_lsp::runtime().block_on(async {
+            let support = vault
+                .open_document("tool.py", "python3", py.to_string())
+                .await
+                .unwrap();
+            assert_eq!(support.missing, None, "pylsp is on PATH");
+            assert!(support.completion_triggers.contains(&'.'));
+            let after_dot = Pos {
+                line: 1,
+                character: 3,
+            };
+            let items = vault
+                .completion("tool.py", after_dot, Some('.'))
+                .await
+                .unwrap();
+            assert!(
+                items.iter().any(|c| c.label == "path"),
+                "os. should offer os.path, got {} items",
+                items.len()
+            );
+        });
+        drop(vault);
+    }
+
     #[test]
     fn rust_analyzer_answers_about_a_crate() {
         if !super::super::in_path("rust-analyzer") {
