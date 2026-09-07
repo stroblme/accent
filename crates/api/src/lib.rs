@@ -602,24 +602,6 @@ impl Vault {
             json!([rel])
         )
     }
-
-    pub fn complete_notes(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |v: &Local| v.complete_notes(prefix, limit),
-            "complete_notes",
-            json!([prefix, limit])
-        )
-    }
-
-    pub fn complete_tags(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |v: &Local| v.complete_tags(prefix, limit),
-            "complete_tags",
-            json!([prefix, limit])
-        )
-    }
 }
 
 // Git. The repositories belong to the machine the files are on, so every one of these runs there
@@ -1360,40 +1342,6 @@ impl Local {
             .into_iter()
             .filter(|(original, _)| original == rel)
             .map(|(_, copy)| copy)
-            .collect())
-    }
-
-    /// Notes for the `[[` completion: prefix on the name or the whole path, shortest path first
-    /// because that is the one the user most likely means.
-    pub fn complete_notes(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
-        let prefix = prefix.to_lowercase();
-        let mut hits: Vec<String> = self
-            .index()
-            .note_paths()?
-            .into_iter()
-            .filter(|rel| {
-                markdown::strip_ext(basename(rel))
-                    .to_lowercase()
-                    .starts_with(&prefix)
-                    || rel.to_lowercase().starts_with(&prefix)
-            })
-            .collect();
-        // Stable, so paths of equal length keep the index's alphabetical order.
-        hits.sort_by_key(String::len);
-        hits.truncate(limit);
-        Ok(hits)
-    }
-
-    /// Tags for the `#` completion, most used first.
-    pub fn complete_tags(&self, prefix: &str, limit: usize) -> Result<Vec<String>> {
-        let prefix = prefix.to_lowercase();
-        Ok(self
-            .index()
-            .tags()?
-            .into_iter()
-            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix))
-            .map(|(name, _)| name)
-            .take(limit)
             .collect())
     }
 }
@@ -2430,30 +2378,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(Op::Delete, "bravo"), (Op::Insert, "bravo two")]
         );
-    }
-
-    #[test]
-    fn complete_notes_and_tags_are_prefix_filtered_and_capped() {
-        let f = Fixture::open(VaultConfig::default());
-        f.write("Alpha.md", "on #alpha and #alphabet, more #alpha\n");
-        f.write("Alphabet.md", "letters\n");
-        f.write("Beta.md", "unrelated #beta\n");
-        f.vault.rescan();
-        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
-
-        assert_eq!(
-            f.vault.complete_notes("alp", 10).unwrap(),
-            ["Alpha.md", "Alphabet.md"]
-        );
-        assert_eq!(f.vault.complete_notes("alp", 1).unwrap(), ["Alpha.md"]);
-        assert!(f.vault.complete_notes("zzz", 10).unwrap().is_empty());
-
-        // Count ordering: `#alpha` twice beats `#alphabet` once.
-        assert_eq!(
-            f.vault.complete_tags("alp", 10).unwrap(),
-            ["alpha", "alphabet"]
-        );
-        assert_eq!(f.vault.complete_tags("alp", 1).unwrap(), ["alpha"]);
     }
 
     /// The notes provider through the façade: what the editor sees when a note is opened.

@@ -540,6 +540,15 @@ impl Language for External {
         Ok(self.support())
     }
 
+    fn saved(&self, rel: &str) -> Result<()> {
+        let uri = self.uri(rel)?;
+        self.client.notify(
+            "textDocument/didSave",
+            json!({"textDocument": {"uri": uri}}),
+        )?;
+        Ok(())
+    }
+
     fn change(&self, rel: &str, text: String) -> Result<()> {
         let uri = self.uri(rel)?;
         let version = {
@@ -1035,11 +1044,10 @@ mod tests {
             "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
         )
         .unwrap();
-        let main =
-            "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() { println!(\"{}\", add(1, 2)); }\n";
+        let main = "fn add(a: i32, b: i32) -> i32 { a + b }\nfn main() { let s: i32 = \"no\"; println!(\"{}\", add(1, 2)); }\n";
         std::fs::write(root.path().join("src/main.rs"), main).unwrap();
 
-        let (vault, _events) = crate::Vault::open_at(
+        let (vault, events) = crate::Vault::open_at(
             root.path(),
             &cache.path().join("index.db"),
             crate::VaultConfig::default(),
@@ -1060,7 +1068,34 @@ mod tests {
                 .map(|s| s.name.clone())
                 .collect();
             assert_eq!(names, ["add", "main"]);
+            // The compiler's diagnostics come from `cargo check`, which rust-analyzer runs on a
+            // save and on nothing else: the whole reason the save is a notification of its own.
+            vault.save_document("src/main.rs").await.unwrap();
         });
+        // rust-analyzer's own type check reports first; the compiler's answer is the one whose
+        // source is rustc, and it is the one that proves the save was heard.
+        let started = std::time::Instant::now();
+        let mut errors = Vec::new();
+        while started.elapsed() < std::time::Duration::from_secs(60) && errors.is_empty() {
+            let Ok(event) = events.recv_timeout(std::time::Duration::from_millis(500)) else {
+                continue;
+            };
+            if let crate::Event::Diagnostics { rel, items } = event
+                && rel == "src/main.rs"
+            {
+                errors = items
+                    .into_iter()
+                    .filter(|d| d.source.as_deref() == Some("rustc"))
+                    .collect();
+            }
+        }
+        eprintln!("cargo check diagnostics after {:?}", started.elapsed());
+        assert!(
+            errors
+                .iter()
+                .any(|d| d.message.contains("mismatched types")),
+            "expected the type error from cargo check, got {errors:?}"
+        );
         drop(vault);
     }
 }

@@ -30,6 +30,7 @@ mod pdfview;
 mod preview;
 mod settings;
 mod sidebar;
+mod signature;
 mod start;
 mod statusbar;
 mod terminal;
@@ -37,10 +38,10 @@ mod theme;
 mod tree;
 mod typing;
 
-use accent_api::{Config, Etag, Event, SaveError, Session, Vault, ssh};
+use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
 use accent_core::config::PdfZoom;
 use accent_core::index::Phase;
-use accent_core::markdown::{Link, LinkKind};
+use accent_core::markdown::LinkKind;
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
@@ -62,14 +63,19 @@ const RECENT_NOTES: usize = 50;
 const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
-/// Rows in a `[[wikilink]]` or `#tag` completion popup.
-const COMPLETIONS: usize = 20;
 /// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
 const RENDER: Duration = Duration::from_millis(300);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
 /// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
 const POLL: Duration = Duration::from_millis(120);
+/// A jump into a file that is not open yet waits for the read: how often it looks for the tab,
+/// and how many times before it gives up. 300 ms in all, which is five times the ~60 ms a read
+/// from the remote vault this was developed against costs.
+const OPEN_POLL: Duration = Duration::from_millis(30);
+const OPEN_TRIES: usize = 10;
+/// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
+const REFERENCES: Duration = Duration::from_millis(300);
 /// One press of Zoom In or Zoom Out, a tenth of the document font.
 const ZOOM_STEP: f64 = 0.1;
 /// How often the tree may be re-read while the first index is still running, in microseconds:
@@ -190,7 +196,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
-    ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
+    (
+        "win.pane-references",
+        "References Pane",
+        &["<Control><Shift>b"],
+    ),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
@@ -199,8 +209,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.reveal-in-sidebar", "Reveal in Sidebar", &[]),
     (
         "win.follow-link",
-        "Follow Link",
-        &["<Control><Shift>Return"],
+        "Go to Definition",
+        &["<Control><Shift>Return", "F12"],
     ),
     // Control+Shift chords, which the terminal's reserved set already lets through, and which no
     // GtkSourceView built-in claims.
@@ -929,6 +939,9 @@ struct App {
     /// ever missing at restore time — it does not exist until the first refresh finds a
     /// repository — so the first refresh reads this and then clears it for good.
     pane_wanted: RefCell<String>,
+    /// The References request in flight. Replaced rather than queued: the caret moves faster
+    /// than a server answers.
+    references: RefCell<Option<glib::JoinHandle<()>>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
@@ -1453,36 +1466,7 @@ impl App {
             Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
         };
         let prefs = self.prefs();
-        let tab = editor::open(
-            &self.root(),
-            key,
-            text,
-            flavour,
-            &self.tabs(),
-            &prefs,
-            (
-                // Without a vault there is nothing to complete against, and the closures are
-                // only ever installed on a note anyway.
-                {
-                    let vault = self.vault.clone();
-                    move |prefix: &str| {
-                        vault
-                            .as_ref()
-                            .and_then(|v| v.complete_notes(prefix, COMPLETIONS).ok())
-                            .unwrap_or_default()
-                    }
-                },
-                {
-                    let vault = self.vault.clone();
-                    move |prefix: &str| {
-                        vault
-                            .as_ref()
-                            .and_then(|v| v.complete_tags(prefix, COMPLETIONS).ok())
-                            .unwrap_or_default()
-                    }
-                },
-            ),
-        );
+        let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
         self.adopt(tab, how);
         if flavour.is_note() {
             self.sync_conflict_banner(key, None);
@@ -1680,8 +1664,8 @@ impl App {
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
     /// exact match rather than the top of the note.
     ///
-    /// Every row that leads here — a search hit, a tag, a backlink, an outline heading — is a
-    /// single click in the sidebar, so the note opens as a preview.
+    /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
+    /// the note opens as a preview.
     ///
     /// ponytail: the offset is turned into a character offset by counting the text in front of it,
     /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
@@ -1864,12 +1848,26 @@ impl App {
         tab.connect_follow(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_, link| app.follow(link)
+            move |_| app.go_to_definition()
         ));
         tab.connect_cursor(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |tab| app.sync_scroll(tab)
+            move |tab| {
+                app.sync_scroll(tab);
+                // A code tab's references are about the symbol under the caret, so they follow
+                // it — but only while the pane is on screen, since nobody is reading it otherwise.
+                if !tab.flavour().is_note()
+                    && app.is_active(tab)
+                    && app.sidebar_column.is_visible()
+                    && app
+                        .sidebar
+                        .get()
+                        .is_some_and(|s| s.is_showing("references"))
+                {
+                    app.refresh_references();
+                }
+            }
         ));
         // The chrome hides on the keystroke itself, not on the debounce that follows it.
         tab.buffer.connect_changed(glib::clone!(
@@ -1895,6 +1893,9 @@ impl App {
                         #[weak(rename_to = app)]
                         self,
                         move |tab: &Rc<Tab>| {
+                            // The pinned title is drawn from the same symbols, so it is redrawn
+                            // whether or not this tab is the one being looked at.
+                            tab.update_sticky();
                             if app.is_active(tab) {
                                 app.sync_outline();
                             }
@@ -1922,14 +1923,12 @@ impl App {
         self.save_session_soon();
     }
 
-    /// Keep the window subtitle, the backlinks pane and the preview in step with the active tab.
+    /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
-            if let Some(sidebar) = self.sidebar.get() {
-                sidebar.set_backlinks(&[]);
-            }
+            self.refresh_references();
             return;
         };
         let key = doc.key();
@@ -1951,40 +1950,10 @@ impl App {
                 });
             }
         }
-        // Backlinks and the preview are about notes. A source file, an image or a status page
-        // leaves both empty rather than showing the last note's.
+        // The preview is about notes. A source file, an image or a status page leaves it empty
+        // rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
-        // Off the main loop: one round trip on a remote vault is ~60 ms here, and this runs on
-        // every tab switch. The pane is emptied at once so it never shows the last note's
-        // backlinks while the new note's are still coming.
-        if let Some(sidebar) = self.sidebar.get() {
-            sidebar.set_backlinks(&[]);
-        }
-        if let Some(vault) = self.vault().filter(|_| note.is_some()).cloned() {
-            let (key, weak) = (key.clone(), Rc::downgrade(self));
-            glib::spawn_future_local(async move {
-                let found = gio::spawn_blocking({
-                    let key = key.clone();
-                    move || vault.backlinks(&key).unwrap_or_default()
-                })
-                .await;
-                let Some(app) = weak.upgrade() else { return };
-                // The user may have moved on while we were asking; a stale answer must not
-                // replace the pane the current tab put there.
-                if app.active_key().as_deref() != Some(&key) {
-                    return;
-                }
-                let mut sources: Vec<String> = Vec::new();
-                for link in found.unwrap_or_default() {
-                    if !sources.contains(&link.src_rel_path) {
-                        sources.push(link.src_rel_path);
-                    }
-                }
-                if let Some(sidebar) = app.sidebar.get() {
-                    sidebar.set_backlinks(&sources);
-                }
-            });
-        }
+        self.refresh_references();
         self.sync_status();
         self.sync_outline();
         self.sync_opening();
@@ -2055,33 +2024,88 @@ impl App {
         let Some(tab) = doc.tab() else {
             return sidebar.set_outline(None);
         };
-        if !tab.flavour().is_note() {
-            // ponytail: an outline of code is a symbol list, which is the language server's job.
-            return sidebar.set_outline(Some(&sidebar::outline_note(
-                "No Outline",
-                "Symbols arrive with language server support.",
-            )));
+        // The same list whatever the tab holds: a note's headings and a source file's functions
+        // are both what the language layer calls symbols.
+        let rows = lang::flatten(&tab.lang.symbols());
+        if rows.is_empty() {
+            let language = tab.language().unwrap_or_else(|| "this file".to_string());
+            let (title, body) = match tab.lang.support().and_then(|s| s.missing) {
+                Some(_) => (
+                    "No Language Server",
+                    format!("Symbols need a language server for {language}."),
+                ),
+                None if tab.flavour().is_note() => {
+                    ("No Headings", "This note has no headings yet.".to_string())
+                }
+                None => (
+                    "No Symbols",
+                    "Nothing in this file has a name to list.".to_string(),
+                ),
+            };
+            return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
-        let headings: Vec<(u8, String, usize)> = tab
-            .headings()
-            .into_iter()
-            .map(|h| (h.level, h.text, h.range.start))
-            .collect();
-        if headings.is_empty() {
-            return sidebar.set_outline(Some(&sidebar::outline_note(
-                "No Headings",
-                "This note has no headings yet.",
-            )));
-        }
-        let key = doc.key();
         sidebar.set_outline(Some(&sidebar::outline_list(
-            &headings,
+            &rows,
             glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |at| app.open_note_at(&key, Some(at))
+                #[weak]
+                tab,
+                move |at| tab.goto_pos(at)
             ),
         )));
+    }
+
+    /// Fill the References pane for the active tab: a note's backlinks, or what refers to the
+    /// symbol under the caret.
+    ///
+    /// Debounced and cancellable, because on a code tab it follows the caret: the previous
+    /// request is dropped, which is what cancels it at the server rather than leaving it to be
+    /// answered and thrown away.
+    fn refresh_references(self: &Rc<Self>) {
+        if let Some(handle) = self.references.borrow_mut().take() {
+            handle.abort();
+        }
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let tab = self.active();
+        let empty = references_empty(tab.as_ref());
+        // Emptied at once, so the pane never shows the last file's answer while this one's is
+        // still coming.
+        sidebar.set_references(&[], empty);
+        let (Some(tab), Some(vault)) = (tab.clone(), tab.as_ref().and_then(|tab| tab.lang.vault()))
+        else {
+            return;
+        };
+        let (key, note) = (tab.rel(), tab.flavour().is_note());
+        let pos = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let weak = Rc::downgrade(self);
+        let handle = glib::spawn_future_local(async move {
+            glib::timeout_future(REFERENCES).await;
+            lang::flush(tab.clone()).await;
+            let found = vault.references(&key, pos).await.unwrap_or_default();
+            let Some(app) = weak.upgrade() else { return };
+            // The user may have moved on while we were asking; a stale answer must not replace
+            // the pane the current tab put there.
+            if app.active_key().as_deref() != Some(&key) {
+                return;
+            }
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.set_references(&reference_rows(&found, note), empty);
+            }
+        });
+        *self.references.borrow_mut() = Some(handle);
+    }
+
+    /// Put a list of locations in the References pane and show it. What a definition with more
+    /// than one answer does, rather than the window picking one of them.
+    fn show_locations(self: &Rc<Self>, found: &[Location]) {
+        if let Some(handle) = self.references.borrow_mut().take() {
+            handle.abort();
+        }
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_references(&reference_rows(found, false), references_empty(None));
+        }
+        self.show_pane("references");
     }
 
     // --- saving --------------------------------------------------------------------------
@@ -2158,6 +2182,7 @@ impl App {
         let etag = written?;
         tab.mark_clean(etag);
         tab.clear_disk_alert();
+        lang::saved(tab);
         // Our own writes go through the vault, which tells the watcher they were ours, so no
         // event comes back to say the working tree moved. The pane is told here instead.
         if let Some(git) = self.git.get() {
@@ -3220,13 +3245,12 @@ impl App {
                 }
             }
             "pane-outline" => self.show_pane("outline"),
-            "backlinks" => self.show_pane("backlinks"),
-            "view-mode" => self.set_mode(self.mode.get().next()),
-            "follow-link" => {
-                if let Some(link) = self.active().and_then(|tab| tab.link_at_cursor()) {
-                    self.follow(&link);
-                }
+            "pane-references" => {
+                self.show_pane("references");
+                self.refresh_references();
             }
+            "view-mode" => self.set_mode(self.mode.get().next()),
+            "follow-link" => self.go_to_definition(),
             "fold" => {
                 if let Some(tab) = self.active() {
                     tab.fold_at_caret();
@@ -3587,20 +3611,87 @@ impl App {
         }
     }
 
-    fn follow(self: &Rc<Self>, link: &Link) {
-        if link.kind == LinkKind::External {
-            gtk::UriLauncher::new(&link.target).launch(
-                Some(&self.window),
-                gio::Cancellable::NONE,
-                |result| {
-                    if let Err(e) = result {
-                        tracing::warn!("cannot open link in browser: {e}");
-                    }
-                },
-            );
+    /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
+    ///
+    /// An external link under the caret is followed as a link, because that is what the reader
+    /// pointed at; everything else is a question for the language server, whether the tab holds
+    /// a note or a source file.
+    fn go_to_definition(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return;
+        };
+        if let Some(link) = tab
+            .link_at_cursor()
+            .filter(|link| link.kind == LinkKind::External)
+        {
+            return self.launch(&link.target);
+        }
+        let Some(vault) = tab.lang.vault() else {
+            return self.needs_vault("go to a definition");
+        };
+        // Said once per tab: a file whose server is not installed would otherwise toast on every
+        // Ctrl+click, and the answer does not change while the tab is open.
+        if let Some(server) = tab.lang.support().and_then(|s| s.missing) {
+            if tab.lang.claim_toast() {
+                let language = tab.language().unwrap_or_else(|| "this file".to_string());
+                self.toast(&format!(
+                    "No language server for {language} ({server} not found)"
+                ));
+            }
             return;
         }
-        self.open_target(&link.target);
+        let pos = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            lang::flush(tab.clone()).await;
+            let found = vault.definition(&tab.rel(), pos).await;
+            tracing::debug!("definition for {} at {pos:?}: {found:?}", tab.rel());
+            let Some(app) = weak.upgrade() else { return };
+            match found.unwrap_or_default().as_slice() {
+                [] => app.toast("No definition found"),
+                [one] => app.open_at(one),
+                // More than one place answers to the name — an overload, a trait method, a note
+                // title two files share — so the pane lists them instead of the window guessing.
+                many => app.show_locations(many),
+            }
+        });
+    }
+
+    /// Open a location and put the caret on it: a URL in the browser, a path in a tab.
+    ///
+    /// A file that is not open yet is read on a worker thread, so its tab arrives a turn or two
+    /// later; the jump waits for it rather than being dropped on the floor.
+    fn open_at(self: &Rc<Self>, loc: &Location) {
+        if loc.is_url() {
+            return self.launch(&loc.path);
+        }
+        let (key, at) = (loc.path.clone(), loc.range.start);
+        match doc::is_loose_key(&key) {
+            // Outside the vault: the same door a file dropped on the window comes through, and
+            // the tab it opens gets no language server of its own.
+            true => self.open_path(&key),
+            false => self.open_preview(&key),
+        }
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            for _ in 0..OPEN_TRIES {
+                let Some(app) = weak.upgrade() else { return };
+                if let Some(tab) = app.tab_for(&key) {
+                    return tab.goto_pos(at);
+                }
+                drop(app);
+                glib::timeout_future(OPEN_POLL).await;
+            }
+        });
+    }
+
+    /// Hand a URL to the desktop.
+    fn launch(&self, uri: &str) {
+        gtk::UriLauncher::new(uri).launch(Some(&self.window), gio::Cancellable::NONE, |result| {
+            if let Err(e) = result {
+                tracing::warn!("cannot open link in browser: {e}");
+            }
+        });
     }
 
     fn show_pane(&self, name: &str) {
@@ -4013,9 +4104,14 @@ impl App {
         //
         // Remembered as well as shown: the Git page is still hidden here, so asking for it is a
         // no-op until the first refresh finds a repository (`on_git_changed`).
-        self.pane_wanted.replace(session.pane.clone());
-        if let Some(sidebar) = self.sidebar.get().filter(|_| !session.pane.is_empty()) {
-            sidebar.show_pane(&session.pane);
+        // A state file written while the pane was still called Backlinks names it that way.
+        let pane = match session.pane.as_str() {
+            "backlinks" => "references".to_string(),
+            _ => session.pane.clone(),
+        };
+        self.pane_wanted.replace(pane.clone());
+        if let Some(sidebar) = self.sidebar.get().filter(|_| !pane.is_empty()) {
+            sidebar.show_pane(&pane);
         }
         self.sidebar_column.set_visible(session.sidebar);
         self.split
@@ -4431,6 +4527,7 @@ fn build_window(
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
         pane_wanted: RefCell::new(String::new()),
+        references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
         terminals: Cell::new(0),
@@ -4514,7 +4611,7 @@ fn build_window(
     Some(app)
 }
 
-/// Files / Search / Tags / Backlinks over the vault tree.
+/// Files / Search / Tags / References over the vault tree.
 /// The sidebar for a window with a vault: the tree, the index panes and the outline.
 fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
@@ -4675,7 +4772,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
 }
 
 /// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
-/// There is no index behind it, so Files, Search, Tags and Backlinks have nothing to show; an
+/// There is no index behind it, so Files, Search, Tags and References have nothing to show; an
 /// outline does not need one, and a PDF's bookmarks are the reason such a window has a sidebar.
 fn build_outline_sidebar(app: &Rc<App>) {
     adopt_sidebar(app, None);
@@ -4691,6 +4788,15 @@ fn adopt_sidebar(
             #[weak]
             app,
             move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
+        ),
+        glib::clone!(
+            #[weak]
+            app,
+            move |row: &str| {
+                if let Some(loc) = reference_target(row) {
+                    app.open_at(&loc);
+                }
+            }
         ),
     );
     // The switcher is the sidebar header's title widget rather than a top bar of its own, so the
@@ -5886,12 +5992,16 @@ fn install_chrome_css() {
                background-color: var(--view-bg-color); }} \
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
              textview border gutter {{ background-color: var(--view-bg-color); }} \
-             GtkSourceAssistant.completion {{ background-color: var(--popover-bg-color); \
-               color: var(--popover-fg-color); min-width: 240px; \
+             GtkSourceAssistant {{ background-color: var(--popover-bg-color); \
+               color: var(--popover-fg-color); \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
+             GtkSourceAssistant.completion {{ min-width: 240px; }} \
              GtkSourceAssistant.completion list row {{ padding: 3px 6px; }} \
              GtkSourceAssistant.completion list row cell.typed-text {{ margin-left: 12px; \
                margin-right: 12px; min-height: 30px; }} \
+             GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
+             GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
+               margin-left: 12px; }} \
              textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}"
         ));
         gtk::style_context_add_provider_for_display(
@@ -5900,6 +6010,55 @@ fn install_chrome_css() {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
     });
+}
+
+/// The References pane's rows: `path:line`, one-based, in the order the server answered.
+///
+/// `per_path` keeps one row per file, which is what a note's backlinks have always been — a note
+/// that links to the open one three times is one backlink, not three. A code tab wants every
+/// occurrence, so it asks for none of that.
+fn reference_rows(found: &[Location], per_path: bool) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    for loc in found {
+        if per_path {
+            if paths.contains(&loc.path.as_str()) {
+                continue;
+            }
+            paths.push(&loc.path);
+        }
+        let row = format!("{}:{}", loc.path, loc.range.start.line + 1);
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A References row read back: the path and the line it names.
+fn reference_target(row: &str) -> Option<Location> {
+    let (path, line) = row.rsplit_once(':')?;
+    let line: u32 = line.parse().ok()?;
+    let at = accent_api::Pos {
+        line: line.saturating_sub(1),
+        character: 0,
+    };
+    Some(Location {
+        path: path.to_string(),
+        range: accent_api::Range { start: at, end: at },
+    })
+}
+
+/// What the References pane says when it has nothing to list. A note has backlinks; a source file
+/// has references to whatever the caret is on.
+fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
+    match tab.map(|tab| tab.flavour().is_note()) {
+        Some(false) => (
+            "No References",
+            "Nothing refers to the symbol under the caret.",
+        ),
+        _ => ("No Backlinks", "No note links to the open one."),
+    }
 }
 
 /// What the toast says after a Replace All: what it wrote, what it could not, and what is still
@@ -5926,6 +6085,43 @@ fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) 
         ));
     }
     message
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    fn at(path: &str, line: u32) -> Location {
+        let pos = accent_api::Pos { line, character: 0 };
+        Location {
+            path: path.to_string(),
+            range: accent_api::Range {
+                start: pos,
+                end: pos,
+            },
+        }
+    }
+
+    /// A note's pane lists the notes that link to it, once each; a code tab's lists every place
+    /// the symbol turns up.
+    #[test]
+    fn a_notes_rows_are_one_per_file_and_a_code_tabs_are_one_per_use() {
+        let found = [at("a.md", 0), at("a.md", 4), at("b.md", 2)];
+        assert_eq!(reference_rows(&found, true), ["a.md:1", "b.md:3"]);
+        assert_eq!(
+            reference_rows(&found, false),
+            ["a.md:1", "a.md:5", "b.md:3"]
+        );
+    }
+
+    /// The row is the only thing the pane hands back, so it has to read as a location again.
+    #[test]
+    fn a_row_reads_back_as_the_place_it_names() {
+        let target = reference_target("src/main.rs:12").unwrap();
+        assert_eq!(target.path, "src/main.rs");
+        assert_eq!(target.range.start.line, 11);
+        assert!(reference_target("no-line-here").is_none());
+    }
 }
 
 #[cfg(test)]

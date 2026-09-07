@@ -10,7 +10,7 @@
 //! of keystrokes costs one round trip rather than one per key.
 
 use crate::editor::{Flavour, Tab};
-use accent_api::{Kind, Support, Symbol, Vault};
+use accent_api::{Kind, Pos, Support, Symbol, Vault};
 use gtk::glib;
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -51,6 +51,8 @@ pub struct State {
     /// nobody to ask and gets no providers.
     vault: RefCell<Option<Arc<Vault>>>,
     hooks: RefCell<Option<Rc<Hooks>>>,
+    /// The signature popover of this tab, and the request that would fill it.
+    pub signature: crate::signature::Help,
 }
 
 impl State {
@@ -60,23 +62,26 @@ impl State {
     }
 
     /// What the provider can do; `None` while the document is still opening.
-    // The completion, hover and signature providers are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn support(&self) -> Option<Support> {
         self.support.borrow().clone()
     }
 
-    // The Outline pane and the sticky title are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn symbols(&self) -> Vec<Symbol> {
         self.symbols.borrow().clone()
     }
 
     /// Whether the "no language server" toast still has to be said, marking it said.
-    // Go to Definition is the caller and arrives with it.
-    #[allow(dead_code)]
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
+    }
+}
+
+/// Where an iter is, in the coordinates every request and answer uses: a zero-based line and a
+/// column counted in characters, which is exactly what `TextIter` reports.
+pub fn pos_of(iter: &gtk::TextIter) -> Pos {
+    Pos {
+        line: iter.line().max(0) as u32,
+        character: iter.line_offset().max(0) as u32,
     }
 }
 
@@ -104,6 +109,9 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     }
     *tab.lang.vault.borrow_mut() = Some(vault.clone());
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
+    crate::completion::install(tab);
+    crate::hover::install(tab);
+    crate::signature::install(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
@@ -124,12 +132,35 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
 /// The buffer changed: the server's copy is stale and everything derived from it is too.
 pub fn changed(tab: &Rc<Tab>) {
     tab.lang.dirty.set(true);
+    // A signature that is up is about the call being typed, so it is asked again rather than
+    // left saying what the last keystroke meant.
+    if tab.lang.signature.is_shown() {
+        crate::signature::request(tab);
+    }
     restart(tab, REFRESH);
+}
+
+/// The buffer reached the disk. The server hears the edit first, then the save: rust-analyzer
+/// runs `cargo check` on a save and nothing else, so without this a Rust file never gets its
+/// compiler diagnostics.
+pub fn saved(tab: &Rc<Tab>) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let tab = tab.clone();
+    glib::spawn_future_local(async move {
+        flush(tab.clone()).await;
+        let rel = tab.rel();
+        if let Err(e) = vault.save_document(&rel).await {
+            tracing::debug!("saved {rel}: {e:#}");
+        }
+    });
 }
 
 /// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
 /// the future it spawns holds the vault handle and the path and nothing else.
 pub fn detach(tab: &Tab) {
+    tab.lang.signature.dismiss();
     if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
         handle.abort();
     }
@@ -222,12 +253,42 @@ async fn refresh(tab: Rc<Tab>) {
     }
 }
 
+/// The symbol tree as the Outline pane reads it: one row per symbol, depth first, carrying how
+/// deep it is (1 for a top-level one, which is what the pane indents from) and where a click on
+/// it should land.
+pub fn flatten(symbols: &[Symbol]) -> Vec<(u8, String, Pos)> {
+    fn walk(rows: &mut Vec<(u8, String, Pos)>, symbols: &[Symbol], depth: u8) {
+        for symbol in symbols {
+            rows.push((depth, symbol.name.clone(), symbol.selection.start));
+            walk(rows, &symbol.children, depth.saturating_add(1));
+        }
+    }
+    let mut rows = Vec::new();
+    walk(&mut rows, symbols, 1);
+    rows
+}
+
+/// The line to pin above the view when `top` is the first line on screen: the line naming the
+/// deepest symbol whose body the reader is inside and whose own head has scrolled away.
+///
+/// The *selection* line rather than the range's first, because a server includes a symbol's doc
+/// comment in its range: what a reader has lost sight of is the signature, not the paragraph
+/// above it. `None` when nothing has been scrolled out of sight, which takes the bar down again.
+pub fn innermost(symbols: &[Symbol], top: u32) -> Option<u32> {
+    symbols.iter().find_map(|symbol| {
+        let head = symbol.selection.start.line;
+        match head < top && top <= symbol.range.end.line {
+            // Deepest first: a method inside a class is the better answer of the two.
+            true => innermost(&symbol.children, top).or(Some(head)),
+            false => None,
+        }
+    })
+}
+
 /// The icon for a completion kind. The names are the app's own, shipped in the GResource
 /// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
 /// a type parameter. Kinds that mean the same thing to a reader share one drawing: a constructor
 /// is a method, a property is a field.
-// The completion list is the only caller and arrives with the rewrite of `completion.rs`.
-#[allow(dead_code)]
 pub fn icon_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Text => "lsp-text-symbolic",
@@ -254,6 +315,63 @@ pub fn icon_name(kind: Kind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accent_api::Range;
+
+    fn symbol(name: &str, line: u32, children: Vec<Symbol>) -> Symbol {
+        let at = Range {
+            start: Pos { line, character: 0 },
+            end: Pos { line, character: 0 },
+        };
+        Symbol {
+            name: name.to_string(),
+            range: at,
+            selection: at,
+            children,
+        }
+    }
+
+    /// The deepest symbol wins, and a reader who can still see a symbol's first line is told
+    /// nothing about it.
+    #[test]
+    fn the_sticky_line_is_the_innermost_block_whose_head_is_off_screen() {
+        let mut outer = symbol("Class", 0, vec![]);
+        outer.range.end.line = 40;
+        let mut inner = symbol("method", 10, vec![]);
+        inner.range.end.line = 20;
+        outer.children = vec![inner];
+        let tree = [outer];
+        assert_eq!(innermost(&tree, 15), Some(10));
+        assert_eq!(innermost(&tree, 30), Some(0));
+        assert_eq!(innermost(&tree, 0), None);
+        assert_eq!(innermost(&tree, 41), None);
+    }
+
+    /// Depth first, and a child is one step deeper than its parent: the pane indents from that
+    /// number and reads top to bottom, so the order is the order of the file.
+    #[test]
+    fn flatten_walks_the_tree_in_reading_order() {
+        let tree = vec![
+            symbol(
+                "Title",
+                0,
+                vec![symbol("Section", 4, vec![symbol("Deeper", 8, vec![])])],
+            ),
+            symbol("Next", 12, vec![]),
+        ];
+        let rows: Vec<(u8, String)> = flatten(&tree)
+            .into_iter()
+            .map(|(depth, name, _)| (depth, name))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (1, "Title".to_string()),
+                (2, "Section".to_string()),
+                (3, "Deeper".to_string()),
+                (1, "Next".to_string()),
+            ]
+        );
+    }
 
     /// Every kind names a file that is actually in the GResource directory: a missing icon is a
     /// blank cell in the completion list and nothing on the console.

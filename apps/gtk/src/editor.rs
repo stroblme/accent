@@ -9,10 +9,10 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, completion, diagnostics, fold, highlight, lang, multicaret, typing};
+use crate::{comment, diagnostics, fold, highlight, lang, multicaret, typing};
 use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
-use accent_core::markdown::{Heading, Link};
+use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene, pango};
 use sourceview5::prelude::*;
@@ -56,7 +56,6 @@ const DIM: f64 = 0.6;
 /// A callback the app registered. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs: a callback is free to reach back into the tab that called it.
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
-type LinkHook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>, &Link)>>>;
 
 /// Why a tab's banner is up. The intent is stored rather than re-derived when the button is
 /// pressed, so the button always does what its label says: deriving it from the file system meant
@@ -228,9 +227,6 @@ pub struct Tab {
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
     fold_renderer: fold::Renderer,
-    /// The note's headings, for the Outline pane. Produced by the same analysis as the links, so
-    /// keeping them costs nothing over throwing them away.
-    headings: RefCell<Vec<Heading>>,
     font: RefCell<Option<gtk::CssProvider>>,
     /// A watch on the file itself, for a tab no vault watcher covers. `None` for everything
     /// inside a vault, which the worker already reports on.
@@ -244,7 +240,7 @@ pub struct Tab {
     on_edited: Hook,
     on_banner: Hook,
     on_cursor: Hook,
-    on_follow: LinkHook,
+    on_follow: Hook,
     /// This tab's document on the vault's language layer: what it can answer, what it last
     /// answered, and the refresh that is still in flight. Empty for a tab outside every vault.
     pub lang: lang::State,
@@ -258,8 +254,6 @@ pub struct Tab {
 ///
 /// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
 /// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
-/// `completions` are the note and tag lookups behind `[[wikilink]]` and `#tag` completion, and
-/// the only way this module ever reaches the vault; a code tab never calls them.
 pub fn open(
     root: &Path,
     key: &str,
@@ -267,10 +261,6 @@ pub fn open(
     flavour: Flavour,
     tabs: &adw::TabView,
     prefs: &Prefs,
-    completions: (
-        impl Fn(&str) -> Vec<String> + 'static,
-        impl Fn(&str) -> Vec<String> + 'static,
-    ),
 ) -> Rc<Tab> {
     let path = root.join(key);
     let (zoom, column_width) = (prefs.zoom, prefs.column_width);
@@ -352,11 +342,10 @@ pub fn open(
     // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
     // does nothing is one that makes the user select the line first.
     line_clipboard(&view);
-    // Both are markdown behaviour: wikilink and tag completion, and continuing a list or a fence
-    // on Return. In a Python file they would be wrong rather than merely unused.
+    // Markdown behaviour: continuing a list or a fence on Return, and closing a bracket as it is
+    // typed. In a Python file both would be wrong rather than merely unused. Completion is not
+    // here: every flavour has it now, and `lang::attach` installs it once there is a vault to ask.
     if flavour.is_note() {
-        let (notes, tags) = completions;
-        completion::install(&view, notes, tags);
         typing::install(&view);
     }
 
@@ -476,7 +465,6 @@ pub fn open(
         annotations,
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
-        headings: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
@@ -526,7 +514,10 @@ pub fn open(
     width.connect_resize(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_, _, _| tab.set_clamp()
+        move |_, _, _| {
+            tab.set_clamp();
+            tab.update_sticky();
+        }
     ));
 
     // What the top of the view is inside changes on every scroll, and the widget the title has
@@ -627,10 +618,16 @@ pub fn open(
             {
                 return;
             }
-            if let Some(link) = tab.link_at(x, y) {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                tab.follow(&link);
+            // The caret goes where the pointer is first: Go to Definition asks about the caret,
+            // and a Ctrl+click means "this one", not "wherever I last typed".
+            let (bx, by) =
+                tab.view
+                    .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+            if let Some(iter) = tab.view.iter_at_location(bx, by) {
+                tab.buffer.place_cursor(&iter);
             }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            tab.emit(&tab.on_follow);
         }
     ));
     view.add_controller(click);
@@ -994,11 +991,6 @@ impl Tab {
             }
         ));
         *self.monitor.borrow_mut() = Some(monitor);
-    }
-
-    /// The note's headings, most recent analysis, for the Outline pane.
-    pub fn headings(&self) -> Vec<Heading> {
-        self.headings.borrow().clone()
     }
 
     /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and
@@ -1551,21 +1543,9 @@ impl Tab {
         adjustment.set_value(adjustment.value() + f64::from(n * height));
     }
 
-    /// Pin the opening line of whatever block the top of the view is inside above the view, or
-    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
-    /// this, now that its first line has gone off the top.
-    ///
-    /// A block is a markdown heading or a fenced code block, which is exactly what the styling
-    /// pass has already marked on the buffer — so the answer is two tag-toggle searches through
-    /// the buffer's own index rather than a second parse or a walk back through the lines.
-    /// Nothing here reads a language's structure, so a function inside a `.py` tab has no title
-    /// to pin; that needs a parser this editor does not have.
-    fn update_sticky(&self) {
-        if !self.flavour.is_note() {
-            return;
-        }
-        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
-        let top = first.line();
+    /// The note's own answer to what the top of the view is inside: the nearest heading or the
+    /// fence the reader is inside, whichever is lower down.
+    fn sticky_note_line(&self, first: gtk::TextIter, top: i32) -> Option<i32> {
         // From the *end* of the top line, so a heading or a fence opening on that line is found
         // and then discarded by `sticky_opener` for being on screen already, rather than passed
         // over in favour of the one above it.
@@ -1590,7 +1570,40 @@ impl Tab {
             }
             at.starts_tag(Some(&tag)).then(|| at.line())
         });
-        let Some(line) = sticky_opener(top, heading, fence) else {
+        sticky_opener(top, heading, fence)
+    }
+
+    /// Pin the opening line of whatever block the top of the view is inside above the view, or
+    /// take it away again. VS Code's sticky scroll, and it answers the same question: what is
+    /// this, now that its first line has gone off the top.
+    ///
+    /// In a note a block is a markdown heading or a fenced code block, which is exactly what the
+    /// styling pass has already marked on the buffer — so the answer is two tag-toggle searches
+    /// through the buffer's own index rather than a second parse or a walk back through the
+    /// lines. In a source file it is the innermost symbol the language server named, which is the
+    /// same question asked of the only thing that knows a language's structure. A CSV has no
+    /// blocks at all.
+    pub fn update_sticky(&self) {
+        if self.flavour == Flavour::Csv {
+            return;
+        }
+        // Before the view is allocated its visible rect is empty and `line_at_y` answers with
+        // whatever line the layout happens to be at, which pinned a heading over a note that was
+        // at its very top. The resize hook recomputes once there is a height.
+        if self.view.height() == 0 {
+            self.sticky_bar.set_visible(false);
+            return;
+        }
+        let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
+        let top = first.line();
+        let line = match self.flavour {
+            Flavour::Note => self.sticky_note_line(first, top),
+            Flavour::Code => {
+                lang::innermost(&self.lang.symbols(), top.max(0) as u32).map(|line| line as i32)
+            }
+            Flavour::Csv => None,
+        };
+        let Some(line) = line else {
             self.sticky_bar.set_visible(false);
             return;
         };
@@ -1760,8 +1773,6 @@ impl Tab {
     }
 
     /// Put the caret at a server position, which is zero-based and counts characters.
-    // Go to Definition and the References pane are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn goto_pos(&self, pos: Pos) {
         self.jump_to(&diagnostics::iter_at(&self.buffer, pos), 0.25);
     }
@@ -1810,8 +1821,8 @@ impl Tab {
         *self.on_banner.borrow_mut() = Some(Rc::new(f));
     }
 
-    /// Called for a Ctrl+click or a Ctrl+Return on a link.
-    pub fn connect_follow(self: &Rc<Self>, f: impl Fn(&Rc<Tab>, &Link) + 'static) {
+    /// Called for a Ctrl+click in the view or the Go to Definition chord.
+    pub fn connect_follow(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
         *self.on_follow.borrow_mut() = Some(Rc::new(f));
     }
 
@@ -1826,13 +1837,6 @@ impl Tab {
         let f = hook.borrow().clone();
         if let Some(f) = f {
             f(self);
-        }
-    }
-
-    fn follow(self: &Rc<Self>, link: &Link) {
-        let f = self.on_follow.borrow().clone();
-        if let Some(f) = f {
-            f(self, link);
         }
     }
 
@@ -1879,11 +1883,7 @@ impl Tab {
     /// table; code gets nothing, because the style scheme colours it from the language.
     fn analyse(&self) {
         match self.flavour {
-            Flavour::Note => {
-                let analysis = highlight::apply(&self.buffer);
-                *self.links.borrow_mut() = analysis.links;
-                *self.headings.borrow_mut() = analysis.headings;
-            }
+            Flavour::Note => *self.links.borrow_mut() = highlight::apply(&self.buffer).links,
             Flavour::Csv => highlight::apply_csv(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
