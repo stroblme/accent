@@ -1073,6 +1073,69 @@ mod tests {
         drop(vault);
     }
 
+    /// texlab answers the LaTeX row; what NOTEPAD asked for (`\\ref` and `\\cite` completion)
+    /// is the server's own, so this is what proves it needs nothing accent-side.
+    #[test]
+    fn texlab_completes_labels_and_citations() {
+        if !super::super::in_path("texlab") {
+            eprintln!("texlab is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\bibliography{refs}\n\\end{document}\n";
+        std::fs::write(root.path().join("main.tex"), tex).unwrap();
+        std::fs::write(
+            root.path().join("refs.bib"),
+            "@article{knuth84, author = {Knuth}, title = {Literate Programming}, year = 1984}\n",
+        )
+        .unwrap();
+        let (vault, _events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        accent_lsp::runtime().block_on(async {
+            let support = vault
+                .open_document("main.tex", "latex", tex.to_string())
+                .await
+                .unwrap();
+            assert_eq!(support.missing, None, "texlab is on PATH");
+            let labels: Vec<String> = vault
+                .completion(
+                    "main.tex",
+                    Pos {
+                        line: 3,
+                        character: 9,
+                    },
+                    None,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.label)
+                .collect();
+            assert!(labels.iter().any(|l| l == "fig:abc"), "labels: {labels:?}");
+            let keys: Vec<String> = vault
+                .completion(
+                    "main.tex",
+                    Pos {
+                        line: 4,
+                        character: 6,
+                    },
+                    None,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.label)
+                .collect();
+            assert!(keys.iter().any(|k| k == "knuth84"), "citations: {keys:?}");
+        });
+        drop(vault);
+    }
+
     #[test]
     fn rust_analyzer_answers_about_a_crate() {
         if !super::super::in_path("rust-analyzer") {

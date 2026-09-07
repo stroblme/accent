@@ -17,7 +17,7 @@
 //!   opened at, and re-requesting per keystroke is a round trip for a narrowing list.
 
 use crate::editor::Tab;
-use accent_api::{Completion, TextEdit};
+use accent_api::{Completion, Pos, Range, TextEdit};
 use gtk::glib;
 use gtk::subclass::prelude::*;
 use sourceview5::prelude::*;
@@ -288,8 +288,10 @@ mod provider_imp {
             // One user action, so Ctrl+Z takes the whole acceptance back: the replaced range, the
             // inserted text and whatever import the item brought with it.
             buffer.begin_user_action();
-            let mut start = diagnostics::iter_at(&buffer, item.replace.start);
-            let mut end = diagnostics::iter_at(&buffer, item.replace.end);
+            let caret = lang::pos_of(&buffer.iter_at_mark(&buffer.get_insert()));
+            let replace = super::grown(item.replace, caret);
+            let mut start = diagnostics::iter_at(&buffer, replace.start);
+            let mut end = diagnostics::iter_at(&buffer, replace.end);
             buffer.delete(&mut start, &mut end);
             // `delete` leaves both iters at the deletion point, so this writes exactly there.
             match item.is_snippet {
@@ -350,10 +352,57 @@ pub fn install(tab: &Rc<Tab>) {
     completion.add_provider(&provider);
 }
 
+/// The range an accepted item replaces, once the caret has moved on: the popup opens on a
+/// trigger with an empty word (`self.` offers everything), and what is typed after that to
+/// narrow the list belongs to the word being completed. Without this `get` + `get_func` gave
+/// `getget_func`. The caret only extends the range; a range reaching past it (the `]]` a note's
+/// completion eats) is kept as it is.
+fn grown(replace: Range, caret: Pos) -> Range {
+    match caret.line == replace.end.line && caret.character > replace.end.character {
+        true => Range {
+            start: replace.start,
+            end: caret,
+        },
+        false => replace,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accent_api::{Pos, Range};
+
+    #[test]
+    fn typing_after_the_popup_opened_grows_what_is_replaced() {
+        let at = |character| Pos { line: 3, character };
+        let opened = Range {
+            start: at(5),
+            end: at(5),
+        };
+        assert_eq!(
+            grown(opened, at(8)),
+            Range {
+                start: at(5),
+                end: at(8)
+            }
+        );
+        // A range reaching past the caret is the note's paired `]]`, and stays.
+        let eats = Range {
+            start: at(2),
+            end: at(9),
+        };
+        assert_eq!(grown(eats, at(7)), eats);
+        // Another line is another story; nothing is guessed.
+        assert_eq!(
+            grown(
+                opened,
+                Pos {
+                    line: 4,
+                    character: 1
+                }
+            ),
+            opened
+        );
+    }
 
     fn edit(line: u32, text: &str) -> TextEdit {
         let at = Pos { line, character: 0 };
