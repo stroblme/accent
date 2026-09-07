@@ -17,6 +17,7 @@ mod fileops;
 mod find;
 mod git;
 mod highlight;
+mod hover;
 mod lang;
 mod marks;
 mod multicaret;
