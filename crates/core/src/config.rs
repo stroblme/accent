@@ -36,6 +36,9 @@ daily_pattern = "%Y-%m-%d"
 daily_template = "Templates/Daily.md"
 templates_dir = "Templates"
 new_note_dir = "Inbox"
+
+[vaults."/home/me/Notes".lsp.servers]
+python3 = ["pylsp"]
 "#
     };
 }
@@ -130,6 +133,15 @@ pub struct VaultConfig {
     pub templates_dir: String,
     /// Empty means the vault root.
     pub new_note_dir: String,
+    pub lsp: LspConfig,
+}
+
+/// Which language server answers for a language, where the built-in choice is not the one
+/// wanted. Keyed by GtkSourceView language id (`python3`, `rust`), valued by a command line.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LspConfig {
+    pub servers: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for VaultConfig {
@@ -140,6 +152,7 @@ impl Default for VaultConfig {
             daily_template: None,
             templates_dir: "Templates".to_string(),
             new_note_dir: String::new(),
+            lsp: LspConfig::default(),
         }
     }
 }

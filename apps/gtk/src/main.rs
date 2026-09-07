@@ -2550,6 +2550,8 @@ impl App {
                 self.show_connection_banner(&why);
             }
             Event::Error(message) => self.toast(&message),
+            // ponytail: painted once the editor learns to (Phase 6, GTK slice).
+            Event::Diagnostics { .. } => {}
         }
     }
 

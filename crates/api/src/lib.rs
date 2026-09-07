@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+pub mod language;
 pub mod remote;
 pub mod rpc;
 pub mod ssh;
@@ -28,7 +29,7 @@ use accent_core::{diff, markdown, template};
 // The module too: a tab matches on `fs::Read`, and the façade hands one back.
 pub use accent_core::fs;
 
-pub use accent_core::config::{Config, Session, VaultConfig};
+pub use accent_core::config::{Config, LspConfig, Session, VaultConfig};
 pub use accent_core::diff::{DiffLine, Op};
 pub use accent_core::fs::{Etag, Read, SaveError, Text};
 // The module as well as its types: the git operations take a `Repo`, not a `Vault`, so callers
@@ -40,6 +41,10 @@ pub use accent_core::index::{
 };
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
+pub use language::{
+    Completion, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity, Signature, Support,
+    Symbol, Task, TextEdit,
+};
 
 // ---------------------------------------------------------------- public data
 
@@ -84,6 +89,11 @@ pub enum Event {
     /// has; writes fail until [`Vault::reconnect`] succeeds.
     Disconnected(String),
     Error(String),
+    /// What a language provider has to say about an open document, whole: an empty list clears.
+    Diagnostics {
+        rel: String,
+        items: Vec<Diagnostic>,
+    },
 }
 
 /// What a rename would do, so the UI can confirm before anything is written.
