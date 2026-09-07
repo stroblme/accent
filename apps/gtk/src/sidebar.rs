@@ -412,14 +412,6 @@ impl Sidebar {
         self.show_pane("tags");
         (panes.select_tag)(tag);
     }
-
-    /// The visible pane's name, for session state. A stack always has a visible child once it has
-    /// pages, so the fallback only covers the impossible case.
-    pub fn pane(&self) -> String {
-        self.stack
-            .visible_child_name()
-            .map_or_else(|| "files".to_string(), Into::into)
-    }
 }
 
 // --- pure helpers, the only part of this module the tests can reach ------------------------------

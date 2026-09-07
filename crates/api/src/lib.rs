@@ -1203,8 +1203,38 @@ impl Local {
 impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
     /// costs what it shows.
+    ///
+    /// The index's own rows, plus the trees it deliberately does not hold — `node_modules`, a
+    /// `.venv`, a cargo `target/` — read straight off the disk
+    /// ([`walk::unindexed_children`]) and merged in, so the file tree can show every folder in
+    /// the vault without any of them being indexed, watched or searched. Those rows carry
+    /// `id == 0`, which is what tells them apart. It happens here rather than in the tree so
+    /// that a vault on another machine gets it too: this runs on the host holding the files.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
-        self.index().list_files(rel)
+        let mut rows = self.index().list_files(rel)?;
+        let held: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
+        // Non-fatal: a directory that vanished mid-listing must not blank the rows the index did
+        // answer for.
+        let extra = walk::unindexed_children(&self.root, rel, &held).unwrap_or_else(|e| {
+            tracing::debug!(dir = rel, "listing the unindexed children: {e}");
+            Vec::new()
+        });
+        if extra.is_empty() {
+            return Ok(rows);
+        }
+        rows.extend(extra.into_iter().map(|(rel_path, kind)| FileRow {
+            id: 0,
+            rel_path,
+            kind,
+            title: None,
+            size: 0,
+            mtime_ns: 0,
+        }));
+        // `Index::list_files` orders directories first and then by path, case-insensitively; the
+        // merged listing has to come out the same way or the disk rows would land in a block of
+        // their own at the end. `sort_by_cached_key` folds each path once rather than per compare.
+        rows.sort_by_cached_key(|r| (r.kind != FileKind::Dir, r.rel_path.to_ascii_lowercase()));
+        Ok(rows)
     }
 
     /// Ranked full-text search. On the search connection, so a slow query cannot block the tree.
@@ -1936,6 +1966,37 @@ mod tests {
             "directories first, then files"
         );
         assert_eq!(names(&f.vault.list_dir("sub").unwrap()), ["sub/Deep.md"]);
+    }
+
+    #[test]
+    fn list_dir_merges_the_trees_the_index_does_not_hold() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Note.md", "hello");
+        f.write("node_modules/pkg/index.js", "js");
+        f.write("apples/a.md", "a");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let root = f.vault.list_dir("").unwrap();
+        assert_eq!(
+            names(&root),
+            ["apples", "node_modules", "Note.md"],
+            "the skipped tree sorts among the indexed rows, not after them"
+        );
+        // Which of them is in the index is what the file tree reads to decide whether a row may
+        // be renamed, moved or dropped onto.
+        let id = |rel: &str| root.iter().find(|r| r.rel_path == rel).unwrap().id;
+        assert_eq!(id("node_modules"), 0);
+        assert!(id("apples") > 0);
+        // Its contents come from the disk, one level at a time.
+        assert_eq!(
+            names(&f.vault.list_dir("node_modules").unwrap()),
+            ["node_modules/pkg"]
+        );
+        assert_eq!(
+            names(&f.vault.list_dir("node_modules/pkg").unwrap()),
+            ["node_modules/pkg/index.js"]
+        );
     }
 
     /// Depends on real inotify events.

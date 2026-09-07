@@ -190,8 +190,6 @@ pub struct Session {
     pub sidebar: bool,
     pub sidebar_width: i32,
     pub view: String,
-    /// Which sidebar pane was showing: an older state file without the key gets the default.
-    pub pane: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
     /// Notes opened in this vault, most recent first. Filesystem mtime is what the index can
@@ -215,7 +213,6 @@ impl Default for Session {
             sidebar: true,
             sidebar_width: 280,
             view: "editor".to_string(),
-            pane: "files".to_string(),
             zoom: 1.0,
             recent_notes: Vec::new(),
             recent_commands: Vec::new(),
@@ -543,7 +540,6 @@ mod tests {
             sidebar: false,
             sidebar_width: 320,
             view: "preview".to_string(),
-            pane: "search".to_string(),
             zoom: 1.2,
             recent_notes: vec!["Daily/2026-09-03.md".to_string()],
             recent_commands: vec!["win.save".to_string()],
@@ -569,17 +565,17 @@ mod tests {
             assert!(!back.sidebar);
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.view, "preview");
-            assert_eq!(back.pane, "search");
             assert_eq!(back.zoom, 1.2);
             assert_eq!(back.recent_notes, s.recent_notes);
             assert_eq!(back.recent_commands, s.recent_commands);
         });
     }
 
-    /// A state file written before `pane` and `zoom` existed must still load, with their
-    /// defaults.
+    /// A state file from another version must still load: one written before `zoom` existed gets
+    /// the default, and the `pane` every file written until now carries is simply dropped — which
+    /// sidebar pane was showing is no longer restored.
     #[test]
-    fn session_from_an_older_file_defaults_the_missing_pane() {
+    fn session_from_another_version_loads() {
         let tmp = tempfile::tempdir().unwrap();
         let vault = tmp.path().join("vault");
         std::fs::create_dir(&vault).unwrap();
@@ -590,13 +586,12 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 &path,
-                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor"}"#,
+                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor","pane":"git"}"#,
             )
             .unwrap();
 
             let back = Session::load(&vault);
             assert_eq!(back.open, ["a.md"]);
-            assert_eq!(back.pane, "files");
             assert_eq!(back.zoom, 1.0);
         });
     }

@@ -271,6 +271,89 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
+/// Does the walk refuse to look inside `rel`? True for the trees [`scan`] never enters:
+/// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], and anything at or under a [`DEPENDENCY_MARKERS`] file.
+///
+/// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
+/// disagree about which paths the index holds. The vault root is the user's own choice and is
+/// never refused.
+pub fn is_unindexed(root: &Path, rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    if rel.split('/').any(|part| never_walked(part, false)) {
+        return true;
+    }
+    let mut dir = root.to_path_buf();
+    rel.split('/').any(|part| {
+        dir.push(part);
+        is_dependency_tree(&dir)
+    })
+}
+
+/// The children of the directory `rel` that `held` — the index's own listing of it — does not
+/// name, as `(rel_path, kind)`.
+///
+/// The file tree shows every folder in the vault, the ones the index deliberately does not walk
+/// included: a listing that silently leaves `node_modules` out is a listing nobody can trust.
+/// Those trees stay out of the index, the watcher and every query all the same — nothing here is
+/// stored — so the only place their contents can come from is a `read_dir`, one level at a time,
+/// when the reader opens the row.
+///
+/// Two kinds of row come back: the skipped directories themselves, listed beside their indexed
+/// siblings, and — where `rel` is already inside one — everything in it. [`ALWAYS_SKIP_DIRS`],
+/// Syncthing's temporaries and our own save temporaries are refused at every depth, exactly as
+/// [`scan`] refuses them, so `.git` and `.trash` are out of reach here too.
+///
+/// `held` is both the thing that keeps a row from being listed twice and what keeps this cheap:
+/// deciding whether a directory is a dependency tree costs a stat per [`DEPENDENCY_MARKERS`]
+/// entry, and a directory the index already holds cannot be one, so it is never asked. On the
+/// test vault's 2 400-directory `Resources/library/storage` that is the difference between 4 800
+/// stats per expansion and none.
+pub fn unindexed_children(
+    root: &Path,
+    rel: &str,
+    held: &std::collections::HashSet<&str>,
+) -> io::Result<Vec<(String, FileKind)>> {
+    let inside = is_unindexed(root, rel);
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(root.join(rel))? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // `include_skipped`, because the skipped trees are exactly what this lists; what stays
+        // refused is `ALWAYS_SKIP_DIRS` and the temporaries.
+        if never_walked(&name, true) || name.starts_with(".accent-") {
+            continue;
+        }
+        let rel_path = match rel.is_empty() {
+            true => name.clone(),
+            false => format!("{rel}/{name}"),
+        };
+        if held.contains(rel_path.as_str()) {
+            continue;
+        }
+        let path = entry.path();
+        let kind = entry.file_type().ok();
+        let dir = match kind {
+            // The dirent's own `d_type`, so an ordinary file or folder costs no syscall at all.
+            Some(t) if !t.is_symlink() => t.is_dir(),
+            // A link is followed, so a package linked into `node_modules` — which npm does by the
+            // hundred — reads as the directory it points at rather than as an unopenable file. A
+            // link that loops costs nothing: this is one level, opened by hand.
+            _ => std::fs::metadata(&path).is_ok_and(|m| m.is_dir()),
+        };
+        // Outside a skipped tree, a child the index does not hold is only listed when it is one
+        // of the trees the walk refuses. Anything else missing from the index is missing for a
+        // reason of its own — a symlink pointing back into the vault, a file that vanished
+        // between the scan and now — and guessing at it here is not this function's business.
+        if !inside && !(dir && (SKIP_DIRS.contains(&name.as_str()) || is_dependency_tree(&path))) {
+            continue;
+        }
+        out.push((rel_path, if dir { FileKind::Dir } else { classify(&name) }));
+    }
+    Ok(out)
+}
+
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
 pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -555,6 +638,7 @@ fn classify_error(err: &ignore::Error) -> Skipped {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::fs;
     use std::os::unix::fs::symlink;
 
@@ -924,5 +1008,79 @@ mod tests {
             .filter(|s| s.reason == SkipReason::SymlinkLoop)
             .collect();
         assert_eq!(loops.len(), 1, "{:?}", r.skipped);
+    }
+
+    /// A vault holding one skipped tree of each kind, beside an ordinary note.
+    fn skipped_vault() -> tempfile::TempDir {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |p: &str| vault.path().join(p);
+        fs::write(at("Note.md"), "n").unwrap();
+        fs::create_dir_all(at("node_modules/pkg")).unwrap();
+        fs::write(at("node_modules/pkg/index.js"), "js").unwrap();
+        fs::create_dir(at(".venv")).unwrap();
+        fs::write(at(".venv/pyvenv.cfg"), "").unwrap();
+        fs::create_dir(at(".git")).unwrap();
+        fs::write(at(".git/HEAD"), "").unwrap();
+        vault
+    }
+
+    #[test]
+    fn is_unindexed_covers_the_trees_the_walk_refuses() {
+        let vault = skipped_vault();
+        let un = |rel| is_unindexed(vault.path(), rel);
+        assert!(un("node_modules"));
+        assert!(un("node_modules/pkg/index.js"));
+        assert!(
+            un(".venv"),
+            "a dependency marker is checked on the path itself"
+        );
+        assert!(un(".venv/lib"));
+        assert!(un(".git"));
+        assert!(!un("Note.md"));
+        // The root is the user's own choice, marker or not.
+        assert!(!un(""));
+    }
+
+    #[test]
+    fn unindexed_children_lists_the_skipped_trees_beside_indexed_siblings() {
+        let vault = skipped_vault();
+        let names = |rel| {
+            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &HashSet::new())
+                .unwrap()
+                .into_iter()
+                .map(|(rel, _)| rel)
+                .collect();
+            n.sort();
+            n
+        };
+        // At an indexed level only the skipped directories are missing from the index; the note
+        // beside them is already in the listing this merges into, and `.git` is never reachable.
+        assert_eq!(names(""), [".venv", "node_modules"]);
+        // Inside one, everything is: nothing under it is indexed at all.
+        assert_eq!(names("node_modules"), ["node_modules/pkg"]);
+        assert_eq!(names("node_modules/pkg"), ["node_modules/pkg/index.js"]);
+    }
+
+    #[test]
+    fn unindexed_children_leaves_out_what_the_index_already_holds() {
+        let vault = skipped_vault();
+        // A directory that gained its marker since the last scan is still in the index, and must
+        // not come back a second time from the disk.
+        let held = HashSet::from(["node_modules"]);
+        let rows = unindexed_children(vault.path(), "", &held).unwrap();
+        assert_eq!(
+            rows.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+            [".venv"]
+        );
+    }
+
+    #[test]
+    fn unindexed_children_classifies_by_name_as_the_walk_does() {
+        let vault = skipped_vault();
+        fs::write(vault.path().join("node_modules/README.md"), "r").unwrap();
+        let rows = unindexed_children(vault.path(), "node_modules", &HashSet::new()).unwrap();
+        let kind = |rel: &str| rows.iter().find(|(r, _)| r == rel).map(|(_, k)| *k);
+        assert_eq!(kind("node_modules/README.md"), Some(FileKind::Markdown));
+        assert_eq!(kind("node_modules/pkg"), Some(FileKind::Dir));
     }
 }

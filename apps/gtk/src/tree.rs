@@ -13,10 +13,37 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// One row of the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Row {
+    /// `d`, `m`, `p`, `i` or `o` — see [`encode`].
+    pub kind: char,
+    /// Vault-relative path.
+    pub rel: String,
+    /// Whether the index holds this row.
+    ///
+    /// False inside the trees the walk refuses — `node_modules`, a `.venv`, a cargo `target/`.
+    /// Those are listed because a file tree that leaves a folder out is one nobody can trust, but
+    /// they are read off the disk and nothing else in the app knows they are there: they are not
+    /// searched, not watched and not stored. So they list and open, and nothing may be created,
+    /// renamed, moved into or dragged out of them — a change the index never hears of would leave
+    /// the tree and the index disagreeing until the next rescan.
+    pub indexed: bool,
+}
+
+impl Row {
+    pub fn is_dir(&self) -> bool {
+        self.kind == 'd'
+    }
+}
+
 /// ponytail: rows are `gtk::StringObject`s holding `"<kind char><rel_path>"` instead of a custom
 /// GObject with typed properties. Saves ~40 lines of subclass boilerplate; if the tree ever needs
 /// more per-row state (git status, unsaved marker) define a real `FileItem` GObject then.
-fn encode(kind: FileKind, rel: &str) -> String {
+///
+/// The kind letter is upper case for a row the index does not hold, which is the one extra bit
+/// [`Row::indexed`] needs and costs no extra byte.
+fn encode(kind: FileKind, rel: &str, indexed: bool) -> String {
     let c = match kind {
         FileKind::Dir => 'd',
         FileKind::Markdown => 'm',
@@ -26,17 +53,33 @@ fn encode(kind: FileKind, rel: &str) -> String {
         _ if is_image(rel) => 'i',
         _ => 'o',
     };
+    let c = match indexed {
+        true => c,
+        false => c.to_ascii_uppercase(),
+    };
     format!("{c}{rel}")
 }
 
-pub fn decode(item: &glib::Object) -> Option<(char, String)> {
-    let s = item.downcast_ref::<gtk::StringObject>()?.string();
+pub fn decode(item: &glib::Object) -> Option<Row> {
+    decode_str(&item.downcast_ref::<gtk::StringObject>()?.string())
+}
+
+/// The pure half of [`decode`], so the encoding is a test rather than a running window.
+fn decode_str(s: &str) -> Option<Row> {
     let mut cs = s.chars();
     let kind = cs.next()?;
-    Some((kind, cs.as_str().to_string()))
+    Some(Row {
+        kind: kind.to_ascii_lowercase(),
+        rel: cs.as_str().to_string(),
+        indexed: kind.is_ascii_lowercase(),
+    })
 }
 
 /// `.obsidian`, `.stfolder`, `.git`, … and Syncthing conflicts never belong in the tree.
+///
+/// Only asked of the rows the index holds: a row read off the disk is one of the skipped trees,
+/// which the walk has already filtered (`.git` and `.trash` are out of reach there too), and
+/// hiding the dot-named ones would hide `.venv` and four of the six names in `SKIP_DIRS`.
 pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
     row_kind == FileKind::Conflict
         || rel.split('/').any(|c| c.starts_with('.'))
@@ -68,8 +111,10 @@ pub fn fill(store: &gio::ListStore, vault: &Arc<Vault>, prefix: &str) {
 fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>) {
     let items: Vec<String> = rows
         .into_iter()
-        .filter(|r| !hidden(r.kind, &r.rel_path))
-        .map(|r| encode(r.kind, &r.rel_path))
+        // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
+        // the index.
+        .filter(|r| r.id == 0 || !hidden(r.kind, &r.rel_path))
+        .map(|r| encode(r.kind, &r.rel_path, r.id != 0))
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {
         return;
@@ -137,6 +182,10 @@ pub struct Tree {
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<HashSet<String>>>,
+    /// The open file, which the selection follows. Shared with the pointer-leave handler: the
+    /// list selects rows on hover (see `build`), so the selection has to be put back whenever
+    /// the pointer goes away again.
+    active: Rc<RefCell<Option<String>>>,
 }
 
 impl Tree {
@@ -204,8 +253,8 @@ impl Tree {
         }
     }
 
-    /// The selected row, as (kind char, rel path).
-    pub fn selected(&self) -> Option<(char, String)> {
+    /// The selected row.
+    pub fn selected(&self) -> Option<Row> {
         self.view
             .model()
             .and_downcast::<gtk::SingleSelection>()?
@@ -217,8 +266,18 @@ impl Tree {
     }
 
     /// The row under a pointer position, for the context menu.
-    pub fn row_at(&self, x: f64, y: f64) -> Option<(char, String)> {
+    pub fn row_at(&self, x: f64, y: f64) -> Option<Row> {
         row_at(&self.view, x, y)
+    }
+
+    /// Move the selection onto the open file, or off every row when nothing is open.
+    ///
+    /// Only among the rows the tree already has: a path whose folders are still shut is not
+    /// expanded to, and the list is not scrolled. Which tab is in front should not move the tree
+    /// under the reader — Reveal in Sidebar is the gesture that does.
+    pub fn set_active(&self, rel: Option<&str>) {
+        *self.active.borrow_mut() = rel.map(str::to_string);
+        select(&self.view, rel);
     }
 
     /// Expand everything above `rel`, then select it and scroll it into view. False when the path
@@ -259,9 +318,8 @@ fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
     rel.match_indices('/').map(|(at, _)| &rel[..at])
 }
 
-/// The row at a position in the list, as (kind char, rel path), or `None` over the blank area
-/// below the last one.
-fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<(char, String)> {
+/// The row at a position in the list, or `None` over the blank area below the last one.
+fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
     let mut widget = view.pick(x, y, gtk::PickFlags::DEFAULT)?;
     // `pick` lands on the label or the icon; the row identity hangs off the expander above it.
     let expander = loop {
@@ -273,6 +331,23 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<(char, String)> {
     expander.list_row()?.item().as_ref().and_then(decode)
 }
 
+/// Put the selection on `rel`'s row, or on no row at all. Cheap when it is already there, which
+/// is what keeps it out of the way of the pointer selecting rows as it crosses the list.
+fn select(view: &gtk::ListView, rel: Option<&str>) {
+    let Some(selection) = view.model().and_downcast::<gtk::SingleSelection>() else {
+        return;
+    };
+    let Some(model) = selection.model().and_downcast::<gtk::TreeListModel>() else {
+        return;
+    };
+    let at = rel
+        .and_then(|rel| find_row(&model, rel))
+        .map_or(gtk::INVALID_LIST_POSITION, |row| row.position());
+    if selection.selected() != at {
+        selection.set_selected(at);
+    }
+}
+
 /// The row holding `rel`, or `None` while its parent is still collapsed.
 ///
 /// ponytail: a linear scan of the rows the model currently has, which is every *visible* row and
@@ -282,8 +357,8 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<(char, String)> {
 pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRow> {
     (0..model.n_items()).find_map(|i| {
         let row = model.item(i).and_downcast::<gtk::TreeListRow>()?;
-        let (_, r) = row.item().as_ref().and_then(decode)?;
-        (r == rel).then_some(row)
+        let item = row.item().as_ref().and_then(decode)?;
+        (item.rel == rel).then_some(row)
     })
 }
 
@@ -429,8 +504,9 @@ pub fn build(
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache) = (vault.clone(), cache.clone());
         move |obj| {
-            let (kind, rel) = decode(obj)?;
-            (kind == 'd').then(|| children_model(&vault, &cache, &rel).upcast())
+            let row = decode(obj)?;
+            row.is_dir()
+                .then(|| children_model(&vault, &cache, &row.rel).upcast())
         }
     });
 
@@ -465,10 +541,10 @@ pub fn build(
         let root_label = root_label.clone();
         expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
             let row = expander.list_row().and_then(|row| row.item());
-            let Some((_, rel)) = row.as_ref().and_then(decode) else {
+            let Some(row) = row.as_ref().and_then(decode) else {
                 return false;
             };
-            tooltip.set_text(Some(&format!("{root_label}/{rel}")));
+            tooltip.set_text(Some(&format!("{root_label}/{}", row.rel)));
             true
         });
         // A row can be dragged into a pane, which opens the note there, onto a pane's edge, which
@@ -483,15 +559,20 @@ pub fn build(
             .build();
         source.connect_prepare(|source, _, _| {
             let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
-            let (kind, rel) = expander.list_row()?.item().as_ref().and_then(decode)?;
-            let moving = move_content(&rel);
+            let row = expander.list_row()?.item().as_ref().and_then(decode)?;
+            // Nothing is dragged out of a tree the index does not hold: the move would happen on
+            // disk and the index would go on listing the file where it used to be.
+            if !row.indexed {
+                return None;
+            }
+            let moving = move_content(&row.rel);
             // A directory offers the move type alone: it has no single note to open, so a pane
             // must never be able to take it.
-            Some(match kind == 'd' {
+            Some(match row.is_dir() {
                 true => moving,
                 false => gdk::ContentProvider::new_union(&[
                     moving,
-                    gdk::ContentProvider::for_value(&rel.to_value()),
+                    gdk::ContentProvider::for_value(&row.rel.to_value()),
                 ]),
             })
         });
@@ -504,8 +585,11 @@ pub fn build(
         // that row's New Note would have put one too.
         expander.add_controller(move_target(&row_moves, |target, _, _| {
             let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
-            let (kind, rel) = expander.list_row()?.item().as_ref().and_then(decode)?;
-            Some(crate::fileops::row_dir(Some((&rel, kind == 'd'))).to_string())
+            let row = expander.list_row()?.item().as_ref().and_then(decode)?;
+            // And nothing is dropped into one either, for the same reason. The row simply never
+            // lights up.
+            row.indexed
+                .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
         }));
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
@@ -520,7 +604,7 @@ pub fn build(
         let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
             return;
         };
-        let Some((kind, rel)) = row.item().as_ref().and_then(decode) else {
+        let Some(item) = row.item().as_ref().and_then(decode) else {
             return;
         };
         expander.set_list_row(Some(&row));
@@ -532,15 +616,16 @@ pub fn build(
             .first_child()
             .and_downcast::<gtk::Image>()
             .expect("icon");
-        icon.set_icon_name(Some(icon_name(kind)));
+        icon.set_icon_name(Some(icon_name(item.kind)));
         let label = icon
             .next_sibling()
             .and_downcast::<gtk::Label>()
             .expect("label");
-        label.set_text(rel.rsplit('/').next().unwrap_or(&rel));
+        label.set_text(item.rel.rsplit('/').next().unwrap_or(&item.rel));
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
-        // to have the class taken off it again.
-        let dim = is_ignored(&bind_ignored.borrow(), &rel);
+        // to have the class taken off it again. A row the index does not hold is dimmed by the
+        // same rule and for the same reason the ignored ones are: search does not reach it.
+        let dim = !item.indexed || is_ignored(&bind_ignored.borrow(), &item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             match dim {
                 true => widget.add_css_class("dim-label"),
@@ -565,15 +650,48 @@ pub fn build(
         else {
             return;
         };
-        let Some((kind, rel)) = row.item().as_ref().and_then(decode) else {
+        let Some(item) = row.item().as_ref().and_then(decode) else {
             return;
         };
-        if kind == 'd' {
+        if item.is_dir() {
             row.set_expanded(!row.is_expanded());
         } else {
-            on_activate(kind, &rel);
+            on_activate(item.kind, &item.rel);
         }
     });
+    // `single-click-activate` is GTK's "activated on single click **and selected on hover**", so
+    // the selection is what the pointer leaves behind as it crosses the list — and it is also
+    // the highlight that says which file is open. The two are the same thing, so the open file's
+    // row is put back the moment the pointer goes away, instead of a row nobody chose staying lit.
+    let active = Rc::new(RefCell::new(None::<String>));
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_leave({
+        let active = active.clone();
+        move |controller| {
+            let Some(view) = controller.widget().and_downcast::<gtk::ListView>() else {
+                return;
+            };
+            select(&view, active.borrow().as_deref());
+        }
+    });
+    // The listing lands from a worker thread and expanding a folder inserts rows, so the open
+    // file's row often is not there — or not there yet — at the moment the tab changed. Re-applied
+    // whenever the model changes, but never while the pointer is in the list: the selection is
+    // the hover highlight too, and a reindex must not pull it out from under the row being
+    // pointed at.
+    model.connect_items_changed({
+        let (active, motion) = (active.clone(), motion.clone());
+        move |_, _, _, _| {
+            if motion.contains_pointer() {
+                return;
+            }
+            let Some(view) = motion.widget().and_downcast::<gtk::ListView>() else {
+                return;
+            };
+            select(&view, active.borrow().as_deref());
+        }
+    });
+    view.add_controller(motion);
     // The blank area below the last row is the vault root, the same place a right-click there
     // creates in. A drop that landed on a row is that row's own business — its target has already
     // accepted or refused it — so this one has to answer for the blank area alone, or a refusal
@@ -606,6 +724,7 @@ pub fn build(
         root: root.clone(),
         cache,
         ignored,
+        active,
     }
 }
 
@@ -624,6 +743,22 @@ mod tests {
         // A note at the vault root has nothing above it to expand.
         assert_eq!(dirs("c.md"), [] as [&str; 0]);
         assert_eq!(dirs(""), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn a_row_carries_whether_the_index_holds_it() {
+        let row = |kind, rel, indexed| decode_str(&encode(kind, rel, indexed)).unwrap();
+        let note = row(FileKind::Markdown, "Notes/A.md", true);
+        assert_eq!(note.kind, 'm');
+        assert_eq!(note.rel, "Notes/A.md");
+        assert!(note.indexed);
+        // A row read off the disk keeps its kind — the icon and the expander must not change —
+        // and says the index has never heard of it.
+        let dep = row(FileKind::Dir, "node_modules", false);
+        assert_eq!(dep.kind, 'd');
+        assert!(dep.is_dir());
+        assert_eq!(dep.rel, "node_modules");
+        assert!(!dep.indexed);
     }
 
     #[test]
