@@ -4821,7 +4821,6 @@ fn adopt_sidebar(
 fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
     let open = Rc::downgrade(app);
-    let split = Rc::downgrade(app);
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
@@ -4837,12 +4836,6 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         open: Box::new(move |rel| {
             if let Some(app) = open.upgrade() {
                 app.open_path(rel);
-            }
-        }),
-        split: Box::new(move |rel, side| {
-            if let Some(app) = split.upgrade() {
-                let at = app.pane();
-                app.open_beside(&at, side, rel);
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
@@ -4865,11 +4858,18 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         }),
         close: Box::new(move |rel| {
             let Some(app) = close.upgrade() else { return };
-            if let Some(tab) = app.tab_for(rel) {
-                // The file is in the trash: there is nothing left to save the buffer into, so the
-                // tab goes without the close asking to write it back out again.
-                tab.discard();
-                app.close_page(&tab.page);
+            // A folder in the trash takes everything under it, so every document at or below the
+            // path goes with it — a PDF or an image as much as a note. The file is in the trash:
+            // there is nothing left to save a buffer into, so the tab goes without the close
+            // asking to write it back out again, and unsaved edits go with the file.
+            for doc in app.docs() {
+                if !fileops::trashed_with(rel, &doc.key()) {
+                    continue;
+                }
+                if let Some(tab) = doc.tab() {
+                    tab.discard();
+                }
+                app.close_page(doc.page());
             }
         }),
     })
@@ -5394,10 +5394,10 @@ fn wire_tree(app: &Rc<App>) {
         app,
         move |gesture, _, x, y| {
             let Some(tree) = app.tree.get() else { return };
-            let Some((kind, rel)) = tree.row_at(x, y) else {
-                return;
-            };
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            // No row under the pointer is the blank area below the last one, and that gets a menu
+            // too: it is where a note is created in the vault root.
+            let row = tree.row_at(x, y);
             // The menu hangs off the host box, so the click has to be translated out of the
             // list's coordinates or it would point at the wrong row once the list is scrolled.
             let Some(at) = tree.view().compute_point(
@@ -5408,7 +5408,7 @@ fn wire_tree(app: &Rc<App>) {
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
             if let Some(ops) = app.ops() {
-                fileops::context_menu(ops, tree.widget(), &rel, kind == 'd', anchor);
+                fileops::context_menu(ops, tree.widget(), clicked(&row), anchor);
             }
         }
     ));
@@ -5424,15 +5424,18 @@ fn wire_tree(app: &Rc<App>) {
             let Some(tree) = app.tree.get() else {
                 return glib::Propagation::Proceed;
             };
-            let Some((kind, rel)) = tree.selected() else {
-                return glib::Propagation::Proceed;
-            };
+            let row = tree.selected();
             match key {
                 gdk::Key::Delete => {
+                    let Some((_, rel)) = &row else {
+                        return glib::Propagation::Proceed;
+                    };
                     if let Some(ops) = app.ops() {
-                        fileops::trash(ops, &rel);
+                        fileops::trash(ops, rel);
                     }
                 }
+                // Nothing selected is the keyboard's version of a click on blank space, and it
+                // gets the same root-scoped menu the pointer path shows there.
                 gdk::Key::Menu => {
                     let Some(ops) = app.ops() else {
                         return glib::Propagation::Proceed;
@@ -5440,8 +5443,7 @@ fn wire_tree(app: &Rc<App>) {
                     fileops::context_menu(
                         ops,
                         tree.widget(),
-                        &rel,
-                        kind == 'd',
+                        clicked(&row),
                         row_anchor(tree.view(), tree.widget()),
                     );
                 }
@@ -5465,6 +5467,12 @@ fn written_at(rel: &str, etag: &Etag) -> String {
         Ok(when) => format!("{rel} · {when}"),
         Err(_) => rel.to_string(),
     }
+}
+
+/// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays
+/// `None`, which is what the menu reads as the vault root.
+fn clicked(row: &Option<(char, String)>) -> Option<(&str, bool)> {
+    row.as_ref().map(|(kind, rel)| (rel.as_str(), *kind == 'd'))
 }
 
 /// Where a Menu-key popover points: the focused row, or the top of the list. In `host`'s

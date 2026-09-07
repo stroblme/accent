@@ -10,7 +10,6 @@
 //! good); buttons and titles use header capitalisation, and only "Move to…" takes an ellipsis
 //! because it is the one item that needs more input before it can act.
 
-use crate::panes::Side;
 use accent_api::{RenamePlan, Vault};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -37,8 +36,6 @@ pub struct Ops {
     pub toast: Box<dyn Fn(&str)>,
     /// Open a note in a tab.
     pub open: Box<dyn Fn(&str)>,
-    /// Open a note in a pane of its own, on the given side of the active pane.
-    pub split: Box<dyn Fn(&str, Side)>,
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
@@ -48,8 +45,9 @@ pub struct Ops {
     /// Reload these paths' tabs from disk, returning how many were left alone because their
     /// buffer still holds unsaved edits (those get the changed-on-disk banner instead).
     pub reload: Box<dyn Fn(&[String]) -> usize>,
-    /// Close the tab for a path that has stopped existing. Only called once the file is really
-    /// gone, so there is nothing left to write the buffer into and nothing to ask about.
+    /// Close every document at or under a path that has stopped existing — a folder in the trash
+    /// takes the notes inside it. Only called once the file is really gone, so there is nothing
+    /// left to write the buffer into and nothing to ask about.
     pub close: Box<dyn Fn(&str)>,
 }
 
@@ -341,6 +339,19 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
     );
 }
 
+/// Whether an open document's key goes with `trashed`: the path itself, or anything inside it
+/// when a whole folder is deleted. The key of a file outside the vault is absolute and the key of
+/// a diff or a terminal is not a path at all, so neither ever matches a vault-relative one.
+///
+/// An empty `trashed` is the vault root, which has no Move to Trash item and must never be read
+/// as "everything": the guard is what keeps a bug there from closing every tab in the window.
+pub fn trashed_with(trashed: &str, key: &str) -> bool {
+    !trashed.is_empty()
+        && key
+            .strip_prefix(trashed)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
 fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
@@ -629,8 +640,12 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
 
 // ------------------------------------------------------------------------------ context menu
 
-/// Right-click and Menu-key context menu for a tree row. `host` is the tree's outer box, and
+/// Right-click and Menu-key context menu for the file tree. `host` is the tree's outer box, and
 /// `anchor` is where to point the popover in that box's coordinates.
+///
+/// `row` is the row that was clicked, as (path, is a directory), or `None` where the click landed
+/// on no row at all — the blank area below the last one. Creating is offered in all three cases,
+/// and everything else needs a path, so a menu opened over nothing holds the create items alone.
 ///
 /// ponytail: the popover is parented to the box rather than to the `GtkListView` inside it,
 /// because GTK only re-presents a popover from its parent's `allocate_native_children`, which a
@@ -641,8 +656,7 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
 pub fn context_menu(
     ops: &Rc<Ops>,
     host: &gtk::Widget,
-    rel: &str,
-    is_dir: bool,
+    row: Option<(&str, bool)>,
     anchor: gdk::Rectangle,
 ) {
     // On the host, not the list: an action resolves up the widget tree from the popover's parent.
@@ -651,26 +665,25 @@ pub fn context_menu(
     host.insert_action_group(GROUP, Some(&actions(ops)));
 
     let menu = gio::Menu::new();
-    if is_dir {
-        menu.append_item(&item("New Note", "new-note", rel));
-        menu.append_item(&item("New Folder", "new-folder", rel));
-        // Putting files in is only worth offering where they are not here already; a folder of a
-        // local vault is one the file manager can be dropped onto.
-        if ops.vault.is_remote() {
-            menu.append_item(&item("Upload Files…", "upload", rel));
-        }
-    } else {
+    if let Some((rel, false)) = row {
         menu.append_item(&item("Open", "open", rel));
-        // Opening beside what is already there, in the section that opens things.
-        for (label, action) in [
-            ("Split Left", "split-left"),
-            ("Split Right", "split-right"),
-            ("Split Up", "split-up"),
-            ("Split Down", "split-down"),
-        ] {
-            menu.append_item(&item(label, action, rel));
-        }
     }
+    // Everything that puts something in a folder shares one target, so a right-click anywhere in
+    // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
+    let dir = create_dir(row);
+    menu.append_item(&item("New Note", "new-note", dir));
+    menu.append_item(&item("New Folder", "new-folder", dir));
+    // Putting files in is only worth offering where they are not here already; a folder of a
+    // local vault is one the file manager can be dropped onto.
+    if ops.vault.is_remote() {
+        menu.append_item(&item("Upload Files…", "upload", dir));
+    }
+    // Everything below names one file or folder, so none of it belongs on a menu opened over
+    // blank space. Splitting is not here at all: it opens a note beside the active tab, which is
+    // what the tab's own menu and `win.split-*` are for, not something done to a path.
+    let Some((rel, is_dir)) = row else {
+        return popup(host, &menu, anchor);
+    };
     menu.append_item(&item("Rename", "rename", rel));
     menu.append_item(&item("Move to…", "move", rel));
     // Reading the path out and leaving the app are neither edits nor deletions, so they get a
@@ -689,14 +702,35 @@ pub fn context_menu(
     let danger = gio::Menu::new();
     danger.append_item(&item("Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
+    popup(host, &menu, anchor);
+}
 
-    let popover = gtk::PopoverMenu::from_model(Some(&menu));
+/// Where New Note, New Folder and Upload put what they create: inside the folder that was
+/// clicked, beside the file that was clicked, and in the vault root when nothing was.
+fn create_dir(row: Option<(&str, bool)>) -> &str {
+    match row {
+        Some((rel, true)) => rel,
+        Some((rel, false)) => parent_dir(rel),
+        None => "",
+    }
+}
+
+/// Hang the menu off `host` and show it.
+fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle) {
+    let popover = gtk::PopoverMenu::from_model(Some(menu));
     popover.set_parent(host);
     popover.set_has_arrow(false);
     popover.set_pointing_to(Some(&anchor));
-    // A popover parented by hand stays parented: without this every right-click would leave
-    // another one hanging off the tree.
-    popover.connect_closed(|p| p.unparent());
+    // A popover parented by hand stays parented until it is unparented by hand — but not while it
+    // is closing. `closed` is emitted from inside the item's own `clicked`, and an unparented
+    // widget has no path to the action group on the host, so unparenting there dropped whatever
+    // the click had just asked for — every item in this menu, not only the ones that open a
+    // dialog, exactly as it dropped the status bar's Fit Page. The idle runs once the click is
+    // over.
+    popover.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
     popover.popup();
 }
 
@@ -725,19 +759,6 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         group.add_action(&action);
     };
     add("open", Box::new(|ops, rel| (ops.open)(rel)));
-    add(
-        "split-left",
-        Box::new(|ops, rel| (ops.split)(rel, Side::Left)),
-    );
-    add(
-        "split-right",
-        Box::new(|ops, rel| (ops.split)(rel, Side::Right)),
-    );
-    add("split-up", Box::new(|ops, rel| (ops.split)(rel, Side::Up)));
-    add(
-        "split-down",
-        Box::new(|ops, rel| (ops.split)(rel, Side::Down)),
-    );
     add("new-note", Box::new(new_note));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));
@@ -1019,6 +1040,34 @@ mod tests {
         assert_eq!(sibling_path("a/b/c.md", "d.md"), "a/b/d.md");
         assert_eq!(sibling_path("c.md", "d.md"), "d.md");
         assert_eq!(sibling_path("a/b", "c"), "a/c");
+    }
+
+    #[test]
+    fn create_dir_answers_for_all_three_kinds_of_click() {
+        assert_eq!(create_dir(Some(("Notes/Daily", true))), "Notes/Daily");
+        assert_eq!(
+            create_dir(Some(("Notes/Daily/mon.md", false))),
+            "Notes/Daily"
+        );
+        // A file at the vault root, and the blank area below the last row: both the root.
+        assert_eq!(create_dir(Some(("todo.md", false))), "");
+        assert_eq!(create_dir(None), "");
+    }
+
+    #[test]
+    fn trashed_with_takes_a_folder_but_not_its_neighbours() {
+        assert!(trashed_with("a/b.md", "a/b.md"));
+        assert!(!trashed_with("a/b.md", "a/c.md"));
+        // A folder takes what is under it, however deep.
+        assert!(trashed_with("Notes", "Notes"));
+        assert!(trashed_with("Notes", "Notes/Daily/mon.md"));
+        // Not a folder whose name merely starts the same way.
+        assert!(!trashed_with("Notes", "Notestore/x.md"));
+        // Absolute keys (a file outside the vault) and non-path keys never match.
+        assert!(!trashed_with("Notes", "/home/me/Notes/x.md"));
+        assert!(!trashed_with("Notes", "terminal:1"));
+        // The vault root is never "everything".
+        assert!(!trashed_with("", "a/b.md"));
     }
 
     #[test]
