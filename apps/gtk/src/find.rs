@@ -86,12 +86,14 @@ impl Bar {
             .hexpand(true)
             .build();
         let matches = gtk::Label::builder().css_classes(["dim-label"]).build();
+        // Up and down, not back and forward: the matches are places in a document that scrolls
+        // vertically, which is the axis every other find bar names here (DESIGN.md, Iconography).
         let previous = gtk::Button::builder()
-            .icon_name("go-previous-symbolic")
+            .icon_name("go-up-symbolic")
             .tooltip_text("Find Previous")
             .build();
         let next = gtk::Button::builder()
-            .icon_name("go-next-symbolic")
+            .icon_name("go-down-symbolic")
             .tooltip_text("Find Next")
             .build();
 
@@ -203,7 +205,10 @@ impl Bar {
         ));
 
         // Escape leaves the bar and puts the caret back where the user was typing. Capture phase,
-        // because `GtkSearchEntry` binds Escape to `stop-search` and would eat it first.
+        // because `GtkSearchEntry` binds Escape to `stop-search` and would eat it first — so
+        // Escape always closes the bar rather than first clearing the query, which is what the
+        // key is for here. The window carries the other half, for an Escape pressed with the
+        // focus back in the document (`main.rs`).
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed(glib::clone!(
@@ -322,6 +327,15 @@ impl Bar {
         self.matches.set_text(text);
     }
 
+    /// Put the bar away and give the document the keyboard back. Public because Escape reaches it
+    /// from outside the bar too.
+    pub fn close(&self) {
+        self.bar.set_search_mode(false);
+        if let Some(tab) = self.tab() {
+            tab.view.grab_focus();
+        }
+    }
+
     // --- internals -------------------------------------------------------------------------
 
     fn tab(&self) -> Option<Rc<Tab>> {
@@ -406,13 +420,6 @@ impl Bar {
                     tab.goto_line(line, column);
                 }
             }
-        }
-    }
-
-    fn close(&self) {
-        self.bar.set_search_mode(false);
-        if let Some(tab) = self.tab() {
-            tab.view.grab_focus();
         }
     }
 

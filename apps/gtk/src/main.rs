@@ -48,6 +48,7 @@ use editor::{Alert, Flavour, Prefs, Tab};
 use gtk::{gdk, gio, glib};
 use panes::{Pane, Side, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1667,25 +1668,19 @@ impl App {
         viewer
     }
 
-    /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
-    /// exact match rather than the top of the note.
+    /// Open a note over the byte range a sidebar search result matched, so it opens on the match
+    /// rather than at the top and the match is marked where it lands.
     ///
     /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
-    /// the note opens as a preview.
-    ///
-    /// ponytail: the offset is turned into a character offset by counting the text in front of it,
-    /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
-    /// belongs on `Tab` if anything ever needs it per keystroke.
-    fn open_note_at(self: &Rc<Self>, rel: &str, offset: Option<usize>) {
+    /// the note opens as a preview and the next such click takes the same tab.
+    fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.open_preview(rel);
-        let (Some(offset), Some(tab)) = (offset, self.tab_for(rel)) else {
-            return;
-        };
-        let text = tab.text();
-        let Some(head) = text.get(..offset.min(text.len())) else {
-            return;
-        };
-        tab.goto_offset(head.chars().count());
+        let Some(at) = at else { return };
+        self.on_tab(rel.to_string(), move |tab| {
+            if let Some(chars) = char_range(&tab.text(), at.clone()) {
+                tab.goto_range(chars);
+            }
+        });
     }
 
     /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
@@ -3700,9 +3695,6 @@ impl App {
     }
 
     /// Open a location and put the caret on it: a URL in the browser, a path in a tab.
-    ///
-    /// A file that is not open yet is read on a worker thread, so its tab arrives a turn or two
-    /// later; the jump waits for it rather than being dropped on the floor.
     fn open_at(self: &Rc<Self>, loc: &Location) {
         if loc.is_url() {
             return self.launch(&loc.path);
@@ -3714,12 +3706,22 @@ impl App {
             true => self.open_path(&key),
             false => self.open_preview(&key),
         }
+        self.on_tab(key, move |tab| tab.goto_pos(at));
+    }
+
+    /// Do something to the tab holding `key`, once there is one.
+    ///
+    /// The one door for every jump that follows an open. A file that is not open yet is read on a
+    /// worker thread, so its tab arrives a turn or two later; this waits for it rather than
+    /// dropping the jump on the floor, and gives up rather than waiting on a file that will not
+    /// open at all.
+    fn on_tab(self: &Rc<Self>, key: String, f: impl Fn(&Rc<Tab>) + 'static) {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             for _ in 0..OPEN_TRIES {
                 let Some(app) = weak.upgrade() else { return };
                 if let Some(tab) = app.tab_for(&key) {
-                    return tab.goto_pos(at);
+                    return f(&tab);
                 }
                 drop(app);
                 glib::timeout_future(OPEN_POLL).await;
@@ -4827,7 +4829,7 @@ fn adopt_sidebar(
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
+            move |rel: &str, at: Option<Range<usize>>| app.open_note_at(rel, at)
         ),
         glib::clone!(
             #[weak]
@@ -5350,6 +5352,27 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         }
     ));
     app.window.add_controller(keys);
+
+    // The other half of the find bar's Escape: the bar has one of its own, but only for a key
+    // pressed inside it, and the user who typed a query and went back to reading has the focus in
+    // the document. Bubble phase, and a separate controller from the capture one above, so
+    // everything that answers to Escape closer to the focus still gets it first — the signature
+    // popover dismissing itself, a popover, a menu.
+    let dismiss = gtk::EventControllerKey::new();
+    dismiss.connect_key_pressed(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, _| match key == gdk::Key::Escape && app.find.is_open() {
+            true => {
+                app.find.close();
+                glib::Propagation::Stop
+            }
+            false => glib::Propagation::Proceed,
+        }
+    ));
+    app.window.add_controller(dismiss);
     app.window.connect_notify_local(
         Some("focus-widget"),
         glib::clone!(
@@ -6119,6 +6142,20 @@ fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
     }
 }
 
+/// The character range `bytes` names in `text`, or `None` when it names no range this text has.
+///
+/// The index reports byte offsets and `GtkTextBuffer` addresses characters, so a search hit has to
+/// be counted across before it can be pointed at. Out of bounds and mid-character are both `None`
+/// rather than a guess: the file on disk has moved on from what was indexed, and a caret dropped
+/// somewhere near the old place is worse than one left where it was.
+///
+/// ponytail: counting the text in front of the match is fine for a note opened by a click; a real
+/// byte-to-iter map belongs on `Tab` if anything ever needs one per keystroke.
+fn char_range(text: &str, bytes: Range<usize>) -> Option<Range<usize>> {
+    let start = text.get(..bytes.start)?.chars().count();
+    Some(start..start + text.get(bytes)?.chars().count())
+}
+
 /// What the toast says after a Replace All: what it wrote, what it could not, and what is still
 /// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
 fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
@@ -6185,6 +6222,19 @@ mod reference_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_hit_counts_across_to_the_characters_the_buffer_addresses() {
+        // Two bytes a character, so the byte range and the character range differ.
+        let text = "αβγ match δε";
+        assert_eq!(&text[7..12], "match");
+        assert_eq!(char_range(text, 7..12), Some(4..9));
+        // ASCII is the identity.
+        assert_eq!(char_range("hello world", 6..11), Some(6..11));
+        // The file has changed since it was indexed: past the end, or mid-character.
+        assert_eq!(char_range("short", 4..99), None);
+        assert_eq!(char_range("αβγ", 1..3), None);
+    }
 
     #[test]
     fn replace_toast_counts_matches_notes_and_what_went_wrong() {

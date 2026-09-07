@@ -17,6 +17,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -1777,10 +1778,27 @@ impl Tab {
         self.jump_to(&diagnostics::iter_at(&self.buffer, pos), 0.25);
     }
 
-    /// Put the caret `chars` characters into the buffer.
-    pub fn goto_offset(&self, chars: usize) {
-        let offset = (chars as i32).clamp(0, self.buffer.char_count());
-        self.jump_to(&self.buffer.iter_at_offset(offset), 0.3);
+    /// Jump to a character range and mark it the way the find bar marks a match it found: the
+    /// range itself is selected, and the text inside it becomes this tab's search query with the
+    /// highlight on, so every other occurrence in the note is marked too.
+    ///
+    /// Nothing here expires. The marks are the find bar's own and go the way they always do — a
+    /// new query replaces them, an edit moves them, closing the bar clears them.
+    pub fn goto_range(&self, chars: Range<usize>) {
+        let last = self.buffer.char_count();
+        let start = self
+            .buffer
+            .iter_at_offset((chars.start as i32).clamp(0, last));
+        let end = self
+            .buffer
+            .iter_at_offset((chars.end as i32).clamp(0, last));
+        self.jump_to(&start, 0.3);
+        if start == end {
+            return;
+        }
+        self.buffer.select_range(&start, &end);
+        self.set_query(&self.buffer.text(&start, &end, false));
+        self.set_highlight(true);
     }
 
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
