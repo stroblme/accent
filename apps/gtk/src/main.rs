@@ -30,6 +30,7 @@ mod pdfview;
 mod preview;
 mod settings;
 mod sidebar;
+mod signature;
 mod start;
 mod statusbar;
 mod terminal;

@@ -51,6 +51,8 @@ pub struct State {
     /// nobody to ask and gets no providers.
     vault: RefCell<Option<Arc<Vault>>>,
     hooks: RefCell<Option<Rc<Hooks>>>,
+    /// The signature popover of this tab, and the request that would fill it.
+    pub signature: crate::signature::Help,
 }
 
 impl State {
@@ -113,6 +115,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
     crate::completion::install(tab);
     crate::hover::install(tab);
+    crate::signature::install(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
@@ -133,12 +136,18 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
 /// The buffer changed: the server's copy is stale and everything derived from it is too.
 pub fn changed(tab: &Rc<Tab>) {
     tab.lang.dirty.set(true);
+    // A signature that is up is about the call being typed, so it is asked again rather than
+    // left saying what the last keystroke meant.
+    if tab.lang.signature.is_shown() {
+        crate::signature::request(tab);
+    }
     restart(tab, REFRESH);
 }
 
 /// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
 /// the future it spawns holds the vault handle and the path and nothing else.
 pub fn detach(tab: &Tab) {
+    tab.lang.signature.dismiss();
     if let Some(handle) = tab.lang.refresh.borrow_mut().take() {
         handle.abort();
     }
