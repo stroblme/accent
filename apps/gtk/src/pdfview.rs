@@ -186,6 +186,29 @@ impl Cache {
         self.bytes = 0;
         self.lowres_bytes = 0;
     }
+
+    /// Forget everything rendered of one page, at every scale and in either theme.
+    ///
+    /// What a stroke or an exported highlight invalidates: the page it landed on is drawn
+    /// differently now and every other page is exactly as it was, so dropping the whole cache
+    /// would re-render the viewport and its prefetch after every stroke.
+    pub fn forget_page(&mut self, page: u32) {
+        let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
+        self.tiles.retain(|key, (texture, _)| {
+            let keep = key.page != page;
+            if !keep {
+                *tiles -= bytes_of(texture);
+            }
+            keep
+        });
+        self.lowres.retain(|(at, _), (texture, _)| {
+            let keep = *at != page;
+            if !keep {
+                *lowres -= bytes_of(texture);
+            }
+            keep
+        });
+    }
 }
 
 /// Drop the least recently used entries of `map` until it is comfortably under `budget`, and
@@ -250,6 +273,10 @@ impl Want {
     }
 }
 
+/// Where every note link that highlights a document lands, per page: the quads to paint and the
+/// index of the link each came from.
+pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
+
 /// What the render thread sends back. Every variant is `Send`, because each one travels to the
 /// main loop inside its own idle callback.
 pub enum Reply {
@@ -272,6 +299,16 @@ pub enum Reply {
     /// The file was read: these are its page sizes. The first one arrives when the document is
     /// opened, which is why a tab can be on screen before anything is known about it.
     Reloaded(Vec<(f32, f32)>),
+    /// Where every note link that highlights this document lands on the page today, and which
+    /// link each one is. The whole map every time, so a stale page cannot survive underneath.
+    Highlights(Highlights),
+    /// An export finished: how many annotations it wrote, or why it could not.
+    Exported(Result<usize, String>),
+    /// This page's annotations changed, so what is cached of it is of the old page.
+    PageChanged(usize),
+    /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
+    /// write from someone else's and does not reload over strokes drawn since.
+    Saved(accent_core::fs::Etag),
     /// The document could not be opened at all, with the reason to show in its place.
     Failed(String),
 }
@@ -550,6 +587,15 @@ impl PdfView {
         *self.imp().on_pressed.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called when a press turns out to have been a click rather than the start of a drag.
+    ///
+    /// A highlight opens the note that holds it, and that must not fire on every drag that
+    /// happens to begin inside one — so it waits for the release, unlike the link handler above,
+    /// which answers on the press because following a link is what a press on one means.
+    pub fn connect_clicked(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
+        *self.imp().on_clicked.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Called on pointer motion, so the tab can show a hand over a link.
     pub fn connect_motion(&self, f: impl Fn(&PdfView, f64, f64) + 'static) {
         *self.imp().on_motion.borrow_mut() = Some(Box::new(f));
@@ -574,6 +620,32 @@ impl PdfView {
     /// Rectangles to paint over the page, in page points, per page: the search matches.
     pub fn set_marks(&self, marks: HashMap<usize, Vec<accent_core::pdf::Rect>>) {
         *self.imp().marks.borrow_mut() = marks;
+        self.queue_draw();
+    }
+
+    /// Where the note links that highlight this document land, per page, each with the index of
+    /// the link it came from.
+    pub fn set_highlights(&self, highlights: Highlights) {
+        *self.imp().highlights.borrow_mut() = highlights;
+        self.queue_draw();
+    }
+
+    /// Which highlight is under this widget coordinate, if any.
+    pub fn highlight_at(&self, x: f64, y: f64) -> Option<usize> {
+        let (page, px, py) = self.page_point(x, y)?;
+        let highlights = self.imp().highlights.borrow();
+        highlights.get(&page)?.iter().find_map(|(quads, link)| {
+            let inside = quads
+                .iter()
+                .any(|q| (q.left..=q.right).contains(&px) && (q.top..=q.bottom).contains(&py));
+            inside.then_some(*link)
+        })
+    }
+
+    /// Forget what is cached of one page, which a stroke or an exported highlight makes stale.
+    pub fn forget_page(&self, page: usize) {
+        self.cache().borrow_mut().forget_page(page as u32);
+        self.imp().asked.borrow_mut().clear();
         self.queue_draw();
     }
 
@@ -795,6 +867,9 @@ mod imp {
         pub dark: Cell<bool>,
         pub thumbnails: Cell<bool>,
         pub marks: RefCell<HashMap<usize, Vec<accent_core::pdf::Rect>>>,
+        /// Where the note links that highlight this document land, per page, each with the index
+        /// of the link it came from so a click on one can open the note that holds it.
+        pub highlights: RefCell<super::Highlights>,
         /// The selected glyphs' boxes, per page the selection covers.
         pub selection: RefCell<Vec<(usize, Vec<accent_core::pdf::Rect>)>>,
         /// Where a drag began, in widget coordinates, while one is in progress.
@@ -816,6 +891,7 @@ mod imp {
         pub on_select: RefCell<Option<OnSelect>>,
         pub on_goto: RefCell<Option<Page>>,
         pub on_pressed: RefCell<Option<Coords>>,
+        pub on_clicked: RefCell<Option<Coords>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
         pub on_zoom: RefCell<Option<Zoomed>>,
@@ -838,6 +914,7 @@ mod imp {
                 dark: Cell::new(false),
                 thumbnails: Cell::new(false),
                 marks: RefCell::new(HashMap::new()),
+                highlights: RefCell::new(HashMap::new()),
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 current_mark: Cell::new(None),
@@ -851,6 +928,7 @@ mod imp {
                 on_select: RefCell::new(None),
                 on_goto: RefCell::new(None),
                 on_pressed: RefCell::new(None),
+                on_clicked: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -999,7 +1077,19 @@ mod imp {
             drag.connect_drag_end(glib::clone!(
                 #[weak]
                 obj,
-                move |_, _, _| obj.imp().drag_from.set(None)
+                move |_, dx, dy| {
+                    let from = obj.imp().drag_from.replace(None);
+                    // The same few pixels the update handler calls a shaky hand rather than a
+                    // selection: what is left is a click, and a click can be on a highlight.
+                    if let Some((x, y)) = from
+                        && dx.abs() < 3.0
+                        && dy.abs() < 3.0
+                        && !obj.imp().thumbnails.get()
+                        && let Some(f) = obj.imp().on_clicked.borrow().as_ref()
+                    {
+                        f(&obj, x, y);
+                    }
+                }
             ));
             obj.add_controller(drag);
 
@@ -1064,6 +1154,7 @@ mod imp {
             let mut wanted: Vec<Want> = Vec::new();
             let cache = obj.cache();
             let marks = self.marks.borrow();
+            let highlights = self.highlights.borrow();
             let selection = self.selection.borrow();
             for (index, rect) in layout.pages.iter().enumerate() {
                 // One viewport of prefetch above and below, so scrolling meets ready tiles.
@@ -1143,6 +1234,22 @@ mod imp {
                     );
                 }
 
+                // Under the selection and the search marks: a highlight is what the page says,
+                // the other two are what the reader is doing to it right now.
+                if let Some(page_highlights) = highlights.get(&index) {
+                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.2);
+                    for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
+                        snapshot.append_color(
+                            &colour,
+                            &graphene::Rect::new(
+                                rect.x + quad.left * layout.scale,
+                                rect.y + quad.top * layout.scale,
+                                quad.width() * layout.scale,
+                                quad.height() * layout.scale,
+                            ),
+                        );
+                    }
+                }
                 if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
                     let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
                     for glyph in boxes {

@@ -198,6 +198,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
+    ("win.pdf-copy", "Copy Selection", &[]),
+    ("win.pdf-copy-link", "Copy Link to Selection", &[]),
+    ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
     (
         "win.pane-references",
         "References Pane",
@@ -1514,12 +1517,25 @@ impl App {
         pdf.connect_opened(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| {
+            move |pdf| {
                 app.sync_opening();
                 app.sync_outline();
                 // The page count is known now, so the readout has something to say at last.
                 app.sync_status();
+                // And the pages are there to paint the notes' highlights onto.
+                app.sync_pdf_links(pdf);
             }
+        ));
+        pdf.connect_note(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            // A zero-length range: the caret goes to the `[[`, nothing is selected.
+            move |rel, at| app.open_note_at(rel, Some(at..at))
+        ));
+        pdf.connect_export(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, result| app.exported(pdf, result)
         ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
@@ -1546,6 +1562,86 @@ impl App {
     /// The PDF in the active tab, for the actions that only mean something in one.
     fn active_pdf(&self) -> Option<Rc<pdftab::PdfTab>> {
         self.active_doc()?.pdf().cloned()
+    }
+
+    /// Whether a PDF tab's file is one this machine may write to.
+    ///
+    /// On a remote vault `PdfTab::path()` is the ssh cache copy, and writing annotations there
+    /// would change a scratch file nobody reads. A loose tab is an absolute path here, so it is
+    /// writable whatever vault the window is on.
+    fn pdf_is_writable(&self, pdf: &Rc<pdftab::PdfTab>) -> bool {
+        doc::is_loose_key(&pdf.key()) || !self.vault().is_some_and(|v| v.is_remote())
+    }
+
+    /// Write the note links that highlight the open PDF into the file, as real annotations.
+    fn export_highlights(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Exporting highlights needs a local vault");
+        }
+        pdf.export_highlights(theme::accent_rgb());
+    }
+
+    /// What an export came back with.
+    fn exported(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, result: Result<usize, String>) {
+        match result {
+            Err(e) => self.toast(&format!("Cannot export: {e}")),
+            Ok(0) => self.toast("Nothing new to export"),
+            Ok(n) => {
+                let name = doc::file_name(&pdf.key()).to_string();
+                let plural = if n == 1 { "highlight" } else { "highlights" };
+                self.toast(&format!("Exported {n} {plural} into {name}"));
+                // Ask again: the ones now in the file drop out of the painted overlay, because
+                // the page's own pixels carry them.
+                self.sync_pdf_links(pdf);
+            }
+        }
+    }
+
+    /// Tell a PDF tab which note links highlight it.
+    fn sync_pdf_links(&self, pdf: &Rc<pdftab::PdfTab>) {
+        let key = pdf.key();
+        // A file outside every vault has no index to ask.
+        if doc::is_loose_key(&key) {
+            return;
+        }
+        let Some(vault) = self.vault() else { return };
+        match vault.pdf_links(&key) {
+            Ok(links) => pdf.set_note_links(links),
+            Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
+        }
+    }
+
+    /// The same, once the notes that just changed have reached the index.
+    ///
+    /// A moment later, and not at once, because the link rows are resolved at the end of the
+    /// worker's batch while the event that a file changed is emitted inside it — and our own
+    /// saves emit nothing at all, by design.
+    ///
+    // ponytail: a timer, because there is no event for "the index is current now". The ceiling
+    // is a highlight that appears a third of a second after the note is written; an
+    // `Event::Indexed` from the worker is the upgrade.
+    fn sync_pdf_links_soon(self: &Rc<Self>) {
+        if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
+            return;
+        }
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(300),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.sync_all_pdf_links()
+            ),
+        );
+    }
+
+    /// The same for every open PDF, after something changed the notes.
+    fn sync_all_pdf_links(&self) {
+        for doc in self.docs() {
+            if let Doc::Pdf(pdf) = doc {
+                self.sync_pdf_links(&pdf);
+            }
+        }
     }
 
     /// An image, in a tab that only looks at it.
@@ -1739,10 +1835,28 @@ impl App {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
         };
+        // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
+        let (target, anchor) = split_pdf_anchor(target);
         match vault.resolve_link(target) {
-            Ok(Some(rel)) => self.open_preview(&rel),
+            Ok(Some(rel)) => {
+                self.open_preview(&rel);
+                self.show_pdf_anchor(&rel, anchor);
+            }
             Ok(None) => self.toast(&format!("No note called {target}")),
             Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
+        }
+    }
+
+    /// Show the page and selection an anchor names, if the tab just opened is that PDF.
+    ///
+    /// Called straight after the tab is opened rather than through `on_tab`, which waits for a
+    /// *text* tab: `open_pdf` has already pushed the document by the time it returns.
+    fn show_pdf_anchor(&self, key: &str, anchor: Option<PdfAnchor>) {
+        let Some((page, selection)) = anchor else {
+            return;
+        };
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(key) {
+            pdf.show_link(page, selection);
         }
     }
 
@@ -2158,6 +2272,7 @@ impl App {
         }
         match self.write_tab(tab, tab.etag.get()) {
             Ok(()) => {
+                self.sync_pdf_links_soon();
                 if explicit {
                     self.toast("Saved");
                 }
@@ -2469,9 +2584,12 @@ impl App {
                 | Event::FileChanged(_)
                 | Event::FileRemoved(_)
                 | Event::FileRenamed { .. }
-        ) && let Some(git) = self.git.get()
-        {
-            git.schedule_refresh();
+        ) {
+            if let Some(git) = self.git.get() {
+                git.schedule_refresh();
+            }
+            // The same events mean a note may have gained or lost a link into an open PDF.
+            self.sync_pdf_links_soon();
         }
         match event {
             Event::Progress(p) => {
@@ -3205,6 +3323,17 @@ impl App {
                     pdf.toggle_invert();
                 }
             }
+            "pdf-copy" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.copy_selection();
+                }
+            }
+            "pdf-copy-link" => {
+                if let Some(pdf) = self.active_pdf() {
+                    pdf.copy_link();
+                }
+            }
+            "pdf-export-highlights" => self.export_highlights(),
             "pdf-fit-width" | "pdf-fit-page" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.set_zoom(match name {
@@ -3699,12 +3828,18 @@ impl App {
         if loc.is_url() {
             return self.launch(&loc.path);
         }
-        let (key, at) = (loc.path.clone(), loc.range.start);
+        // A definition into a PDF carries its anchor in the path, so that a wikilink into a
+        // page reaches the page (`language/notes.rs`, `definition`).
+        let (path, anchor) = split_pdf_anchor(&loc.path);
+        let (key, at) = (path.to_string(), loc.range.start);
         match doc::is_loose_key(&key) {
             // Outside the vault: the same door a file dropped on the window comes through, and
             // the tab it opens gets no language server of its own.
             true => self.open_path(&key),
             false => self.open_preview(&key),
+        }
+        if anchor.is_some() {
+            return self.show_pdf_anchor(&key, anchor);
         }
         self.on_tab(key, move |tab| tab.goto_pos(at));
     }
@@ -6151,6 +6286,23 @@ fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
 ///
 /// ponytail: counting the text in front of the match is fine for a note opened by a click; a real
 /// byte-to-iter map belongs on `Tab` if anything ever needs one per keystroke.
+/// A place in a PDF a link names: the page, and the selection on it if it names one.
+type PdfAnchor = (usize, Option<[usize; 4]>);
+
+/// Split a link target into the path and the PDF anchor it carries, if it carries one.
+///
+/// `paper.pdf#page=3&selection=4,0,4,11` is a path *and* a place in it; a heading anchor is not
+/// this function's business and stays with the path it came in on.
+fn split_pdf_anchor(target: &str) -> (&str, Option<PdfAnchor>) {
+    match target.split_once('#') {
+        Some((path, anchor)) => match accent_core::markdown::pdf_anchor(anchor) {
+            Some(at) => (path, Some(at)),
+            None => (target, None),
+        },
+        None => (target, None),
+    }
+}
+
 fn char_range(text: &str, bytes: Range<usize>) -> Option<Range<usize>> {
     let start = text.get(..bytes.start)?.chars().count();
     Some(start..start + text.get(bytes)?.chars().count())

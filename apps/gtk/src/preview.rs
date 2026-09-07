@@ -610,7 +610,15 @@ fn decide(
         .to_string();
 
     match accent_uri(&uri) {
-        Some(("open", target)) => on_open(&target),
+        // The anchor rides along for a PDF, which needs the page as well as the file. Rejoined
+        // here rather than kept by `accent_uri`, whose other host must go on dropping it: an
+        // asset is fetched by path and a `#` in one is not a place in a document.
+        Some(("open", target)) => match uri.split_once('#') {
+            Some((_, anchor)) if !anchor.is_empty() => {
+                on_open(&format!("{target}#{}", percent_decode(anchor)))
+            }
+            _ => on_open(&target),
+        },
         // Our own `load_html`, which arrives as the base URI and never as a click.
         Some(("file", _)) if action.navigation_type() != webkit6::NavigationType::LinkClicked => {
             return false;
