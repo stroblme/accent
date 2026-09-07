@@ -37,7 +37,7 @@ pub use accent_core::fs::{Etag, Read, SaveError, Text};
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
-    Backlink, FileRow, HeadingRow, Match, Progress, ReconcileStats, SearchHit, Stats,
+    Backlink, FileRow, Match, Progress, ReconcileStats, SearchHit, Stats,
 };
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
@@ -567,10 +567,6 @@ impl Vault {
         )
     }
 
-    pub fn headings(&self, rel: &str) -> Result<Vec<HeadingRow>> {
-        ask!(self, |v: &Local| v.headings(rel), "headings", json!([rel]))
-    }
-
     pub fn resolve_link(&self, target: &str) -> Result<Option<String>> {
         ask!(
             self,
@@ -733,6 +729,14 @@ impl Vault {
     }
 }
 
+/// Take a lock, ignoring poison.
+///
+/// A panic in one query must not take the whole vault down with it, so a poisoned lock is used
+/// rather than propagated: everything behind one here is a cache the next query rebuilds.
+pub(crate) fn locked<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// One open vault: the index, the watcher, and the worker thread that owns both writers.
 struct Local {
     root: PathBuf,
@@ -744,6 +748,8 @@ struct Local {
     /// `list_dir` and `backlinks` must never queue behind one on the same mutex.
     search: Mutex<Index>,
     cfg: Mutex<VaultConfig>,
+    /// The language providers answering for the open documents.
+    lang: std::sync::Arc<language::Languages>,
     tx: Sender<Msg>,
     worker: Option<JoinHandle<()>>,
 }
@@ -770,6 +776,8 @@ impl Local {
 
         let (tx, rx) = channel::<Msg>();
         let (events, event_rx) = channel::<Event>();
+        // The providers send their diagnostics down the same channel the worker's events use.
+        let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
         let worker = Worker {
             root: root.clone(),
             index: writer,
@@ -793,6 +801,7 @@ impl Local {
                 index: Mutex::new(index),
                 search: Mutex::new(search),
                 cfg: Mutex::new(cfg),
+                lang,
                 tx,
                 worker: Some(handle),
             },
@@ -806,11 +815,11 @@ impl Local {
     }
 
     pub fn config(&self) -> VaultConfig {
-        self.locked(&self.cfg).clone()
+        locked(&self.cfg).clone()
     }
 
     pub fn set_config(&self, cfg: VaultConfig) {
-        *self.locked(&self.cfg) = cfg;
+        *locked(&self.cfg) = cfg;
     }
 
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
@@ -853,17 +862,11 @@ impl Local {
     }
 
     fn index(&self) -> MutexGuard<'_, Index> {
-        self.locked(&self.index)
+        locked(&self.index)
     }
 
     fn searcher(&self) -> MutexGuard<'_, Index> {
-        self.locked(&self.search)
-    }
-
-    /// A panic in one query must not take the whole vault down with it, so a poisoned lock is
-    /// used rather than propagated: the index is a cache and the next query rebuilds what it needs.
-    fn locked<'a, T>(&self, m: &'a Mutex<T>) -> MutexGuard<'a, T> {
-        m.lock().unwrap_or_else(|e| e.into_inner())
+        locked(&self.search)
     }
 
     fn post(&self, msg: Msg) {
@@ -879,6 +882,8 @@ impl Drop for Local {
     /// ponytail: the join waits for whatever the worker is doing, and a cold reconcile of a large
     /// vault takes seconds. Give `reconcile` a cancellation flag if closing a window ever stalls.
     fn drop(&mut self) {
+        // Before the worker, because a provider is still sending diagnostics down its channel.
+        self.lang.shutdown();
         let _ = self.tx.send(Msg::Shutdown);
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
@@ -1335,10 +1340,6 @@ impl Local {
 
     pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
         self.index().recent_notes(limit)
-    }
-
-    pub fn headings(&self, rel: &str) -> Result<Vec<HeadingRow>> {
-        self.index().headings(rel)
     }
 
     /// The note a wikilink target points at, or `None` when it dangles and the UI can offer to
@@ -2453,6 +2454,120 @@ mod tests {
             ["alpha", "alphabet"]
         );
         assert_eq!(f.vault.complete_tags("alp", 1).unwrap(), ["alpha"]);
+    }
+
+    /// The notes provider through the façade: what the editor sees when a note is opened.
+    ///
+    /// `block_on` inside the body and never around the fixture: dropping the vault stops the
+    /// providers by blocking on the same runtime, which a runtime thread may not do.
+    #[test]
+    fn notes_provider_completes_and_diagnoses() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "see [[Beta]] and [[Nope]] #rust\n");
+        f.write("sub/Beta.md", "# Beta\nbody\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let rt = accent_lsp::runtime();
+        let support = rt.block_on(f.vault.open_document(
+            "a.md",
+            "markdown",
+            "see [[Beta]] and [[Nope]] #rust\n".to_string(),
+        ));
+        assert_eq!(support.unwrap().completion_triggers, ['[', '#']);
+
+        let Some(Event::Diagnostics { rel, items }) =
+            f.wait(|e| matches!(e, Event::Diagnostics { .. }))
+        else {
+            panic!("opening a note has to say what is wrong with it");
+        };
+        assert_eq!(rel, "a.md");
+        assert_eq!(items.len(), 1, "[[Beta]] resolves, [[Nope]] does not");
+        assert_eq!(items[0].severity, Severity::Hint);
+        assert_eq!(items[0].message, "No note named Nope");
+        assert_eq!(items[0].range.start.character, 17);
+
+        rt.block_on(async {
+            // The provider answers about the text the editor has, not about the file on disk.
+            f.vault
+                .change_document("a.md", "see [[Be]]".to_string())
+                .await
+                .unwrap();
+            let at = |character| Pos { line: 0, character };
+            let items = f.vault.completion("a.md", at(8), None).await.unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "Beta");
+            assert_eq!(items[0].insert, "[[Beta]]");
+            assert_eq!(
+                items[0].replace,
+                Range {
+                    start: at(4),
+                    end: at(10)
+                },
+                "the trigger and the `]]` the auto-pair left both go"
+            );
+
+            f.vault
+                .change_document("a.md", "a #ru".to_string())
+                .await
+                .unwrap();
+            let items = f.vault.completion("a.md", at(5), None).await.unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].insert, "#rust");
+            assert_eq!(items[0].kind, Kind::Tag);
+        });
+    }
+
+    #[test]
+    fn notes_provider_follows_links_both_ways() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "see [[Beta]]\n");
+        f.write("sub/Beta.md", "intro\n\n# Beta\nbody\n");
+        f.vault.rescan();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        accent_lsp::runtime().block_on(async {
+            let caret = Pos {
+                line: 0,
+                character: 7,
+            };
+            f.vault
+                .open_document("a.md", "markdown", "see [[Beta]]\n".to_string())
+                .await
+                .unwrap();
+
+            let target = f.vault.definition("a.md", caret).await.unwrap();
+            assert_eq!(
+                target,
+                [Location {
+                    path: "sub/Beta.md".to_string(),
+                    range: Range::default()
+                }]
+            );
+            let hover = f.vault.hover("a.md", caret).await.unwrap().unwrap();
+            assert!(hover.text.contains("**Beta**"), "{}", hover.text);
+
+            f.vault
+                .open_document(
+                    "sub/Beta.md",
+                    "markdown",
+                    "intro\n\n# Beta\nbody\n".to_string(),
+                )
+                .await
+                .unwrap();
+            let refs = f.vault.references("sub/Beta.md", caret).await.unwrap();
+            assert_eq!(refs.len(), 1);
+            assert_eq!(refs[0].path, "a.md");
+            assert_eq!(refs[0].range.start.character, 4, "the link as written");
+
+            // An anchor lands on the heading rather than on the first line.
+            f.vault
+                .change_document("a.md", "see [[Beta#Beta]]\n".to_string())
+                .await
+                .unwrap();
+            let target = f.vault.definition("a.md", caret).await.unwrap();
+            assert_eq!(target[0].range.start.line, 2);
+        });
     }
 
     /// `[[Old]]` here belongs to a different note; renaming `Dir/Old.md` must leave it alone.
