@@ -74,6 +74,8 @@ const POLL: Duration = Duration::from_millis(120);
 /// from the remote vault this was developed against costs.
 const OPEN_POLL: Duration = Duration::from_millis(30);
 const OPEN_TRIES: usize = 10;
+/// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
+const REFERENCES: Duration = Duration::from_millis(300);
 /// One press of Zoom In or Zoom Out, a tenth of the document font.
 const ZOOM_STEP: f64 = 0.1;
 /// How often the tree may be re-read while the first index is still running, in microseconds:
@@ -194,7 +196,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
-    ("win.backlinks", "Backlinks Pane", &["<Control><Shift>b"]),
+    (
+        "win.pane-references",
+        "References Pane",
+        &["<Control><Shift>b"],
+    ),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
@@ -933,6 +939,9 @@ struct App {
     /// ever missing at restore time — it does not exist until the first refresh finds a
     /// repository — so the first refresh reads this and then clears it for good.
     pane_wanted: RefCell<String>,
+    /// The References request in flight. Replaced rather than queued: the caret moves faster
+    /// than a server answers.
+    references: RefCell<Option<glib::JoinHandle<()>>>,
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
@@ -1844,7 +1853,21 @@ impl App {
         tab.connect_cursor(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |tab| app.sync_scroll(tab)
+            move |tab| {
+                app.sync_scroll(tab);
+                // A code tab's references are about the symbol under the caret, so they follow
+                // it — but only while the pane is on screen, since nobody is reading it otherwise.
+                if !tab.flavour().is_note()
+                    && app.is_active(tab)
+                    && app.sidebar_column.is_visible()
+                    && app
+                        .sidebar
+                        .get()
+                        .is_some_and(|s| s.is_showing("references"))
+                {
+                    app.refresh_references();
+                }
+            }
         ));
         // The chrome hides on the keystroke itself, not on the debounce that follows it.
         tab.buffer.connect_changed(glib::clone!(
@@ -1897,14 +1920,12 @@ impl App {
         self.save_session_soon();
     }
 
-    /// Keep the window subtitle, the backlinks pane and the preview in step with the active tab.
+    /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
-            if let Some(sidebar) = self.sidebar.get() {
-                sidebar.set_backlinks(&[]);
-            }
+            self.refresh_references();
             return;
         };
         let key = doc.key();
@@ -1926,40 +1947,10 @@ impl App {
                 });
             }
         }
-        // Backlinks and the preview are about notes. A source file, an image or a status page
-        // leaves both empty rather than showing the last note's.
+        // The preview is about notes. A source file, an image or a status page leaves it empty
+        // rather than showing the last note's.
         let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
-        // Off the main loop: one round trip on a remote vault is ~60 ms here, and this runs on
-        // every tab switch. The pane is emptied at once so it never shows the last note's
-        // backlinks while the new note's are still coming.
-        if let Some(sidebar) = self.sidebar.get() {
-            sidebar.set_backlinks(&[]);
-        }
-        if let Some(vault) = self.vault().filter(|_| note.is_some()).cloned() {
-            let (key, weak) = (key.clone(), Rc::downgrade(self));
-            glib::spawn_future_local(async move {
-                let found = gio::spawn_blocking({
-                    let key = key.clone();
-                    move || vault.backlinks(&key).unwrap_or_default()
-                })
-                .await;
-                let Some(app) = weak.upgrade() else { return };
-                // The user may have moved on while we were asking; a stale answer must not
-                // replace the pane the current tab put there.
-                if app.active_key().as_deref() != Some(&key) {
-                    return;
-                }
-                let mut sources: Vec<String> = Vec::new();
-                for link in found.unwrap_or_default() {
-                    if !sources.contains(&link.src_rel_path) {
-                        sources.push(link.src_rel_path);
-                    }
-                }
-                if let Some(sidebar) = app.sidebar.get() {
-                    sidebar.set_backlinks(&sources);
-                }
-            });
-        }
+        self.refresh_references();
         self.sync_status();
         self.sync_outline();
         self.sync_opening();
@@ -2058,6 +2049,60 @@ impl App {
                 move |at| tab.goto_pos(at)
             ),
         )));
+    }
+
+    /// Fill the References pane for the active tab: a note's backlinks, or what refers to the
+    /// symbol under the caret.
+    ///
+    /// Debounced and cancellable, because on a code tab it follows the caret: the previous
+    /// request is dropped, which is what cancels it at the server rather than leaving it to be
+    /// answered and thrown away.
+    fn refresh_references(self: &Rc<Self>) {
+        if let Some(handle) = self.references.borrow_mut().take() {
+            handle.abort();
+        }
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let tab = self.active();
+        let empty = references_empty(tab.as_ref());
+        // Emptied at once, so the pane never shows the last file's answer while this one's is
+        // still coming.
+        sidebar.set_references(&[], empty);
+        let (Some(tab), Some(vault)) = (tab.clone(), tab.as_ref().and_then(|tab| tab.lang.vault()))
+        else {
+            return;
+        };
+        let (key, note) = (tab.rel(), tab.flavour().is_note());
+        let pos = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let weak = Rc::downgrade(self);
+        let handle = glib::spawn_future_local(async move {
+            glib::timeout_future(REFERENCES).await;
+            lang::flush(tab.clone()).await;
+            let found = vault.references(&key, pos).await.unwrap_or_default();
+            let Some(app) = weak.upgrade() else { return };
+            // The user may have moved on while we were asking; a stale answer must not replace
+            // the pane the current tab put there.
+            if app.active_key().as_deref() != Some(&key) {
+                return;
+            }
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.set_references(&reference_rows(&found, note), empty);
+            }
+        });
+        *self.references.borrow_mut() = Some(handle);
+    }
+
+    /// Put a list of locations in the References pane and show it. What a definition with more
+    /// than one answer does, rather than the window picking one of them.
+    fn show_locations(self: &Rc<Self>, found: &[Location]) {
+        if let Some(handle) = self.references.borrow_mut().take() {
+            handle.abort();
+        }
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_references(&reference_rows(found, false), references_empty(None));
+        }
+        self.show_pane("references");
     }
 
     // --- saving --------------------------------------------------------------------------
@@ -3196,7 +3241,10 @@ impl App {
                 }
             }
             "pane-outline" => self.show_pane("outline"),
-            "backlinks" => self.show_pane("backlinks"),
+            "pane-references" => {
+                self.show_pane("references");
+                self.refresh_references();
+            }
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => self.go_to_definition(),
             "fold" => {
@@ -3598,9 +3646,9 @@ impl App {
             match found.unwrap_or_default().as_slice() {
                 [] => app.toast("No definition found"),
                 [one] => app.open_at(one),
-                // ponytail: the References pane lists the rest; until it does, the first one is
-                // where a definition with overloads goes.
-                [first, ..] => app.open_at(first),
+                // More than one place answers to the name — an overload, a trait method, a note
+                // title two files share — so the pane lists them instead of the window guessing.
+                many => app.show_locations(many),
             }
         });
     }
@@ -4052,9 +4100,14 @@ impl App {
         //
         // Remembered as well as shown: the Git page is still hidden here, so asking for it is a
         // no-op until the first refresh finds a repository (`on_git_changed`).
-        self.pane_wanted.replace(session.pane.clone());
-        if let Some(sidebar) = self.sidebar.get().filter(|_| !session.pane.is_empty()) {
-            sidebar.show_pane(&session.pane);
+        // A state file written while the pane was still called Backlinks names it that way.
+        let pane = match session.pane.as_str() {
+            "backlinks" => "references".to_string(),
+            _ => session.pane.clone(),
+        };
+        self.pane_wanted.replace(pane.clone());
+        if let Some(sidebar) = self.sidebar.get().filter(|_| !pane.is_empty()) {
+            sidebar.show_pane(&pane);
         }
         self.sidebar_column.set_visible(session.sidebar);
         self.split
@@ -4470,6 +4523,7 @@ fn build_window(
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
         pane_wanted: RefCell::new(String::new()),
+        references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
         terminals: Cell::new(0),
@@ -4730,6 +4784,15 @@ fn adopt_sidebar(
             #[weak]
             app,
             move |rel: &str, offset: Option<usize>| app.open_note_at(rel, offset)
+        ),
+        glib::clone!(
+            #[weak]
+            app,
+            move |row: &str| {
+                if let Some(loc) = reference_target(row) {
+                    app.open_at(&loc);
+                }
+            }
         ),
     );
     // The switcher is the sidebar header's title widget rather than a top bar of its own, so the
@@ -5945,6 +6008,55 @@ fn install_chrome_css() {
     });
 }
 
+/// The References pane's rows: `path:line`, one-based, in the order the server answered.
+///
+/// `per_path` keeps one row per file, which is what a note's backlinks have always been — a note
+/// that links to the open one three times is one backlink, not three. A code tab wants every
+/// occurrence, so it asks for none of that.
+fn reference_rows(found: &[Location], per_path: bool) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    let mut paths: Vec<&str> = Vec::new();
+    for loc in found {
+        if per_path {
+            if paths.contains(&loc.path.as_str()) {
+                continue;
+            }
+            paths.push(&loc.path);
+        }
+        let row = format!("{}:{}", loc.path, loc.range.start.line + 1);
+        if !rows.contains(&row) {
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A References row read back: the path and the line it names.
+fn reference_target(row: &str) -> Option<Location> {
+    let (path, line) = row.rsplit_once(':')?;
+    let line: u32 = line.parse().ok()?;
+    let at = accent_api::Pos {
+        line: line.saturating_sub(1),
+        character: 0,
+    };
+    Some(Location {
+        path: path.to_string(),
+        range: accent_api::Range { start: at, end: at },
+    })
+}
+
+/// What the References pane says when it has nothing to list. A note has backlinks; a source file
+/// has references to whatever the caret is on.
+fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
+    match tab.map(|tab| tab.flavour().is_note()) {
+        Some(false) => (
+            "No References",
+            "Nothing refers to the symbol under the caret.",
+        ),
+        _ => ("No Backlinks", "No note links to the open one."),
+    }
+}
+
 /// What the toast says after a Replace All: what it wrote, what it could not, and what is still
 /// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
 fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
@@ -5969,6 +6081,43 @@ fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) 
         ));
     }
     message
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    fn at(path: &str, line: u32) -> Location {
+        let pos = accent_api::Pos { line, character: 0 };
+        Location {
+            path: path.to_string(),
+            range: accent_api::Range {
+                start: pos,
+                end: pos,
+            },
+        }
+    }
+
+    /// A note's pane lists the notes that link to it, once each; a code tab's lists every place
+    /// the symbol turns up.
+    #[test]
+    fn a_notes_rows_are_one_per_file_and_a_code_tabs_are_one_per_use() {
+        let found = [at("a.md", 0), at("a.md", 4), at("b.md", 2)];
+        assert_eq!(reference_rows(&found, true), ["a.md:1", "b.md:3"]);
+        assert_eq!(
+            reference_rows(&found, false),
+            ["a.md:1", "a.md:5", "b.md:3"]
+        );
+    }
+
+    /// The row is the only thing the pane hands back, so it has to read as a location again.
+    #[test]
+    fn a_row_reads_back_as_the_place_it_names() {
+        let target = reference_target("src/main.rs:12").unwrap();
+        assert_eq!(target.path, "src/main.rs");
+        assert_eq!(target.range.start.line, 11);
+        assert!(reference_target("no-line-here").is_none());
+    }
 }
 
 #[cfg(test)]
