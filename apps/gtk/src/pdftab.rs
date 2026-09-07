@@ -9,10 +9,12 @@
 //! document is not a limitation we could lift by adding more.
 
 use crate::pdfview::{self, Anchor, PdfView, PdfZoom, Reply, Span, TileKey, Want};
+use accent_api::PdfLink;
 use accent_core::pdf::{self, LinkTarget, PdfDoc};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Sender, TryRecvError, channel};
@@ -25,9 +27,6 @@ const HISTORY: usize = 100;
 /// of a portrait page at [`pdfview::LOWRES_W`], which is a heading and the lines under it: a
 /// whole page shrunk to a popover says nothing a reader can read.
 const BAND: i32 = 96;
-
-/// The action group the selection menu's one item names, inserted on the tab's own host box.
-const GROUP: &str = "pdfsel";
 
 /// What the render thread is asked for.
 enum Request {
@@ -52,13 +51,87 @@ enum Request {
         /// moved on, so it finishes the document instead of stopping where it was pushed aside.
         from: usize,
     },
+    /// Where the note links that highlight this document land on the page today.
+    Highlights(Vec<PdfLink>),
+    /// Write those links into the file as real `/Highlight` annotations, in `color`.
+    Export {
+        links: Vec<PdfLink>,
+        color: [u8; 3],
+    },
+    /// One free-hand stroke, in that page's own points.
+    Ink {
+        page: usize,
+        points: Vec<(f32, f32)>,
+        width: f32,
+        rgb: [u8; 3],
+    },
+    /// Take off whichever stroke passes within [`ERASE_RADIUS`] of this point.
+    Erase {
+        page: usize,
+        at: (f32, f32),
+    },
+    /// Undo the last stroke drawn in this session.
+    Undo,
+    /// Write the drawn-on document out, if anything was drawn since the last time. The channel,
+    /// where there is one, is told when that is done — which is what the window close waits on.
+    Save(Option<Sender<()>>),
     Reload,
+}
+
+/// How close the eraser has to pass to a stroke to take it. Whole strokes, never part of one.
+const ERASE_RADIUS: f32 = 4.0;
+
+/// How long after the last stroke the document is written out.
+const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// What the render thread knows about the ink it has drawn, so that Undo can reach this session's
+/// strokes and nothing else.
+///
+/// `base` is how many annotations a page carried before we touched it — they come first in
+/// `/Annots`, so an erase below that line moves it. `added` is the pages drawn on, in order.
+#[derive(Default)]
+struct Ink {
+    base: HashMap<usize, usize>,
+    added: Vec<usize>,
+    dirty: bool,
+}
+
+impl Ink {
+    /// A page is about to be drawn on: remember what was on it before, once.
+    fn note(&mut self, page: usize, count: usize) {
+        self.base.entry(page).or_insert(count);
+    }
+
+    /// An annotation at `index` was removed from `page`.
+    ///
+    /// Below the line it was one the document already had, so the line moves down with it; above
+    /// it, it was one of ours and there is one fewer stroke left to undo.
+    fn erased(&mut self, page: usize, index: usize) {
+        match self.base.get_mut(&page) {
+            Some(base) if index < *base => *base -= 1,
+            _ => {
+                if let Some(at) = self.added.iter().rposition(|at| *at == page) {
+                    self.added.remove(at);
+                }
+            }
+        }
+    }
+
+    /// Which annotation of `page` Undo should delete, given how many it now has.
+    fn undo_target(&self, page: usize, count: usize) -> Option<usize> {
+        let base = self.base.get(&page).copied().unwrap_or(count);
+        (count > base).then(|| count - 1)
+    }
 }
 
 /// Where a document is being read, remembered per file in the session.
 pub use accent_core::config::PdfPlace as Place;
 
 type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
+/// A highlight was clicked: the note holding the link, and the byte it starts at.
+type NoteHook = RefCell<Option<Rc<dyn Fn(&str, usize)>>>;
+/// An export finished, with what it wrote or why it could not.
+type ExportHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, Result<usize, String>)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
 
 /// The Ctrl-hover link preview currently on screen.
@@ -108,6 +181,19 @@ pub struct PdfTab {
     glyphs: RefCell<std::collections::HashMap<usize, Vec<pdf::Glyph>>>,
     /// The selected text, for Ctrl+C.
     selected: RefCell<String>,
+    /// The same selection as glyph ranges, one per page it covers, which is what a link is made
+    /// of. Kept beside the text because the boxes on screen cannot be turned back into indices.
+    ranges: RefCell<Vec<pdf::Selection>>,
+    /// The note links that highlight this document, as the index last reported them. The painted
+    /// quads carry an index into this, so a click on one knows which note to open.
+    notes: RefCell<Vec<PdfLink>>,
+    /// A page and selection to show once the glyphs for it arrive: Follow Link into a PDF.
+    pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
+    /// A save is already scheduled, so a burst of strokes costs one write.
+    save_pending: Cell<bool>,
+    /// The etag of the last write *this tab* made, so a watcher report of our own save is
+    /// recognised and not answered with a reload. See [`PdfTab::refresh`].
+    saved: Cell<Option<accent_core::fs::Etag>>,
     outline: RefCell<Vec<pdf::Outline>>,
     /// The link preview on screen, if the pointer is on a link with Ctrl held.
     preview: RefCell<Option<Preview>>,
@@ -128,6 +214,9 @@ pub struct PdfTab {
     on_open: Hook,
     on_matches: Hook,
     on_uri: UriHook,
+    on_mode: Hook,
+    on_note: NoteHook,
+    on_export: ExportHook,
 }
 
 /// Open `path` in a new tab of `tabs`. Never fails: a document that will not open is a tab
@@ -191,6 +280,11 @@ pub fn open(
         links: RefCell::new(std::collections::HashMap::new()),
         glyphs: RefCell::new(std::collections::HashMap::new()),
         selected: RefCell::new(String::new()),
+        ranges: RefCell::new(Vec::new()),
+        notes: RefCell::new(Vec::new()),
+        pending_show: Cell::new(None),
+        save_pending: Cell::new(false),
+        saved: Cell::new(None),
         outline: RefCell::new(Vec::new()),
         preview: RefCell::new(None),
         query: Cell::new(0),
@@ -202,6 +296,9 @@ pub fn open(
         on_open: RefCell::new(None),
         on_matches: RefCell::new(None),
         on_uri: RefCell::new(None),
+        on_mode: RefCell::new(None),
+        on_note: RefCell::new(None),
+        on_export: RefCell::new(None),
     });
 
     tab.view.set_zoom(place.zoom);
@@ -360,6 +457,184 @@ impl PdfTab {
         self.view.clipboard().set_text(&text);
     }
 
+    /// Copy the selection as a wikilink into this PDF, with the selected text as its alias.
+    ///
+    /// Pasting that link into a note is what makes it a highlight: the index sees a link into a
+    /// page and a selection, and the viewer paints it. There is no separate Highlight action,
+    /// because a highlight is a link and the clipboard is how a link gets where it is wanted.
+    ///
+    /// One link per page, joined by newlines: `page=N&selection=…` names one page, and a drag
+    /// that ran across a break is two places in the document.
+    pub fn copy_link(&self) {
+        // A loose PDF is linked by name: an absolute path in a wikilink resolves nowhere, and
+        // the name is what a vault would key it by if the file ever joined one.
+        let key = self.key.borrow().clone();
+        let rel = match crate::doc::is_loose_key(&key) {
+            true => crate::doc::file_name(&key).to_string(),
+            false => key,
+        };
+        let glyphs = self.glyphs.borrow();
+        let links: Vec<String> = self
+            .ranges
+            .borrow()
+            .iter()
+            .filter_map(|sel| {
+                let out = pdf::selection_link(glyphs.get(&sel.page)?, &rel, sel);
+                Some(link_with_alias(&out.link, &out.text))
+            })
+            .collect();
+        if links.is_empty() {
+            return;
+        }
+        self.view.clipboard().set_text(&links.join("\n"));
+    }
+
+    /// The note links that highlight this document, as the index reports them. Painting them
+    /// needs the pages' glyphs, so the render thread answers.
+    pub fn set_note_links(self: &Rc<Self>, links: Vec<PdfLink>) {
+        *self.notes.borrow_mut() = links.clone();
+        self.ask(Request::Highlights(links));
+    }
+
+    /// Write those highlights into the file itself, as `/Highlight` annotations in `color`.
+    pub fn export_highlights(self: &Rc<Self>, color: [u8; 3]) {
+        let links = self.notes.borrow().clone();
+        self.ask(Request::Export { links, color });
+    }
+
+    /// Go to a page, and show the selection a link names as if it had just been dragged.
+    ///
+    /// The glyphs of that page are what turn the four numbers back into rectangles, so a page
+    /// never read before answers a moment later rather than not at all.
+    pub fn show_link(self: &Rc<Self>, page: usize, selection: Option<[usize; 4]>) {
+        self.pending_show.set(Some((page, selection)));
+        // Nothing is known about the document yet; the reload reply applies it.
+        if self.view.page_count() == 0 {
+            return;
+        }
+        self.push_history();
+        match self.glyphs.borrow().contains_key(&page) {
+            true => self.apply_show(),
+            false => self.ask(Request::Text(page)),
+        }
+    }
+
+    /// Show whatever [`PdfTab::show_link`] is still waiting to show, if its page has arrived.
+    fn apply_show(&self) {
+        let Some((page, selection)) = self.pending_show.get() else {
+            return;
+        };
+        let Some(sel) = selection else {
+            self.pending_show.set(None);
+            return self.view.goto_page(page, None);
+        };
+        let glyphs = self.glyphs.borrow();
+        let Some(page_glyphs) = glyphs.get(&page) else {
+            return;
+        };
+        self.pending_show.set(None);
+        // A link written against another engine's numbering points at nothing here; the page it
+        // names is still where the reader wanted to be.
+        let Some((range, quads)) = pdf::selection_quads(page_glyphs, sel) else {
+            return self.view.goto_page(page, None);
+        };
+        let bounds = quads.iter().copied().reduce(pdf::Rect::union);
+        *self.selected.borrow_mut() = page_glyphs[range.clone()].iter().map(|g| g.ch).collect();
+        *self.ranges.borrow_mut() = vec![pdf::Selection {
+            page,
+            start: range.start,
+            end: range.end,
+        }];
+        drop(glyphs);
+        self.view.set_selection(vec![(page, quads)]);
+        match bounds {
+            Some(r) => self.view.reveal(page, r),
+            None => self.view.goto_page(page, None),
+        }
+    }
+
+    /// What a drag over the page does: select, draw, or erase.
+    pub fn mode(&self) -> pdfview::Mode {
+        self.view.mode()
+    }
+
+    /// Only the reading view: the thumbnail strip is a list of buttons, never a canvas.
+    pub fn set_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        if self.view.mode() == mode {
+            return;
+        }
+        self.view.set_mode(mode);
+        // Putting the pen down is a good moment to write, rather than waiting out the timer.
+        if mode == pdfview::Mode::Select {
+            self.flush();
+        }
+        self.emit(&self.on_mode);
+    }
+
+    /// What the status bar says while a pen is out, or nothing while one is not.
+    pub fn mode_label(&self) -> Option<&'static str> {
+        match self.view.mode() {
+            pdfview::Mode::Select => None,
+            pdfview::Mode::Pen => Some("Pen"),
+            pdfview::Mode::Eraser => Some("Eraser"),
+        }
+    }
+
+    /// Called when the pen is picked up or put down.
+    pub fn connect_mode(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_mode.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Write out whatever has been drawn, if anything has.
+    ///
+    /// The thread answers when it gets there; nothing waits for it, because the write is atomic
+    /// and the channel is drained before the thread ends, so a tab closing still saves.
+    pub fn flush(self: &Rc<Self>) {
+        self.ask(Request::Save(None));
+    }
+
+    /// The same, but wait for it — the window is closing and the process is about to end, so a
+    /// write still on the render thread's queue would go with it.
+    ///
+    // ponytail: up to a second of the main loop, and only on the way out. The thread answers as
+    // soon as it finishes whatever tile it is on, so in practice this is a few milliseconds.
+    pub fn flush_blocking(self: &Rc<Self>) {
+        let (tx, rx) = channel();
+        self.ask(Request::Save(Some(tx)));
+        let _ = rx.recv_timeout(std::time::Duration::from_secs(1));
+    }
+
+    /// Write out a second after the last stroke, and once for a burst of them.
+    ///
+    /// The idiom the session save uses: a flag set once and cleared by its own callback, rather
+    /// than a `SourceId` removed and replaced, which is a critical if the source has already run.
+    fn save_soon(self: &Rc<Self>) {
+        if self.save_pending.replace(true) {
+            return;
+        }
+        glib::timeout_add_local_once(
+            INK_SAVE,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || {
+                    tab.save_pending.set(false);
+                    tab.flush();
+                }
+            ),
+        );
+    }
+
+    /// Called when a highlight is clicked, with the note holding the link and the byte it is at.
+    pub fn connect_note(&self, f: impl Fn(&str, usize) + 'static) {
+        *self.on_note.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Called when an export finishes, with what it wrote or why it could not.
+    pub fn connect_export(&self, f: impl Fn(&Rc<PdfTab>, Result<usize, String>) + 'static) {
+        *self.on_export.borrow_mut() = Some(Rc::new(f));
+    }
+
     /// The bookmarks, for the Outline pane.
     pub fn outline(&self) -> Vec<pdf::Outline> {
         self.outline.borrow().clone()
@@ -436,7 +711,17 @@ impl PdfTab {
 
     /// Re-read the file, keeping the page, the scroll and the zoom. A rebuilt PDF is the reason
     /// this exists: a LaTeX loop should not send the reader back to page one.
+    ///
+    /// A write of our own is not a reason: the document in memory *is* what was written, and
+    /// re-reading it would drop annotations made since. There is no `own: true` to ride on the
+    /// way a note's save has one, because the bytes never went through the vault — so the etag
+    /// of what we wrote is what tells the two apart.
     pub fn refresh(self: &Rc<Self>) {
+        if self.saved.get().is_some()
+            && accent_core::fs::Etag::of(&self.path()).ok() == self.saved.get()
+        {
+            return;
+        }
         self.ask(Request::Reload);
     }
 
@@ -583,6 +868,28 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |view, x, y| tab.click(view, x, y)
+        ));
+        view.connect_clicked(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |view, x, y| tab.clicked_highlight(view, x, y)
+        ));
+        view.connect_ink(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page, points| {
+                tab.ask(Request::Ink {
+                    page,
+                    points,
+                    width: pdfview::PEN_WIDTH,
+                    rgb: crate::theme::accent_rgb(),
+                });
+            }
+        ));
+        view.connect_erase(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page, at| tab.ask(Request::Erase { page, at })
         ));
         view.connect_select(glib::clone!(
             #[weak(rename_to = tab)]
@@ -773,25 +1080,15 @@ impl PdfTab {
         band.set_child(Some(&picture));
     }
 
-    /// The selection's own menu, on a secondary click over the page.
+    /// The page's own menu, on a secondary click over it.
     ///
-    /// Copy alone, in a section of its own like the shell's clipboard section next door. Turning
-    /// a selection into a highlight or a link into a note belongs to Phase 8 (ROADMAP.md, PDF
-    /// annotations), which is what `pdf::selection_link` is already waiting there for.
+    /// Copy and Copy Link to Selection when there is a selection, then Export Highlights, which
+    /// is about the document rather than about what is selected and so is always offered.
     ///
-    /// The action is the tab's own rather than a `win.` one, so it lives and dies with the tab
-    /// and needs nothing from the window.
+    /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
+    /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
+    /// section. The tab keeps `Ctrl+C` in its key controller either way.
     fn wire_menu(self: &Rc<Self>) {
-        let group = gio::SimpleActionGroup::new();
-        let copy = gio::SimpleAction::new("copy", None);
-        copy.connect_activate(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, _| tab.copy_selection()
-        ));
-        group.add_action(&copy);
-        self.host.insert_action_group(GROUP, Some(&group));
-
         let secondary = gtk::GestureClick::builder()
             .button(gtk::gdk::BUTTON_SECONDARY)
             .build();
@@ -803,14 +1100,29 @@ impl PdfTab {
         self.view.add_controller(secondary);
     }
 
-    /// Put the menu under the pointer. Nothing selected is nothing to offer, so the click does
-    /// nothing at all rather than showing a menu of one dead item.
+    /// Put the menu under the pointer.
     fn selection_menu(&self, x: f64, y: f64) {
-        if self.selected.borrow().is_empty() {
-            return;
-        }
         let menu = gio::Menu::new();
-        menu.append(Some("Copy"), Some(&format!("{GROUP}.copy")));
+        // Window actions, in sections, the way the terminal's menu is built: that is what puts
+        // them in the palette and lets them be rebound, which a tab-local group could not.
+        if !self.selected.borrow().is_empty() {
+            let clipboard = gio::Menu::new();
+            for action in ["win.pdf-copy", "win.pdf-copy-link"] {
+                clipboard.append(Some(crate::label_of(action)), Some(action));
+            }
+            menu.append_section(None, &clipboard);
+        }
+        let file = gio::Menu::new();
+        file.append(
+            Some(crate::label_of("win.pdf-export-highlights")),
+            Some("win.pdf-export-highlights"),
+        );
+        menu.append_section(None, &file);
+        let draw = gio::Menu::new();
+        for action in ["win.pdf-pen", "win.pdf-eraser"] {
+            draw.append(Some(crate::label_of(action)), Some(action));
+        }
+        menu.append_section(None, &draw);
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
         // Parented to the box rather than to the view, and pointed at the box's own coordinates:
         // a popover hung off a widget with a `size_allocate` of its own never re-presents and
@@ -850,6 +1162,20 @@ impl PdfTab {
                 if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                     tab.copy_selection();
                     return glib::Propagation::Stop;
+                }
+                // The pen's own two keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
+                // whatever has the keyboard, and here that is the page being drawn on.
+                if tab.mode() != pdfview::Mode::Select {
+                    if key == gtk::gdk::Key::z
+                        && state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                    {
+                        tab.ask(Request::Undo);
+                        return glib::Propagation::Stop;
+                    }
+                    if key == gtk::gdk::Key::Escape {
+                        tab.set_mode(pdfview::Mode::Select);
+                        return glib::Propagation::Stop;
+                    }
                 }
                 match key {
                     gtk::gdk::Key::space if shift => tab.previous_page(),
@@ -920,6 +1246,7 @@ impl PdfTab {
         let (start, end) = (a.min(b), a.max(b));
         let mut text = String::new();
         let mut boxes = Vec::new();
+        let mut ranges = Vec::new();
         for page in start.0..=end.0 {
             let Some(page_glyphs) = glyphs.get(&page) else {
                 return;
@@ -941,6 +1268,13 @@ impl PdfTab {
                 text.push('\n');
             }
             text.extend(picked.iter().map(|g| g.ch));
+            // The indices as well as the boxes: a link is made of the numbers, and a rectangle
+            // on screen cannot be turned back into one.
+            ranges.push(pdf::Selection {
+                page,
+                start: lo,
+                end: hi + 1,
+            });
             // A glyph with no box of its own — a space between words — would paint as a dot.
             boxes.push((
                 page,
@@ -952,6 +1286,7 @@ impl PdfTab {
             ));
         }
         *self.selected.borrow_mut() = text;
+        *self.ranges.borrow_mut() = ranges;
         self.view.set_selection(boxes);
     }
 
@@ -961,10 +1296,33 @@ impl PdfTab {
             return;
         }
         self.selected.borrow_mut().clear();
+        self.ranges.borrow_mut().clear();
         self.view.set_selection(Vec::new());
     }
 
     /// A click on the page: follow a link if there is one under it.
+    /// A click that was not a drag: open the note whose link paints a highlight here.
+    ///
+    /// After the link handler, which answers on the press — a link inside a highlight is still a
+    /// link, and following it is what a click on one has always meant.
+    fn clicked_highlight(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
+        if self.link_at(view, x, y).is_some() {
+            return;
+        }
+        let Some(at) = view.highlight_at(x, y) else {
+            return;
+        };
+        let note = self
+            .notes
+            .borrow()
+            .get(at)
+            .map(|l| (l.src_rel_path.clone(), l.byte_start.max(0) as usize));
+        let hook = self.on_note.borrow().clone();
+        if let (Some((rel, byte)), Some(f)) = (note, hook) {
+            f(&rel, byte);
+        }
+    }
+
     fn click(self: &Rc<Self>, view: &PdfView, x: f64, y: f64) {
         self.clear_selection();
         let Some(target) = self.link_at(view, x, y) else {
@@ -1017,6 +1375,10 @@ impl PdfTab {
                         self.select(span);
                     }
                 }
+                // Or a link is waiting for this page, which is Follow Link into the document.
+                if self.pending_show.get().is_some_and(|(at, _)| at == page) {
+                    self.apply_show();
+                }
             }
             Reply::Outline(outline) => {
                 *self.outline.borrow_mut() = outline;
@@ -1044,6 +1406,22 @@ impl PdfTab {
                 self.view.set_marks(marks);
                 self.emit(&self.on_matches);
             }
+            Reply::Highlights(map) => self.view.set_highlights(map),
+            Reply::Exported(result) => {
+                let hook = self.on_export.borrow().clone();
+                if let Some(f) = hook {
+                    f(self, result);
+                }
+            }
+            Reply::PageChanged(page) => {
+                self.view.forget_page(page);
+                self.thumbs.forget_page(page);
+                // The drawn stroke is in the document now, so the overlay can go as soon as the
+                // tile carrying it arrives.
+                self.view.settle_stroke(page);
+                self.save_soon();
+            }
+            Reply::Saved(etag) => self.saved.set(Some(etag)),
             Reply::Reloaded(sizes) => {
                 // The anchor is taken now rather than when the reload was asked for: the reader
                 // may have moved while the file was being re-read.
@@ -1051,6 +1429,10 @@ impl PdfTab {
                 self.view.forget_textures();
                 self.thumbs.forget_textures();
                 self.links.borrow_mut().clear();
+                // The glyphs and anything made of them are of the old document: an export or a
+                // rebuild moves the text, and a stale index would paint the selection elsewhere.
+                self.glyphs.borrow_mut().clear();
+                self.clear_selection();
                 self.view.set_sizes(sizes.clone());
                 self.thumbs.set_sizes(sizes);
                 match self.pending.take() {
@@ -1059,6 +1441,10 @@ impl PdfTab {
                     None => self.view.scroll_to(anchor),
                 }
                 self.ask(Request::Outline);
+                // A link followed into a document that was still opening waits here.
+                if let Some((page, sel)) = self.pending_show.get() {
+                    self.show_link(page, sel);
+                }
                 self.emit(&self.on_open);
             }
             Reply::Failed(message) => {
@@ -1105,6 +1491,59 @@ fn crop(texture: &gtk::gdk::MemoryTexture, top: i32, height: i32) -> gtk::gdk::M
         &bytes,
         stride,
     )
+}
+
+/// Put the selected text into a link as its alias: `[[f.pdf#page=1&selection=…|the text]]`.
+///
+/// The alias is what a reader sees in the note and what re-anchors the highlight when the
+/// selection numbers no longer fit the document, so it is the text and not a label. Newlines
+/// collapse — a link is one line — and the three characters that would end the link early are
+/// dropped rather than escaped, because a wikilink has no escape for them.
+fn link_with_alias(link: &str, text: &str) -> String {
+    let alias: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(['|', '[', ']'], "");
+    match alias.is_empty() {
+        true => link.to_string(),
+        false => format!("{}|{alias}]]", link.trim_end_matches("]]")),
+    }
+}
+
+/// Where each note link lands on the page today, per page, with the index of the link it is.
+///
+/// The four numbers first, and the text the link quotes as the fallback — a document rebuilt
+/// with different line breaks moves the numbers but not the sentence. A link whose quads a real
+/// `/Highlight` already covers is left out: it has been exported, and the annotation is in the
+/// page's own pixels.
+fn highlight_quads(doc: &PdfDoc, links: &[PdfLink]) -> pdfview::Highlights {
+    let mut glyphs: HashMap<usize, Vec<pdf::Glyph>> = HashMap::new();
+    let mut existing: HashMap<usize, Vec<pdf::Highlight>> = HashMap::new();
+    let mut out = pdfview::Highlights::new();
+    for (at, link) in links.iter().enumerate() {
+        let page = link.page;
+        let found = glyphs
+            .entry(page)
+            .or_insert_with(|| doc.page_text(page).unwrap_or_default());
+        let quads = pdf::selection_quads(found, link.selection)
+            .map(|(_, quads)| quads)
+            .or_else(|| {
+                let text = link.alias.as_deref()?;
+                doc.search(page, text).ok()?.into_iter().next()
+            });
+        let Some(quads) = quads.filter(|q| !q.is_empty()) else {
+            continue;
+        };
+        let already = existing
+            .entry(page)
+            .or_insert_with(|| doc.highlights_on(page).unwrap_or_default());
+        if already.iter().any(|h| pdf::same_quads(&h.quads, &quads)) {
+            continue;
+        }
+        out.entry(page).or_default().push((quads, at));
+    }
+    out
 }
 
 /// Every page a drag covers, in document order however the drag was pulled.
@@ -1160,6 +1599,11 @@ fn render_loop(
     rx: std::sync::mpsc::Receiver<Request>,
     view: glib::SendWeakRef<PdfView>,
 ) {
+    // What the file looked like when this document was read. Every write from here updates it,
+    // which is how the tab tells its own save from someone else's and does not reload over it.
+    let mut etag = accent_core::fs::Etag::of(&path).ok();
+    // What has been drawn here, so Undo reaches this session's strokes and no others.
+    let mut ink = Ink::default();
     // The channel closing is the tab going away, which is the only way this thread ends.
     while let Ok(first) = rx.recv() {
         let mut queue = vec![first];
@@ -1242,12 +1686,126 @@ fn render_loop(
                         at += 1;
                     }
                 }
+                Request::Ink {
+                    page,
+                    points,
+                    width,
+                    rgb,
+                } => {
+                    let before = doc.annotation_count(page).unwrap_or(0);
+                    match doc.add_ink(page, &points, width, rgb) {
+                        Ok(()) => {
+                            ink.note(page, before);
+                            ink.added.push(page);
+                            ink.dirty = true;
+                            send(&view, Reply::PageChanged(page));
+                        }
+                        Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                    }
+                }
+                Request::Erase { page, at } => {
+                    let hit = doc.ink_paths(page).unwrap_or_default();
+                    let found = hit
+                        .iter()
+                        .find(|(_, points)| pdf::hit(points, at, ERASE_RADIUS));
+                    if let Some((index, _)) = found {
+                        let before = doc.annotation_count(page).unwrap_or(0);
+                        ink.note(page, before);
+                        if let Err(e) = doc.delete_annotation(page, *index) {
+                            tracing::warn!("erasing on page {page}: {e:#}");
+                            continue;
+                        }
+                        ink.erased(page, *index);
+                        ink.dirty = true;
+                        send(&view, Reply::PageChanged(page));
+                    }
+                }
+                Request::Undo => {
+                    while let Some(page) = ink.added.pop() {
+                        let count = doc.annotation_count(page).unwrap_or(0);
+                        let Some(index) = ink.undo_target(page, count) else {
+                            continue;
+                        };
+                        match doc.delete_annotation(page, index) {
+                            Ok(()) => {
+                                ink.dirty = true;
+                                send(&view, Reply::PageChanged(page));
+                            }
+                            Err(e) => tracing::warn!("undoing on page {page}: {e:#}"),
+                        }
+                        break;
+                    }
+                }
+                Request::Save(ack) => {
+                    if !ink.dirty {
+                        // The ack still goes: a caller waiting on it is waiting for the file to
+                        // be right, and it already is.
+                        drop(ack);
+                        continue;
+                    }
+                    // ponytail: `save_to_bytes` rewrites the whole file under the pdfium lock, so
+                    // a very large PDF stops the tiles for as long as that takes. Saving
+                    // incrementally is the upgrade.
+                    match doc.save().map_err(|e| e.to_string()).and_then(|bytes| {
+                        accent_core::fs::write_bytes(&path, &bytes, etag).map_err(|e| e.to_string())
+                    }) {
+                        Ok(written) => {
+                            etag = Some(written);
+                            ink.dirty = false;
+                            send(&view, Reply::Saved(written));
+                        }
+                        // Left dirty on purpose: the next stroke's save tries again, and the
+                        // drawing is still in the document either way.
+                        Err(e) => tracing::warn!("saving {}: {e}", path.display()),
+                    }
+                    // Dropping the sender is the signal: the receiver's `recv` returns either
+                    // way, so a failed save does not hang the window that is closing.
+                    drop(ack);
+                }
+                Request::Highlights(links) => {
+                    send(&view, Reply::Highlights(highlight_quads(&doc, &links)));
+                }
+                Request::Export { links, color } => {
+                    let quads = highlight_quads(&doc, &links);
+                    let pages: Vec<usize> = quads.keys().copied().collect();
+                    let highlights: Vec<pdf::Highlight> = quads
+                        .into_iter()
+                        .flat_map(|(page, found)| {
+                            found.into_iter().map(move |(quads, at)| (page, quads, at))
+                        })
+                        .map(|(page, quads, at)| pdf::Highlight {
+                            page,
+                            quads,
+                            color: [color[0], color[1], color[2], 255],
+                            contents: links.get(at).and_then(|l| l.alias.clone()),
+                        })
+                        .collect();
+                    let written = doc
+                        .add_highlights(&highlights)
+                        .and_then(|added| match added {
+                            // Nothing new is not a write: the file is already what it should be.
+                            0 => Ok(0),
+                            _ => {
+                                let bytes = doc.save()?;
+                                let written = accent_core::fs::write_bytes(&path, &bytes, etag)?;
+                                etag = Some(written);
+                                send(&view, Reply::Saved(written));
+                                for page in pages {
+                                    send(&view, Reply::PageChanged(page));
+                                }
+                                Ok(added)
+                            }
+                        })
+                        .map_err(|e| format!("{e:#}"));
+                    send(&view, Reply::Exported(written));
+                }
                 Request::Reload => {
                     // Swapped only on success: a half-written PDF fails to open often while a
                     // LaTeX run is going, and the next event tries again.
                     match PdfDoc::open(&path) {
                         Ok(fresh) => {
                             doc = fresh;
+                            etag = accent_core::fs::Etag::of(&path).ok();
                             send(&view, Reply::Reloaded(page_sizes(&doc)));
                         }
                         Err(e) => tracing::debug!("reloading {}: {e:#}", path.display()),
@@ -1357,7 +1915,48 @@ fn send(view: &glib::SendWeakRef<PdfView>, reply: Reply) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, Request, band_offset, interrupt};
+    use super::{BAND, Ink, Request, band_offset, interrupt, link_with_alias};
+
+    /// Undo takes back this session's strokes and stops at whatever the document already had,
+    /// however the eraser moved the line in between.
+    #[test]
+    fn undo_never_reaches_a_pre_existing_annotation() {
+        let mut ink = Ink::default();
+        // A page that already carried three annotations, then two strokes of ours.
+        ink.note(0, 3);
+        ink.added.push(0);
+        ink.added.push(0);
+        assert_eq!(ink.undo_target(0, 5), Some(4));
+
+        // The reader erases one of the document's own: the line moves down, ours are still ours.
+        ink.erased(0, 1);
+        assert_eq!(ink.undo_target(0, 4), Some(3));
+        assert_eq!(ink.added.len(), 2);
+
+        // Erasing one of ours leaves one stroke to undo, and then nothing.
+        ink.erased(0, 3);
+        assert_eq!(ink.added.len(), 1);
+        assert_eq!(ink.undo_target(0, 3), Some(2));
+        assert_eq!(
+            ink.undo_target(0, 2),
+            None,
+            "the document's own are not ours"
+        );
+
+        // A page never drawn on has nothing to undo, whatever it carries.
+        assert_eq!(ink.undo_target(9, 7), None);
+    }
+
+    #[test]
+    fn link_with_alias_strips_what_would_end_the_link() {
+        let link = "[[a.pdf#page=1&selection=0,0,0,5]]";
+        assert_eq!(
+            link_with_alias(link, " a |b]]\n c "),
+            "[[a.pdf#page=1&selection=0,0,0,5|a b c]]"
+        );
+        // Nothing worth quoting is no alias, not an empty one.
+        assert_eq!(link_with_alias(link, "  \n "), link);
+    }
 
     fn search(query: u64, from: usize) -> Request {
         Request::Search {

@@ -467,6 +467,34 @@ fn split_anchor(dest: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Read a PDF anchor: `page=3` or `page=3&selection=4,0,4,11`, as Obsidian writes them.
+///
+/// The page comes back **zero-based**, the way [`crate::pdf::Selection`] counts, and the four
+/// selection numbers in the order the link spells them. `None` for a heading or a block anchor,
+/// which is what tells a link to a note apart from a link into a PDF.
+///
+/// Here rather than in `pdf.rs` because this is link syntax, not PDF geometry: the index parses
+/// it without the `pdf` feature, and so does a build with no libpdfium at all.
+pub fn pdf_anchor(anchor: &str) -> Option<(usize, Option<[usize; 4]>)> {
+    let (mut page, mut selection) = (None, None);
+    for part in anchor.split('&') {
+        match part.split_once('=') {
+            Some(("page", n)) => page = n.trim().parse::<usize>().ok()?.checked_sub(1),
+            // Four numbers or none: a selection we cannot read is a link to the page, which is
+            // still where the reader wanted to go.
+            Some(("selection", list)) => {
+                selection = list
+                    .split(',')
+                    .map(|n| n.trim().parse::<usize>().ok())
+                    .collect::<Option<Vec<_>>>()
+                    .and_then(|nums| <[usize; 4]>::try_from(nums).ok());
+            }
+            _ => {}
+        }
+    }
+    Some((page?, selection))
+}
+
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
 fn is_external(dest: &str) -> bool {
     if dest.starts_with("//") {
@@ -977,6 +1005,22 @@ mod tests {
         }
         assert_eq!(&t[a.links[0].range.clone()], "[[Note]]");
         assert_eq!(&t[a.links[4].range.clone()], "[[Note#Heading|alias]]");
+    }
+
+    #[test]
+    fn pdf_anchor_reads_page_and_selection() {
+        assert_eq!(
+            pdf_anchor("page=3&selection=4,0,4,11"),
+            Some((2, Some([4, 0, 4, 11])))
+        );
+        assert_eq!(pdf_anchor("page=3"), Some((2, None)));
+        // A heading is not a PDF anchor, which is what keeps `[[Note#Heading]]` on the note path.
+        assert_eq!(pdf_anchor("Heading"), None);
+        // Page numbers are one-based in the link and zero-based here, so page 0 is not a page.
+        assert_eq!(pdf_anchor("page=0"), None);
+        // A selection that is not four numbers is no selection, but the page still counts.
+        assert_eq!(pdf_anchor("page=2&selection=1,2,3"), Some((1, None)));
+        assert_eq!(pdf_anchor("page=2&selection=1,2,3,4,5"), Some((1, None)));
     }
 
     #[test]

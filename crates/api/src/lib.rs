@@ -38,7 +38,7 @@ pub use accent_core::fs::{Etag, Read, SaveError, Text};
 pub use accent_core::git;
 pub use accent_core::git::{Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 pub use accent_core::index::{
-    Backlink, FileRow, Match, Progress, ReconcileStats, SearchHit, Stats,
+    Backlink, FileRow, Match, PdfLink, Progress, ReconcileStats, SearchHit, Stats,
 };
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
@@ -533,6 +533,17 @@ impl Vault {
             self,
             |v: &Local| v.backlinks(rel),
             "backlinks",
+            json!([rel])
+        )
+    }
+
+    /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
+    /// because that is where the notes and the index are.
+    pub fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
+        ask!(
+            self,
+            |v: &Local| v.pdf_links(rel),
+            "pdf_links",
             json!([rel])
         )
     }
@@ -1368,6 +1379,10 @@ impl Local {
 
     pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
         self.index().backlinks(rel)
+    }
+
+    fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
+        self.index().pdf_links(rel)
     }
 
     pub fn note_paths(&self) -> Result<Vec<String>> {
