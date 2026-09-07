@@ -270,7 +270,7 @@ pub fn recolour_pixel(px: [u8; 4], paper: [u8; 3], ink: [u8; 3]) -> [u8; 4] {
 /// [`recolour_pixel`] over a whole RGBA8 buffer, in place. Shared by the page and tile renders so
 /// the two cannot drift apart.
 fn recolour(data: &mut [u8], paper: [u8; 3], ink: [u8; 3]) {
-    for px in data.chunks_exact_mut(4) {
+    for px in data.as_chunks_mut::<4>().0 {
         let out = recolour_pixel([px[0], px[1], px[2], px[3]], paper, ink);
         px.copy_from_slice(&out);
     }
