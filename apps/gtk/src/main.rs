@@ -63,7 +63,8 @@ const RECENT_NOTES: usize = 50;
 const RECENT_COMMANDS: usize = 20;
 /// Full-text hits the sidebar shows; beyond this the list stops being scannable.
 const SEARCH_LIMIT: usize = 100;
-/// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit.
+/// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit, and the status bar's
+/// word count is read again on the same beat.
 const RENDER: Duration = Duration::from_millis(300);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
@@ -977,7 +978,8 @@ struct App {
     menu_page: RefCell<Option<adw::TabPage>>,
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
-    render: RefCell<Option<glib::SourceId>>,
+    /// The pending post-edit refresh: the preview's re-render and the status bar's word count.
+    refresh: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
@@ -1495,7 +1497,13 @@ impl App {
         pdf.connect_page(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.save_session_soon()
+            move |_| {
+                // Edge-triggered: `PdfView` reports the page under the middle of the viewport
+                // only when it changes, so this is once per page boundary crossed, not once per
+                // scrolled pixel, and needs no debounce of its own.
+                app.sync_status();
+                app.save_session_soon();
+            }
         ));
         pdf.connect_outline(glib::clone!(
             #[weak(rename_to = app)]
@@ -1508,6 +1516,8 @@ impl App {
             move |_| {
                 app.sync_opening();
                 app.sync_outline();
+                // The page count is known now, so the readout has something to say at last.
+                app.sync_status();
             }
         ));
         pdf.connect_matches(glib::clone!(
@@ -1830,7 +1840,7 @@ impl App {
             self,
             move |tab| {
                 lang::changed(tab);
-                app.queue_render(tab);
+                app.queue_refresh(tab);
                 if app.is_active(tab) {
                     app.sync_outline();
                 }
@@ -1935,6 +1945,11 @@ impl App {
         let Some(doc) = self.active_doc() else {
             self.title.set_subtitle(&self.host());
             self.refresh_references();
+            // The bar speaks for the tab in front, so with none it says nothing: the last
+            // document's "Markdown · 2 words" used to stay under an empty document column,
+            // because this path returned before either readout was asked again.
+            self.sync_status();
+            self.refresh_zoom();
             return;
         };
         let key = doc.key();
@@ -2188,6 +2203,8 @@ impl App {
         let etag = written?;
         tab.mark_clean(etag);
         tab.clear_disk_alert();
+        // The tab is clean again, so the bar's dot goes with the one on the tab title.
+        self.sync_status();
         lang::saved(tab);
         // Our own writes go through the vault, which tells the watcher they were ours, so no
         // event comes back to say the working tree moved. The pane is told here instead.
@@ -2257,6 +2274,9 @@ impl App {
         if let Err(e) = tab.reload_keep_cursor() {
             self.toast(&format!("Reload failed: {e}"));
         }
+        // A reload writes the buffer without an edit event, so the count and the dot are asked
+        // for here rather than waiting for the next keystroke.
+        self.sync_status();
         true
     }
 
@@ -2914,11 +2934,19 @@ impl App {
         }
     }
 
-    fn queue_render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if !self.shows_preview() || !self.is_active(tab) {
+    /// What follows an edit into the tab in front, [`RENDER`] after the last keystroke: the
+    /// preview is re-rendered, and the status bar is asked for the word count again.
+    ///
+    /// One timer for both, because they are the same question — what does the buffer say now.
+    /// The count used to be read only when a tab was opened or switched to, so a draft grew
+    /// under a number that never moved; counting per keystroke instead would copy the whole
+    /// buffer out on every key, and a number that settles a third of a second later reads the
+    /// same to anyone watching it.
+    fn queue_refresh(self: &Rc<Self>, tab: &Rc<Tab>) {
+        if !self.is_active(tab) {
             return;
         }
-        if let Some(id) = self.render.borrow_mut().take() {
+        if let Some(id) = self.refresh.borrow_mut().take() {
             id.remove();
         }
         let id = glib::timeout_add_local_once(
@@ -2927,14 +2955,15 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move || {
-                    *app.render.borrow_mut() = None;
-                    if let Some(tab) = app.active() {
+                    *app.refresh.borrow_mut() = None;
+                    app.sync_status();
+                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
                         app.render(&tab);
                     }
                 }
             ),
         );
-        *self.render.borrow_mut() = Some(id);
+        *self.refresh.borrow_mut() = Some(id);
     }
 
     /// The find bar addressing the rendered preview, which is what it does while presenting.
@@ -3007,6 +3036,7 @@ impl App {
         self.chrome_hidden.set(true);
         self.sidebar_header.add_css_class("chrome-hidden");
         self.header.add_css_class("chrome-hidden");
+        self.statusbar.widget().add_css_class("chrome-hidden");
         for pane in self.panes.borrow().iter() {
             pane.bar.add_css_class("chrome-hidden");
         }
@@ -3025,6 +3055,7 @@ impl App {
         }
         self.sidebar_header.remove_css_class("chrome-hidden");
         self.header.remove_css_class("chrome-hidden");
+        self.statusbar.widget().remove_css_class("chrome-hidden");
         for pane in self.panes.borrow().iter() {
             pane.bar.remove_css_class("chrome-hidden");
         }
@@ -3379,9 +3410,11 @@ impl App {
     /// The same thin bar indexing uses, for the same reason: something is being read and the
     /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
     /// that exists only while an open is in flight.
-    /// The file's own facts in the status bar: what it is, and for a note how long it is.
+    /// The file's own facts in the status bar: what it is, whether it is saved, and its one
+    /// count — a note's words, a code tab's diagnostics, a PDF's page.
     fn sync_status(&self) {
-        let (kind, facts) = match self.active_doc() {
+        let doc = self.active_doc();
+        let (kind, facts) = match &doc {
             Some(Doc::Text(tab)) => match tab.flavour() {
                 editor::Flavour::Note => (
                     Some("Markdown".to_string()),
@@ -3400,13 +3433,21 @@ impl App {
                     None,
                 ),
             },
-            Some(Doc::Pdf(_)) => (Some("PDF".to_string()), None),
+            // Where the reader is, in the slot a note fills with its word count.
+            Some(Doc::Pdf(pdf)) => (Some("PDF".to_string()), pdf.page_label()),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
         self.statusbar.set_facts(facts.as_deref());
+        // Only a text tab has a buffer that can be ahead of the disk; the dot is the tab's own,
+        // so one symbol means "unsaved" in both places.
+        self.statusbar.set_unsaved(
+            doc.as_ref()
+                .and_then(Doc::tab)
+                .is_some_and(|t| t.modified.get()),
+        );
         self.sync_branch();
     }
 
@@ -4535,7 +4576,7 @@ fn build_window(
         reconciled: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
-        render: RefCell::new(None),
+        refresh: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
