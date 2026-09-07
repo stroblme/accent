@@ -483,6 +483,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "change_document" => any(block(
             vault.change_document(&arg::<String>(p, 0)?, arg(p, 1)?),
         )),
+        "save_document" => any(block(vault.save_document(&arg::<String>(p, 0)?))),
         "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
         "completion" => any(block(vault.completion(
             &arg::<String>(p, 0)?,

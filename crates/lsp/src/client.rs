@@ -207,7 +207,7 @@ impl Client {
             "capabilities": {
                 "general": {"positionEncodings": ["utf-8", "utf-16"]},
                 "textDocument": {
-                    "synchronization": {"didSave": false},
+                    "synchronization": {"didSave": true},
                     "completion": {
                         "completionItem": {
                             "snippetSupport": true,

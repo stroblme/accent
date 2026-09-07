@@ -255,6 +255,11 @@ pub(crate) type Fut<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>
 pub(crate) trait Language: Send + Sync {
     fn open(&self, rel: &str, language_id: &str, text: String) -> Result<Support>;
     fn change(&self, rel: &str, text: String) -> Result<()>;
+    /// The document reached the disk. What a server does on a save it does not do on a change:
+    /// rust-analyzer's `cargo check` diagnostics, for one.
+    fn saved(&self, _rel: &str) -> Result<()> {
+        Ok(())
+    }
     fn close(&self, rel: &str);
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Vec<Completion>>;
     /// Fill in what the item was too expensive to send: `rel` says which document's text the
@@ -406,6 +411,11 @@ impl Languages {
     pub(crate) fn change_document(&self, rel: String, text: String) -> Task<()> {
         let provider = self.provider(&rel);
         Task::spawn(async move { provider?.change(&rel, text) })
+    }
+
+    pub(crate) fn save_document(&self, rel: String) -> Task<()> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.saved(&rel) })
     }
 
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
@@ -581,6 +591,14 @@ impl Vault {
         }
     }
 
+    /// The buffer was written; a server that checks on save is told.
+    pub fn save_document(&self, rel: &str) -> Task<()> {
+        match &self.backend {
+            Backend::Local(v) => v.save_document(rel),
+            Backend::Remote(r) => remote_task(r.clone(), "save_document", json!([rel])),
+        }
+    }
+
     pub fn close_document(&self, rel: &str) -> Task<()> {
         match &self.backend {
             Backend::Local(v) => v.close_document(rel),
@@ -668,6 +686,10 @@ impl Local {
 
     pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
         self.lang.change_document(rel.to_string(), text)
+    }
+
+    pub fn save_document(&self, rel: &str) -> Task<()> {
+        self.lang.save_document(rel.to_string())
     }
 
     pub fn close_document(&self, rel: &str) -> Task<()> {
