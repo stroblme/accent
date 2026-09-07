@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use crate::remote::Remote;
 use crate::{Backend, Event, Local, LspConfig, Vault, locked, remote_err};
 
+pub(crate) mod external;
 pub(crate) mod notes;
 
 use notes::Notes;
@@ -256,7 +257,9 @@ pub(crate) trait Language: Send + Sync {
     fn change(&self, rel: &str, text: String) -> Result<()>;
     fn close(&self, rel: &str);
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Vec<Completion>>;
-    fn resolve(&self, item: Completion) -> Fut<'_, Completion>;
+    /// Fill in what the item was too expensive to send: `rel` says which document's text the
+    /// edits it comes back with are measured against.
+    fn resolve(&self, rel: &str, item: Completion) -> Fut<'_, Completion>;
     fn signature_help(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Signature>>;
     fn hover(&self, rel: &str, pos: Pos) -> Fut<'_, Option<Hover>>;
     fn definition(&self, rel: &str, pos: Pos) -> Fut<'_, Vec<Location>>;
@@ -375,12 +378,24 @@ impl Languages {
                     Ok(support)
                 })
             }
-            // ponytail: the external provider starts here in the next commit; until then the UI
-            // is told the server is missing, which is what it already says for an unknown language.
             Some(Server::External { language_id, argv }) => {
-                tracing::debug!("no language server yet for {language_id}");
+                let (root, events) = (me.root.clone(), me.events.clone());
+                Task::spawn(async move {
+                    // One session per (server, project): two crates in one vault get one server
+                    // each, and two files in one crate share it.
+                    let session_root = session_root(&root, &Local::join(&root, &rel)?);
+                    let key = (argv[0].clone(), session_root.clone());
+                    let start = external::start(argv, session_root, root, events);
+                    let provider = me.session(key, start).await?;
+                    let support = provider.open(&rel, &language_id, text)?;
+                    locked(&me.docs).insert(rel, provider);
+                    Ok(support)
+                })
+            }
+            Some(Server::Missing(name)) => {
+                tracing::debug!("no language server for {language}: {name} is not installed");
                 Task::ready(Ok(Support {
-                    missing: argv.first().cloned(),
+                    missing: Some(name),
                     ..Support::default()
                 }))
             }
@@ -415,7 +430,7 @@ impl Languages {
 
     pub(crate) fn resolve_completion(&self, rel: String, item: Completion) -> Task<Completion> {
         let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.resolve(item).await })
+        Task::spawn(async move { provider?.resolve(&rel, item).await })
     }
 
     pub(crate) fn signature_help(&self, rel: String, pos: Pos) -> Task<Option<Signature>> {
@@ -458,21 +473,86 @@ pub(crate) enum Server {
         language_id: String,
         argv: Vec<String>,
     },
+    /// A language accent knows a server for, which is not installed. The name is what to install.
+    Missing(String),
 }
 
-/// Which provider a GtkSourceView language id gets. A configured command line wins over
-/// everything, which is how a vault picks `pylsp` over the built-in choice.
+/// The servers accent starts by itself: GtkSourceView language id, the id the protocol calls the
+/// same language, and the command lines to try in order.
 ///
-// ponytail: the built-in table of language servers (rust-analyzer, clangd, …) arrives with the
-// external provider; until then only a configured command line names one.
+/// Deliberately short. A language nobody here has run is better served by a line in the vault's
+/// config than by a guess in this table.
+const SERVERS: &[(&str, &str, &[&[&str]])] = &[
+    ("rust", "rust", &[&["rust-analyzer"]]),
+    ("c", "c", &[&["clangd"]]),
+    ("cpp", "cpp", &[&["clangd"]]),
+    ("python", "python", PYTHON),
+    ("python3", "python", PYTHON),
+    ("js", "javascript", TYPESCRIPT),
+    ("typescript", "typescript", TYPESCRIPT),
+    ("latex", "latex", &[&["texlab"]]),
+    ("toml", "toml", &[&["taplo", "lsp", "stdio"]]),
+    ("go", "go", &[&["gopls"]]),
+];
+
+const PYTHON: &[&[&str]] = &[&["pyright-langserver", "--stdio"], &["pylsp"]];
+const TYPESCRIPT: &[&[&str]] = &[&["typescript-language-server", "--stdio"]];
+
+/// Which provider a GtkSourceView language id gets. A configured command line wins over the
+/// built-in choices, which is how a vault picks `pylsp` over `pyright`.
 pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
-    if let Some(argv) = cfg.servers.get(language).filter(|argv| !argv.is_empty()) {
-        return Some(Server::External {
-            language_id: language.to_string(),
-            argv: argv.clone(),
-        });
+    let row = SERVERS.iter().find(|(id, ..)| *id == language);
+    let configured = cfg.servers.get(language).filter(|argv| !argv.is_empty());
+    if configured.is_none() && language == "markdown" {
+        return Some(Server::Notes);
     }
-    (language == "markdown").then_some(Server::Notes)
+    // A configured command line replaces the built-in alternatives rather than joining them.
+    let alternatives: Vec<Vec<String>> = match configured {
+        Some(argv) => vec![argv.clone()],
+        None => row?
+            .2
+            .iter()
+            .map(|argv| argv.iter().map(|&a| a.to_string()).collect())
+            .collect(),
+    };
+    // The protocol's name for the language, which is not always GtkSourceView's (`js`).
+    let language_id = row.map_or(language, |(_, id, _)| id).to_string();
+    match alternatives.iter().find(|argv| in_path(&argv[0])) {
+        Some(argv) => Some(Server::External {
+            language_id,
+            argv: argv.clone(),
+        }),
+        // Known but not installed: the first choice is the one worth naming to the user.
+        None => Some(Server::Missing(alternatives.into_iter().next()?.remove(0))),
+    }
+}
+
+/// Whether an executable can be started: an absolute name is the file itself, a bare one is
+/// looked for the way a shell would.
+fn in_path(exe: &str) -> bool {
+    let path = Path::new(exe);
+    if path.is_absolute() {
+        return path.is_file();
+    }
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(exe).is_file()))
+}
+
+/// Where a server should be rooted for a file: the nearest checkout at or above it that is still
+/// inside the vault, else the vault itself.
+///
+/// A vault of several projects gets one server per project, which is what makes `rust-analyzer`
+/// see a crate rather than a directory of unrelated ones. A worktree's `.git` is a file, so
+/// existence is the test, not directory-ness.
+pub(crate) fn session_root(vault_root: &Path, abs_file: &Path) -> PathBuf {
+    let mut dir = abs_file.parent();
+    while let Some(here) = dir.filter(|d| d.starts_with(vault_root)) {
+        if here.join(".git").exists() {
+            return here.to_path_buf();
+        }
+        dir = here.parent();
+    }
+    vault_root.to_path_buf()
 }
 
 // ------------------------------------------------------------------ the façade
@@ -712,6 +792,76 @@ mod tests {
                 }
             ),
             None
+        );
+    }
+
+    /// A vault whose config names `argv` for `language`.
+    fn configured(language: &str, argv: &[&str]) -> LspConfig {
+        LspConfig {
+            servers: [(
+                language.to_string(),
+                argv.iter().map(|a| a.to_string()).collect(),
+            )]
+            .into_iter()
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn a_language_gets_the_server_it_has() {
+        // Something certain to be executable on any machine running this test.
+        let me = std::env::current_exe().unwrap();
+        let me = me.to_str().unwrap();
+
+        let Some(Server::External { language_id, argv }) =
+            server(&configured("rust", &[me, "--stdio"]), "rust")
+        else {
+            panic!("a configured command line that exists is the server to run")
+        };
+        assert_eq!(language_id, "rust", "the protocol's name for the language");
+        assert_eq!(argv, [me, "--stdio"]);
+
+        // A language the table has no row for takes its own id as the protocol's.
+        let Some(Server::External { language_id, .. }) = server(&configured("nim", &[me]), "nim")
+        else {
+            panic!("a configured server answers for any language")
+        };
+        assert_eq!(language_id, "nim");
+
+        assert!(
+            matches!(server(&configured("rust", &["/no/such/server"]), "rust"),
+                Some(Server::Missing(name)) if name == "/no/such/server"),
+            "a named server that is not there is what the UI reports"
+        );
+        assert!(matches!(
+            server(&LspConfig::default(), "markdown"),
+            Some(Server::Notes)
+        ));
+        assert!(server(&LspConfig::default(), "brainfuck").is_none());
+    }
+
+    #[test]
+    fn a_session_is_rooted_at_the_nearest_checkout() {
+        let vault = tempfile::tempdir().unwrap();
+        let root = vault.path();
+        let crate_dir = root.join("proj/src");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+        assert_eq!(
+            session_root(root, &crate_dir.join("main.rs")),
+            root,
+            "no checkout anywhere: the vault is the project"
+        );
+
+        // A worktree's `.git` is a file, and it counts the same as a directory.
+        std::fs::write(root.join("proj/.git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(
+            session_root(root, &crate_dir.join("main.rs")),
+            root.join("proj")
+        );
+        assert_eq!(
+            session_root(root, &root.join("loose.rs")),
+            root,
+            "a file beside the checkout is not inside it"
         );
     }
 

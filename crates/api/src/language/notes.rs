@@ -460,7 +460,7 @@ impl Language for Notes {
         Box::pin(async move { Ok(or_empty("completion", Notes::completion(self, &rel, pos))) })
     }
 
-    fn resolve(&self, item: Completion) -> Fut<'_, Completion> {
+    fn resolve(&self, _rel: &str, item: Completion) -> Fut<'_, Completion> {
         Box::pin(async move { Ok(item) })
     }
 
