@@ -16,6 +16,7 @@ mod fileops;
 mod find;
 mod git;
 mod highlight;
+mod lang;
 mod marks;
 mod multicaret;
 mod palette;
@@ -4153,6 +4154,7 @@ fn build_window(
     note: Option<String>,
 ) -> Option<Rc<App>> {
     install_document_font();
+    install_icons();
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
 
@@ -5779,6 +5781,24 @@ thread_local! {
 // outline or a negative margin, was measured: it only ever reaches the side rendered before the
 // handle, because the pane after it paints over the other. A 2 px shift while a divider is being
 // dragged is invisible, so it is the cheaper of the two.
+/// Registers the icons compiled into the binary and points the theme at them.
+///
+/// A GResource rather than hicolor: the completion list needs the kind icons long before anyone
+/// runs `make install`, and the theme keeps answering for every Adwaita name as it did.
+fn install_icons() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Err(e) = gio::resources_register_include!("accent.gresource") {
+            tracing::warn!("icons: {e}");
+            return;
+        }
+        let Some(display) = gdk::Display::default() else {
+            return;
+        };
+        gtk::IconTheme::for_display(&display).add_resource_path("/io/github/stroblme/Accent/icons");
+    });
+}
+
 fn install_chrome_css() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {

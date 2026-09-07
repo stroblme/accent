@@ -18,7 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
-sourceview5 = { version = "0.11", features = ["v5_12"] }
+sourceview5 = { version = "0.11", features = ["v5_18"] }
 nucleo-matcher = "0.3"
 webkit6 = "0.6"
 # v0_76 for the context menu model and `check_match_at`; v0_78 deprecates `current_directory_uri`
@@ -27,3 +27,9 @@ vte4 = { version = "0.10", features = ["v0_76"] }
 libspelling = "0.5"
 # Only for "now" when expanding templates; core takes a NaiveDateTime.
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# Hover documentation arrives as markdown and Pango wants markup; only the pull parser is needed.
+pulldown-cmark = { version = "0.13", default-features = false }
+
+[build-dependencies]
+# Compiles the completion-kind icons into the binary's GResource.
+glib-build-tools = "0.22"
