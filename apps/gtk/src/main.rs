@@ -121,6 +121,8 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.split-down", "Split Down", &[]),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
+    ("app.open-remote", "Open Remote…", &[]),
+    ("win.open-recent", "Open Recent…", &["<Control>r"]),
     ("app.close-vault", "Close Vault", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
     ("win.palette-files", "Go to File…", &["<Control>e"]),
@@ -277,16 +279,34 @@ struct Landing {
 }
 
 impl Shell {
-    /// The two actions that outlive the window firing them: Open Folder… lands on the start
-    /// screen, and Close Vault takes the current window away, so neither can live on a window the
-    /// way the `win.` actions do. Registered once on the application, where the shell is in scope.
+    /// The actions that outlive the window firing them: Open Folder… and Open Remote… both land a
+    /// vault that may not be this window's, Close Vault takes the current window away, and Quit
+    /// takes them all, so none of them can live on a window the way the `win.` actions do.
+    /// Registered once on the application, where the shell is in scope.
+    ///
+    /// Each one records itself in the active window's recently-run list on the way through, which
+    /// is what the `win.` trampoline in [`install_actions`] does for everything else: an action
+    /// the palette lists has to be an action the palette can learn.
     fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
         let open = gio::SimpleAction::new("open-vault", None);
         open.connect_activate({
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| shell.choose_vault(&gtk_app)
+            move |_, _| {
+                shell.record(&gtk_app, "app.open-vault");
+                shell.choose_vault(&gtk_app);
+            }
         });
         gtk_app.add_action(&open);
+
+        let remote = gio::SimpleAction::new("open-remote", None);
+        remote.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| {
+                shell.record(&gtk_app, "app.open-remote");
+                shell.choose_remote(&gtk_app);
+            }
+        });
+        gtk_app.add_action(&remote);
 
         // GNOME Shell offers New Window in the launcher's context menu only when it finds an
         // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
@@ -295,16 +315,58 @@ impl Shell {
         let new_window = gio::SimpleAction::new("new-window", None);
         new_window.connect_activate({
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| shell.start_screen(&gtk_app)
+            move |_, _| {
+                shell.record(&gtk_app, "app.new-window");
+                shell.start_screen(&gtk_app);
+            }
         });
         gtk_app.add_action(&new_window);
 
         let close = gio::SimpleAction::new("close-vault", None);
         close.connect_activate({
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| shell.close_vault(&gtk_app)
+            move |_, _| {
+                shell.record(&gtk_app, "app.close-vault");
+                shell.close_vault(&gtk_app);
+            }
         });
         gtk_app.add_action(&close);
+
+        // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
+        // down without emitting `close-request`, which is where unsaved buffers get written and
+        // where a failed save gets to stop the exit. The application ends on its own once the last
+        // window is gone, so a window that refuses to close also refuses to quit.
+        let quit = gio::SimpleAction::new("quit", None);
+        quit.connect_activate({
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |_, _| {
+                // Recorded before the windows go: the session is written by each window's own
+                // `close-request`, which runs after this and carries the entry with it.
+                shell.record(&gtk_app, "app.quit");
+                for window in gtk_app.windows() {
+                    window.close();
+                }
+            }
+        });
+        gtk_app.add_action(&quit);
+    }
+
+    /// The [`App`] behind a window, for the app-scoped actions: they are fired at the application
+    /// and have to find the window that asked before they can record anything on it.
+    fn app_at(&self, window: &gtk::Window) -> Option<Rc<App>> {
+        self.windows
+            .borrow()
+            .iter()
+            .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
+            .map(|(_, app)| app.clone())
+    }
+
+    /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
+    /// the start screen, which has no session to remember it in.
+    fn record(&self, gtk_app: &adw::Application, action: &str) {
+        if let Some(app) = gtk_app.active_window().and_then(|w| self.app_at(&w)) {
+            app.command_used(action);
+        }
     }
 
     /// Close Vault: hand this window's vault back and land on the start screen.
@@ -404,7 +466,18 @@ impl Shell {
         // `path()` is `None` — "cannot resolve" for something perfectly openable.
         if let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) {
             let note = args.get(2).and_then(|a| a.to_str()).map(str::to_string);
-            self.open_vault(gtk_app, PathBuf::from(address), note);
+            // Read back through the parser rather than taken as typed: `Vault::key` is the
+            // address as `ssh::Url` spells it, and that is what the recent list and the
+            // one-window-per-vault check compare against. `ssh://box/srv/vault/` stored as typed
+            // matches neither, so it would open a second window on a vault already open.
+            let root = match ssh::parse(address) {
+                Ok(url) => url.to_string(),
+                Err(e) => {
+                    eprintln!("cannot open {address}: {e}");
+                    return glib::ExitCode::FAILURE;
+                }
+            };
+            self.open_vault(gtk_app, PathBuf::from(root), note);
             return glib::ExitCode::SUCCESS;
         }
         // Resolved against the *invoking* process's directory, not this one's: a second
@@ -456,37 +529,39 @@ impl Shell {
         });
     }
 
+    /// Open Remote…: the same host-and-path form the start screen asks with, over whichever
+    /// window is in front. A remote vault is opened, keyed and remembered exactly as a local one
+    /// is, so there is nothing here but the address.
+    fn choose_remote(self: &Rc<Self>, gtk_app: &adw::Application) {
+        let Some(window) = gtk_app.active_window() else {
+            return;
+        };
+        let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+        start::connect_dialog(&window, move |address| {
+            shell.open_vault(&gtk_app, PathBuf::from(address), None);
+            // The start screen has done its job if it was what asked.
+            if let Some(window) = shell.start.upgrade() {
+                window.close();
+            }
+        });
+    }
+
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
         if let Some(window) = self.start.upgrade() {
             window.present();
             return;
         }
-        let window = start::present(
-            gtk_app,
-            self.config.clone(),
-            {
-                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-                move |root| {
-                    shell.open_vault(&gtk_app, root, None);
-                    // The start window has done its job. It is reached through the shell rather than
-                    // captured, which is what keeps the closure it lives in out of its own cycle.
-                    if let Some(window) = shell.start.upgrade() {
-                        window.close();
-                    }
+        let window = start::present(gtk_app, self.config.clone(), {
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            move |root| {
+                shell.open_vault(&gtk_app, root, None);
+                // The start window has done its job. It is reached through the shell rather than
+                // captured, which is what keeps the closure it lives in out of its own cycle.
+                if let Some(window) = shell.start.upgrade() {
+                    window.close();
                 }
-            },
-            {
-                // An address rather than a directory, and that is the whole difference: a remote
-                // vault is opened, keyed and remembered exactly as a local one is.
-                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-                move |address: String| {
-                    shell.open_vault(&gtk_app, PathBuf::from(address), None);
-                    if let Some(window) = shell.start.upgrade() {
-                        window.close();
-                    }
-                }
-            },
-        );
+            }
+        });
         self.start.set(Some(&window));
     }
 
@@ -2962,6 +3037,7 @@ impl App {
             "split-down" => self.split_active(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
+            "open-recent" => self.palette(palette::Mode::Vaults),
             "find" => self.find.open(find::Mode::Find),
             "replace" => self.find.open(find::Mode::Replace),
             "goto-line" => self.find.open(find::Mode::Goto),
@@ -3591,6 +3667,10 @@ impl App {
                 let corpus = self.corpus.borrow().tags.clone();
                 move || corpus.as_ref().clone()
             }),
+            // Filtered here rather than in the dialog: the window is the only thing that knows
+            // which vault it is already on, and a row that raises the window it was picked from
+            // would be the one row in the list that does nothing.
+            vaults: start::other_vaults(&config.recent_vaults, self.vault().map(|v| v.key())),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
             on_rebind: Box::new({
@@ -3619,6 +3699,16 @@ impl App {
                         app.sidebar_column.set_visible(true);
                         if let Some(sidebar) = app.sidebar.get() {
                             sidebar.show_tag(tag);
+                        }
+                    }
+                    // Through the shell, which raises the window that vault already has rather
+                    // than opening a second one on the same index, session and watcher.
+                    palette::Item::Vault(key) => {
+                        if let (Some(shell), Some(gtk_app)) = (
+                            app.shell.upgrade(),
+                            app.window.application().and_downcast::<adw::Application>(),
+                        ) {
+                            shell.open_vault(&gtk_app, PathBuf::from(key), None);
                         }
                     }
                 }
@@ -4085,12 +4175,11 @@ fn build_window(
         }
         None => (None, None),
     };
+    // Touched now, so the window title and any picker opened in this window read the list the
+    // way it will be written; the write itself waits for the post-present idle below, an fsync
+    // being no part of building a widget tree.
     if let Some(root) = &root {
-        let mut config = shell.config.borrow_mut();
-        config.touch_recent(root);
-        if let Err(e) = config.save() {
-            tracing::warn!("saving config: {e:#}");
-        }
+        shell.config.borrow_mut().touch_recent(root);
     }
 
     let vault_name = match &root {
@@ -4330,7 +4419,7 @@ fn build_window(
 
     wire_pane(&app, &first);
 
-    install_actions(gtk_app, &app);
+    install_actions(&app);
     wire_window(&app, &modes);
     if vault.is_some() {
         wire_tree(&app);
@@ -4344,6 +4433,12 @@ fn build_window(
         #[weak]
         app,
         move || {
+            // The recent list, written once the window the user asked for is on screen.
+            if app.vault().is_some()
+                && let Err(e) = app.config.borrow().save()
+            {
+                tracing::warn!("saving config: {e:#}");
+            }
             app.restore_session();
             if let Some(rel) = note {
                 app.open_path(&rel);
@@ -5323,7 +5418,7 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
     }
 }
 
-fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
+fn install_actions(app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
             let action = gio::SimpleAction::new(name, None);
@@ -5359,22 +5454,6 @@ fn install_actions(gtk_app: &adw::Application, app: &Rc<App>) {
             }
         }
     ));
-
-    // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
-    // down without emitting `close-request`, which is where unsaved buffers get written and where
-    // a failed save gets to stop the exit. The application ends on its own once the last window
-    // is gone, so a window that refuses to close also refuses to quit.
-    let quit = gio::SimpleAction::new("quit", None);
-    quit.connect_activate(glib::clone!(
-        #[weak]
-        gtk_app,
-        move |_, _| {
-            for window in gtk_app.windows() {
-                window.close();
-            }
-        }
-    ));
-    gtk_app.add_action(&quit);
 }
 
 /// Which action a mouse button asks for, for the two GTK has no name for. GDK names only the
@@ -5410,10 +5489,16 @@ fn menu_button() -> gtk::MenuButton {
             "win.save",
         ]
         .as_slice(),
+        // What changes which vault this window is on: the three ways in, then the way out.
+        [
+            "app.open-vault",
+            "app.open-remote",
+            "win.open-recent",
+            "app.close-vault",
+        ]
+        .as_slice(),
         ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
-        ["win.preferences", "win.about"].as_slice(),
-        // What leaves the vault, in the order of how much it takes with it.
-        ["app.open-vault", "app.close-vault", "app.quit"].as_slice(),
+        ["win.preferences", "win.about", "app.quit"].as_slice(),
     ] {
         let section = gio::Menu::new();
         for action in group {
