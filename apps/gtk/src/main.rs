@@ -201,6 +201,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-copy", "Copy Selection", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
+    ("win.pdf-pen", "Pen", &["<Control><Shift>i"]),
+    ("win.pdf-eraser", "Eraser", &[]),
+    ("win.insert-sketch", "Insert Sketch", &[]),
     (
         "win.pane-references",
         "References Pane",
@@ -1526,6 +1529,11 @@ impl App {
                 app.sync_pdf_links(pdf);
             }
         ));
+        pdf.connect_mode(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_status()
+        ));
         pdf.connect_note(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1571,6 +1579,69 @@ impl App {
     /// writable whatever vault the window is on.
     fn pdf_is_writable(&self, pdf: &Rc<pdftab::PdfTab>) -> bool {
         doc::is_loose_key(&pdf.key()) || !self.vault().is_some_and(|v| v.is_remote())
+    }
+
+    /// A blank page to draw on, beside the note that embeds it.
+    ///
+    /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
+    /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    fn insert_sketch(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to put a sketch in");
+        };
+        let rel = tab.rel();
+        if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
+            return self.toast("A sketch needs a note in a local vault");
+        }
+        let Some(vault) = self.vault() else { return };
+        // Beside the note, numbered from one: there is no attachments directory to put it in, and
+        // inventing one would be a setting nobody asked for.
+        let stem = Path::new(&rel)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let dir = Path::new(&rel)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty());
+        let key = (1..)
+            .map(|n| match dir {
+                Some(dir) => format!("{}/{stem}-sketch-{n}.pdf", dir.display()),
+                None => format!("{stem}-sketch-{n}.pdf"),
+            })
+            .find(|key| !vault.exists(key));
+        let Some(key) = key else { return };
+
+        let bytes = match accent_core::pdf::blank_pdf() {
+            Ok(bytes) => bytes,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e:#}")),
+        };
+        let path = match vault.resolve(&key) {
+            Ok(path) => path,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e}")),
+        };
+        if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
+            return self.toast(&format!("Cannot write {key}: {e}"));
+        }
+
+        tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
+        let at = self.pane_of(&tab.page).unwrap_or_else(|| self.pane());
+        self.open_beside(&at, Side::Right, &key);
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(&key) {
+            pdf.set_mode(pdfview::Mode::Pen);
+        }
+    }
+
+    /// Pick up a pen or put it down: the same action twice goes back to reading.
+    fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Drawing needs a local vault");
+        }
+        let wanted = match pdf.mode() == mode {
+            true => pdfview::Mode::Select,
+            false => mode,
+        };
+        pdf.set_mode(wanted);
     }
 
     /// Write the note links that highlight the open PDF into the file, as real annotations.
@@ -2479,6 +2550,11 @@ impl App {
     /// Forget a page that is really closing. Called on every path that closes one, because
     /// `close_page_finish` does not come back through the `close-page` handler.
     fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
+        // A drawn-on document leaving: the render thread drains its channel before it ends, so
+        // the write still happens after the tab is gone.
+        if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
+            pdf.flush();
+        }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
         self.save_session_soon();
@@ -3334,6 +3410,9 @@ impl App {
                 }
             }
             "pdf-export-highlights" => self.export_highlights(),
+            "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
+            "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),
+            "insert-sketch" => self.insert_sketch(),
             "pdf-fit-width" | "pdf-fit-page" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.set_zoom(match name {
@@ -3557,8 +3636,15 @@ impl App {
                     None,
                 ),
             },
-            // Where the reader is, in the slot a note fills with its word count.
-            Some(Doc::Pdf(pdf)) => (Some("PDF".to_string()), pdf.page_label()),
+            // Where the reader is, in the slot a note fills with its word count — and what the
+            // pointer is doing to the page, while it is doing anything but reading.
+            Some(Doc::Pdf(pdf)) => {
+                let facts = match (pdf.page_label(), pdf.mode_label()) {
+                    (Some(page), Some(mode)) => Some(format!("{page} · {mode}")),
+                    (page, mode) => page.or_else(|| mode.map(str::to_string)),
+                };
+                (Some("PDF".to_string()), facts)
+            }
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
@@ -5442,6 +5528,13 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     }
                 });
                 return glib::Propagation::Stop;
+            }
+            // The process ends when this returns, and a drawn-on PDF's write lives on the
+            // render thread, so it is waited for rather than left to be killed.
+            for doc in app.docs() {
+                if let Doc::Pdf(pdf) = doc {
+                    pdf.flush_blocking();
+                }
             }
             app.save_session();
             glib::Propagation::Proceed

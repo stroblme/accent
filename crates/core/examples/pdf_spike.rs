@@ -119,6 +119,23 @@ fn main() -> Result<()> {
     println!("  text     : {:?}", link.text);
     println!("  quads    : {:?}", link.quads);
 
+    // --- ink -----------------------------------------------------------------------------
+    let t = Instant::now();
+    let strokes = doc.ink_paths(page)?;
+    println!(
+        "ink        : {:>7.1} ms  ({} strokes on page {page}, {} annotations)",
+        ms(t),
+        strokes.len(),
+        doc.annotation_count(page)?
+    );
+    for (index, points) in strokes.iter().take(5) {
+        println!(
+            "  #{index} {} points, first {:?}",
+            points.len(),
+            points.first()
+        );
+    }
+
     // --- highlights ----------------------------------------------------------------------
     let t = Instant::now();
     let highlights = doc.highlights()?;
