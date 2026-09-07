@@ -1414,11 +1414,10 @@ impl PdfTab {
                 }
             }
             Reply::PageChanged(page) => {
-                self.view.forget_page(page);
-                self.thumbs.forget_page(page);
-                // The drawn stroke is in the document now, so the overlay can go as soon as the
-                // tile carrying it arrives.
-                self.view.settle_stroke(page);
+                // The reading view keeps painting what it has until the new render arrives; the
+                // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
+                self.view.refresh_page(page);
+                self.thumbs.queue_draw();
                 self.save_soon();
             }
             Reply::Saved(etag) => self.saved.set(Some(etag)),

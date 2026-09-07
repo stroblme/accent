@@ -12,7 +12,7 @@ use adw::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Tile edge in device pixels. 512 is 1 MiB of RGBA, small enough that a scroll never waits on
 /// one page-sized render and large enough that a screen is a handful of them.
@@ -208,15 +208,20 @@ impl Cache {
         self.lowres_bytes = 0;
     }
 
-    /// Forget everything rendered of one page, at every scale and in either theme.
+    /// Forget what was rendered of one page, **except** its tiles at the scale and scheme now on
+    /// screen, which stay to be painted while their replacements render.
     ///
     /// What a stroke or an exported highlight invalidates: the page it landed on is drawn
     /// differently now and every other page is exactly as it was, so dropping the whole cache
-    /// would re-render the viewport and its prefetch after every stroke.
-    pub fn forget_page(&mut self, page: u32) {
+    /// would re-render the viewport and its prefetch after every stroke. What is kept is stale
+    /// and is asked for again — see [`PdfView::refresh_page`] — but painting yesterday's render
+    /// of a page for the 30 ms its replacement takes is invisible, where painting blank paper is
+    /// the flash this exists to avoid. Everything else is going spare: nobody is looking at a
+    /// render at another zoom, and keeping it would paint the old page after the next one.
+    pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, dark: bool) {
         let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
         self.tiles.retain(|key, (texture, _)| {
-            let keep = key.page != page;
+            let keep = key.page != page || (key.scale_milli == scale_milli && key.dark == dark);
             if !keep {
                 *tiles -= bytes_of(texture);
             }
@@ -552,7 +557,12 @@ impl PdfView {
 
     /// Take a rendered tile. Ignored if the document has moved on from the scale it was for.
     pub fn insert_tile(&self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
+        self.imp().stale_tiles.borrow_mut().remove(&key);
         self.cache().borrow_mut().insert(key, texture, bytes);
+        // Whatever was drawn on this page is in its pixels now, so the stroke painted over the
+        // top can go. Here rather than when the stroke was sent: the render is what replaces it,
+        // and dropping it any earlier is a gap the reader sees.
+        self.settle_stroke(key.page as usize);
         self.queue_draw();
     }
 
@@ -702,11 +712,13 @@ impl PdfView {
         }
     }
 
-    /// Drop the drawn stroke that is still painted over the page, now that a tile carries it.
+    /// Drop the finished strokes of a page that is now rendered with them.
     pub fn settle_stroke(&self, page: usize) {
-        let done = matches!(&*self.imp().stroke.borrow(), Some((at, _, true)) if *at == page);
-        if done {
-            *self.imp().stroke.borrow_mut() = None;
+        let mut strokes = self.imp().strokes.borrow_mut();
+        let before = strokes.len();
+        strokes.retain(|(at, _, done)| !(*done && *at == page));
+        if strokes.len() != before {
+            drop(strokes);
             self.queue_draw();
         }
     }
@@ -728,11 +740,24 @@ impl PdfView {
         )
     }
 
-    /// Forget what is cached of one page, which a stroke or an exported highlight makes stale.
-    pub fn forget_page(&self, page: usize) {
-        self.cache().borrow_mut().forget_page(page as u32);
-        self.imp().asked.borrow_mut().clear();
+    /// Draw one page again, because what it holds changed — a stroke, an erase, an export.
+    ///
+    /// Deliberately not an eviction. What is on screen keeps being painted until its replacement
+    /// arrives, so a stroke costs one re-render and no blank page in between.
+    pub fn refresh_page(&self, page: usize) {
+        let (scale_milli, dark) = self.stamp();
+        self.cache()
+            .borrow_mut()
+            .forget_page_except(page as u32, scale_milli, dark);
+        self.imp().stale_pages.borrow_mut().insert(page as u32);
         self.queue_draw();
+    }
+
+    /// The scale and colour scheme the page is being painted at, which is what a cached tile is
+    /// keyed by. One definition, shared by the snapshot and by [`PdfView::refresh_page`].
+    fn stamp(&self) -> (u32, bool) {
+        let scale = self.imp().layout.borrow().scale * self.scale_factor().max(1) as f32;
+        ((scale * 1000.0).round() as u32, self.imp().dark.get())
     }
 
     /// The one match to draw more strongly than the rest.
@@ -968,9 +993,19 @@ mod imp {
         pub drag_from: Cell<Option<(f64, f64)>>,
         /// What a drag over the page does: select, draw, or erase.
         pub mode: Cell<super::Mode>,
-        /// The stroke being drawn, or the last one drawn and not yet in a tile: the page it is
-        /// on, its points in that page's own points, and whether the pointer has let go.
-        pub stroke: RefCell<Option<super::Stroke>>,
+        /// Pages whose content changed and whose visible tiles are therefore out of date. The
+        /// next frame turns each into the set of tile keys below, and forgets the page here.
+        pub stale_pages: RefCell<HashSet<u32>>,
+        /// Tiles that are painted but out of date: asked for again every frame until the render
+        /// that replaces them arrives, which is what makes an abandoned batch heal itself.
+        pub stale_tiles: RefCell<HashSet<TileKey>>,
+        /// The stroke being drawn, and any drawn before it whose render has not arrived yet.
+        /// The live one, if there is one, is last.
+        ///
+        // ponytail: a stroke leaves this list when a tile of its page lands, so the list is as
+        // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
+        // a stroke with no render to replace it is one that still has to be painted.
+        pub strokes: RefCell<Vec<super::Stroke>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -1017,7 +1052,9 @@ mod imp {
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 mode: Cell::new(super::Mode::default()),
-                stroke: RefCell::new(None),
+                stale_pages: RefCell::new(HashSet::new()),
+                stale_tiles: RefCell::new(HashSet::new()),
+                strokes: RefCell::new(Vec::new()),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
@@ -1173,7 +1210,7 @@ mod imp {
                             };
                             gesture.set_state(gtk::EventSequenceState::Claimed);
                             let at = obj.point_on(page, x, y);
-                            *obj.imp().stroke.borrow_mut() = Some((page, vec![at], false));
+                            obj.imp().strokes.borrow_mut().push((page, vec![at], false));
                         }
                         super::Mode::Eraser => {
                             gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -1202,12 +1239,14 @@ mod imp {
                         super::Mode::Pen => {
                             // The page is whichever one the stroke began on: a hand that runs
                             // over the edge keeps drawing on the paper it started on.
-                            let page = match &*obj.imp().stroke.borrow() {
+                            let page = match obj.imp().strokes.borrow().last() {
                                 Some((page, _, false)) => *page,
                                 _ => return,
                             };
                             let at = obj.point_on(page, x + dx, y + dy);
-                            if let Some((_, points, _)) = obj.imp().stroke.borrow_mut().as_mut() {
+                            if let Some((_, points, false)) =
+                                obj.imp().strokes.borrow_mut().last_mut()
+                            {
                                 points.push(at);
                             }
                             obj.queue_draw();
@@ -1224,7 +1263,7 @@ mod imp {
                     if obj.imp().mode.get() == super::Mode::Pen {
                         // The stroke stays painted until a tile carries it, so the page never
                         // blinks between the hand letting go and pdfium answering.
-                        let finished = match obj.imp().stroke.borrow_mut().as_mut() {
+                        let finished = match obj.imp().strokes.borrow_mut().last_mut() {
                             Some((page, points, done)) if !*done => {
                                 *done = true;
                                 Some((*page, points.clone()))
@@ -1318,7 +1357,7 @@ mod imp {
             let cache = obj.cache();
             let marks = self.marks.borrow();
             let highlights = self.highlights.borrow();
-            let stroke = self.stroke.borrow();
+            let strokes = self.strokes.borrow();
             let selection = self.selection.borrow();
             for (index, rect) in layout.pages.iter().enumerate() {
                 // One viewport of prefetch above and below, so scrolling meets ready tiles.
@@ -1334,6 +1373,9 @@ mod imp {
                 let page = index as u32;
                 let low = cache.borrow_mut().lowres(page, dark);
                 let mut missing = false;
+                // A page whose content changed becomes the set of tiles that are out of date,
+                // once, here — this is where what is actually on screen is known.
+                let refreshing = self.stale_pages.borrow_mut().remove(&page);
                 if !thumbnails {
                     let device_w = (rect.w * sf as f32).round() as i32;
                     let device_h = (rect.h * sf as f32).round() as i32;
@@ -1346,7 +1388,15 @@ mod imp {
                                 ty: ty as u16,
                                 dark,
                             };
+                            if refreshing {
+                                self.stale_tiles.borrow_mut().insert(key);
+                            }
                             let tile = cache.borrow_mut().get(&key);
+                            let want = Want {
+                                page,
+                                tx: tx as u16,
+                                ty: ty as u16,
+                            };
                             match tile {
                                 Some(texture) => {
                                     let x = rect.x + (tx * TILE) as f32 / sf as f32;
@@ -1355,14 +1405,16 @@ mod imp {
                                     let h = texture.height() as f32 / sf as f32;
                                     snapshot
                                         .append_texture(&texture, &graphene::Rect::new(x, y, w, h));
+                                    // Painted, and still the old render: ask again, and keep
+                                    // asking until the replacement lands, so a batch pushed
+                                    // aside by a scroll is picked up by the next one.
+                                    if self.stale_tiles.borrow().contains(&key) {
+                                        wanted.push(want);
+                                    }
                                 }
                                 None => {
                                     missing = true;
-                                    wanted.push(Want {
-                                        page,
-                                        tx: tx as u16,
-                                        ty: ty as u16,
-                                    });
+                                    wanted.push(want);
                                 }
                             }
                         }
@@ -1428,7 +1480,7 @@ mod imp {
                         );
                     }
                 }
-                if let Some((_, points, _)) = stroke.as_ref().filter(|(at, _, _)| *at == index) {
+                for (_, points, _) in strokes.iter().filter(|(at, _, _)| *at == index) {
                     let builder = gsk::PathBuilder::new();
                     let point = |&(x, y): &(f32, f32)| {
                         graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
