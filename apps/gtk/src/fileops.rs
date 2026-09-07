@@ -7,8 +7,8 @@
 //!
 //! DESIGN.md decides the shapes. A toast reports something that happened and is over; an
 //! `AdwAlertDialog` appears only where the choice can lose data (rewriting links, deleting for
-//! good); buttons and titles use header capitalisation, and only "Move to…" takes an ellipsis
-//! because it is the one item that needs more input before it can act.
+//! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
+//! it needs more input before it can act (Upload Files…, Download…).
 
 use accent_api::{RenamePlan, Vault};
 use adw::prelude::*;
@@ -140,8 +140,13 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 
 // --------------------------------------------------------------------------------- renaming
 
-/// Rename a note or folder in place. The extension starts outside the selection, so typing
-/// replaces the stem only, which is what every file manager does.
+/// Rename a note or folder, and move it: a typed name carrying `/` is a path relative to the
+/// folder the file is in, `..` included, so `../Archive/note.md` moves the file as well as names
+/// it. That is the keyboard's move — `F2`, and the only one an assistive technology can drive now
+/// that Move to… is gone — and it goes through the same [`plan`] every other move does.
+///
+/// The extension starts outside the selection, so typing replaces the stem only, which is what
+/// every file manager does.
 pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
@@ -162,51 +167,40 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
         if response != CONFIRM {
             return;
         }
-        let name = match sanitise_name(&typed.text()) {
-            Ok(name) => name,
+        let to = match renamed_path(&rel, &typed.text(), note) {
+            Ok(to) => to,
             Err(why) => return (ops.toast)(why),
         };
-        let to = sibling_path(&rel, &renamed_to(&name, note));
         if to != rel {
-            plan(&ops, &rel, &to, "Renamed");
+            plan(&ops, &rel, &to, verb(&rel, &to));
         }
     });
     let stem = split_ext(&current).0.chars().count() as i32;
     focus_name(&entry, Some(stem));
 }
 
-/// Move a note or folder to another directory of the same vault, keeping its name: a wikilink
-/// resolves by basename, so nothing that points at it has to be rewritten.
-pub fn move_to(ops: &Rc<Ops>, rel: &str) {
-    let root = ops.vault.root().to_path_buf();
-    let dialog = gtk::FileDialog::builder()
-        .title("Move To")
-        .initial_folder(&gio::File::for_path(&root))
-        .modal(true)
-        .build();
-
-    let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
-    dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
-        // The error case is almost always "the user closed the chooser", which needs no toast.
-        let Some(chosen) = result.ok().and_then(|f| f.path()) else {
-            return;
-        };
-        let Some(dir) = inside_vault(&root, &chosen) else {
-            return (ops.toast)("Choose a folder inside this vault.");
-        };
-        let to = moved_path(&rel, &dir);
-        if to != rel {
-            plan(&ops, &rel, &to, "Moved");
-        }
-    });
+/// Move a note or folder into another directory of the same vault, keeping its name, from a drag
+/// in the tree. A wikilink resolves by basename, so nothing pointing at it has to be rewritten —
+/// but a folder full of notes still can be, which is why this goes through [`plan`] like the rest.
+///
+/// Where the drop may land at all is [`move_dest`]'s decision, taken while the pointer is still
+/// moving so a row that cannot take what is over it never lights up. What is left to refuse here
+/// is a name the destination already holds.
+pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
+    // Asked before the move rather than read off its error, as `new_folder` does: the error names
+    // an absolute path, which is not what anyone dropped anything on.
+    if ops.vault.exists(to) {
+        return (ops.toast)(&format!("{} is already there", basename(to)));
+    }
+    plan(ops, from, to, "Moved");
 }
 
 /// Ask the vault what the move would touch, then either do it or confirm the link rewrites first.
 fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
     // `plan_rename` reads the backlinks out of the index, so during the first reconcile it finds
     // none — and an empty rewrite list is also what skips the confirmation dialog, so the rename
-    // would go through in silence and break every wikilink pointing at the note. Both Rename and
-    // Move to… land here, which is why the check sits at the top rather than in either of them.
+    // would go through in silence and break every wikilink pointing at the note. Rename and a
+    // dropped row both land here, which is why the check sits at the top rather than in either.
     if !(ops.reconciled)() {
         return (ops.toast)("Still indexing, try again in a moment");
     }
@@ -670,7 +664,7 @@ pub fn context_menu(
     }
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
-    let dir = create_dir(row);
+    let dir = row_dir(row);
     menu.append_item(&item("New Note", "new-note", dir));
     menu.append_item(&item("New Folder", "new-folder", dir));
     // Putting files in is only worth offering where they are not here already; a folder of a
@@ -684,8 +678,9 @@ pub fn context_menu(
     let Some((rel, is_dir)) = row else {
         return popup(host, &menu, anchor);
     };
+    // Rename is the move as well as the name: a path typed into it carries the file, which is
+    // what replaced Move to… when the tree learned to take a drop.
     menu.append_item(&item("Rename", "rename", rel));
-    menu.append_item(&item("Move to…", "move", rel));
     // Reading the path out and leaving the app are neither edits nor deletions, so they get a
     // section of their own between the two.
     let elsewhere = gio::Menu::new();
@@ -705,9 +700,11 @@ pub fn context_menu(
     popup(host, &menu, anchor);
 }
 
-/// Where New Note, New Folder and Upload put what they create: inside the folder that was
-/// clicked, beside the file that was clicked, and in the vault root when nothing was.
-fn create_dir(row: Option<(&str, bool)>) -> &str {
+/// The folder a row stands for: the folder itself, the one holding the file, and the vault root
+/// where there is no row at all — the blank area below the last one, or the root label above the
+/// first. It is where New Note, New Folder and Upload put what they create, and where a drop
+/// moves what was dragged, so the two ways of putting a file somewhere agree by construction.
+pub fn row_dir(row: Option<(&str, bool)>) -> &str {
     match row {
         Some((rel, true)) => rel,
         Some((rel, false)) => parent_dir(rel),
@@ -762,7 +759,6 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("new-note", Box::new(new_note));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));
-    add("move", Box::new(move_to));
     add("copy-rel", Box::new(copy_relative_path));
     add("copy-abs", Box::new(copy_absolute_path));
     add("show", Box::new(show_in_files));
@@ -840,22 +836,66 @@ fn child_path(dir: &str, name: &str) -> String {
     }
 }
 
-/// `rel` renamed to `name`, staying in the same directory.
-fn sibling_path(rel: &str, name: &str) -> String {
-    child_path(parent_dir(rel), name)
-}
-
 /// `rel` moved into `dest_dir`, keeping its name.
 fn moved_path(rel: &str, dest_dir: &str) -> String {
     child_path(dest_dir, basename(rel))
 }
 
-/// `chosen` as a vault-relative directory, or `None` when it is not inside the vault at all.
-/// Both ends are canonicalised first, or a symlinked or `..`-laden path would sneak past.
-fn inside_vault(root: &Path, chosen: &Path) -> Option<String> {
-    let (root, chosen) = (root.canonicalize().ok()?, chosen.canonicalize().ok()?);
-    let rel = chosen.strip_prefix(&root).ok()?;
-    Some(rel.to_string_lossy().into_owned())
+/// Where dropping `from` on a row of `dir` would put it, or `None` where there is no such move.
+///
+/// The three refusals are what a drag can ask for and a rename cannot: a folder onto itself, a
+/// folder into something under it (which would move it inside its own new self), and a drop back
+/// into the folder it is already in, which is a no-op and not worth a confirmation dialog. `dir`
+/// is "" for the vault root.
+pub fn move_dest(from: &str, dir: &str) -> Option<String> {
+    let inside_itself = dir == from || dir.starts_with(&format!("{from}/"));
+    if inside_itself || parent_dir(from) == dir {
+        return None;
+    }
+    Some(moved_path(from, dir))
+}
+
+/// Where a typed name puts the file, vault-relative: a plain name renames it in place, and one
+/// carrying `/` is a path relative to the folder it is in, `..` walking back up out of that
+/// folder. `Err` where the path would leave the vault or name something the tree hides.
+fn renamed_path(rel: &str, typed: &str, note: bool) -> Result<String, &'static str> {
+    // Empty segments and `.` mean nothing here, so `a//b` and `./a` are the paths they look like.
+    let typed: Vec<&str> = typed
+        .trim()
+        .split('/')
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    let Some((name, dirs)) = typed.split_last().filter(|(name, _)| **name != "..") else {
+        return Err("Enter a name.");
+    };
+    let mut parts: Vec<&str> = parent_dir(rel)
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    for dir in dirs {
+        match *dir {
+            ".." => {
+                parts.pop().ok_or("That path leaves this vault.")?;
+            }
+            dir if dir.starts_with('.') => return Err("Names cannot start with a dot."),
+            dir => parts.push(dir),
+        }
+    }
+    if name.starts_with('.') {
+        return Err("Names cannot start with a dot.");
+    }
+    let name = renamed_to(name, note);
+    parts.push(&name);
+    Ok(parts.join("/"))
+}
+
+/// What the toast calls it: a file that stayed in its folder was renamed, one that left it moved.
+fn verb(from: &str, to: &str) -> &'static str {
+    match parent_dir(from) == parent_dir(to) {
+        true => "Renamed",
+        false => "Moved",
+    }
 }
 
 /// Whether the file was already there, from an `anyhow` chain that has wrapped the `io::Error`.
@@ -949,15 +989,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// A unique empty directory under the system temp dir. `apps/gtk` has no `tempfile`
-    /// dev-dependency and one test does not earn one.
-    fn tempdir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("accent-fileops-{}-{tag}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
-    }
-
     #[test]
     fn sanitise_name_trims_and_accepts_a_normal_name() {
         assert_eq!(
@@ -1036,22 +1067,12 @@ mod tests {
     }
 
     #[test]
-    fn sibling_path_stays_in_the_same_directory() {
-        assert_eq!(sibling_path("a/b/c.md", "d.md"), "a/b/d.md");
-        assert_eq!(sibling_path("c.md", "d.md"), "d.md");
-        assert_eq!(sibling_path("a/b", "c"), "a/c");
-    }
-
-    #[test]
-    fn create_dir_answers_for_all_three_kinds_of_click() {
-        assert_eq!(create_dir(Some(("Notes/Daily", true))), "Notes/Daily");
-        assert_eq!(
-            create_dir(Some(("Notes/Daily/mon.md", false))),
-            "Notes/Daily"
-        );
-        // A file at the vault root, and the blank area below the last row: both the root.
-        assert_eq!(create_dir(Some(("todo.md", false))), "");
-        assert_eq!(create_dir(None), "");
+    fn row_dir_answers_for_all_three_kinds_of_row() {
+        assert_eq!(row_dir(Some(("Notes/Daily", true))), "Notes/Daily");
+        assert_eq!(row_dir(Some(("Notes/Daily/mon.md", false))), "Notes/Daily");
+        // A file at the vault root, and no row at all: both the root.
+        assert_eq!(row_dir(Some(("todo.md", false))), "");
+        assert_eq!(row_dir(None), "");
     }
 
     #[test]
@@ -1071,37 +1092,57 @@ mod tests {
     }
 
     #[test]
+    fn move_dest_refuses_the_three_moves_a_drop_can_ask_for() {
+        // Into a folder, and out to the vault root.
+        assert_eq!(move_dest("a/b.md", "x"), Some("x/b.md".into()));
+        assert_eq!(move_dest("a/deep/b.md", ""), Some("b.md".into()));
+        assert_eq!(move_dest("a/Notes", "x"), Some("x/Notes".into()));
+        // Onto itself, and into what is under it.
+        assert_eq!(move_dest("a/Notes", "a/Notes"), None);
+        assert_eq!(move_dest("a/Notes", "a/Notes/Daily"), None);
+        // Into the folder it is already in, which includes the root row over a root-level file.
+        assert_eq!(move_dest("a/b.md", "a"), None);
+        assert_eq!(move_dest("b.md", ""), None);
+        // A folder whose name merely starts the same way is a different folder.
+        assert_eq!(
+            move_dest("a/Notes", "a/Notestore"),
+            Some("a/Notestore/Notes".into())
+        );
+    }
+
+    #[test]
+    fn renamed_path_renames_in_place_and_moves_on_a_slash() {
+        let to = |typed| renamed_path("Notes/Daily/mon.md", typed, true);
+        assert_eq!(to("tue"), Ok("Notes/Daily/tue.md".into()));
+        assert_eq!(
+            to("Archive/tue.md"),
+            Ok("Notes/Daily/Archive/tue.md".into())
+        );
+        // `..` walks up, which is the only way the keyboard reaches the vault root.
+        assert_eq!(to("../tue.md"), Ok("Notes/tue.md".into()));
+        assert_eq!(to("../../tue.md"), Ok("tue.md".into()));
+        assert_eq!(to("../Archive/tue.md"), Ok("Notes/Archive/tue.md".into()));
+        // One `..` too many leaves the vault, and so does one from a file already at the root.
+        assert!(to("../../../tue.md").is_err());
+        assert!(renamed_path("mon.md", "../tue.md", true).is_err());
+        // The extension policy applies to the name, not to the folders on the way to it.
+        assert_eq!(
+            renamed_path("a/x.pdf", "b/y.pdf", false),
+            Ok("a/b/y.pdf".into())
+        );
+        // Nothing typed, nothing but separators, and a hidden name at either end.
+        assert!(to("").is_err());
+        assert!(to("  ").is_err());
+        assert!(to("..").is_err());
+        assert!(to(".hidden.md").is_err());
+        assert!(to(".config/tue.md").is_err());
+    }
+
+    #[test]
     fn moved_path_keeps_the_basename() {
         assert_eq!(moved_path("a/b/c.md", "x/y"), "x/y/c.md");
         assert_eq!(moved_path("a/b/c.md", ""), "c.md");
         assert_eq!(moved_path("c.md", "x"), "x/c.md");
-    }
-
-    #[test]
-    fn inside_vault_accepts_only_the_tree_below_the_root() {
-        let base = tempdir("inside");
-        let root = base.join("vault");
-        std::fs::create_dir_all(root.join("Notes/Daily")).expect("vault tree");
-        std::fs::create_dir_all(base.join("elsewhere")).expect("sibling");
-
-        assert_eq!(inside_vault(&root, &root), Some(String::new()));
-        assert_eq!(
-            inside_vault(&root, &root.join("Notes")),
-            Some("Notes".into())
-        );
-        assert_eq!(
-            inside_vault(&root, &root.join("Notes/Daily")),
-            Some("Notes/Daily".into())
-        );
-        assert_eq!(inside_vault(&root, &base.join("elsewhere")), None);
-        assert_eq!(inside_vault(&root, &base), None);
-        // A path that walks back out again is caught, which is the point of canonicalising.
-        assert_eq!(
-            inside_vault(&root, &root.join("Notes/../../elsewhere")),
-            None
-        );
-
-        std::fs::remove_dir_all(&base).expect("cleanup");
     }
 
     #[test]

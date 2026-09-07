@@ -4632,6 +4632,17 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             app,
             move |on| app.set_drop_active(on)
         ),
+        // A row dropped back into the tree moves the file. Where it may land at all is decided
+        // before the drop; what is left is the same plan-and-rewrite Rename goes through.
+        glib::clone!(
+            #[weak]
+            app,
+            move |from: &str, to: &str| {
+                if let Some(ops) = app.ops() {
+                    fileops::move_dropped(ops, from, to);
+                }
+            }
+        ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
