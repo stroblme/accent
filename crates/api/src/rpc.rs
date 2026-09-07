@@ -460,6 +460,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "tags" => any(vault.tags()),
         "files_with_tag" => any(vault.files_with_tag(&arg::<String>(p, 0)?)),
         "backlinks" => any(vault.backlinks(&arg::<String>(p, 0)?)),
+        "pdf_links" => any(vault.pdf_links(&arg::<String>(p, 0)?)),
         "note_paths" => any(vault.note_paths()),
         "file_paths" => any(vault.file_paths(arg(p, 0)?)),
         "set_excluded" => any(vault.set_excluded(&paths(0)?)),
