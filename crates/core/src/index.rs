@@ -17,7 +17,7 @@ use std::time::Instant;
 use crate::search::Regex;
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 /// Biggest non-markdown file whose text goes into the index.
 ///
 /// Deliberately far stricter than [`crate::fs::MAX_TEXT`] (16 MiB), which is the cap on what a
@@ -60,6 +60,9 @@ CREATE TABLE links(
     resolved_file INTEGER,
     kind          INTEGER NOT NULL,
     anchor        TEXT,
+    -- The link's `|alias`, kept for one reader: a PDF highlight re-anchors by the text it quotes
+    -- when the selection numbers no longer fit the document's lines.
+    alias         TEXT,
     byte_start    INTEGER NOT NULL,
     byte_end      INTEGER NOT NULL
 );
@@ -224,6 +227,20 @@ pub struct Backlink {
     pub src_rel_path: String,
     pub byte_start: i64,
     pub byte_end: i64,
+}
+
+/// A note link that points into a page of a PDF: what paints as a highlight over that page.
+///
+/// `page` is zero-based like [`crate::pdf::Selection`], `selection` the four numbers the link
+/// spells, and `alias` the text it quotes, which re-anchors the highlight when the numbers no
+/// longer fit the document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfLink {
+    pub src_rel_path: String,
+    pub byte_start: i64,
+    pub page: usize,
+    pub selection: [usize; 4],
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -887,14 +904,15 @@ fn upsert(
     if let Some(a) = analysis.as_ref() {
         for l in &a.links {
             tx.prepare_cached(
-                "INSERT INTO links(src_file, target, resolved_file, kind, anchor, byte_start, byte_end)
-                 VALUES(?1,?2,NULL,?3,?4,?5,?6)",
+                "INSERT INTO links(src_file, target, resolved_file, kind, anchor, alias, byte_start, byte_end)
+                 VALUES(?1,?2,NULL,?3,?4,?5,?6,?7)",
             )?
             .execute(params![
                 id,
                 l.target,
                 link_kind_i64(l.kind),
                 l.anchor,
+                l.alias,
                 l.range.start as i64,
                 l.range.end as i64,
             ])?;
@@ -1241,6 +1259,45 @@ impl Index {
             }
         }
         Ok(out)
+    }
+
+    /// Every link in the vault that points at a *page and selection* of this PDF.
+    ///
+    /// This is where a highlight lives: the note holds it, the index finds it, and the viewer
+    /// paints it. There is no annotations table, because the index is a disposable cache and a
+    /// table nothing could rebuild would be wiped by the next schema bump.
+    pub fn pdf_links(&self, rel_path: &str) -> Result<Vec<PdfLink>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT s.rel_path, l.byte_start, l.anchor, l.alias
+             FROM links l
+             JOIN files s ON s.id = l.src_file
+             JOIN files t ON t.id = l.resolved_file
+             WHERE t.rel_path = ?1 AND l.anchor LIKE 'page=%selection=%'
+             ORDER BY s.rel_path, l.byte_start",
+        )?;
+        // The `LIKE` narrows the rows; the anchor is parsed in Rust, where the one parser lives.
+        let rows = st.query_map([rel_path], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+            ))
+        })?;
+        Ok(rows
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|(src_rel_path, byte_start, anchor, alias)| {
+                let (page, selection) = crate::markdown::pdf_anchor(&anchor)?;
+                Some(PdfLink {
+                    src_rel_path,
+                    byte_start,
+                    page,
+                    selection: selection?,
+                    alias,
+                })
+            })
+            .collect())
     }
 
     pub fn backlinks(&self, rel_path: &str) -> Result<Vec<Backlink>> {
@@ -1907,6 +1964,30 @@ mod tests {
             "stale FTS row"
         );
         assert_eq!(ix.search("crabs", 10, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pdf_links_read_page_selection_and_alias() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("d.md"),
+            "see [[c.pdf#page=1&selection=0,0,0,5|Hello]] and [[c.pdf#page=2]] and [[Beta]]\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let links = ix.pdf_links("c.pdf").unwrap();
+        // Only the one with a selection: a link to a bare page is a jump, not a highlight.
+        assert_eq!(links.len(), 1, "{links:?}");
+        assert_eq!(links[0].src_rel_path, "d.md");
+        assert_eq!(links[0].byte_start, 4);
+        assert_eq!(links[0].page, 0, "one-based in the link, zero-based here");
+        assert_eq!(links[0].selection, [0, 0, 0, 5]);
+        assert_eq!(links[0].alias.as_deref(), Some("Hello"));
+
+        // A note is not a PDF, and nothing points into it that way.
+        assert!(ix.pdf_links("sub/Beta.md").unwrap().is_empty());
     }
 
     #[test]

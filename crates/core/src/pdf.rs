@@ -128,6 +128,16 @@ impl Rect {
         )
     }
 
+    /// The same rectangle with `by` points of room on every side.
+    fn grow(self, by: f32) -> Rect {
+        Rect {
+            left: self.left - by,
+            top: self.top - by,
+            right: self.right + by,
+            bottom: self.bottom + by,
+        }
+    }
+
     /// Smallest rectangle containing both.
     pub fn union(self, o: Rect) -> Rect {
         Rect {
@@ -158,6 +168,10 @@ impl Rect {
         ]
     }
 }
+
+/// One `/Ink` annotation as the eraser sees it: where it sits in the page's `/Annots`, and the
+/// points of the path it draws.
+pub type InkPath = (usize, Vec<(f32, f32)>);
 
 /// A rendered page. `data` is tightly packed RGBA8, `width * height * 4` bytes.
 pub struct RgbaImage {
@@ -475,83 +489,257 @@ impl PdfDoc {
         text.inside_rect(rect.to_pdf(page_height))
     }
 
-    /// Build an Obsidian-compatible link for a glyph range, plus the quads and text we keep for
-    /// re-anchoring.
-    ///
-    // ponytail: Obsidian's `selection=a,b,c,d` are PDF.js text-*item* indices with a character
-    // offset inside each item, and PDF.js segments a page differently from pdfium — there is no
-    // way to reproduce its numbering from here, so cross-engine fidelity is best-effort: a link we
-    // emit may land a few characters off when opened in Obsidian, and vice versa. That is why
-    // `SelectionLink` also carries `quads` and `text`: our own viewer re-anchors from those
-    // (quads first, text search as the fallback) and treats the numbers as a hint only.
-    pub fn selection_link(&self, rel_pdf_path: &str, sel: &Selection) -> Result<SelectionLink> {
+    /// Existing `/Highlight` annotations on one page.
+    pub fn highlights_on(&self, page: usize) -> Result<Vec<Highlight>> {
         let _guard = lock();
-        let glyphs = self.page_text_locked(sel.page)?;
-        let start = sel.start.min(glyphs.len());
-        let end = sel.end.clamp(start, glyphs.len());
-        let lines = line_groups(&glyphs);
-
-        let (a, b) = item_offset(&lines, start);
-        let (c, d) = item_offset(&lines, end.saturating_sub(1));
-
-        let quads = lines
-            .iter()
-            .filter_map(|line| {
-                let lo = line.start.max(start);
-                let hi = line.end.min(end);
-                (lo < hi).then(|| {
-                    glyphs[lo..hi]
-                        .iter()
-                        .map(|g| g.rect)
-                        .reduce(Rect::union)
-                        .unwrap_or(Rect::ZERO)
-                })
-            })
-            .collect();
-
-        Ok(SelectionLink {
-            // `d + 1`: PDF.js's end offset is exclusive.
-            link: format!(
-                "[[{rel_pdf_path}#page={}&selection={a},{b},{c},{}]]",
-                sel.page + 1,
-                d + 1
-            ),
-            quads,
-            text: glyphs[start..end].iter().map(|g| g.ch).collect(),
-        })
+        Ok(highlights_of(page, &self.page(page)?))
     }
 
     /// Existing `/Highlight` annotations across the whole document.
     pub fn highlights(&self) -> Result<Vec<Highlight>> {
         let _guard = lock();
-        let mut out = Vec::new();
-        for (page, p) in self.doc().pages().iter().enumerate() {
-            let page_height = p.height().value;
-            for a in p.annotations().iter() {
-                if a.annotation_type() != PdfPageAnnotationType::Highlight {
-                    continue;
+        Ok(self
+            .doc()
+            .pages()
+            .iter()
+            .enumerate()
+            .flat_map(|(page, p)| highlights_of(page, &p))
+            .collect())
+    }
+
+    /// Write `/Highlight` annotations into the in-memory document, and say how many were written.
+    ///
+    /// A highlight whose quads a highlight on that page already covers is skipped, so exporting
+    /// the same note links twice adds nothing and the painted overlay can step aside for the
+    /// annotation as soon as it is in the file.
+    ///
+    /// Nothing reaches the disk here: [`PdfDoc::save`] is the second half.
+    pub fn add_highlights(&mut self, highlights: &[Highlight]) -> Result<usize> {
+        let _guard = lock();
+        let mut added = 0;
+        for h in highlights {
+            let mut p = self.page(h.page)?;
+            // Manual: under the default every annotation added re-serialises the *page's* content
+            // stream, which we never touch. The annotation's own appearance stream is written by
+            // pdfium either way.
+            p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+            if highlights_of(h.page, &p)
+                .iter()
+                .any(|e| same_quads(&e.quads, &h.quads))
+            {
+                continue;
+            }
+            let height = p.height().value;
+            let bounds = h
+                .quads
+                .iter()
+                .copied()
+                .reduce(Rect::union)
+                .unwrap_or(Rect::ZERO);
+            let mut a = p
+                .annotations_mut()
+                .create_highlight_annotation()
+                .context("create highlight annotation")?;
+            // The colour first, and never `fill_color`/`stroke_color` as *getters*: both setters
+            // fall back to casting the annotation handle to a page-object handle once an
+            // appearance stream exists, which is the crash `annotation_color` documents. On a
+            // fresh annotation the safe branch is the one that runs.
+            a.set_stroke_color(PdfColor::new(
+                h.color[0], h.color[1], h.color[2], h.color[3],
+            ))
+            .context("highlight colour")?;
+            // Before the quads: pdfium copies `/Rect` into the appearance stream's bounding box.
+            a.set_bounds(bounds.to_pdf(height))
+                .context("highlight bounds")?;
+            for q in &h.quads {
+                let [tl, tr, bl, br] = q.quad_corners();
+                let y = |v: f32| height - v;
+                a.attachment_points_mut()
+                    .create_attachment_point_at_end(PdfQuadPoints::new_from_values(
+                        tl.0,
+                        y(tl.1),
+                        tr.0,
+                        y(tr.1),
+                        bl.0,
+                        y(bl.1),
+                        br.0,
+                        y(br.1),
+                    ))
+                    .context("highlight quad")?;
+            }
+            if let Some(text) = &h.contents {
+                a.set_contents(text).context("highlight contents")?;
+            }
+            a.set_is_printed(true).context("highlight print flag")?;
+            added += 1;
+        }
+        Ok(added)
+    }
+
+    /// Draw one free-hand stroke onto a page as an `/Ink` annotation.
+    ///
+    /// `points` are in this module's top-left-origin page points, `width` is the stroke width in
+    /// points, `rgb` its colour.
+    ///
+    // ponytail: the geometry ends up in the annotation's *appearance stream* rather than in an
+    // `/InkList` array, because `FPDFAnnot_AddInkStroke` is only reachable through the raw
+    // bindings and pdfium-render keeps the annotation handle private. Every viewer renders the
+    // appearance stream, so this draws correctly everywhere; what it costs is an editor that
+    // wants to reshape the stroke, which would need `/InkList`. Raw bindings are the upgrade.
+    pub fn add_ink(
+        &mut self,
+        page: usize,
+        points: &[(f32, f32)],
+        width: f32,
+        rgb: [u8; 3],
+    ) -> Result<()> {
+        let thinned = thin(points, 1.5);
+        let Some(&first) = thinned.first() else {
+            return Ok(());
+        };
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let height = p.height().value;
+        let y = |v: f32| PdfPoints::new(height - v);
+        let colour = PdfColor::new(rgb[0], rgb[1], rgb[2], 255);
+
+        let bounds = thinned
+            .iter()
+            .fold(
+                Rect {
+                    left: first.0,
+                    top: first.1,
+                    right: first.0,
+                    bottom: first.1,
+                },
+                |r, &(x, y)| {
+                    r.union(Rect {
+                        left: x,
+                        top: y,
+                        right: x,
+                        bottom: y,
+                    })
+                },
+            )
+            .grow(width / 2.0 + 1.0);
+
+        let mut path = PdfPagePathObject::new(
+            self.doc(),
+            PdfPoints::new(first.0),
+            y(first.1),
+            Some(colour),
+            Some(PdfPoints::new(width)),
+            None,
+        )
+        .context("ink path")?;
+        path.set_line_cap(PdfPageObjectLineCap::Round)
+            .context("ink line cap")?;
+        path.set_line_join(PdfPageObjectLineJoin::Round)
+            .context("ink line join")?;
+        match thinned.len() {
+            // A stroke that never moved: a zero-length segment, which the round cap draws as the
+            // dot the reader meant.
+            1 => path
+                .line_to(PdfPoints::new(first.0), y(first.1))
+                .context("ink dot")?,
+            _ => {
+                for [c1, c2, end] in catmull_rom(&thinned) {
+                    path.bezier_to(
+                        PdfPoints::new(end.0),
+                        y(end.1),
+                        PdfPoints::new(c1.0),
+                        y(c1.1),
+                        PdfPoints::new(c2.0),
+                        y(c2.1),
+                    )
+                    .context("ink segment")?;
                 }
-                let mut quads: Vec<Rect> = a
-                    .attachment_points()
-                    .iter()
-                    .map(|q| Rect::from_pdf(q.to_rect(), page_height))
-                    .collect();
-                // Not every producer writes /QuadPoints; /Rect is the coarse fallback.
-                if quads.is_empty()
-                    && let Ok(b) = a.bounds()
-                {
-                    quads.push(Rect::from_pdf(b, page_height));
-                }
-                let c = annotation_color(&a).unwrap_or(PdfColor::new(255, 255, 0, 255));
-                out.push(Highlight {
-                    page,
-                    quads,
-                    color: [c.red(), c.green(), c.blue(), c.alpha()],
-                    contents: a.contents(),
-                });
             }
         }
-        Ok(out)
+
+        let mut ink = p
+            .annotations_mut()
+            .create_ink_annotation()
+            .context("create ink annotation")?;
+        ink.set_stroke_color(colour).context("ink colour")?;
+        // Before the object: pdfium copies `/Rect` into the appearance stream's bounding box, and
+        // a box set afterwards would scale what was drawn into it.
+        ink.set_bounds(bounds.to_pdf(height))
+            .context("ink bounds")?;
+        ink.objects_mut()
+            .add_object(path.into())
+            .context("ink object")?;
+        ink.set_is_printed(true).context("ink print flag")?;
+        Ok(())
+    }
+
+    /// How many annotations of every kind a page carries.
+    pub fn annotation_count(&self, page: usize) -> Result<usize> {
+        let _guard = lock();
+        Ok(self.page(page)?.annotations().len())
+    }
+
+    /// Remove one annotation by its index in the page's `/Annots`.
+    pub fn delete_annotation(&mut self, page: usize, index: usize) -> Result<()> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        // Through `annotations_mut` rather than `annotations`: the annotation has to carry the
+        // document's lifetime for `delete_annotation` to take it, and the shared accessor hands
+        // back one borrowed from `p` instead.
+        let a = p
+            .annotations_mut()
+            .get(index as PdfPageAnnotationIndex)
+            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+        p.annotations_mut()
+            .delete_annotation(a)
+            .context("delete annotation")?;
+        Ok(())
+    }
+
+    /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
+    /// aim at. The index is the annotation's place in `/Annots`, which is what deletes it.
+    ///
+    // ponytail: the points are read straight out of the appearance path, so a stroke drawn by
+    // another editor whose appearance stream carries a `/Matrix` is hit-tested in form space and
+    // may not answer to the pointer. Ours never do; a transform-aware read is the upgrade.
+    pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
+        let _guard = lock();
+        let p = self.page(page)?;
+        let height = p.height().value;
+        Ok(p.annotations()
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.annotation_type() == PdfPageAnnotationType::Ink)
+            .map(|(i, a)| {
+                let points = a
+                    .objects()
+                    .iter()
+                    .filter_map(|o| {
+                        Some(
+                            o.as_path_object()?
+                                .segments()
+                                .iter()
+                                .map(|s| (s.x().value, height - s.y().value))
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .flatten()
+                    .collect();
+                (i, points)
+            })
+            .collect())
+    }
+
+    /// The document as it now stands, annotations included.
+    ///
+    // ponytail: `FPDF_SaveAsCopy` rewrites the whole file, so a 100 MB PDF is 100 MB of work
+    // under the global pdfium lock and loses whatever incremental history the file had. Saving
+    // incrementally (`FPDF_INCREMENTAL`) is the upgrade if that ever bites.
+    pub fn save(&self) -> Result<Vec<u8>> {
+        let _guard = lock();
+        self.doc().save_to_bytes().context("save pdf")
     }
 
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot
@@ -707,6 +895,37 @@ fn view_top(view: PdfDestinationViewSettings) -> Option<f32> {
 // objects — then `stroke_color()` still takes the crashing branch. Never seen in the wild, and
 // the real fix is upstream (or our own `FPDFAnnot_GetColor` call, which needs the raw
 // `FPDF_ANNOTATION` handle that pdfium-render keeps private).
+/// The `/Highlight` annotations of one loaded page. Shared by the whole-document read, the
+/// per-page one and the export's own "is this already here" check, so the three cannot drift.
+fn highlights_of(page: usize, p: &PdfPage<'_>) -> Vec<Highlight> {
+    let page_height = p.height().value;
+    let mut out = Vec::new();
+    for a in p.annotations().iter() {
+        if a.annotation_type() != PdfPageAnnotationType::Highlight {
+            continue;
+        }
+        let mut quads: Vec<Rect> = a
+            .attachment_points()
+            .iter()
+            .map(|q| Rect::from_pdf(q.to_rect(), page_height))
+            .collect();
+        // Not every producer writes /QuadPoints; /Rect is the coarse fallback.
+        if quads.is_empty()
+            && let Ok(b) = a.bounds()
+        {
+            quads.push(Rect::from_pdf(b, page_height));
+        }
+        let c = annotation_color(&a).unwrap_or(PdfColor::new(255, 255, 0, 255));
+        out.push(Highlight {
+            page,
+            quads,
+            color: [c.red(), c.green(), c.blue(), c.alpha()],
+            contents: a.contents(),
+        });
+    }
+    out
+}
+
 fn annotation_color(a: &PdfPageAnnotation<'_>) -> Option<PdfColor> {
     if a.objects().len() > 0 {
         return a.objects().iter().find_map(|o| o.fill_color().ok());
@@ -752,6 +971,183 @@ fn item_offset(lines: &[Range<usize>], idx: usize) -> (usize, usize) {
     match lines.last() {
         Some(line) => (lines.len() - 1, line.end - line.start),
         None => (0, 0),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Selections
+// ---------------------------------------------------------------------------------------------
+
+/// One rectangle per visual line the glyph range `start..end` touches.
+fn quads_between(glyphs: &[Glyph], lines: &[Range<usize>], start: usize, end: usize) -> Vec<Rect> {
+    lines
+        .iter()
+        .filter_map(|line| {
+            let lo = line.start.max(start);
+            let hi = line.end.min(end);
+            (lo < hi).then(|| {
+                glyphs[lo..hi]
+                    .iter()
+                    .map(|g| g.rect)
+                    .reduce(Rect::union)
+                    .unwrap_or(Rect::ZERO)
+            })
+        })
+        .collect()
+}
+
+/// Build an Obsidian-compatible link for a glyph range, plus the quads and text we keep for
+/// re-anchoring.
+///
+/// Takes the page's glyphs rather than reading them: the caller that has a selection on screen
+/// already holds them, and [`selection_quads`] has to walk the same lines to paint it again.
+///
+// ponytail: Obsidian's `selection=a,b,c,d` are PDF.js text-*item* indices with a character
+// offset inside each item, and PDF.js segments a page differently from pdfium — there is no
+// way to reproduce its numbering from here, so cross-engine fidelity is best-effort: a link we
+// emit may land a few characters off when opened in Obsidian, and vice versa. That is why
+// `SelectionLink` also carries `quads` and `text`: our own viewer re-anchors from those
+// (quads first, text search as the fallback) and treats the numbers as a hint only.
+pub fn selection_link(glyphs: &[Glyph], rel_pdf_path: &str, sel: &Selection) -> SelectionLink {
+    let start = sel.start.min(glyphs.len());
+    let end = sel.end.clamp(start, glyphs.len());
+    let lines = line_groups(glyphs);
+
+    let (a, b) = item_offset(&lines, start);
+    let (c, d) = item_offset(&lines, end.saturating_sub(1));
+
+    SelectionLink {
+        // `d + 1`: PDF.js's end offset is exclusive.
+        link: format!(
+            "[[{rel_pdf_path}#page={}&selection={a},{b},{c},{}]]",
+            sel.page + 1,
+            d + 1
+        ),
+        quads: quads_between(glyphs, &lines, start, end),
+        text: glyphs[start..end].iter().map(|g| g.ch).collect(),
+    }
+}
+
+/// The reverse of [`selection_link`]: what `a,b,c,d` covers on this page today.
+///
+/// `None` when the numbers do not fit the page's lines, which is what a link written against
+/// another engine's numbering, or against an edition of the document with different line breaks,
+/// looks like. The caller falls back to searching the text the link quotes.
+pub fn selection_quads(glyphs: &[Glyph], sel: [usize; 4]) -> Option<(Range<usize>, Vec<Rect>)> {
+    let [a, b, c, d] = sel;
+    let lines = line_groups(glyphs);
+    let (first, last) = (lines.get(a)?, lines.get(c)?);
+    let start = first.start + b;
+    let end = last.start + d;
+    if start > first.end || end > last.end || end <= start {
+        return None;
+    }
+    Some((start..end, quads_between(glyphs, &lines, start, end)))
+}
+
+/// Whether two quad lists cover the same place, to half a point.
+///
+/// What tells an exported highlight from the note link it came from, so a second export writes
+/// nothing and the painted overlay steps aside once the annotation is in the file.
+pub fn same_quads(a: &[Rect], b: &[Rect]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            let close = |p: f32, q: f32| (p - q).abs() < 0.5;
+            close(x.left, y.left)
+                && close(x.top, y.top)
+                && close(x.right, y.right)
+                && close(x.bottom, y.bottom)
+        })
+}
+
+/// A blank single-page A4 document, for a sketch a note wants to draw on.
+///
+/// Portrait, because a note reads top-down and that is the shape that embeds in its flow; Fit
+/// Width shows the whole page either way. Landscape would be a preference, not a default.
+pub fn blank_pdf() -> Result<Vec<u8>> {
+    let pdfium = pdfium()?;
+    let _guard = lock();
+    let mut doc = pdfium.create_new_pdf().context("create pdf")?;
+    doc.pages_mut()
+        .create_page_at_end(PdfPagePaperSize::a4())
+        .context("create page")?;
+    let bytes = doc.save_to_bytes().context("save new pdf")?;
+    // Closed here rather than at the end of the function, so it happens under the lock like
+    // every other document this module drops.
+    drop(doc);
+    Ok(bytes)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ink geometry
+// ---------------------------------------------------------------------------------------------
+//
+// Pure, and here rather than in the widget so Android draws the same curve through the same
+// three functions.
+
+/// Drop points closer than `min` to the last one kept.
+///
+/// A pointer reports on every motion event, so a slow stroke arrives as a cloud of near-identical
+/// points; thinning first is what keeps the curve below from wobbling between them.
+pub fn thin(points: &[(f32, f32)], min: f32) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    for &p in points {
+        let far = out
+            .last()
+            .is_none_or(|&(x, y)| (p.0 - x).hypot(p.1 - y) >= min);
+        if far {
+            out.push(p);
+        }
+    }
+    // A stroke that never moved is still a dot, not nothing.
+    if out.is_empty()
+        && let Some(&p) = points.first()
+    {
+        out.push(p);
+    }
+    out
+}
+
+/// A Catmull-Rom spline through `points` as cubic Béziers: `[control 1, control 2, end]` per
+/// segment, ready for `bezier_to`.
+///
+// ponytail: the ends repeat the first and last point rather than extrapolating a phantom one,
+// which is the standard clamped form and means a stroke starts and ends exactly where the pointer
+// did. Not Savitzky-Golay (what UNote uses): that wants a least-squares solve over a 31-sample
+// window, lags the pointer by half of it, and has to be re-run over the whole stroke on every
+// motion event. Catmull-Rom is local, closed-form, and its output is the argument `bezier_to`
+// already takes.
+pub fn catmull_rom(points: &[(f32, f32)]) -> Vec<[(f32, f32); 3]> {
+    let at = |i: isize| points[(i.max(0) as usize).min(points.len() - 1)];
+    (0..points.len().saturating_sub(1))
+        .map(|i| {
+            let i = i as isize;
+            let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+            [
+                (p1.0 + (p2.0 - p0.0) / 6.0, p1.1 + (p2.1 - p0.1) / 6.0),
+                (p2.0 - (p3.0 - p1.0) / 6.0, p2.1 - (p3.1 - p1.1) / 6.0),
+                p2,
+            ]
+        })
+        .collect()
+}
+
+/// Whether `at` lies within `radius` of the polyline through `points` — the eraser's hit test.
+pub fn hit(points: &[(f32, f32)], at: (f32, f32), radius: f32) -> bool {
+    let near = |a: (f32, f32), b: (f32, f32)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len2 = dx * dx + dy * dy;
+        // A degenerate segment is its own endpoint.
+        let t = match len2 > f32::EPSILON {
+            true => (((at.0 - a.0) * dx + (at.1 - a.1) * dy) / len2).clamp(0.0, 1.0),
+            false => 0.0,
+        };
+        (at.0 - (a.0 + t * dx)).hypot(at.1 - (a.1 + t * dy)) <= radius
+    };
+    match points {
+        [] => false,
+        [only] => near(*only, *only),
+        _ => points.windows(2).any(|w| near(w[0], w[1])),
     }
 }
 
@@ -898,7 +1294,8 @@ mod tests {
             start: 0,
             end: 40,
         };
-        let out = doc.selection_link("notes/paper.pdf", &sel).unwrap();
+        let glyphs = doc.page_text(0).unwrap();
+        let out = selection_link(&glyphs, "notes/paper.pdf", &sel);
         // Stand-in for ^\[\[.+\.pdf#page=\d+&selection=\d+,\d+,\d+,\d+\]\]$ without a regex dep.
         let body = out
             .link
@@ -918,6 +1315,164 @@ mod tests {
 
         assert!(out.text.starts_with("Hello"), "{:?}", out.text);
         assert!(!out.quads.is_empty());
+    }
+
+    /// Save the document into its own temporary directory and open the copy.
+    fn reopen(dir: &tempfile::TempDir, doc: &PdfDoc) -> PdfDoc {
+        let out = dir.path().join("out.pdf");
+        std::fs::write(&out, doc.save().unwrap()).unwrap();
+        PdfDoc::open(&out).unwrap()
+    }
+
+    #[test]
+    fn exported_highlights_read_back_after_a_reopen() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let hl = Highlight {
+            page: 0,
+            quads: vec![Rect {
+                left: 18.0,
+                top: 36.0,
+                right: 140.0,
+                bottom: 64.0,
+            }],
+            color: [255, 255, 0, 255],
+            contents: Some("check this".to_string()),
+        };
+        assert_eq!(doc.add_highlights(std::slice::from_ref(&hl)).unwrap(), 1);
+        // The same quads again are the export the reader asked for twice.
+        assert_eq!(doc.add_highlights(std::slice::from_ref(&hl)).unwrap(), 0);
+
+        let back = reopen(&dir, &doc);
+        let hls = back.highlights().unwrap();
+        assert_eq!(hls.len(), 1, "{hls:?}");
+        assert_eq!(hls[0].page, 0);
+        assert_eq!(hls[0].contents.as_deref(), Some("check this"));
+        assert_eq!(hls[0].color, [255, 255, 0, 255]);
+        assert!(same_quads(&hls[0].quads, &hl.quads), "{:?}", hls[0].quads);
+        // And it tints the page, the way the fixture's own highlight does.
+        let img = back.render_page(0, 1.0, Theme::Plain).unwrap();
+        let i = ((50 * img.width + 80) * 4) as usize;
+        let px = [img.data[i], img.data[i + 1], img.data[i + 2]];
+        assert!(
+            px[0] > 200 && px[1] > 200 && px[2] < 120,
+            "yellowish: {px:?}"
+        );
+
+        // A page-level read sees the same one, and the other page has none.
+        assert_eq!(back.highlights_on(0).unwrap().len(), 1);
+        assert!(back.highlights_on(1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ink_round_trips_through_save() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let before = doc.annotation_count(0).unwrap();
+        doc.add_ink(
+            0,
+            &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)],
+            4.0,
+            [255, 0, 0],
+        )
+        .unwrap();
+        assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
+
+        let strokes = doc.ink_paths(0).unwrap();
+        assert_eq!(strokes.len(), 1, "{strokes:?}");
+        let start = strokes[0].1[0];
+        assert!(
+            (start.0 - 20.0).abs() < 0.5 && (start.1 - 20.0).abs() < 0.5,
+            "{start:?}"
+        );
+
+        // It survives the file, which is the whole point of drawing into the PDF.
+        let back = reopen(&dir, &doc);
+        assert_eq!(back.annotation_count(0).unwrap(), before + 1);
+        assert_eq!(back.ink_paths(0).unwrap().len(), 1);
+        // And it is drawn: the stroke passes through the middle of the page in red.
+        let img = back.render_page(0, 1.0, Theme::Plain).unwrap();
+        let red = img
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[0] > 200 && px[1] < 100 && px[2] < 100);
+        assert!(red, "the stroke is drawn");
+
+        // Erasing takes the whole stroke and leaves what was there before.
+        let mut back = back;
+        back.delete_annotation(0, strokes[0].0).unwrap();
+        assert_eq!(back.annotation_count(0).unwrap(), before);
+        assert!(back.ink_paths(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn blank_pdf_is_one_a4_page() {
+        if !available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sketch.pdf");
+        std::fs::write(&path, blank_pdf().unwrap()).unwrap();
+        let doc = PdfDoc::open(&path).unwrap();
+        assert_eq!(doc.page_count(), 1);
+        let (w, h) = doc.page_size(0).unwrap();
+        assert!(
+            (w - 595.3).abs() < 1.0 && (h - 841.9).abs() < 1.0,
+            "{w}x{h}"
+        );
+    }
+
+    #[test]
+    fn thin_catmull_rom_and_hit() {
+        // Thinning keeps the ends and drops what sits inside the step.
+        let pts = [(0.0, 0.0), (0.5, 0.0), (3.0, 0.0)];
+        assert_eq!(thin(&pts, 1.0), vec![(0.0, 0.0), (3.0, 0.0)]);
+        // A stroke that never moved is a dot, not an empty path.
+        assert_eq!(thin(&[(1.0, 2.0), (1.0, 2.0)], 1.0), vec![(1.0, 2.0)]);
+        assert!(thin(&[], 1.0).is_empty());
+
+        // Three points on a line give two segments that stay on it and end where they should.
+        let segs = catmull_rom(&[(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)]);
+        assert_eq!(segs.len(), 2);
+        assert!(segs.iter().flatten().all(|p| p.1 == 0.0), "{segs:?}");
+        assert_eq!(segs[0][2], (10.0, 0.0));
+        assert_eq!(segs[1][2], (20.0, 0.0));
+        assert!(catmull_rom(&[(1.0, 1.0)]).is_empty());
+
+        let line = [(0.0, 0.0), (10.0, 0.0)];
+        assert!(hit(&line, (5.0, 3.0), 4.0));
+        assert!(!hit(&line, (5.0, 5.0), 4.0));
+        // Past the end of the segment, not just off its side.
+        assert!(!hit(&line, (20.0, 0.0), 4.0));
+        assert!(hit(&[(0.0, 0.0)], (2.0, 0.0), 4.0));
+    }
+
+    #[test]
+    fn selection_quads_round_trips_selection_link() {
+        let Some((_d, doc)) = open_tiny() else { return };
+        let glyphs = doc.page_text(0).unwrap();
+        let sel = Selection {
+            page: 0,
+            start: 0,
+            end: 12,
+        };
+        let out = selection_link(&glyphs, "paper.pdf", &sel);
+        let anchor = out.link.split_once('#').unwrap().1.trim_end_matches("]]");
+        let (page, nums) = crate::markdown::pdf_anchor(anchor).unwrap();
+        assert_eq!(page, 0);
+
+        let (range, quads) = selection_quads(&glyphs, nums.unwrap()).unwrap();
+        assert_eq!(range, 0..12);
+        assert!(same_quads(&quads, &out.quads), "{quads:?} {:?}", out.quads);
+
+        // Numbers past the page's lines are a link from another engine, not a panic.
+        assert!(selection_quads(&glyphs, [99, 0, 99, 3]).is_none());
+        assert!(selection_quads(&glyphs, [0, 0, 0, 0]).is_none());
     }
 
     #[test]

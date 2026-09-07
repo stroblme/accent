@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use accent_core::pdf::{PdfDoc, Rect, RgbaImage, Selection, Theme};
+use accent_core::pdf::{self, PdfDoc, Rect, RgbaImage, Selection, Theme};
 use anyhow::{Result, bail};
 
 const SCALE: f32 = 2.0;
@@ -113,7 +113,7 @@ fn main() -> Result<()> {
         start: 0,
         end: 40.min(glyphs.len()),
     };
-    let link = doc.selection_link(&rel, &sel)?;
+    let link = pdf::selection_link(&glyphs, &rel, &sel);
     println!("selection  : {:>7.1} ms", ms(t));
     println!("  link     : {}", link.link);
     println!("  text     : {:?}", link.text);
