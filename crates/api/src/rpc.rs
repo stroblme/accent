@@ -467,8 +467,6 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "resolve_link" => any(vault.resolve_link(&arg::<String>(p, 0)?)),
         "conflicts" => any(vault.conflicts()),
         "conflicts_of" => any(vault.conflicts_of(&arg::<String>(p, 0)?)),
-        "complete_notes" => any(vault.complete_notes(&arg::<String>(p, 0)?, arg(p, 1)?)),
-        "complete_tags" => any(vault.complete_tags(&arg::<String>(p, 0)?, arg(p, 1)?)),
         "rescan" => {
             vault.rescan();
             ok(())

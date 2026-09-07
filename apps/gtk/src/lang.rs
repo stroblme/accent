@@ -10,7 +10,7 @@
 //! of keystrokes costs one round trip rather than one per key.
 
 use crate::editor::{Flavour, Tab};
-use accent_api::{Kind, Support, Symbol, Vault};
+use accent_api::{Kind, Pos, Support, Symbol, Vault};
 use gtk::glib;
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -60,8 +60,6 @@ impl State {
     }
 
     /// What the provider can do; `None` while the document is still opening.
-    // The completion, hover and signature providers are the callers, and arrive with them.
-    #[allow(dead_code)]
     pub fn support(&self) -> Option<Support> {
         self.support.borrow().clone()
     }
@@ -77,6 +75,15 @@ impl State {
     #[allow(dead_code)]
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
+    }
+}
+
+/// Where an iter is, in the coordinates every request and answer uses: a zero-based line and a
+/// column counted in characters, which is exactly what `TextIter` reports.
+pub fn pos_of(iter: &gtk::TextIter) -> Pos {
+    Pos {
+        line: iter.line().max(0) as u32,
+        character: iter.line_offset().max(0) as u32,
     }
 }
 
@@ -104,6 +111,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     }
     *tab.lang.vault.borrow_mut() = Some(vault.clone());
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
+    crate::completion::install(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
@@ -226,8 +234,6 @@ async fn refresh(tab: Rc<Tab>) {
 /// (`data/icons/scalable/actions`) because Adwaita has no glyph for a function, an enum member or
 /// a type parameter. Kinds that mean the same thing to a reader share one drawing: a constructor
 /// is a method, a property is a field.
-// The completion list is the only caller and arrives with the rewrite of `completion.rs`.
-#[allow(dead_code)]
 pub fn icon_name(kind: Kind) -> &'static str {
     match kind {
         Kind::Text => "lsp-text-symbolic",

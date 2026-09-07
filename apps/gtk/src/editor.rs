@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, completion, diagnostics, fold, highlight, lang, multicaret, typing};
+use crate::{comment, diagnostics, fold, highlight, lang, multicaret, typing};
 use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::{Heading, Link};
@@ -258,8 +258,6 @@ pub struct Tab {
 ///
 /// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
 /// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
-/// `completions` are the note and tag lookups behind `[[wikilink]]` and `#tag` completion, and
-/// the only way this module ever reaches the vault; a code tab never calls them.
 pub fn open(
     root: &Path,
     key: &str,
@@ -267,10 +265,6 @@ pub fn open(
     flavour: Flavour,
     tabs: &adw::TabView,
     prefs: &Prefs,
-    completions: (
-        impl Fn(&str) -> Vec<String> + 'static,
-        impl Fn(&str) -> Vec<String> + 'static,
-    ),
 ) -> Rc<Tab> {
     let path = root.join(key);
     let (zoom, column_width) = (prefs.zoom, prefs.column_width);
@@ -352,11 +346,10 @@ pub fn open(
     // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
     // does nothing is one that makes the user select the line first.
     line_clipboard(&view);
-    // Both are markdown behaviour: wikilink and tag completion, and continuing a list or a fence
-    // on Return. In a Python file they would be wrong rather than merely unused.
+    // Markdown behaviour: continuing a list or a fence on Return, and closing a bracket as it is
+    // typed. In a Python file both would be wrong rather than merely unused. Completion is not
+    // here: every flavour has it now, and `lang::attach` installs it once there is a vault to ask.
     if flavour.is_note() {
-        let (notes, tags) = completions;
-        completion::install(&view, notes, tags);
         typing::install(&view);
     }
 
