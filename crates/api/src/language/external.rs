@@ -24,8 +24,8 @@ use accent_lsp::types::{
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
-    Completion, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range, Severity,
-    Signature, Support, Symbol, TextEdit,
+    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
+    Severity, Signature, Support, Symbol, TextEdit,
 };
 use crate::{Event, Local, locked};
 
@@ -209,17 +209,20 @@ fn completions_of(
     pos: Pos,
     enc: Encoding,
     resolvable: bool,
-) -> Vec<Completion> {
-    let mut items = match answer {
-        Some(CompletionResponse::List(list)) => list.items,
-        Some(CompletionResponse::Array(items)) => items,
-        None => return Vec::new(),
+) -> Completions {
+    let (mut items, incomplete) = match answer {
+        Some(CompletionResponse::List(list)) => (list.items, list.is_incomplete),
+        Some(CompletionResponse::Array(items)) => (items, false),
+        None => return Completions::default(),
     };
     items.sort_by_cached_key(sort_key);
-    items
-        .iter()
-        .filter_map(|raw| completion_of(raw, text, pos, enc, resolvable))
-        .collect()
+    Completions {
+        items: items
+            .iter()
+            .filter_map(|raw| completion_of(raw, text, pos, enc, resolvable))
+            .collect(),
+        incomplete,
+    }
 }
 
 fn marked(s: MarkedString) -> String {
@@ -582,11 +585,11 @@ impl Language for External {
         }
     }
 
-    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Vec<Completion>> {
+    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions> {
         let rel = rel.to_string();
         Box::pin(async move {
             let Some(completion) = self.caps.completion_provider.as_ref() else {
-                return Ok(Vec::new());
+                return Ok(Completions::default());
             };
             let (mut params, text) = self.at(&rel, pos)?;
             params["context"] = match trigger {
@@ -802,7 +805,9 @@ mod tests {
              "textEdit": {"newText": "foo", "insert": range(0, 8, 0, 10), "replace": range(0, 8, 0, 12)}},
             {"label": "fourth", "sortText": "c"},
         ]);
-        let out = completions_of(parse(items), text, pos, Encoding::Utf16, true);
+        let list = completions_of(parse(items), text, pos, Encoding::Utf16, true);
+        assert!(!list.incomplete, "an array is the whole answer");
+        let out = list.items;
 
         assert_eq!(
             out.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
@@ -823,6 +828,23 @@ mod tests {
     }
 
     #[test]
+    fn a_capped_list_says_so() {
+        let list = json!({"isIncomplete": true, "items": [{"label": "cite"}]});
+        let out = completions_of(
+            parse(list),
+            "\\ci",
+            Pos {
+                line: 0,
+                character: 3,
+            },
+            Encoding::Utf8,
+            false,
+        );
+        assert!(out.incomplete);
+        assert_eq!(out.items[0].label, "cite");
+    }
+
+    #[test]
     fn a_completion_range_is_converted_out_of_the_servers_units() {
         // `😀` is two UTF-16 units, so the server's column 5 is character 4.
         let text = "let 😀 = fo\n";
@@ -837,7 +859,7 @@ mod tests {
             },
             Encoding::Utf16,
             false,
-        );
+        ).items;
         assert_eq!(out[0].replace.start.character, 8);
         assert!(out[0].resolve.is_none(), "the server cannot resolve");
     }
@@ -1063,7 +1085,8 @@ mod tests {
             let items = vault
                 .completion("tool.py", after_dot, Some('.'))
                 .await
-                .unwrap();
+                .unwrap()
+                .items;
             assert!(
                 items.iter().any(|c| c.label == "path"),
                 "os. should offer os.path, got {} items",
@@ -1083,7 +1106,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\bibliography{refs}\n\\end{document}\n";
+        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\ci\n\\bibliography{refs}\n\\end{document}\n";
         std::fs::write(root.path().join("main.tex"), tex).unwrap();
         std::fs::write(
             root.path().join("refs.bib"),
@@ -1113,6 +1136,7 @@ mod tests {
                 )
                 .await
                 .unwrap()
+                .items
                 .into_iter()
                 .map(|c| c.label)
                 .collect();
@@ -1128,10 +1152,40 @@ mod tests {
                 )
                 .await
                 .unwrap()
+                .items
                 .into_iter()
                 .map(|c| c.label)
                 .collect();
             assert!(keys.iter().any(|k| k == "knuth84"), "citations: {keys:?}");
+            // A command: texlab caps its answer at 50 and says so, which is what makes the
+            // popup ask again as the name grows instead of narrowing a list that lacks `cite`.
+            let after_backslash = vault
+                .completion(
+                    "main.tex",
+                    Pos {
+                        line: 5,
+                        character: 1,
+                    },
+                    Some('\\'),
+                )
+                .await
+                .unwrap();
+            assert!(after_backslash.incomplete, "texlab caps the command list");
+            let commands = vault
+                .completion(
+                    "main.tex",
+                    Pos {
+                        line: 5,
+                        character: 3,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            assert!(
+                commands.items.iter().any(|c| c.label == "cite"),
+                "\\ci offers cite"
+            );
         });
         drop(vault);
     }
