@@ -28,6 +28,7 @@ mod panes;
 mod pdftab;
 mod pdfview;
 mod preview;
+mod ring;
 mod settings;
 mod sidebar;
 mod signature;
@@ -201,7 +202,9 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-copy", "Copy Selection", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
-    ("win.pdf-pen", "Pen", &["<Control><Shift>i"]),
+    ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),
+    ("win.pdf-pen", "Pen", &[]),
+    ("win.pdf-highlighter", "Highlighter", &[]),
     ("win.pdf-eraser", "Eraser", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     (
@@ -966,6 +969,15 @@ struct App {
     toolbar: adw::ToolbarView,
     header: adw::HeaderBar,
     modes: gtk::ToggleButton,
+    /// The header's Drawing toggle, shown only over a PDF.
+    drawing_button: gtk::ToggleButton,
+    /// Whether the ring of tools is out, which is the window's state and not the tab's.
+    drawing: Cell<bool>,
+    /// The tool the ring offers when it comes back.
+    tool: Cell<pdfview::Mode>,
+    /// Where this window last left the ring, once the reader has moved it. `None` until then,
+    /// which leaves each ring free to open in its own corner.
+    ring_at: Cell<Option<(f64, f64)>>,
     menu: gtk::MenuButton,
     paned: gtk::Paned,
     /// Swaps the pane tree for a placeholder while no note is open (DESIGN.md, States).
@@ -1631,7 +1643,29 @@ impl App {
         }
     }
 
-    /// Pick up a pen or put it down: the same action twice goes back to reading.
+    /// Show or hide the ring of drawing tools over the page.
+    ///
+    /// The window's state rather than the tab's: the button is in the header, and moving between
+    /// two PDFs with the tools out should not put them away.
+    fn set_drawing(self: &Rc<Self>, showing: bool) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if showing && !self.pdf_is_writable(&pdf) {
+            self.drawing_button.set_active(false);
+            return self.toast("Drawing needs a local vault");
+        }
+        self.drawing.set(showing);
+        self.drawing_button.set_active(showing);
+        // Putting the tools away puts the pen down with them; taking them out arms the last tool.
+        let tool = match showing {
+            true => self.tool.get(),
+            false => pdfview::Mode::Select,
+        };
+        pdf.set_drawing(showing, self.ring_at.get());
+        pdf.set_mode(tool);
+        self.sync_status();
+    }
+
+    /// Pick up one of the tools. The same one twice goes back to reading, the tools staying out.
     fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
         let Some(pdf) = self.active_pdf() else { return };
         if !self.pdf_is_writable(&pdf) {
@@ -1641,7 +1675,38 @@ impl App {
             true => pdfview::Mode::Select,
             false => mode,
         };
+        // Remembered even when it is put down, so the ring coming back offers the same tool.
+        if wanted != pdfview::Mode::Select {
+            self.tool.set(wanted);
+        }
+        // Reaching a tool from the palette with the ring away is what takes it out.
+        if wanted != pdfview::Mode::Select && !self.drawing.get() {
+            self.drawing.set(true);
+            self.drawing_button.set_active(true);
+            pdf.set_drawing(true, self.ring_at.get());
+        }
         pdf.set_mode(wanted);
+        self.sync_status();
+    }
+
+    /// Put the active PDF's tools where this window last had them, and take the position back
+    /// from whichever tab is losing them.
+    fn sync_drawing(&self) {
+        if let Some(pdf) = self.active_pdf() {
+            // Whatever this tab's ring was dragged to is where the next one starts.
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
+            pdf.set_drawing(self.drawing.get(), self.ring_at.get());
+            let showing = self.drawing.get();
+            pdf.set_mode(match showing {
+                true => self.tool.get(),
+                false => pdfview::Mode::Select,
+            });
+        }
+        // Only a PDF can be drawn on, so the button goes with the tab.
+        self.drawing_button.set_visible(self.active_pdf().is_some());
+        self.drawing_button.set_active(self.drawing.get());
     }
 
     /// Write the note links that highlight the open PDF into the file, as real annotations.
@@ -2112,6 +2177,8 @@ impl App {
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.find.retarget(self.active());
+        // The tools belong to the window, so they follow the tab in front.
+        self.sync_drawing();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
@@ -2554,6 +2621,9 @@ impl App {
         // the write still happens after the tab is gone.
         if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
             pdf.flush();
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
@@ -3410,7 +3480,9 @@ impl App {
                 }
             }
             "pdf-export-highlights" => self.export_highlights(),
+            "pdf-draw" => self.set_drawing(!self.drawing.get()),
             "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
+            "pdf-highlighter" => self.pdf_mode(pdfview::Mode::Highlighter),
             "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),
             "insert-sketch" => self.insert_sketch(),
             "pdf-fit-width" | "pdf-fit-page" => {
@@ -4689,9 +4761,20 @@ fn build_window(
         .sync_create()
         .build();
     let modes = mode_switcher();
+    // Split View keeps its action, its chord and its place in the primary menu; what it loses is
+    // the header button, whose place the drawing tools take. The widget stays because the window
+    // still reads and writes its pressed state.
+    let drawing = gtk::ToggleButton::builder()
+        .icon_name("document-edit-symbolic")
+        .tooltip_text(label_of("win.pdf-draw"))
+        .action_name("win.pdf-draw")
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    drawing.add_css_class("flat");
     let menu = menu_button();
     header.pack_end(&menu);
-    header.pack_end(&modes);
+    header.pack_end(&drawing);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -4789,6 +4872,10 @@ fn build_window(
         toolbar,
         header,
         modes: modes.clone(),
+        drawing_button: drawing.clone(),
+        drawing: Cell::new(false),
+        tool: Cell::new(pdfview::Mode::Pen),
+        ring_at: Cell::new(None),
         menu,
         paned,
         content: content.clone(),
@@ -6296,6 +6383,11 @@ fn install_chrome_css() {
                background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
+               box-shadow: 0 1px 4px var(--shade-color); }} \
+             .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
+               color: var(--accent-fg-color); }} \
+             .accent-ring-hub {{ opacity: 0.75; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

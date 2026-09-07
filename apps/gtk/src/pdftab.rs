@@ -9,6 +9,7 @@
 //! document is not a limitation we could lift by adding more.
 
 use crate::pdfview::{self, Anchor, PdfView, PdfZoom, Reply, Span, TileKey, Want};
+use crate::ring;
 use accent_api::PdfLink;
 use accent_core::pdf::{self, LinkTarget, PdfDoc};
 use adw::prelude::*;
@@ -58,12 +59,11 @@ enum Request {
         links: Vec<PdfLink>,
         color: [u8; 3],
     },
-    /// One free-hand stroke, in that page's own points.
+    /// One free-hand stroke, in that page's own points, drawn the way its tool draws.
     Ink {
         page: usize,
         points: Vec<(f32, f32)>,
-        width: f32,
-        rgb: [u8; 3],
+        style: pdf::InkStyle,
     },
     /// Take off whichever stroke passes within [`ERASE_RADIUS`] of this point.
     Erase {
@@ -157,6 +157,8 @@ pub struct PdfTab {
     /// hung off a widget with a `size_allocate` of its own never re-presents (DESIGN.md, States),
     /// and `PdfView` has one.
     host: gtk::Box,
+    /// The drawing tools, floating over the page while the window says they are wanted.
+    ring: Rc<ring::Ring>,
     /// The strip the thumbnails live in, built once. Handing the Outline pane a fresh
     /// `GtkScrolledWindow` around the same widget every time would re-parent a widget that
     /// already has a parent, which GTK refuses with a critical.
@@ -243,8 +245,13 @@ pub fn open(
     let status = adw::StatusPage::builder()
         .icon_name("x-office-document-symbolic")
         .build();
+    // The tools float over the page rather than sitting in the chrome, so the scroller goes in
+    // an overlay and the ring is its one child.
+    let ring = ring::Ring::new();
+    let overlay = gtk::Overlay::builder().child(&scroller).build();
+    overlay.add_overlay(ring.widget());
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    host.append(&scroller);
+    host.append(&overlay);
     let stack = gtk::Stack::new();
     stack.add_named(&host, Some("view"));
     stack.add_named(&status, Some("status"));
@@ -263,6 +270,7 @@ pub fn open(
         view: view.clone(),
         thumbs: thumbs.clone(),
         host,
+        ring: ring.clone(),
         thumb_strip: gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -560,6 +568,9 @@ impl PdfTab {
 
     /// Only the reading view: the thumbnail strip is a list of buttons, never a canvas.
     pub fn set_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        // The ring is told whatever the window decided, even when the mode did not change: it may
+        // be a freshly built one that has never been told anything.
+        self.ring.set_tool(mode);
         if self.view.mode() == mode {
             return;
         }
@@ -571,11 +582,22 @@ impl PdfTab {
         self.emit(&self.on_mode);
     }
 
+    /// Show or hide the ring of tools.
+    pub fn set_drawing(&self, showing: bool, at: Option<(f64, f64)>) {
+        self.ring.set_visible(showing, at);
+    }
+
+    /// Where the reader has dragged the ring, so the next tab to show one puts it there.
+    pub fn ring_at(&self) -> Option<(f64, f64)> {
+        self.ring.at()
+    }
+
     /// What the status bar says while a pen is out, or nothing while one is not.
     pub fn mode_label(&self) -> Option<&'static str> {
         match self.view.mode() {
             pdfview::Mode::Select => None,
             pdfview::Mode::Pen => Some("Pen"),
+            pdfview::Mode::Highlighter => Some("Highlighter"),
             pdfview::Mode::Eraser => Some("Eraser"),
         }
     }
@@ -878,11 +900,11 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |page, points| {
+                let style = tab.view.mode().ink(crate::theme::accent_rgb());
                 tab.ask(Request::Ink {
                     page,
                     points,
-                    width: pdfview::PEN_WIDTH,
-                    rgb: crate::theme::accent_rgb(),
+                    style,
                 });
             }
         ));
@@ -902,6 +924,11 @@ impl PdfTab {
             move |view, x, y| {
                 // The pointer only changes when the answer does: a GDK call per pixel of travel
                 // is what the editor's link hover deliberately avoids too.
+                // While a tool is out, the cursor says so and nothing here takes it back: the
+                // page is not text to be selected, and a link is not to be followed.
+                if view.mode() != pdfview::Mode::Select {
+                    return;
+                }
                 let over = tab.link_at(view, x, y).is_some();
                 let on_page = view.page_point(x, y).is_some();
                 view.set_cursor_from_name(Some(match (over, on_page) {
@@ -1083,7 +1110,8 @@ impl PdfTab {
     /// The page's own menu, on a secondary click over it.
     ///
     /// Copy and Copy Link to Selection when there is a selection, then Export Highlights, which
-    /// is about the document rather than about what is selected and so is always offered.
+    /// is about the document rather than about what is selected and so is always offered. The
+    /// drawing tools are not here: they are the ring, which the header's Drawing button opens.
     ///
     /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
     /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
@@ -1118,11 +1146,6 @@ impl PdfTab {
             Some("win.pdf-export-highlights"),
         );
         menu.append_section(None, &file);
-        let draw = gio::Menu::new();
-        for action in ["win.pdf-pen", "win.pdf-eraser"] {
-            draw.append(Some(crate::label_of(action)), Some(action));
-        }
-        menu.append_section(None, &draw);
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
         // Parented to the box rather than to the view, and pointed at the box's own coordinates:
         // a popover hung off a widget with a `size_allocate` of its own never re-presents and
@@ -1414,11 +1437,10 @@ impl PdfTab {
                 }
             }
             Reply::PageChanged(page) => {
-                self.view.forget_page(page);
-                self.thumbs.forget_page(page);
-                // The drawn stroke is in the document now, so the overlay can go as soon as the
-                // tile carrying it arrives.
-                self.view.settle_stroke(page);
+                // The reading view keeps painting what it has until the new render arrives; the
+                // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
+                self.view.refresh_page(page);
+                self.thumbs.queue_draw();
                 self.save_soon();
             }
             Reply::Saved(etag) => self.saved.set(Some(etag)),
@@ -1689,11 +1711,10 @@ fn render_loop(
                 Request::Ink {
                     page,
                     points,
-                    width,
-                    rgb,
+                    style,
                 } => {
                     let before = doc.annotation_count(page).unwrap_or(0);
-                    match doc.add_ink(page, &points, width, rgb) {
+                    match doc.add_ink(page, &points, style) {
                         Ok(()) => {
                             ink.note(page, before);
                             ink.added.push(page);
