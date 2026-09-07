@@ -1664,8 +1664,8 @@ impl App {
     /// Open a note with the caret on a byte offset, which is how a sidebar search result opens the
     /// exact match rather than the top of the note.
     ///
-    /// Every row that leads here — a search hit, a tag, a backlink, an outline heading — is a
-    /// single click in the sidebar, so the note opens as a preview.
+    /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
+    /// the note opens as a preview.
     ///
     /// ponytail: the offset is turned into a character offset by counting the text in front of it,
     /// because `GtkTextBuffer` addresses characters. Fine for a note; a real byte-to-iter map
@@ -4610,7 +4610,7 @@ fn build_window(
     Some(app)
 }
 
-/// Files / Search / Tags / Backlinks over the vault tree.
+/// Files / Search / Tags / References over the vault tree.
 /// The sidebar for a window with a vault: the tree, the index panes and the outline.
 fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
@@ -4771,7 +4771,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
 }
 
 /// A sidebar with the Outline pane alone, for a window opened on a file rather than a folder.
-/// There is no index behind it, so Files, Search, Tags and Backlinks have nothing to show; an
+/// There is no index behind it, so Files, Search, Tags and References have nothing to show; an
 /// outline does not need one, and a PDF's bookmarks are the reason such a window has a sidebar.
 fn build_outline_sidebar(app: &Rc<App>) {
     adopt_sidebar(app, None);
