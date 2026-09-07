@@ -140,6 +140,15 @@ pub struct Completion {
     pub resolve: Option<serde_json::Value>,
 }
 
+/// A completion answer. `incomplete` is the server saying it stopped at a cap: the list has to
+/// be asked for again as the word grows, because narrowing what it sent would miss items it
+/// left out.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct Completions {
+    pub items: Vec<Completion>,
+    pub incomplete: bool,
+}
+
 /// The signature the caret is inside a call of.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
@@ -261,7 +270,7 @@ pub(crate) trait Language: Send + Sync {
         Ok(())
     }
     fn close(&self, rel: &str);
-    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Vec<Completion>>;
+    fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions>;
     /// Fill in what the item was too expensive to send: `rel` says which document's text the
     /// edits it comes back with are measured against.
     fn resolve(&self, rel: &str, item: Completion) -> Fut<'_, Completion>;
@@ -433,7 +442,7 @@ impl Languages {
         rel: String,
         pos: Pos,
         trigger: Option<char>,
-    ) -> Task<Vec<Completion>> {
+    ) -> Task<Completions> {
         let provider = self.provider(&rel);
         Task::spawn(async move { provider?.completion(&rel, pos, trigger).await })
     }
@@ -606,7 +615,7 @@ impl Vault {
         }
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
         match &self.backend {
             Backend::Local(v) => v.completion(rel, pos, trigger),
             Backend::Remote(r) => remote_task(r.clone(), "completion", json!([rel, pos, trigger])),
@@ -696,7 +705,7 @@ impl Local {
         self.lang.close_document(rel.to_string())
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
         self.lang.completion(rel.to_string(), pos, trigger)
     }
 

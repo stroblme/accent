@@ -42,8 +42,8 @@ pub use accent_core::index::{
 pub use accent_core::search::{self, Options, Regex};
 pub use accent_core::walk::FileKind;
 pub use language::{
-    Completion, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity, Signature, Support,
-    Symbol, Task, TextEdit,
+    Completion, Completions, Diagnostic, Fold, Hover, Kind, Location, Pos, Range, Severity,
+    Signature, Support, Symbol, Task, TextEdit,
 };
 
 // ---------------------------------------------------------------- public data
@@ -2418,7 +2418,7 @@ mod tests {
                 .await
                 .unwrap();
             let at = |character| Pos { line: 0, character };
-            let items = f.vault.completion("a.md", at(8), None).await.unwrap();
+            let items = f.vault.completion("a.md", at(8), None).await.unwrap().items;
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].label, "Beta");
             assert_eq!(items[0].insert, "[[Beta]]");
@@ -2435,7 +2435,7 @@ mod tests {
                 .change_document("a.md", "a #ru".to_string())
                 .await
                 .unwrap();
-            let items = f.vault.completion("a.md", at(5), None).await.unwrap();
+            let items = f.vault.completion("a.md", at(5), None).await.unwrap().items;
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].insert, "#rust");
             assert_eq!(items[0].kind, Kind::Tag);
