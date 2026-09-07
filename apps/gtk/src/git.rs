@@ -124,6 +124,8 @@ struct State {
     statuses: Vec<Status>,
     /// The selected repository's history, as far as it has been paged in.
     commits: Vec<Commit>,
+    /// The selected repository's local branches, which is what the branch chooser lists.
+    branches: Vec<String>,
     submodules: Vec<Submodule>,
     /// Ignored paths across every repository, vault-relative, directories keeping their slash.
     ignored: HashSet<String>,
@@ -139,7 +141,8 @@ pub struct Panel {
     stack: gtk::Stack,
     names: gtk::StringList,
     chooser: gtk::DropDown,
-    branch: gtk::Label,
+    branch_names: gtk::StringList,
+    branch: gtk::DropDown,
     counts: gtk::Label,
     sync: gtk::Button,
     message: gtk::TextView,
@@ -157,8 +160,8 @@ pub struct Panel {
     busy: Cell<bool>,
     /// Something asked for a refresh while one was in flight; run once more when it lands.
     again: Cell<bool>,
-    /// Set while the repository list is being replaced, so the chooser's own notify does not read
-    /// the splice as the user picking a repository.
+    /// Set while a chooser's list is being filled, so the selection notify that follows is not
+    /// read as the user picking a repository or a branch.
     syncing: Cell<bool>,
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
     /// filled: this is the transfer the status bar spins for.
@@ -182,12 +185,23 @@ impl Panel {
             .list_factory(&name_factory(false))
             .build();
 
-        let branch = gtk::Label::builder()
-            .xalign(0.0)
+        // The branch is a chooser built exactly like the repository one above it, and for the
+        // same reasons: the button ellipsizes so that a long branch name is not what decides how
+        // narrow the sidebar can be dragged, while the popup keeps the names whole. Flat and
+        // `heading`, because it stands where the branch label stood and reads as the branch first
+        // and as a control second. It claims the row's spare width without taking it, so Sync and
+        // Commit stay at the trailing edge.
+        let branch_names = gtk::StringList::new(&[]);
+        let branch = gtk::DropDown::builder()
+            .model(&branch_names)
             .hexpand(true)
-            .ellipsize(pango::EllipsizeMode::End)
+            .halign(gtk::Align::Start)
+            .factory(&name_factory(true))
+            .list_factory(&name_factory(false))
             .build();
-        branch.add_css_class("heading");
+        for class in ["flat", "heading"] {
+            branch.add_css_class(class);
+        }
         let counts = gtk::Label::new(None);
         counts.add_css_class("dim-label");
         counts.add_css_class("numeric");
@@ -335,6 +349,7 @@ impl Panel {
             stack,
             names,
             chooser,
+            branch_names,
             branch,
             counts,
             sync,
@@ -409,6 +424,19 @@ impl Panel {
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
             panel.refresh();
+        });
+
+        let weak = Rc::downgrade(self);
+        self.branch.connect_selected_notify(move |chooser| {
+            let (Some(panel), Some(picked)) = (
+                weak.upgrade(),
+                chooser.selected_item().and_downcast::<gtk::StringObject>(),
+            ) else {
+                return;
+            };
+            if !panel.syncing.get() {
+                panel.checkout(picked.string().to_string());
+            }
         });
     }
 
@@ -598,20 +626,14 @@ impl Panel {
             rows.into_iter().map(glib::BoxedAnyObject::new).collect();
         self.changes.splice(0, self.changes.n_items(), &items);
 
-        match fetched
+        let head = fetched
             .statuses
             .get(selected)
-            .map(|s| branch_parts(&s.branch))
-        {
-            Some(Some((name, counts))) => {
-                self.branch.set_text(&name);
-                self.counts.set_text(&counts);
-            }
-            _ => {
-                self.branch.set_text("");
-                self.counts.set_text("");
-            }
-        }
+            .and_then(|s| branch_parts(&s.branch));
+        self.counts
+            .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
+        let (names, at) = branch_model(head.map(|(name, _)| name), &fetched.branches);
+        self.set_branches(&names, at);
         // Without an upstream every click answers "There is no tracking information", so the
         // button says so up front instead.
         let upstream = fetched
@@ -623,8 +645,15 @@ impl Panel {
             Some(name) => format!("Sync with {name}"),
             None => "This branch has no upstream to sync with".to_string(),
         }));
-        self.more.set_visible(fetched.commits.len() >= PAGE);
-        self.fill_log(fetched.commits.clone(), 0);
+        // Most refreshes read back the history that is already on screen — a save, a watcher
+        // event and a `.git` write each schedule one — and splicing then costs an expanded commit
+        // its file list and flashes every row, so only a real difference is drawn. A page that
+        // has not moved also leaves whatever Load More added below it alone.
+        let moved = !same_head(&self.state.borrow().commits, &fetched.commits);
+        if moved {
+            self.more.set_visible(fetched.commits.len() >= PAGE);
+            self.fill_log(fetched.commits.clone(), 0);
+        }
 
         {
             let mut state = self.state.borrow_mut();
@@ -633,12 +662,32 @@ impl Panel {
             state.ignored = ignored;
             state.repos = fetched.repos;
             state.statuses = fetched.statuses;
-            state.commits = fetched.commits;
+            if moved {
+                state.commits = fetched.commits;
+            }
+            state.branches = fetched.branches;
             state.submodules = fetched.submodules;
             state.selected = selected;
         }
         self.sync_commit();
         (self.hooks.changed)();
+    }
+
+    /// Put the branch chooser on `names` with `at` picked, without the selection notify that
+    /// follows being read as the user asking for a checkout.
+    fn set_branches(&self, names: &[String], at: Option<usize>) {
+        self.syncing.set(true);
+        let held: Vec<String> = (0..self.branch_names.n_items())
+            .filter_map(|i| self.branch_names.string(i).map(|s| s.to_string()))
+            .collect();
+        if held != names {
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            self.branch_names
+                .splice(0, self.branch_names.n_items(), &refs);
+        }
+        self.branch
+            .set_selected(at.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
+        self.syncing.set(false);
     }
 
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
@@ -804,7 +853,10 @@ impl Panel {
                 Ok(Err(e)) => panel.failed(verb, &format!("{e:#}")),
                 Err(_) => tracing::warn!("the git worker panicked"),
             }
-            panel.schedule_refresh();
+            // Straight away, not through the debounce: the user asked for this and is watching
+            // the row it moves. The debounce is there to fold a burst of watcher events into one
+            // query, and the `.git` write this just made will schedule one of those anyway.
+            panel.refresh();
         });
     }
 
@@ -857,6 +909,41 @@ impl Panel {
                 tracing::debug!("git sync: {transcript}");
                 "Synced".to_string()
             })
+        });
+    }
+
+    /// Switch the selected repository to a local branch.
+    ///
+    /// Whether that is safe is git's call: it refuses where a checkout would overwrite work that
+    /// is not committed, and its refusal is a toast rather than a dialog because nothing was lost
+    /// and there is nothing to decide. The refresh that follows puts the chooser back on whatever
+    /// HEAD actually is, so a refused switch does not leave it naming a branch we are not on.
+    fn checkout(self: &Rc<Self>, branch: String) {
+        // The row a detached HEAD adds to the list is a readout, not a branch to switch to.
+        let repo = {
+            let state = self.state.borrow();
+            match state.branches.contains(&branch) {
+                true => state.repos.get(state.selected).cloned(),
+                false => None,
+            }
+        };
+        let Some(repo) = repo else {
+            return;
+        };
+        let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let asked = branch.clone();
+            let done = gio::spawn_blocking(move || vault.git_checkout(&repo, &asked)).await;
+            match done {
+                Ok(Ok(())) => (panel.hooks.toast)(&format!("Switched to {branch}")),
+                Ok(Err(e)) => (panel.hooks.toast)(&format!(
+                    "Could not switch to {branch}: {}",
+                    reason(&format!("{e:#}"))
+                )),
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            panel.refresh();
         });
     }
 
@@ -1061,12 +1148,9 @@ impl Panel {
     }
 }
 
-/// What the rest of the window asks the pane, all of it answered from the last refresh.
-///
-/// Nothing calls these yet: the tree's dimmed rows, the status bar's branch and the editor's
-/// change marks are the work packages that follow, and this pane is the one place in the window
-/// that has already asked git.
-#[allow(dead_code)]
+/// What the rest of the window asks the pane, all of it answered from the last refresh: the
+/// tree's dimmed rows, the status bar's branch and the editor's change marks. This pane is the
+/// one place in the window that has already asked git.
 impl Panel {
     /// Everything git ignores, across every repository the vault touches: vault-relative, with a
     /// wholly ignored directory keeping its trailing slash as git reports it.
@@ -1186,6 +1270,7 @@ struct Fetched {
     repos: Vec<Repo>,
     statuses: Vec<Status>,
     commits: Vec<Commit>,
+    branches: Vec<String>,
     submodules: Vec<Submodule>,
 }
 
@@ -1203,20 +1288,22 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
             }
         })
         .collect();
-    let (commits, submodules) = match repos.get(clamp(selected, repos.len())) {
+    let (commits, branches, submodules) = match repos.get(clamp(selected, repos.len())) {
         Some(repo) => (
             vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
                 tracing::debug!("git log: {e}");
                 Vec::new()
             }),
+            vault.git_branches(repo).unwrap_or_default(),
             vault.git_submodules(repo).unwrap_or_default(),
         ),
-        None => (Vec::new(), Vec::new()),
+        None => (Vec::new(), Vec::new(), Vec::new()),
     };
     Fetched {
         repos,
         statuses,
         commits,
+        branches,
         submodules,
     }
 }
@@ -1854,6 +1941,47 @@ fn vault_key(vault_root: &Path, repo: &Repo, repo_rel: &str) -> String {
     }
 }
 
+/// Whether a freshly-read first page says the history has not moved: the same commits, whole and
+/// in the same order, at the head of what the pane already holds. Whole commits and not their ids
+/// alone, so that a branch moving onto a commit — a decoration, and nothing else — still redraws.
+///
+/// A page that is longer than what is held is a first refresh or a shorter history; either way it
+/// has to be drawn. A page that is shorter is what a Load More leaves behind, and its own rows
+/// stay where they are.
+fn same_head(held: &[Commit], page: &[Commit]) -> bool {
+    held.len() >= page.len() && held[..page.len()] == *page
+}
+
+/// The branch chooser's rows and which of them HEAD is on: the local branches, led by whatever
+/// HEAD is on when that is not one of them — a detached HEAD, or a branch with no commit yet, so
+/// that the chooser always says where the repository actually is. `None` is a repository git told
+/// us nothing about, which shows an empty chooser as it used to show an empty label.
+fn branch_model(head: Option<String>, branches: &[String]) -> (Vec<String>, Option<usize>) {
+    let Some(head) = head else {
+        return (Vec::new(), None);
+    };
+    match branches.iter().position(|b| *b == head) {
+        Some(at) => (branches.to_vec(), Some(at)),
+        None => (
+            std::iter::once(head)
+                .chain(branches.iter().cloned())
+                .collect(),
+            Some(0),
+        ),
+    }
+}
+
+/// The one line of a git refusal that fits in a toast: git's own first line, without the prefix
+/// it puts on it and without the colon that introduces the file list underneath.
+fn reason(message: &str) -> &str {
+    message
+        .lines()
+        .next()
+        .unwrap_or(message)
+        .trim_start_matches("error: ")
+        .trim_end_matches(':')
+}
+
 /// The branch name and its ahead/behind counts, the two labels of the branch row. `None` when git
 /// told us nothing at all, which is what a failed `status` leaves behind.
 fn branch_parts(b: &Branch) -> Option<(String, String)> {
@@ -2068,6 +2196,76 @@ mod tests {
             })
         ));
         assert!(matches!(rows.last(), Some(Row::Submodule(_))));
+    }
+
+    fn commit_at(id: &str) -> Commit {
+        Commit {
+            id: id.to_string(),
+            parents: Vec::new(),
+            refs: Vec::new(),
+            author: "a".to_string(),
+            time: 0,
+            summary: "s".to_string(),
+        }
+    }
+
+    #[test]
+    fn same_head_skips_the_splice_only_where_the_page_really_is_unchanged() {
+        let page: Vec<Commit> = ["c", "b", "a"].iter().map(|id| commit_at(id)).collect();
+        assert!(same_head(&page, &page), "the ordinary refresh");
+        assert!(same_head(&[], &[]));
+
+        let mut loaded = page.clone();
+        loaded.push(commit_at("older"));
+        assert!(same_head(&loaded, &page), "a Load More survives a refresh");
+
+        let mut newer = vec![commit_at("d")];
+        newer.extend(page.clone());
+        assert!(!same_head(&page, &newer), "a new commit");
+        assert!(!same_head(&page, &page[1..]), "a commit taken away");
+        assert!(
+            !same_head(&[], &page),
+            "the first refresh has nothing to keep"
+        );
+
+        let mut decorated = page.clone();
+        decorated[0].refs = vec!["main".to_string()];
+        assert!(!same_head(&page, &decorated), "a branch moved onto it");
+    }
+
+    #[test]
+    fn branch_model_always_shows_what_head_is_actually_on() {
+        let locals = ["main".to_string(), "side".to_string()];
+        assert_eq!(
+            branch_model(Some("side".into()), &locals),
+            (locals.to_vec(), Some(1))
+        );
+        assert_eq!(
+            branch_model(Some("HEAD".into()), &locals),
+            (
+                ["HEAD", "main", "side"].map(str::to_string).to_vec(),
+                Some(0)
+            ),
+            "a detached HEAD leads the list it is not in"
+        );
+        assert_eq!(
+            branch_model(Some("main".into()), &[]),
+            (vec!["main".to_string()], Some(0)),
+            "a repository with no commits has a head and no branches"
+        );
+        assert_eq!(branch_model(None, &locals), (Vec::new(), None));
+    }
+
+    #[test]
+    fn reason_is_gits_own_first_line() {
+        assert_eq!(
+            reason("error: Your local changes would be overwritten:\n\tnote.md\nAborting"),
+            "Your local changes would be overwritten"
+        );
+        assert_eq!(
+            reason("fatal: invalid reference"),
+            "fatal: invalid reference"
+        );
     }
 
     #[test]
