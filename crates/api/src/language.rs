@@ -11,9 +11,6 @@
 //! dropped: a completion the user has typed past is cancelled at the server rather than answered
 //! into the void.
 
-// ponytail: the providers that use this land in the next commits.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -23,9 +20,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use anyhow::Result;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-use crate::Event;
+use crate::remote::Remote;
+use crate::{Backend, Event, Local, LspConfig, Vault, locked, remote_err};
+
+pub(crate) mod notes;
+
+use notes::Notes;
 
 /// A line and a column, both zero-based; the column counts characters from the line start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -294,6 +298,332 @@ impl Languages {
             sessions: Mutex::new(HashMap::new()),
             docs: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The session under `key`, started with `start` if it is not there yet. Concurrent openers
+    /// of the same server await one start, and a start that failed is not remembered, so the
+    /// next document to open tries again.
+    pub(crate) async fn session(
+        self: &Arc<Self>,
+        key: (String, PathBuf),
+        start: impl Future<Output = Result<Arc<dyn Language>>>,
+    ) -> Result<Arc<dyn Language>> {
+        let cell = {
+            let mut sessions = locked(&self.sessions);
+            // A server that has exited answers nothing; the next open gets a fresh one.
+            if sessions
+                .get(&key)
+                .and_then(|cell| cell.get())
+                .is_some_and(|p| p.is_dead())
+            {
+                sessions.remove(&key);
+            }
+            sessions.entry(key).or_default().clone()
+        };
+        cell.get_or_try_init(|| start).await.cloned()
+    }
+
+    /// Who answers for an open document.
+    pub(crate) fn provider(&self, rel: &str) -> Result<Arc<dyn Language>> {
+        locked(&self.docs)
+            .get(rel)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
+    }
+
+    /// Stop every provider and forget every document.
+    ///
+    /// Blocks on the runtime, so it must never be called from a runtime worker thread; its one
+    /// caller is `Local::drop`, which runs on the thread that closed the window.
+    pub(crate) fn shutdown(&self) {
+        let sessions: Vec<Session> = locked(&self.sessions)
+            .drain()
+            .map(|(_, cell)| cell)
+            .collect();
+        locked(&self.docs).clear();
+        let stopping: Vec<_> = sessions
+            .iter()
+            .filter_map(|cell| cell.get().cloned())
+            .map(|p| accent_lsp::runtime().spawn(async move { p.shutdown().await }))
+            .collect();
+        accent_lsp::runtime().block_on(async {
+            for handle in stopping {
+                let _ = handle.await;
+            }
+        });
+    }
+
+    pub(crate) fn open_document(
+        self: &Arc<Self>,
+        rel: String,
+        language: String,
+        text: String,
+        cfg: &LspConfig,
+    ) -> Task<Support> {
+        let me = self.clone();
+        match server(cfg, &language) {
+            Some(Server::Notes) => {
+                // One notes provider per vault, whatever the note: they share the index.
+                let key = ("accent".to_string(), me.root.clone());
+                let (root, db, events) = (me.root.clone(), me.db.clone(), me.events.clone());
+                Task::spawn(async move {
+                    let start =
+                        async move { Ok(Arc::new(Notes::open_at(root, &db, events)?) as _) };
+                    let provider = me.session(key, start).await?;
+                    let support = provider.open(&rel, "markdown", text)?;
+                    locked(&me.docs).insert(rel, provider);
+                    Ok(support)
+                })
+            }
+            // ponytail: the external provider starts here in the next commit; until then the UI
+            // is told the server is missing, which is what it already says for an unknown language.
+            Some(Server::External { language_id, argv }) => {
+                tracing::debug!("no language server yet for {language_id}");
+                Task::ready(Ok(Support {
+                    missing: argv.first().cloned(),
+                    ..Support::default()
+                }))
+            }
+            None => Task::ready(Ok(Support::default())),
+        }
+    }
+
+    pub(crate) fn change_document(&self, rel: String, text: String) -> Task<()> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.change(&rel, text) })
+    }
+
+    pub(crate) fn close_document(&self, rel: String) -> Task<()> {
+        let provider = locked(&self.docs).remove(&rel);
+        Task::spawn(async move {
+            if let Some(provider) = provider {
+                provider.close(&rel);
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn completion(
+        &self,
+        rel: String,
+        pos: Pos,
+        trigger: Option<char>,
+    ) -> Task<Vec<Completion>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.completion(&rel, pos, trigger).await })
+    }
+
+    pub(crate) fn resolve_completion(&self, rel: String, item: Completion) -> Task<Completion> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.resolve(item).await })
+    }
+
+    pub(crate) fn signature_help(&self, rel: String, pos: Pos) -> Task<Option<Signature>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.signature_help(&rel, pos).await })
+    }
+
+    pub(crate) fn hover(&self, rel: String, pos: Pos) -> Task<Option<Hover>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.hover(&rel, pos).await })
+    }
+
+    pub(crate) fn definition(&self, rel: String, pos: Pos) -> Task<Vec<Location>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.definition(&rel, pos).await })
+    }
+
+    pub(crate) fn symbols(&self, rel: String) -> Task<Vec<Symbol>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.symbols(&rel).await })
+    }
+
+    pub(crate) fn references(&self, rel: String, pos: Pos) -> Task<Vec<Location>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.references(&rel, pos).await })
+    }
+
+    pub(crate) fn folds(&self, rel: String) -> Task<Vec<Fold>> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.folds(&rel).await })
+    }
+}
+
+/// What answers for a language.
+pub(crate) enum Server {
+    /// The index, for a note.
+    Notes,
+    /// A language server to run, named by the command line that starts it.
+    External {
+        language_id: String,
+        argv: Vec<String>,
+    },
+}
+
+/// Which provider a GtkSourceView language id gets. A configured command line wins over
+/// everything, which is how a vault picks `pylsp` over the built-in choice.
+///
+// ponytail: the built-in table of language servers (rust-analyzer, clangd, …) arrives with the
+// external provider; until then only a configured command line names one.
+pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
+    if let Some(argv) = cfg.servers.get(language).filter(|argv| !argv.is_empty()) {
+        return Some(Server::External {
+            language_id: language.to_string(),
+            argv: argv.clone(),
+        });
+    }
+    (language == "markdown").then_some(Server::Notes)
+}
+
+// ------------------------------------------------------------------ the façade
+
+/// What a text tab asks about the document it holds. Every one of these is a [`Task`]: the UI
+/// awaits it on its own loop and drops it when the answer stops mattering.
+///
+/// A remote vault asks the host, where the files and the language servers are; the call itself
+/// blocks, so it runs on a blocking thread of the runtime rather than being cancelled.
+impl Vault {
+    /// Start answering for `rel`, and say what the provider can do. Nothing else here works
+    /// before this has finished.
+    pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
+        match &self.backend {
+            Backend::Local(v) => v.open_document(rel, language_id, text),
+            Backend::Remote(r) => {
+                remote_task(r.clone(), "open_document", json!([rel, language_id, text]))
+            }
+        }
+    }
+
+    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
+        match &self.backend {
+            Backend::Local(v) => v.change_document(rel, text),
+            Backend::Remote(r) => remote_task(r.clone(), "change_document", json!([rel, text])),
+        }
+    }
+
+    pub fn close_document(&self, rel: &str) -> Task<()> {
+        match &self.backend {
+            Backend::Local(v) => v.close_document(rel),
+            Backend::Remote(r) => remote_task(r.clone(), "close_document", json!([rel])),
+        }
+    }
+
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+        match &self.backend {
+            Backend::Local(v) => v.completion(rel, pos, trigger),
+            Backend::Remote(r) => remote_task(r.clone(), "completion", json!([rel, pos, trigger])),
+        }
+    }
+
+    pub fn resolve_completion(&self, rel: &str, item: Completion) -> Task<Completion> {
+        match &self.backend {
+            Backend::Local(v) => v.resolve_completion(rel, item),
+            Backend::Remote(r) => remote_task(r.clone(), "resolve_completion", json!([rel, item])),
+        }
+    }
+
+    pub fn signature_help(&self, rel: &str, pos: Pos) -> Task<Option<Signature>> {
+        match &self.backend {
+            Backend::Local(v) => v.signature_help(rel, pos),
+            Backend::Remote(r) => remote_task(r.clone(), "signature_help", json!([rel, pos])),
+        }
+    }
+
+    pub fn hover(&self, rel: &str, pos: Pos) -> Task<Option<Hover>> {
+        match &self.backend {
+            Backend::Local(v) => v.hover(rel, pos),
+            Backend::Remote(r) => remote_task(r.clone(), "hover", json!([rel, pos])),
+        }
+    }
+
+    pub fn definition(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
+        match &self.backend {
+            Backend::Local(v) => v.definition(rel, pos),
+            Backend::Remote(r) => remote_task(r.clone(), "definition", json!([rel, pos])),
+        }
+    }
+
+    pub fn symbols(&self, rel: &str) -> Task<Vec<Symbol>> {
+        match &self.backend {
+            Backend::Local(v) => v.symbols(rel),
+            Backend::Remote(r) => remote_task(r.clone(), "symbols", json!([rel])),
+        }
+    }
+
+    pub fn references(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
+        match &self.backend {
+            Backend::Local(v) => v.references(rel, pos),
+            Backend::Remote(r) => remote_task(r.clone(), "references", json!([rel, pos])),
+        }
+    }
+
+    pub fn folds(&self, rel: &str) -> Task<Vec<Fold>> {
+        match &self.backend {
+            Backend::Local(v) => v.folds(rel),
+            Backend::Remote(r) => remote_task(r.clone(), "folds", json!([rel])),
+        }
+    }
+}
+
+/// One remote request as a task. The round trip cannot be cancelled the way a server request
+/// can, so dropping the task only stops the answer from being waited for.
+fn remote_task<T: DeserializeOwned + Send + 'static>(
+    r: Arc<Remote>,
+    method: &'static str,
+    params: Value,
+) -> Task<T> {
+    Task::blocking(move || r.call(method, params).map_err(remote_err))
+}
+
+/// The same requests where the vault is, which is also where `serve` answers them from.
+impl Local {
+    pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
+        self.lang.open_document(
+            rel.to_string(),
+            language_id.to_string(),
+            text,
+            &self.config().lsp,
+        )
+    }
+
+    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
+        self.lang.change_document(rel.to_string(), text)
+    }
+
+    pub fn close_document(&self, rel: &str) -> Task<()> {
+        self.lang.close_document(rel.to_string())
+    }
+
+    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Vec<Completion>> {
+        self.lang.completion(rel.to_string(), pos, trigger)
+    }
+
+    pub fn resolve_completion(&self, rel: &str, item: Completion) -> Task<Completion> {
+        self.lang.resolve_completion(rel.to_string(), item)
+    }
+
+    pub fn signature_help(&self, rel: &str, pos: Pos) -> Task<Option<Signature>> {
+        self.lang.signature_help(rel.to_string(), pos)
+    }
+
+    pub fn hover(&self, rel: &str, pos: Pos) -> Task<Option<Hover>> {
+        self.lang.hover(rel.to_string(), pos)
+    }
+
+    pub fn definition(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
+        self.lang.definition(rel.to_string(), pos)
+    }
+
+    pub fn symbols(&self, rel: &str) -> Task<Vec<Symbol>> {
+        self.lang.symbols(rel.to_string())
+    }
+
+    pub fn references(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
+        self.lang.references(rel.to_string(), pos)
+    }
+
+    pub fn folds(&self, rel: &str) -> Task<Vec<Fold>> {
+        self.lang.folds(rel.to_string())
     }
 }
 
