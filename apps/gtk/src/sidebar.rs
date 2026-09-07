@@ -26,6 +26,10 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
 const PULSE: Duration = Duration::from_millis(80);
+/// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
+/// Nothing else in the window starts a search, so a query the user did not ask for — the requery
+/// a changed file triggers under a finished search — is over inside this and never draws one.
+const SHOW_AFTER: u32 = 2;
 /// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
 /// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
 /// reads as "paste a link here" rather than "what links here", and it is the only icon of the four
@@ -48,8 +52,8 @@ const PORTS_ICON: &str = "network-wired-symbolic";
 /// How far each heading level is indented in the Outline pane, on the 6/12/18 spacing scale.
 const OUTLINE_INDENT: i32 = 12;
 
-/// Open a note, at a byte offset inside it when the row that was activated names one.
-type OnOpen = Rc<dyn Fn(&str, Option<usize>)>;
+/// Open a note, over the byte range of the match when the row that was activated names one.
+type OnOpen = Rc<dyn Fn(&str, Option<Range<usize>>)>;
 
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
@@ -136,17 +140,15 @@ struct VaultPanes {
 
 impl Sidebar {
     /// `files` is the existing vault tree widget, dropped into the Files pane unchanged.
-    /// `on_open` is called with a vault-relative path when the user activates a result, a tagged
-    /// file or a reference, plus the byte offset of the match when the row is one.
-    /// `on_reference` is called with a References row, which carries a line number of its own.
     /// `vault` carries the tree widget and the index closures behind Files, Search, Tags and
     /// References; `None` builds a sidebar with only the Outline pane, which is what a window
     /// opened on a single file has to show. `on_open` is called with a vault-relative path when
-    /// the user activates a result, a tagged file or a reference, plus the byte offset of the
-    /// match when the row is one.
+    /// the user activates a result, a tagged file or a reference, plus the byte range the match
+    /// covers when the row is one.
+    /// `on_reference` is called with a References row, which carries a line number of its own.
     pub fn new(
         vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
-        on_open: impl Fn(&str, Option<usize>) + 'static,
+        on_open: impl Fn(&str, Option<Range<usize>>) + 'static,
         on_reference: impl Fn(&str) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
@@ -416,6 +418,11 @@ impl Sidebar {
 
 // --- pure helpers, the only part of this module the tests can reach ------------------------------
 
+/// Whether the search progress bar is drawn after `pulses` steps of a query still running.
+fn shows_bar(pulses: u32) -> bool {
+    pulses >= SHOW_AFTER
+}
+
 /// FTS5 wraps matched terms in `«` and `»` (see `Index::search`). Escape first, so a note holding a
 /// literal `<` or `&` cannot corrupt the markup, and only then turn the markers into bold. A note
 /// can contain those guillemets itself, so nesting is counted rather than substituted blindly and
@@ -525,8 +532,9 @@ fn accent_markup_colour() -> String {
 /// nothing and the factory does not have to know which kind produced it.
 struct Row {
     rel_path: String,
-    /// Where in the note the match is, for a grep row; `None` opens the note at the top.
-    offset: Option<usize>,
+    /// The match's byte range in the note, for a grep row; `None` opens the note at the top. A
+    /// ranked hit has no range: it is the note that matched, not one place in it.
+    at: Option<Range<usize>>,
     title: String,
     snippet: String,
 }
@@ -558,6 +566,9 @@ fn path_list(model: &gtk::StringList, on_activate: impl Fn(&str) + 'static) -> g
         Some(factory),
     );
     view.add_css_class("navigation-sidebar");
+    // Backlinks and the files under a tag are result lists too, and open on one click like the
+    // rest of them.
+    view.set_single_click_activate(true);
     view.connect_activate(move |view, pos| {
         if let Some(s) = view
             .model()
@@ -670,12 +681,14 @@ impl Search {
             .then(|| self.replace_entry.text().to_string())
     }
 
-    /// Show or hide the progress bar, and run its pulse timer only while it is showing.
+    /// Run the pulse timer while a query is on a worker thread, and show the bar once that query
+    /// has run long enough to be worth reporting.
     ///
     /// Opacity rather than visibility: the bar keeps its height either way, so results do not jump
-    /// down a few pixels the moment a query starts.
+    /// down a few pixels the moment a query starts. And it is shown late rather than at once,
+    /// because a bar that appears and goes in the same breath reads as a flash, not as progress.
     fn set_busy(&self, busy: bool) {
-        self.progress.set_opacity(if busy { 1.0 } else { 0.0 });
+        self.progress.set_opacity(0.0);
         if let Some(id) = self.pulse.take() {
             id.remove();
         }
@@ -683,6 +696,7 @@ impl Search {
             return;
         }
         let (bar, slot) = (self.progress.clone(), self.pulse.clone());
+        let mut pulses = 0;
         self.pulse.set(Some(glib::timeout_add_local(PULSE, move || {
             // `Search` is kept alive by the handlers it connected to its own widgets, so `Drop`
             // is not guaranteed to run. An unrooted bar means the window closed under a query;
@@ -691,7 +705,11 @@ impl Search {
                 slot.set(None);
                 return glib::ControlFlow::Break;
             }
-            bar.pulse();
+            pulses += 1;
+            if shows_bar(pulses) {
+                bar.set_opacity(1.0);
+                bar.pulse();
+            }
             glib::ControlFlow::Continue
         })));
     }
@@ -766,7 +784,7 @@ impl Search {
                         title: row_title(&hit).to_string(),
                         snippet: snippet_markup(&hit.snippet),
                         rel_path: hit.rel_path,
-                        offset: None,
+                        at: None,
                     })
                     .collect()
             }
@@ -869,6 +887,7 @@ fn grep_rows(
     hits.into_iter()
         .map(|m| {
             let matched = &m.line_text[m.range.clone()];
+            let at = m.offset..m.offset + m.range.len();
             let replaced = replacement.map(|r| match literal {
                 true => re.replace(matched, search::NoExpand(r)).into_owned(),
                 false => re.replace(matched, r).into_owned(),
@@ -883,8 +902,8 @@ fn grep_rows(
                     m.line
                 ),
                 snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
+                at: Some(at),
                 rel_path: m.rel_path,
-                offset: Some(m.offset),
             }
         })
         .collect()
@@ -958,6 +977,10 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         Some(factory),
     );
     view.add_css_class("navigation-sidebar");
+    // One click opens, the rule `tree.rs` and the Git pane already follow: a result is a place to
+    // go, and the tab it opens is this pane's preview, so walking the list replaces one tab
+    // rather than leaving twenty behind.
+    view.set_single_click_activate(true);
     view.connect_activate({
         let on_open = on_open.clone();
         move |view, pos| {
@@ -967,7 +990,7 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
                 .and_downcast::<glib::BoxedAnyObject>()
             {
                 let row = boxed.borrow::<Row>();
-                on_open(&row.rel_path, row.offset);
+                on_open(&row.rel_path, row.at.clone());
             }
         }
     });
@@ -1650,6 +1673,16 @@ mod tests {
             title: title.map(str::to_string),
             snippet: String::new(),
         }
+    }
+
+    #[test]
+    fn a_query_shorter_than_the_grace_period_never_draws_a_bar() {
+        assert!(!shows_bar(0), "the bar is not up when the query starts");
+        assert!(!shows_bar(SHOW_AFTER - 1));
+        assert!(shows_bar(SHOW_AFTER));
+        // A requery nobody asked for costs a few milliseconds on a warm index; the wait has to be
+        // long enough to cover one and short enough that a real query still reports itself.
+        assert!((100..=300).contains(&(PULSE * SHOW_AFTER).as_millis()));
     }
 
     #[test]
