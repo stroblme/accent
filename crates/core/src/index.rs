@@ -34,6 +34,10 @@ const BATCH: usize = 500;
 /// single line megabytes long (an embedded data URI), and a sidebar row must not carry all of it.
 const CLIP_BEFORE: usize = 40;
 const CLIP_AFTER: usize = 200;
+/// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
+/// shared by every file the query reaches — and by the three passes the sidebar makes over them —
+/// so without this one file can be the whole answer.
+const PER_FILE: usize = 5;
 
 const SCHEMA: &str = r#"
 CREATE TABLE files(
@@ -186,6 +190,11 @@ pub struct SearchHit {
     pub rel_path: String,
     pub title: Option<String>,
     pub snippet: String,
+    /// Byte range of the phrase in the note, so activating the row can place the caret the way a
+    /// [`Match`] does. `None` when the body does not hold it — a hit on the title alone, or one
+    /// the tokenizer found across a stretch this cannot fold back together — and the note then
+    /// opens at the top.
+    pub at: Option<Range<usize>>,
 }
 
 /// One hit of [`Index::grep`], which lists a row per match rather than a row per note.
@@ -201,6 +210,9 @@ pub struct Match {
     pub range: Range<usize>,
     /// Byte offset of the match in the note, so activating the row can place the caret on it.
     pub offset: usize,
+    /// Matches in this file the cap left out, on its last listed row and 0 on every other, so the
+    /// list can say "+N more in this file" instead of quietly dropping them.
+    pub more: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +312,21 @@ impl Index {
                     ctx.get_raw(0).as_str()?,
                     ctx.get_raw(1).as_str()?,
                 ))
+            },
+        )?;
+        // Where that window's phrase sits in the note, so a hit opens on the match rather than at
+        // the top; `NULL` when the body does not hold it. A second pass over the body, deliberate:
+        // it is the same linear fold-compare the window costs, and the alternative is handing
+        // whole note bodies back to Rust to search them there.
+        conn.create_scalar_function(
+            "phrase_start",
+            2,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| {
+                let (body, needle) = (ctx.get_raw(0).as_str()?, ctx.get_raw(1).as_str()?);
+                Ok(folded_find(body, needle).map(|(at, _)| at as i64))
             },
         )?;
 
@@ -1062,6 +1089,12 @@ impl Index {
     /// file that decoded as text under [`MAX_INDEXED_BODY`]. Directories, PDFs, conflict copies
     /// and binaries have no `notes` row and so can never be a hit.
     ///
+    /// The query is **one phrase**, not a bag of words ([`fts_query`]): "Toggle Split View" finds
+    /// the notes that say those three words in that order, and the one that mentions each of them
+    /// somewhere is not a hit at all. That is what the sidebar's Word toggle already meant, and
+    /// what the user expects of a query typed as a sentence. Each hit carries the phrase's byte
+    /// range in the body, so the row opens the note on the match.
+    ///
     /// Git-ignored files are left out unless `include_ignored` — but never a note, whatever
     /// ignores it. The exclusion sits **inside** the ranking subquery, ahead of its `LIMIT`:
     /// filtering the capped rows afterwards would answer "No Results" on a vault where the build
@@ -1101,7 +1134,8 @@ impl Index {
             return Ok(Vec::new());
         }
         let mut st = self.conn.prepare_cached(
-            "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4)
+            "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4),
+                    phrase_start(notes_fts.body, ?4)
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
              WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
                  SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
@@ -1110,29 +1144,35 @@ impl Index {
                   LIMIT ?3)
              ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
         )?;
-        let terms = terms(query);
-        // The most specific term makes the most useful window, and it goes in folded because
-        // that is how `snippet_window` reads the body it looks through.
-        let window = terms
-            .iter()
-            .max_by_key(|t| t.len())
-            .cloned()
-            .unwrap_or_default();
+        // What the query matched is one phrase, so that is what the window is cut around and what
+        // the snippet marks. It goes in folded, and with its whitespace squeezed, because that is
+        // how `snippet_window` reads the body it looks through.
+        let phrase = fold(&terms(query).join(" "));
         let rows = st.query_map(
             params![
                 q,
                 query.trim(),
                 limit as i64,
-                fold(window),
+                &phrase,
                 include_ignored,
                 FileKind::Markdown.as_i64(),
             ],
             |r| {
-                let body: String = r.get(2)?;
+                let window: String = r.get(2)?;
+                let start: Option<i64> = r.get(3)?;
                 Ok(SearchHit {
                     rel_path: r.get(0)?,
                     title: r.get(1)?,
-                    snippet: mark_terms(&body, &terms),
+                    // The window holds the same first occurrence `phrase_start` found — it starts
+                    // [`SNIPPET_LEAD`] characters ahead of it — so the phrase's length is measured
+                    // over those few hundred characters rather than over the note a second time.
+                    // Folding can make it differ from the needle's, which is why it is measured.
+                    at: start.map(|s| {
+                        let s = s as usize;
+                        let len = folded_find(&window, &phrase).map_or(phrase.len(), |(_, n)| n);
+                        s..s + len
+                    }),
+                    snippet: mark_phrase(&window, &phrase),
                 })
             },
         )?;
@@ -1197,7 +1237,11 @@ impl Index {
     /// came from.
     ///
     /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
-    /// it, so a truncated list can still say how much a Replace All would touch.
+    /// it, so a truncated list can still say how much a Replace All would touch. On top of it
+    /// [`PER_FILE`] caps what one body may contribute, and the rest are counted into
+    /// [`Match::more`] on its last listed row: a generated file with a hundred matches used to
+    /// fill the whole list and hide every other file, and with `All` on it took the room the
+    /// unindexed trees were about to ask for.
     pub fn matches_in(
         rel: &str,
         title: Option<&str>,
@@ -1210,11 +1254,16 @@ impl Index {
         // `find_iter` walks forward, so the line number follows it instead of being counted
         // from the start of the note for every hit.
         let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
+        let (first, mut listed) = (out.len(), 0usize);
         for m in re.find_iter(body) {
             *total += 1;
-            if out.len() >= limit {
+            if out.len() >= limit || listed >= PER_FILE {
+                if let Some(last) = out[first..].last_mut() {
+                    last.more += 1;
+                }
                 continue;
             }
+            listed += 1;
             while cursor < m.start() {
                 if body.as_bytes()[cursor] == b'\n' {
                     line += 1;
@@ -1238,6 +1287,7 @@ impl Index {
                 line_text,
                 range,
                 offset: m.start(),
+                more: 0,
             });
         }
     }
@@ -1416,7 +1466,8 @@ fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
     (text, at(range.start)..at(range.end))
 }
 
-/// The query's words: the units [`fts_query`] turns into FTS terms, and the ones a snippet marks.
+/// The query's words: the tokens [`fts_query`] runs into one phrase, and — joined by a single
+/// space — the needle the snippet is cut and marked around.
 fn terms(query: &str) -> Vec<&str> {
     query.split_whitespace().collect()
 }
@@ -1455,19 +1506,39 @@ fn fold(s: &str) -> String {
 /// How many bytes of `hay` the folded `needle` matches at its start, or `None` if it does not.
 /// `needle` is folded already; folding `hay` lazily is what keeps the byte offsets those of the
 /// original text, which a fold that shortens `café` to `cafe` would otherwise lose.
+///
+/// A space in `needle` matches any run of whitespace, so a phrase still marks where the note wrote
+/// it across two lines — which is how FTS5 matched it in the first place, tokens being adjacent
+/// whatever separates them.
 fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
-    let mut want = needle.chars();
+    let mut hay = hay.chars().peekable();
     let mut used = 0;
-    for c in hay.chars() {
-        let Some(w) = want.next() else {
-            return Some(used);
-        };
+    for w in needle.chars() {
+        if w == ' ' {
+            let before = used;
+            while hay.peek().is_some_and(|c| c.is_whitespace()) {
+                used += hay.next().expect("peeked").len_utf8();
+            }
+            if used == before {
+                return None;
+            }
+            continue;
+        }
+        let c = hay.next()?;
         if fold_char(c) != w {
             return None;
         }
         used += c.len_utf8();
     }
-    want.next().is_none().then_some(used)
+    Some(used)
+}
+
+/// Where the folded `needle` first occurs in `hay`, as the byte offset it starts at and the bytes
+/// it covers there. The length is `hay`'s rather than the needle's: folding and a run of
+/// whitespace both let the two differ.
+fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
+    hay.char_indices()
+        .find_map(|(i, _)| folded_prefix(&hay[i..], needle).map(|n| (i, n)))
 }
 
 /// The stretch of `body` a hit should quote: [`SNIPPET_LEAD`] characters ahead of the first
@@ -1478,10 +1549,11 @@ fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
 /// through `cafe` ~ `café` used to fall back to quoting its first 240 characters — which is the
 /// other half of why nothing in it was ever marked.
 fn snippet_window(body: &str, needle: &str) -> String {
-    let hit = body
-        .char_indices()
-        .position(|(i, _)| folded_prefix(&body[i..], needle).is_some())
-        .unwrap_or(0);
+    // Characters, not bytes: the window is cut by character position on both ends.
+    let hit = match folded_find(body, needle) {
+        Some((at, _)) => body[..at].chars().count(),
+        None => 0,
+    };
     let start = hit.saturating_sub(SNIPPET_LEAD);
     let mut rest = body.chars().skip(start);
     let mut out = String::new();
@@ -1495,19 +1567,18 @@ fn snippet_window(body: &str, needle: &str) -> String {
     out
 }
 
-/// Wrap every occurrence of a query term in the guillemets the UI turns into bold, the way FTS5's
-/// own `snippet()` did. The input is the window [`snippet_window`] already cut, so this is a pass
-/// over a row of text rather than over a note, and it folds the same way that cut did.
-fn mark_terms(window: &str, terms: &[&str]) -> String {
-    let needles: Vec<String> = terms
-        .iter()
-        .filter(|t| !t.is_empty())
-        .map(|t| fold(t))
-        .collect();
-    let mut out = String::with_capacity(window.len() + 8 * needles.len());
+/// Wrap every occurrence of the query phrase in the guillemets the UI turns into bold, the way
+/// FTS5's own `snippet()` did. The input is the window [`snippet_window`] already cut, so this is
+/// a pass over a row of text rather than over a note, and it folds the same way that cut did.
+///
+/// The phrase is marked as one run: the query matched those words in that order, and marking them
+/// separately would highlight text the query did not find.
+fn mark_phrase(window: &str, phrase: &str) -> String {
+    let mut out = String::with_capacity(window.len() + 8);
     let mut rest = window;
     while !rest.is_empty() {
-        match needles.iter().find_map(|n| folded_prefix(rest, n)) {
+        // A zero-length match — an empty query — would mark nothing and never advance.
+        match folded_prefix(rest, phrase).filter(|n| *n > 0) {
             Some(n) => {
                 out.push('«');
                 out.push_str(&rest[..n]);
@@ -1524,24 +1595,20 @@ fn mark_terms(window: &str, terms: &[&str]) -> String {
     out
 }
 
-/// Turn a user query into safe FTS5 syntax: every token quoted, the last one a prefix match.
+/// Turn a user query into safe FTS5 syntax: one quoted phrase, its last token a prefix match.
+///
+/// `toggle split vie` becomes `"toggle split vie"*`, which matches the notes whose text runs those
+/// tokens in that order — not the notes that hold each of them somewhere, which is what a term per
+/// word (an implicit `AND`) used to find. The prefix keeps a query answering while it is typed.
+///
 /// ponytail: no operator support (`AND`, `NEAR`, `-`). Quoting everything means a stray `"` or
 /// `*` can never produce a syntax error; expose raw FTS later behind an explicit flag if wanted.
 fn fts_query(q: &str) -> String {
-    let toks: Vec<&str> = q.split_whitespace().collect();
-    let last = toks.len().saturating_sub(1);
-    toks.iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let esc = t.replace('"', "\"\"");
-            if i == last {
-                format!("\"{esc}\"*")
-            } else {
-                format!("\"{esc}\"")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let toks = terms(q);
+    if toks.is_empty() {
+        return String::new();
+    }
+    format!("\"{}\"*", toks.join(" ").replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -1721,22 +1788,66 @@ mod tests {
     }
 
     #[test]
-    fn a_snippet_marks_every_query_term_it_can_see() {
-        let words = terms("Ferris the crab");
+    fn a_snippet_marks_the_phrase_and_not_its_words_apart() {
+        let phrase = fold("Ferris the crab");
         assert_eq!(
-            mark_terms("A FERRIS and a crab, plus THE rest", &words),
-            "A «FERRIS» and a «crab», plus «THE» rest"
+            mark_phrase("a FERRIS THE CRAB here", &phrase),
+            "a «FERRIS THE CRAB» here"
         );
-        // A term the window does not hold is simply not marked, and an empty query marks nothing.
-        assert_eq!(mark_terms("nothing here", &words), "nothing here");
-        assert_eq!(mark_terms("äöü ferris", &words[..1]), "äöü «ferris»");
-        assert_eq!(mark_terms("as is", &terms("")), "as is");
+        // The words on their own are not what the query matched, so they are not marked.
+        assert_eq!(
+            mark_phrase("a crab, and Ferris too", &phrase),
+            "a crab, and Ferris too"
+        );
+        // A phrase the note wrapped across two lines is one match, the way FTS5 read it.
+        assert_eq!(
+            mark_phrase("a ferris\nthe  crab here", &phrase),
+            "a «ferris\nthe  crab» here"
+        );
+        assert_eq!(mark_phrase("as is", &fold("")), "as is");
         // The index folds diacritics to find the note, so the marking folds them to show why.
         assert_eq!(
-            mark_terms("un café au coin", &terms("cafe")),
-            "un «café» au coin"
+            mark_phrase("un café au coin", &fold("cafe au")),
+            "un «café au» coin"
         );
-        assert_eq!(mark_terms("ÄHNLICH", &terms("ahnlich")), "«ÄHNLICH»");
+        assert_eq!(mark_phrase("ÄHNLICH", &fold("ahnlich")), "«ÄHNLICH»");
+    }
+
+    /// The `!BUG` the phrase query exists for: "Toggle Split View" used to be three terms joined
+    /// by an implicit `AND`, so every note holding all three words anywhere was a hit and the note
+    /// that says the sentence was not first.
+    #[test]
+    fn a_ranked_query_matches_the_whole_phrase() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("shortcuts.md"),
+            "# Shortcuts\nUse Toggle Split View to open a second pane.\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("scattered.md"),
+            "# Notes\nToggle the sidebar. Split the day in two. A view of the lake.\n",
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("Toggle Split Vie", 10, false).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["shortcuts.md"],
+            "only the note that runs the words together matches: {hits:?}"
+        );
+        assert!(hits[0].snippet.contains("«Toggle Split Vie»"), "{hits:?}");
+
+        // The hit opens where the phrase is, not at the top of the note.
+        let body = fs::read_to_string(vault.path().join("shortcuts.md")).unwrap();
+        let at = hits[0].at.clone().expect("the body holds the phrase");
+        assert_eq!(&body[at], "Toggle Split Vie");
+
+        // A one-word query is what it always was.
+        assert_eq!(ix.search("split", 10, false).unwrap().len(), 2);
     }
 
     #[test]
@@ -1818,6 +1929,45 @@ mod tests {
         let (few, total) = ix.grep(&re, 2, false).unwrap();
         assert_eq!((few.len(), total), (2, 4));
         assert_eq!(ix.grep_paths(&re).unwrap(), ["a.md", "sub/Beta.md"]);
+    }
+
+    /// One file with a hundred matches used to be the whole list. It now gets [`PER_FILE`] rows
+    /// and says how many it left out, so every other file still has room — including the ones the
+    /// unindexed pass adds after this one.
+    #[test]
+    fn one_file_cannot_fill_the_list_on_its_own() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        fs::write(
+            vault.path().join("generated.md"),
+            "ferris\n".repeat(100).as_str(),
+        )
+        .unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
+        let (hits, total) = ix.grep(&re, 100, false).unwrap();
+        let listed = |rel: &str| hits.iter().filter(|m| m.rel_path == rel).count();
+        assert_eq!(listed("generated.md"), PER_FILE);
+        assert_eq!(
+            listed("sub/Beta.md"),
+            1,
+            "the other file still fits: {hits:?}"
+        );
+        assert_eq!(total, 101, "the count a Replace All is measured against");
+        // The rows the cap left out are named on the file's last row, not dropped in silence.
+        let tail: Vec<usize> = hits
+            .iter()
+            .filter(|m| m.rel_path == "generated.md")
+            .map(|m| m.more)
+            .collect();
+        assert_eq!(tail, [0, 0, 0, 0, 95]);
+
+        // The list's own cap still holds, and it is shared: a file that fills it leaves the tail
+        // count on whatever row it reached.
+        let (few, _) = ix.grep(&re, 3, false).unwrap();
+        assert_eq!(few.len(), 3);
+        assert_eq!(few[2].more, 97);
     }
 
     #[test]
@@ -1945,6 +2095,8 @@ mod tests {
             "the snippet must quote the body, not the title: {:?}",
             hits[0].snippet
         );
+        // And a hit the body does not hold names no place to open at, so it opens at the top.
+        assert_eq!(hits[0].at, None);
     }
 
     #[test]

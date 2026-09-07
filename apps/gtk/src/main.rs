@@ -3522,9 +3522,15 @@ impl App {
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
             "pane-files" => self.show_pane("files"),
-            "pane-search" => self.show_pane("search"),
+            "pane-search" => {
+                self.seed_search();
+                self.show_pane("search");
+            }
             "replace-in-files" => {
                 self.sidebar_column.set_visible(true);
+                // Before the pane opens: it focuses the replace box when there is a query to
+                // replace, and the selection is what makes one.
+                self.seed_search();
                 if let Some(sidebar) = self.sidebar.get() {
                     sidebar.show_replace();
                 }
@@ -4029,6 +4035,18 @@ impl App {
                 tracing::warn!("cannot open link in browser: {e}");
             }
         });
+    }
+
+    /// Hand the Search pane what the editor has selected, so Ctrl+Shift+F and Ctrl+Shift+H search
+    /// for it. With nothing selected the box keeps what it holds, the way VS Code does: the word
+    /// under the caret is deliberately not a fallback.
+    fn seed_search(&self) {
+        let Some(text) = self.active().and_then(|tab| tab.selected_search()) else {
+            return;
+        };
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_search_text(&text);
+        }
     }
 
     fn show_pane(&self, name: &str) {
