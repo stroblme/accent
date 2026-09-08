@@ -3,12 +3,15 @@
 //! Nothing here knows about `App`: the window takes the shared config and two callbacks and hands
 //! itself back, so the caller opens the vault and closes this window on its own terms.
 
+use crate::fileops;
 use accent_api::ssh;
 use accent_core::config::Config;
 use adw::prelude::*;
 use gtk::{gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 /// AdwStatusPage scrolls its child, so without a size request the window could be dragged
@@ -19,6 +22,10 @@ const MIN_HEIGHT: i32 = 400;
 const COLUMN_WIDTH: i32 = 360;
 /// The response the connect dialog opens a remote with.
 const CONNECT: &str = "connect";
+/// How long the folder completion's own ssh connection may take before it gives up. Deliberately
+/// not `rpc::DEADLINE`: nobody has pressed Connect, and a field that goes quiet for ten seconds is
+/// worse than one that never completes.
+const PROBE_SECONDS: u32 = 5;
 
 /// The window shown when `accent` is launched without a vault path.
 /// `on_open` receives the chosen vault directory; a remote is `app.open-remote`'s job.
@@ -300,7 +307,7 @@ pub(crate) fn connect_dialog(
         .hexpand(true)
         .build();
     let path = gtk::Entry::builder()
-        .placeholder_text("/home/you/Notes")
+        .placeholder_text("/home/you/Notes or ~/Notes")
         .activates_default(true)
         .build();
     let why = gtk::Label::builder()
@@ -310,13 +317,41 @@ pub(crate) fn connect_dialog(
         .build();
     why.add_css_class("error");
 
+    // The folders come from the host itself, over a connection this dialog makes quietly and
+    // gives up on without saying anything. `Probe` is where every rule about that lives.
+    let probe = Rc::new(Probe::default());
+    let path_row = fileops::path_field(&path, "Folders on the host", {
+        // Weak on the entry: it owns this closure through its own handler.
+        let (probe, host, asked) = (probe.clone(), host.clone(), path.downgrade());
+        move |typed| {
+            let Some(entry) = asked.upgrade() else {
+                return Vec::new();
+            };
+            // The keyboard has to be in this field: typing a host name is not asking for a
+            // connection to whatever the half-typed name happens to resolve to.
+            if !fileops::typing_here(&entry) {
+                return Vec::new();
+            }
+            let Ok(url) = ssh::parse(&format!("ssh://{}/", host.text().trim())) else {
+                return Vec::new();
+            };
+            probe.aim(&url);
+            let Some(dir) = typed_dir(typed) else {
+                return Vec::new();
+            };
+            probe
+                .folders(&dir, &entry)
+                .map_or_else(Vec::new, |folders| fileops::completions(typed, &folders))
+        }
+    });
+
     // 12 px between related widgets, as the name dialogs in `fileops` use.
     let form = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(12)
         .build();
     form.append(&host_field(&host));
-    form.append(&path);
+    form.append(&path_row);
     form.append(&why);
 
     let dialog = adw::AlertDialog::new(Some("Open Remote Vault"), None);
@@ -340,8 +375,11 @@ pub(crate) fn connect_dialog(
         path,
         #[weak]
         why,
+        #[strong]
+        probe,
         move || {
-            let address = address(&host.text(), &path.text());
+            let home = probe.home.borrow().clone();
+            let address = address(&host.text(), &path.text(), home.as_deref());
             let message = address.as_ref().err().map_or("", String::as_str);
             why.set_label(message);
             why.set_visible(!message.is_empty());
@@ -356,17 +394,180 @@ pub(crate) fn connect_dialog(
     dialog.choose(Some(window), gio::Cancellable::NONE, {
         let (host, path) = (host.clone(), path.clone());
         move |response| {
+            probe.close();
             if response != CONNECT {
                 return;
             }
             // Connect is only sensitive while the two fields make an address, so this holds.
-            if let Ok(address) = address(&host.text(), &path.text()) {
+            let home = probe.home.borrow().clone();
+            if let Ok(address) = address(&host.text(), &path.text(), home.as_deref()) {
                 on_open_remote(address);
             }
         }
     });
     // The entry is mapped once the dialog has been presented, not before.
     host.grab_focus();
+}
+
+/// The host's folders, fetched over a connection the dialog makes for itself, so the path can be
+/// completed and a `~` resolved before anybody has pressed Connect.
+///
+/// Every rule here is about not surprising the user, who has asked for a form and not for a
+/// connection:
+///
+/// * **Never on a keystroke of its own.** One attempt for the life of the dialog per address, made
+///   the first time a completion is really wanted — the path field has the keyboard and the two
+///   fields name a host. Every later folder reuses that connection, and each listing is cached.
+/// * **Never a prompt.** [`ssh::probe`] forces `BatchMode=yes`, so a host that would want a
+///   passphrase or a host-key answer simply offers no completion. `askpass.rs` is for a connection
+///   the user asked for.
+/// * **Never a failure on screen.** A refusal, a timeout or a listing error offers nothing and is
+///   logged at debug. There is no toast, no banner and nothing in the form.
+/// * **Never the vault's socket**, and what it opens is shut down when the dialog closes.
+#[derive(Default)]
+struct Probe {
+    /// The address the answers below are about. A different host starts over.
+    url: RefCell<Option<ssh::Url>>,
+    /// `$HOME` on the host, once it has said. What a `~` path resolves against.
+    home: RefCell<Option<String>>,
+    /// Folder names per absolute directory; `None` while its listing is still out.
+    dirs: RefCell<HashMap<String, Option<Vec<String>>>>,
+    /// Set by the first failure to connect. One attempt is all an address gets.
+    silent: Cell<bool>,
+    /// Every address this dialog ran a probe against, so all their sockets can be shut down.
+    opened: RefCell<Vec<ssh::Url>>,
+}
+
+impl Probe {
+    /// Point at `url`, forgetting whatever a previous host had said.
+    fn aim(&self, url: &ssh::Url) {
+        if self.url.borrow().as_ref() == Some(url) {
+            return;
+        }
+        *self.url.borrow_mut() = Some(url.clone());
+        *self.home.borrow_mut() = None;
+        self.dirs.borrow_mut().clear();
+        self.silent.set(false);
+    }
+
+    /// The folders in `dir`, or `None` while that is not known — including for good, when the host
+    /// could not be reached. Asks once per directory and calls `again` when the answer lands.
+    fn folders(self: &Rc<Self>, dir: &str, asked: &gtk::Entry) -> Option<Vec<String>> {
+        if let Some(known) = self.dirs.borrow().get(dir) {
+            return known.clone();
+        }
+        if self.silent.get() {
+            return None;
+        }
+        let url = self.url.borrow().clone()?;
+        self.dirs.borrow_mut().insert(dir.to_string(), None);
+        self.opened.borrow_mut().push(url.clone());
+        let (dir, asked, weak) = (dir.to_string(), asked.downgrade(), Rc::downgrade(self));
+        // The connection and the listing both happen off the main loop, so the entry stays
+        // typeable throughout. Weak, because the dialog may be gone by the time the host answers.
+        glib::spawn_future_local(async move {
+            let answer = gio::spawn_blocking({
+                let (url, dir) = (url.clone(), dir.clone());
+                move || ask(&url, &dir)
+            })
+            .await;
+            let Some(probe) = weak.upgrade() else {
+                return;
+            };
+            match answer {
+                Ok(Some((home, folders))) => {
+                    *probe.home.borrow_mut() = Some(home);
+                    probe.dirs.borrow_mut().insert(dir, Some(folders));
+                }
+                answer => {
+                    tracing::debug!(dir, "no completion from the host: {answer:?}");
+                    probe.silent.set(true);
+                    probe.dirs.borrow_mut().remove(&dir);
+                }
+            }
+            if let Some(entry) = asked.upgrade() {
+                fileops::look_again(&entry);
+            }
+        });
+        None
+    }
+
+    /// Shut down every socket this dialog opened, on a thread of its own: the dialog is closing
+    /// and nothing here waits for an answer.
+    fn close(&self) {
+        let urls = std::mem::take(&mut *self.opened.borrow_mut());
+        if urls.is_empty() {
+            return;
+        }
+        let _ = std::thread::Builder::new()
+            .name("accent-probe-exit".to_string())
+            .spawn(move || {
+                for url in urls {
+                    let argv = ssh::exit(&url, &ssh::probe_path(&url));
+                    let _ = Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .stdin(Stdio::null())
+                        .output();
+                }
+            });
+    }
+}
+
+/// `(the host's `$HOME`, the folders in `dir`)`, or `None` where the host could not be reached.
+///
+/// One command answers both: the home directory is what a `~` path needs and what says the shell
+/// really ran, so an empty first line is how a refused or timed-out connection is told apart from
+/// a directory that simply is not there.
+///
+/// ponytail: `ls -1p` and one line per name, so a folder whose name holds a newline is listed as
+/// two. Nothing here writes anything, and the worst case is a completion nobody can use.
+fn ask(url: &ssh::Url, dir: &str) -> Option<(String, Vec<String>)> {
+    let ctl = ssh::probe_path(url);
+    if let Some(parent) = ctl.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let command = format!("printf '%s\\n' \"$HOME\"; ls -1p -- {}", remote_word(dir));
+    let argv = ssh::probe(url, &ctl, PROBE_SECONDS, &command);
+    let out = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        // Belt and braces over `BatchMode`: whatever the session put in the environment, no
+        // helper of any kind may put a window on screen for a connection nobody asked for.
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut lines = text.lines();
+    let home = lines.next().filter(|home| home.starts_with('/'))?;
+    let folders = lines
+        .filter_map(|line| line.strip_suffix('/'))
+        .filter(|name| !name.is_empty() && !name.starts_with('.'))
+        .map(str::to_string)
+        .collect();
+    Some((home.to_string(), folders))
+}
+
+/// The directory as a word for the remote shell, with a leading `~` left to the host's own
+/// `$HOME` rather than resolved here — the whole point being that this machine does not know it.
+fn remote_word(dir: &str) -> String {
+    match dir.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            format!("\"$HOME\"{}", ssh::quote(rest))
+        }
+        _ => ssh::quote(dir),
+    }
+}
+
+/// The folder a half-typed remote path points into: everything up to the last `/`, with the root
+/// spelled `/` rather than empty. `~` on its own counts, so a tilde path resolves its home before
+/// there is anything to complete.
+fn typed_dir(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    match typed.rsplit_once('/') {
+        Some(("", _)) => Some("/".to_string()),
+        Some((head, _)) => Some(head.to_string()),
+        None => typed.starts_with('~').then(|| "~".to_string()),
+    }
 }
 
 /// The host entry, with the hosts from `~/.ssh/config` in a menu beside it.
@@ -450,11 +651,26 @@ fn ssh_hosts(config: &str) -> Vec<String> {
 /// host typed with a login, a port or IPv6 brackets is understood exactly as `Vault` will
 /// understand it, and a malformed one is refused here rather than at the connection. A field that
 /// is still empty is an unfinished form, not a mistake, so it comes back with nothing to say.
-fn address(host: &str, path: &str) -> Result<String, String> {
+///
+/// `~` and `~/…` are the host's home, which only the host knows: `home` is what [`Probe`] read off
+/// it, and without it the form says so rather than guessing at this machine's own home. An address
+/// is stored, cached and keyed by its path, so the tilde is resolved here and never travels.
+fn address(host: &str, path: &str, home: Option<&str>) -> Result<String, String> {
     let (host, path) = (host.trim(), path.trim());
     if host.is_empty() || path.is_empty() {
         return Err(String::new());
     }
+    let path = match path == "~" || path.starts_with("~/") {
+        false => path.to_string(),
+        true => match home {
+            Some(home) => format!("{}{}", home.trim_end_matches('/'), &path[1..]),
+            None => {
+                return Err(
+                    "~ needs the host, which has not answered; type the full path".to_string(),
+                );
+            }
+        },
+    };
     // Asked here rather than left to the parser, which never sees the two fields apart: `box` and
     // `srv/vault` would join into `ssh://boxsrv/vault`, a host nobody typed.
     if !path.starts_with('/') {
@@ -586,19 +802,69 @@ mod tests {
     #[test]
     fn an_address_needs_both_fields_and_an_absolute_path() {
         assert_eq!(
-            address(" box ", " /srv/vault "),
+            address(" box ", " /srv/vault ", None),
             Ok("ssh://box/srv/vault".to_string())
         );
         assert_eq!(
-            address("me@box:2222", "/srv/vault"),
+            address("me@box:2222", "/srv/vault", None),
             Ok("ssh://me@box:2222/srv/vault".to_string())
         );
         // Nothing to say about a form that is not finished.
-        assert_eq!(address("", "/srv/vault"), Err(String::new()));
-        assert_eq!(address("box", ""), Err(String::new()));
+        assert_eq!(address("", "/srv/vault", None), Err(String::new()));
+        assert_eq!(address("box", "", None), Err(String::new()));
         assert_eq!(
-            address("box", "srv/vault"),
+            address("box", "srv/vault", None),
             Err("the path must be absolute".to_string())
         );
+    }
+
+    #[test]
+    fn a_tilde_path_is_the_home_the_host_reported() {
+        let home = Some("/home/me");
+        assert_eq!(
+            address("box", "~/Notes", home),
+            Ok("ssh://box/home/me/Notes".to_string())
+        );
+        assert_eq!(
+            address("box", "~", home),
+            Ok("ssh://box/home/me".to_string())
+        );
+        // A trailing slash on the home must not double up.
+        assert_eq!(
+            address("box", "~/Notes", Some("/home/me/")),
+            Ok("ssh://box/home/me/Notes".to_string())
+        );
+        // Until the host has said, the form says so rather than guessing at this machine's home.
+        assert!(address("box", "~/Notes", None).is_err());
+        // `~user` is not ours to resolve, so it stays what it is: a path that is not absolute.
+        assert_eq!(
+            address("box", "~other/Notes", home),
+            Err("the path must be absolute".to_string())
+        );
+    }
+
+    #[test]
+    fn typed_dir_is_everything_up_to_the_last_slash() {
+        assert_eq!(typed_dir("/home/me/No"), Some("/home/me".to_string()));
+        assert_eq!(typed_dir("/home/me/"), Some("/home/me".to_string()));
+        // The root is a slash, not an empty path.
+        assert_eq!(typed_dir("/srv"), Some("/".to_string()));
+        assert_eq!(typed_dir("/"), Some("/".to_string()));
+        // A tilde counts before there is anything to complete, because resolving it is what the
+        // connection is for.
+        assert_eq!(typed_dir("~"), Some("~".to_string()));
+        assert_eq!(typed_dir("~/No"), Some("~".to_string()));
+        // Nothing typed, and a relative fragment that names no folder yet.
+        assert_eq!(typed_dir(""), None);
+        assert_eq!(typed_dir("srv"), None);
+    }
+
+    #[test]
+    fn a_tilde_directory_is_left_for_the_remote_shell_to_expand() {
+        assert_eq!(remote_word("~"), "\"$HOME\"''");
+        assert_eq!(remote_word("~/Notes"), "\"$HOME\"'/Notes'");
+        assert_eq!(remote_word("/srv/vault"), "'/srv/vault'");
+        // Not a home reference, and quoted whole so it cannot become one.
+        assert_eq!(remote_word("~other"), "'~other'");
     }
 }

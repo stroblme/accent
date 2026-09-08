@@ -10,9 +10,11 @@
 //! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
 //! it needs more input before it can act (Upload Files…, Download…).
 
-use accent_api::{RenamePlan, Vault};
+use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,6 +27,8 @@ const GROUP: &str = "fileops";
 const LISTED: usize = 20;
 /// How many file names an upload's toast or dialog spells out before it counts instead.
 const NAMED: usize = 3;
+/// How many folders a path entry offers at once before the list stops.
+const COMPLETIONS: usize = 12;
 
 /// Everything the operations need from the app, without depending on it.
 // Boxed closures are the whole point of this struct; a type alias per field would only hide the
@@ -58,12 +62,18 @@ pub struct Ops {
 /// The name is created exactly as typed: `notes` is a file called `notes`, `main.rs` is a source
 /// file, and only `notes.md` is a note. A template is markdown, so the picker is on screen only
 /// while the typed name says the file will be one.
+///
+/// A name carrying `/` is a path relative to `dir`, exactly as it is in Rename, and the folders it
+/// names are created with it. The line under the entry says where the file will really land.
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
     let entry = name_entry("File name", "");
     let form = form();
-    form.append(&entry);
+    form.append(&vault_path_field(&entry, &ops.vault, dir));
 
-    form.append(&name_preview(&entry, false));
+    form.append(&name_preview(&entry, {
+        let dir = dir.to_string();
+        move |typed| typed_path(&dir, typed)
+    }));
 
     let templates = ops.vault.templates().unwrap_or_default();
     let picker = template_picker(&templates);
@@ -84,10 +94,11 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
         if response != CONFIRM {
             return;
         }
-        let name = match sanitise_name(&typed.text()) {
-            Ok(name) => name,
+        let rel = match typed_path(&dir, &typed.text()) {
+            Ok(rel) => rel,
             Err(why) => return (ops.toast)(why),
         };
+        let name = basename(&rel).to_string();
         // Read only where the picker is on screen, so a name that stopped being markdown after a
         // template was picked does not carry the leftover selection into a non-note file.
         let template = picker
@@ -95,10 +106,10 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
             .filter(|_| is_markdown(&name))
             .and_then(|p| (p.selected() as usize).checked_sub(1))
             .and_then(|i| templates.get(i));
-        match ops
-            .vault
-            .create_note(&child_path(&dir, &name), template.map(String::as_str))
-        {
+        if let Err(why) = make_parents(&ops, &rel) {
+            return (ops.toast)(&why);
+        }
+        match ops.vault.create_note(&rel, template.map(String::as_str)) {
             Ok((created, _cursor)) => (ops.open)(&created),
             Err(e) if already_exists(&e) => (ops.toast)(&format!("{name} already exists")),
             Err(e) => (ops.toast)(&format!("Cannot create {name}: {e:#}")),
@@ -156,38 +167,77 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 /// it. That is the keyboard's move — `F2`, and the only one an assistive technology can drive now
 /// that Move to… is gone — and it goes through the same [`plan`] every other move does.
 ///
+/// The name is used exactly as typed, as New File's is: `note.md` becomes `main.rs` if that is
+/// what was asked for. A note that loses its `.md` stops being a note, which is the one rename
+/// that asks first ([`confirm_demote`]). The folders a path names are created with it.
+///
 /// The extension starts outside the selection, so typing replaces the stem only, which is what
 /// every file manager does.
 pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
     let form = form();
-    form.append(&entry);
-    // A note that loses its `.md` drops out of the index and stops being a note, so renaming one
-    // keeps the extension that makes it one, and says so as the name is typed.
-    // A folder or a PDF keeps whatever the user types.
-    let note = is_markdown(&current);
-    if note {
-        form.append(&name_preview(&entry, true));
-    }
+    form.append(&vault_path_field(&entry, &ops.vault, parent_dir(rel)));
+    // Rename is the keyboard's move as well, so the line under the entry is where the file lands
+    // rather than what it will be called: `../moved.md` says which folder that is.
+    form.append(&name_preview(&entry, {
+        let rel = rel.to_string();
+        move |typed| renamed_path(&rel, typed)
+    }));
 
     let dialog = name_dialog("Rename", "Rename", &form);
+    let note = is_markdown(&current);
     let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
     let typed = entry.clone();
     dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
         if response != CONFIRM {
             return;
         }
-        let to = match renamed_path(&rel, &typed.text(), note) {
+        let to = match renamed_path(&rel, &typed.text()) {
             Ok(to) => to,
             Err(why) => return (ops.toast)(why),
         };
-        if to != rel {
-            plan(&ops, &rel, &to, verb(&rel, &to));
+        if to == rel {
+            return;
+        }
+        match note && !is_markdown(basename(&to)) {
+            true => confirm_demote(&ops, &rel, &to),
+            false => plan(&ops, &rel, &to, verb(&rel, &to)),
         }
     });
     let stem = split_ext(&current).0.chars().count() as i32;
     focus_name(&entry, Some(stem));
+}
+
+/// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but
+/// it stops being a note: no backlinks, and every `[[wikilink]]` pointing at it stops resolving.
+///
+/// It gets a dialog of its own because the Update Links one cannot cover it: `plan_rename`
+/// compares stems, so a rename that changes only the extension finds nothing to rewrite and would
+/// otherwise go through in silence.
+fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
+    let dialog = adw::AlertDialog::new(
+        Some("No Longer a Note?"),
+        Some(&format!(
+            "{} stays in the vault and stays searchable, but links to it will no longer resolve.",
+            basename(to)
+        )),
+    );
+    dialog.add_responses(&[("cancel", "Cancel"), ("rename", "Rename")]);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+
+    let (ops, from, to, window) = (
+        ops.clone(),
+        from.to_string(),
+        to.to_string(),
+        ops.window.clone(),
+    );
+    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+        if response == "rename" {
+            plan(&ops, &from, &to, verb(&from, &to));
+        }
+    });
 }
 
 /// Move a note or folder into another directory of the same vault, keeping its name, from a drag
@@ -268,6 +318,13 @@ fn link_body(rewrites: &[String]) -> String {
 /// Move the file, then report. A partly rewritten vault is a real outcome, so the notes that
 /// could not be updated are said out loud instead of being logged and forgotten.
 fn apply(ops: &Rc<Ops>, plan: &RenamePlan, update_links: bool, verb: &str) {
+    // Rename is the keyboard's move and a typed path may name folders that are not there yet, so
+    // they are made here — after the confirmation, so nothing exists until the move really
+    // happens. A dropped row never reaches it: every destination the tree offers is a row that is
+    // already there.
+    if let Err(why) = make_parents(ops, &plan.to) {
+        return (ops.toast)(&why);
+    }
     // The note being moved is flushed with the ones about to be rewritten: its own tab is about
     // to point at a path that no longer exists, and an unsaved buffer must not be the casualty.
     let mut dirty = plan.rewrites.clone();
@@ -804,24 +861,6 @@ fn is_markdown(name: &str) -> bool {
     })
 }
 
-/// The name with the extension that keeps a note a note. Only renaming uses it: a note that
-/// loses its `.md` drops out of the index, while creating takes the name as it was typed.
-fn with_extension(name: &str) -> String {
-    match is_markdown(name) {
-        true => name.to_string(),
-        false => format!("{name}.md"),
-    }
-}
-
-/// The name a rename lands on: the same extension policy for a note, the typed name for anything
-/// else (a folder called `Notes` must not become `Notes.md`).
-fn renamed_to(name: &str, note: bool) -> String {
-    match note {
-        true => with_extension(name),
-        false => name.to_string(),
-    }
-}
-
 /// Split a file name into stem and extension, dot included. A leading dot belongs to the name.
 fn split_ext(name: &str) -> (&str, &str) {
     match name.rfind('.') {
@@ -866,26 +905,23 @@ pub fn move_dest(from: &str, dir: &str) -> Option<String> {
     Some(moved_path(from, dir))
 }
 
-/// Where a typed name puts the file, vault-relative: a plain name renames it in place, and one
-/// carrying `/` is a path relative to the folder it is in, `..` walking back up out of that
-/// folder. `Err` where the path would leave the vault or name something the tree hides.
-fn renamed_path(rel: &str, typed: &str, note: bool) -> Result<String, &'static str> {
+/// The folder a half-typed path points into and the last segment, which is the file's own name.
+///
+/// `base` is the folder the path is typed in: the file's own for Rename, the clicked row's for
+/// New File. `..` walks back up out of it and stops at the vault root, and a segment starting with
+/// a dot is refused because the tree hides one. The name comes back as typed, empty included, so
+/// that completion can read a path that is still being written.
+fn split_typed(base: &str, typed: &str) -> Result<(String, String), &'static str> {
+    let typed = typed.trim();
+    let (dirs, name) = typed.rsplit_once('/').unwrap_or(("", typed));
+    let mut parts: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
     // Empty segments and `.` mean nothing here, so `a//b` and `./a` are the paths they look like.
-    let typed: Vec<&str> = typed
-        .trim()
+    for dir in dirs
         .split('/')
         .map(str::trim)
-        .filter(|s| !s.is_empty() && *s != ".")
-        .collect();
-    let Some((name, dirs)) = typed.split_last().filter(|(name, _)| **name != "..") else {
-        return Err("Enter a name.");
-    };
-    let mut parts: Vec<&str> = parent_dir(rel)
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
-    for dir in dirs {
-        match *dir {
+        .filter(|d| !d.is_empty() && *d != ".")
+    {
+        match dir {
             ".." => {
                 parts.pop().ok_or("That path leaves this vault.")?;
             }
@@ -893,12 +929,48 @@ fn renamed_path(rel: &str, typed: &str, note: bool) -> Result<String, &'static s
             dir => parts.push(dir),
         }
     }
+    Ok((parts.join("/"), name.trim().to_string()))
+}
+
+/// Where a typed name puts the file, vault-relative: a plain name lands in `dir`, and one carrying
+/// `/` is a path relative to it, `..` walking back up out of it. `Err` where the path would leave
+/// the vault or name something the tree hides.
+///
+/// The extension is whatever was typed, in both dialogs. A note renamed out of `.md` stops being
+/// one, which the dialog asks about rather than quietly preventing.
+fn typed_path(dir: &str, typed: &str) -> Result<String, &'static str> {
+    let (dest, name) = split_typed(dir, typed)?;
+    if name.is_empty() || name == ".." {
+        return Err("Enter a name.");
+    }
     if name.starts_with('.') {
         return Err("Names cannot start with a dot.");
     }
-    let name = renamed_to(name, note);
-    parts.push(&name);
-    Ok(parts.join("/"))
+    Ok(child_path(&dest, &name))
+}
+
+/// [`typed_path`] from the folder `rel` is in, which is what Rename types against.
+fn renamed_path(rel: &str, typed: &str) -> Result<String, &'static str> {
+    typed_path(parent_dir(rel), typed)
+}
+
+/// Make the folders a typed path names, `mkdir -p` style, so a destination that does not exist yet
+/// is created the way New Folder would rather than reported as a bare OS error.
+///
+/// `Vault::create_dir` resolves through the same guard the typed path already passed, so a `../`
+/// path that leaves the vault is still refused.
+///
+/// ponytail: `create_dir_all` is not transactional, so a failure part way leaves behind whatever
+/// levels it did manage. The toast names the folder it stopped on, which is all New Folder offers
+/// either; make it clean up after itself if that is ever seen.
+fn make_parents(ops: &Ops, rel: &str) -> Result<(), String> {
+    let dir = parent_dir(rel);
+    if dir.is_empty() || ops.vault.exists(dir) {
+        return Ok(());
+    }
+    ops.vault
+        .create_dir(dir)
+        .map_err(|e| format!("Cannot create {dir}: {e}"))
 }
 
 /// What the toast calls it: a file that stayed in its folder was renamed, one that left it moved.
@@ -930,28 +1002,26 @@ fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {
     dialog
 }
 
-/// The dim line under a name entry showing the file name that will really be used. `md` is the
-/// rename dialog's policy, where a note keeps the extension that makes it one; New File creates
-/// the name as typed, so there the line only spells out what will be created.
-fn name_preview(entry: &gtk::Entry, md: bool) -> gtk::Label {
-    let preview = gtk::Label::builder().xalign(0.0).build();
+/// The dim line under a name entry showing where the file will really land, vault-relative.
+///
+/// Both dialogs resolve a typed path, so the line says what the entry cannot: which folder
+/// `../notes/x.md` walks out to, and which folder a plain name is created in. A path that does not
+/// resolve leaves the line empty — the toast on Rename or Create is what says why.
+fn name_preview(
+    entry: &gtk::Entry,
+    dest: impl Fn(&str) -> Result<String, &'static str> + 'static,
+) -> gtk::Label {
+    let preview = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .build();
     preview.add_css_class("dim-label");
-    entry.connect_changed({
+    let show = {
         let preview = preview.clone();
-        move |e| {
-            let typed = e.text();
-            let typed = typed.trim();
-            preview.set_label(&match typed.is_empty() {
-                true => String::new(),
-                false => renamed_to(typed, md),
-            });
-        }
-    });
-    let initial = entry.text();
-    preview.set_label(&match initial.trim() {
-        "" => String::new(),
-        typed => renamed_to(typed, md),
-    });
+        move |e: &gtk::Entry| preview.set_label(&dest(&e.text()).unwrap_or_default())
+    };
+    show(entry);
+    entry.connect_changed(show);
     preview
 }
 
@@ -996,6 +1066,202 @@ fn focus_name(entry: &gtk::Entry, stem: Option<i32>) {
     }
 }
 
+// ------------------------------------------------------------------------------- completion
+
+/// The whole texts a half-typed path could be completed to: every name in `folders` that carries
+/// on from the last segment, with the rest of the path kept in front of it and a `/` on the end so
+/// the next segment can be typed straight away.
+///
+/// Folders only. The last segment is the file's own name, which is being invented rather than
+/// looked up, so nothing can complete it and a file would only be a name to collide with.
+pub(crate) fn completions(typed: &str, folders: &[String]) -> Vec<String> {
+    let typed = typed.trim();
+    let (head, leaf) = match typed.rsplit_once('/') {
+        Some((_, leaf)) => (&typed[..typed.len() - leaf.len()], leaf),
+        None => ("", typed),
+    };
+    let leaf = leaf.to_lowercase();
+    folders
+        .iter()
+        .filter(|name| name.to_lowercase().starts_with(&leaf))
+        .take(COMPLETIONS)
+        .map(|name| format!("{head}{name}/"))
+        .collect()
+}
+
+/// A path entry with the folders it could go into listed under it as it is typed.
+///
+/// GTK4 deprecated `GtkEntryCompletion` and shipped nothing in its place. A popover is the shape
+/// `start::host_field` reaches for, but not here: a completion list stays up while the keyboard is
+/// still in the entry, and in a dialog this small every popover GTK will fit lands on top of
+/// Cancel and Rename. So the list is a revealer inside the form — it pushes the buttons down
+/// instead of covering them, it is reachable by Tab, and it needs no grab, no hand-parenting and
+/// no guessing about where there is room. The folder button beside the entry is the same list on
+/// demand, for an entry nothing is typed in yet.
+///
+/// `complete` answers with whole texts the entry could hold, so every bit of path arithmetic stays
+/// with the caller. It may answer with nothing while it is still finding out — a listing on a
+/// worker thread, or a host that has not replied — and [`look_again`] is how it comes back once it
+/// knows.
+pub(crate) fn path_field(
+    entry: &gtk::Entry,
+    tooltip: &str,
+    complete: impl Fn(&str) -> Vec<String> + 'static,
+) -> gtk::Widget {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A deep vault is a list that scrolls rather than a dialog taller than the window.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(160)
+        .child(&list)
+        .build();
+    scroller.add_css_class("card");
+    let revealer = gtk::Revealer::builder().child(&scroller).build();
+    let button = gtk::ToggleButton::builder()
+        .icon_name("folder-symbolic")
+        .tooltip_text(tooltip)
+        .build();
+    button
+        .bind_property("active", &revealer, "reveal-child")
+        .bidirectional()
+        .sync_create()
+        .build();
+
+    entry.connect_changed({
+        let (list, button) = (list.clone(), button.clone());
+        move |entry| {
+            while let Some(row) = list.first_child() {
+                list.remove(&row);
+            }
+            let text = entry.text();
+            let offers = complete(&text);
+            for candidate in &offers {
+                let row = gtk::Button::builder()
+                    .child(&gtk::Label::builder().label(candidate).xalign(0.0).build())
+                    .build();
+                row.add_css_class("flat");
+                row.connect_clicked({
+                    // Weak: the entry owns this list through its own handler, so a row holding it
+                    // back would be a cycle that outlives the dialog.
+                    let (asked, candidate) = (entry.downgrade(), candidate.clone());
+                    move |_| {
+                        // Setting the text rebuilds this very list, so it happens once the click
+                        // is over — the same reason `popup` unparents its menu from an idle. The
+                        // focus goes back first, so the rebuilt list is the new folder's.
+                        let (asked, candidate) = (asked.clone(), candidate.clone());
+                        glib::idle_add_local_once(move || {
+                            if let Some(entry) = asked.upgrade() {
+                                entry.grab_focus_without_selecting();
+                                entry.set_text(&candidate);
+                                entry.set_position(-1);
+                            }
+                        });
+                    }
+                });
+                list.append(&row);
+            }
+            show_completions(&button, entry, offers.is_empty());
+        }
+    });
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("linked");
+    row.append(entry);
+    row.append(&button);
+    // 6 px inside a control group, per DESIGN.md's spacing scale: the list belongs to the entry.
+    let field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    field.append(&row);
+    field.append(&revealer);
+    field.upcast()
+}
+
+/// Run a path entry's completion again, for an answer that arrived after the keystroke that asked
+/// for it. The entry's own `changed` is the one path everything watching it already takes — the
+/// list, and in the connect dialog the check that enables Connect — so a late answer needs no
+/// second channel, and nothing has to hold a closure that would hold it back.
+pub(crate) fn look_again(entry: &gtk::Entry) {
+    entry.emit_by_name::<()>("changed", &[]);
+}
+
+/// `FOCUS_WITHIN` rather than `has_focus`, which is always false here: a GTK4 `GtkEntry` is a
+/// wrapper whose inner `GtkText` is the widget that actually takes the keyboard.
+pub(crate) fn typing_here(entry: &gtk::Entry) -> bool {
+    entry.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN)
+}
+
+/// The list shows itself in answer to typing, not over a dialog nobody has touched: it opens only
+/// while the entry has the keyboard and holds something to complete. An entry that is still empty
+/// keeps its folders behind the button, which is insensitive when there are none.
+fn show_completions(button: &gtk::ToggleButton, entry: &gtk::Entry, empty: bool) {
+    button.set_sensitive(!empty);
+    button.set_active(!empty && typing_here(entry) && !entry.text().trim().is_empty());
+}
+
+/// A refresh that is only known once the field holding it exists, which is the knot a completion
+/// answering later has to tie: the field is built from the completion, and the completion has to
+/// be able to say "look again".
+/// The path entry the two name dialogs share, completing against the vault's own listing.
+///
+/// `base` is the folder a typed path is relative to. Listings are asked for on a worker thread and
+/// cached per folder, so a vault on another machine completes without a round trip on the
+/// keystroke and a local one answers off the index; a folder that has not answered yet offers
+/// nothing until it does.
+fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::Widget {
+    let folders: Rc<RefCell<HashMap<String, Option<Vec<String>>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    path_field(entry, "Folders in this vault", {
+        // Weak: the entry owns this closure through its own `changed` handler, so holding it
+        // strongly would be a cycle that outlives the dialog.
+        let asked = entry.downgrade();
+        let (vault, base, folders) = (vault.clone(), base.to_string(), folders.clone());
+        move |typed| {
+            let Ok((dir, _)) = split_typed(&base, typed) else {
+                return Vec::new();
+            };
+            let known = folders.borrow().get(&dir).cloned();
+            if let Some(known) = known {
+                return known.map_or_else(Vec::new, |f| completions(typed, &f));
+            }
+            // `None` while the listing is out, so it is asked for once however fast the typing is.
+            folders.borrow_mut().insert(dir.clone(), None);
+            let (vault, folders, asked) = (vault.clone(), folders.clone(), asked.clone());
+            glib::spawn_future_local(async move {
+                let listed = gio::spawn_blocking({
+                    let (vault, dir) = (vault.clone(), dir.clone());
+                    move || vault.list_dir(&dir)
+                })
+                .await;
+                let names = match listed {
+                    Ok(Ok(rows)) => folder_names(rows),
+                    // Offering nothing beats offering a wrong list, which is what the tree says
+                    // about a directory the index could not answer for either.
+                    answer => {
+                        tracing::debug!(dir, "no completions: {answer:?}");
+                        Vec::new()
+                    }
+                };
+                folders.borrow_mut().insert(dir, Some(names));
+                if let Some(entry) = asked.upgrade() {
+                    look_again(&entry);
+                }
+            });
+            Vec::new()
+        }
+    })
+}
+
+/// The folder names directly inside a listing. Hidden ones are left out because the tree hides
+/// them and a typed path refuses them anyway.
+fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
+    rows.into_iter()
+        .filter(|row| row.kind == FileKind::Dir)
+        .map(|row| basename(&row.rel_path).to_string())
+        .filter(|name| !name.starts_with('.'))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1022,25 +1288,6 @@ mod tests {
         assert!(sanitise_name("../x").is_err());
         assert!(sanitise_name("..").is_err());
         assert!(sanitise_name(".hidden").is_err());
-    }
-
-    #[test]
-    fn with_extension_adds_md_only_where_it_is_missing() {
-        assert_eq!(with_extension("note"), "note.md");
-        assert_eq!(with_extension("note.md"), "note.md");
-        assert_eq!(with_extension("NOTE.MD"), "NOTE.MD");
-        assert_eq!(with_extension("note.markdown"), "note.markdown");
-        // Renaming a note to a non-markdown extension would demote it out of the index.
-        assert_eq!(with_extension("chart.pdf"), "chart.pdf.md");
-    }
-
-    #[test]
-    fn renamed_to_keeps_a_note_a_note_and_leaves_everything_else_alone() {
-        // Renaming `note.md` to `x` used to demote it out of the note index.
-        assert_eq!(renamed_to("x", true), "x.md");
-        assert_eq!(renamed_to("x.md", true), "x.md");
-        assert_eq!(renamed_to("Archive", false), "Archive");
-        assert_eq!(renamed_to("chart.pdf", false), "chart.pdf");
     }
 
     #[test]
@@ -1124,8 +1371,8 @@ mod tests {
 
     #[test]
     fn renamed_path_renames_in_place_and_moves_on_a_slash() {
-        let to = |typed| renamed_path("Notes/Daily/mon.md", typed, true);
-        assert_eq!(to("tue"), Ok("Notes/Daily/tue.md".into()));
+        let to = |typed| renamed_path("Notes/Daily/mon.md", typed);
+        assert_eq!(to("tue.md"), Ok("Notes/Daily/tue.md".into()));
         assert_eq!(
             to("Archive/tue.md"),
             Ok("Notes/Daily/Archive/tue.md".into())
@@ -1136,18 +1383,75 @@ mod tests {
         assert_eq!(to("../Archive/tue.md"), Ok("Notes/Archive/tue.md".into()));
         // One `..` too many leaves the vault, and so does one from a file already at the root.
         assert!(to("../../../tue.md").is_err());
-        assert!(renamed_path("mon.md", "../tue.md", true).is_err());
-        // The extension policy applies to the name, not to the folders on the way to it.
-        assert_eq!(
-            renamed_path("a/x.pdf", "b/y.pdf", false),
-            Ok("a/b/y.pdf".into())
-        );
+        assert!(renamed_path("mon.md", "../tue.md").is_err());
+        assert_eq!(renamed_path("a/x.pdf", "b/y.pdf"), Ok("a/b/y.pdf".into()));
         // Nothing typed, nothing but separators, and a hidden name at either end.
         assert!(to("").is_err());
         assert!(to("  ").is_err());
         assert!(to("..").is_err());
         assert!(to(".hidden.md").is_err());
         assert!(to(".config/tue.md").is_err());
+    }
+
+    #[test]
+    fn renamed_path_lands_on_the_extension_that_was_typed() {
+        let to = |typed| renamed_path("Notes/mon.md", typed);
+        // Rename used to force `.md` back on, so a note could not become a source file.
+        assert_eq!(to("main.rs"), Ok("Notes/main.rs".into()));
+        // A bare name stays extensionless rather than becoming a note again.
+        assert_eq!(to("notes"), Ok("Notes/notes".into()));
+        assert_eq!(to("tue.md"), Ok("Notes/tue.md".into()));
+        // A folder called `Notes` was never at risk, and still is not.
+        assert_eq!(renamed_path("Notes", "Archive"), Ok("Archive".into()));
+    }
+
+    #[test]
+    fn typed_path_names_a_folder_that_does_not_exist_yet() {
+        // The dialog resolves the destination and `make_parents` creates what is missing; the
+        // path arithmetic is the same whether the folder is there or not.
+        assert_eq!(renamed_path("a.md", "New/x.md"), Ok("New/x.md".to_string()));
+        assert_eq!(
+            renamed_path("Notes/a.md", "New/Deep/x.md"),
+            Ok("Notes/New/Deep/x.md".to_string())
+        );
+        // New File types against the clicked row's folder instead of the file's own.
+        assert_eq!(
+            typed_path("Notes", "Inbox/x.md"),
+            Ok("Notes/Inbox/x.md".to_string())
+        );
+        assert_eq!(typed_path("", "x.md"), Ok("x.md".to_string()));
+        assert!(typed_path("", "../x.md").is_err());
+    }
+
+    #[test]
+    fn completions_offer_folders_and_keep_the_path_in_front_of_them() {
+        let folders: Vec<String> = ["Archive", "Attachments", "Notes", "notes-old"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // The last segment is what is being completed; a `/` says the next one is starting.
+        assert_eq!(completions("Arc", &folders), ["Archive/".to_string()]);
+        assert_eq!(completions("At", &folders), ["Attachments/".to_string()]);
+        // Case-insensitive, and every match is offered.
+        assert_eq!(
+            completions("NOT", &folders),
+            ["Notes/".to_string(), "notes-old/".to_string()]
+        );
+        // The path already typed is kept, so a click leaves a whole path in the entry.
+        assert_eq!(
+            completions("../Deep/Arc", &folders),
+            ["../Deep/Archive/".to_string()]
+        );
+        assert_eq!(completions("Deep/", &folders).len(), folders.len());
+        // Nothing typed offers every folder; a name nothing starts with offers none.
+        assert_eq!(completions("", &folders).len(), folders.len());
+        assert!(completions("zzz", &folders).is_empty());
+        // A folder whose name was typed in full still earns its trailing slash, beside anything
+        // else that carries on from it.
+        assert_eq!(
+            completions("Notes", &folders),
+            ["Notes/".to_string(), "notes-old/".to_string()]
+        );
     }
 
     #[test]
