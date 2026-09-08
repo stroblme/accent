@@ -102,6 +102,9 @@ pub fn present(
         .build();
     column.append(&buttons);
     if let Some(list) = recent_list(&config, &on_open) {
+        // The one boundary on this screen: the two ways to open a vault the app has never seen,
+        // then the ones it has. A bare `GtkSeparator`, with the column's 18 px on either side.
+        column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         column.append(&list);
     }
 
@@ -205,14 +208,21 @@ fn recent_row(
     row
 }
 
-/// What a recent row says about a vault: a local one is named by its folder and placed by its
-/// path, a remote one by its host and by the path on that host — two vaults called `Notes` on two
-/// machines have to read differently. An address that will not parse is shown as it was stored,
+/// What a recent row says about a vault: it is named by its folder and placed by its path, on
+/// this machine and on another one alike — a remote row differs by its address and its icon, not
+/// by reading the other way round. An address that will not parse is shown as it was stored,
 /// since anything else would be a guess about what the user meant.
+///
+/// ponytail: a non-default port is not in the subtitle. `destination` is what ssh is handed, and
+/// `me@box:2222:/srv/vault` reads worse than it informs; add it if two vaults on one host ever
+/// differ by port alone.
 pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
     if ssh::is_remote_path(path) {
         return match ssh::parse(&path.to_string_lossy()) {
-            Ok(url) => (url.host, url.path.display().to_string()),
+            Ok(url) => (
+                remote_name(&url),
+                format!("{}:{}", url.destination(), url.path.display()),
+            ),
             Err(_) => (path.display().to_string(), String::new()),
         };
     }
@@ -221,6 +231,15 @@ pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     (name, abbreviate(path, home))
+}
+
+/// The folder a remote vault is, for the row's title. A path with no last component — the whole
+/// host, `ssh://box/` — has only the host to be named by.
+fn remote_name(url: &ssh::Url) -> String {
+    url.path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| url.host.clone())
 }
 
 /// The path as GNOME writes it: under `home`, `/home/me/Notes` becomes `~/Notes`.
@@ -521,10 +540,20 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_row_is_named_by_its_host_and_placed_by_its_remote_path() {
+    fn a_remote_row_is_named_by_its_folder_and_placed_by_its_address() {
+        // The login is part of the address; the port is not shown (see `labels`).
         assert_eq!(
             labels(Path::new("ssh://me@box:2222/srv/vault"), None),
-            ("box".to_string(), "/srv/vault".to_string())
+            ("vault".to_string(), "me@box:/srv/vault".to_string())
+        );
+        assert_eq!(
+            labels(Path::new("ssh://box/srv/vault"), None),
+            ("vault".to_string(), "box:/srv/vault".to_string())
+        );
+        // A vault that is the whole of a host has only the host to be named by.
+        assert_eq!(
+            labels(Path::new("ssh://box/"), None),
+            ("box".to_string(), "box:/".to_string())
         );
         // An address that will not parse is shown as it was stored.
         assert_eq!(

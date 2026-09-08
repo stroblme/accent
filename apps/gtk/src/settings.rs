@@ -327,7 +327,7 @@ fn vault_group(
         |cfg, text| cfg.templates_dir = folder(text),
     ));
     group.add(&entry_row(
-        "New Notes Folder",
+        "New Files Folder",
         Some("Empty means the vault root"),
         &vault.new_note_dir,
         config,

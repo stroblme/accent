@@ -1,15 +1,17 @@
-//! The window's find, replace and go-to-line bar.
+//! A pane's find, replace and go-to-line bar.
 //!
-//! One bar per window rather than one per tab, and it sits in the editor column's *content*
-//! rather than among its top bars. Both follow from presentation mode, which unreveals the top
-//! bars and hides the whole tab stack: a bar living inside a tab was on screen right up to the
-//! moment `F5` made it useful.
+//! One bar per pane rather than one per tab or one per window: a pane owns the document it is
+//! showing, so a split searches two notes at once, each with its own query, its own mode and its
+//! own open state. It is a revealed row between the pane's tab bar and its document, which pushes
+//! the document down rather than covering it.
 //!
 //! Because it outlives any one tab, the bar drives the tab from the outside — `Tab` keeps its
-//! `SearchContext` and the caret moves, this file keeps the widgets — and it re-targets on every
-//! tab switch. While presenting there is no buffer to search, so the same widgets address the
-//! rendered preview through [`PreviewOp`] instead; that indirection is also what keeps this file
-//! from having to know what an `App` is.
+//! `SearchContext` and the caret moves, this file keeps the widgets — and it re-targets whenever
+//! the pane's tab in front changes. Re-targeting leaves the old tab's marks alone: the query and
+//! the highlight belong to the tab, so a note opened from a search hit is still marked when the
+//! reader comes back to it. While presenting there is no buffer to search, so the same widgets
+//! address the rendered preview through [`PreviewOp`] instead; that indirection is also what keeps
+//! this file from having to know what an `App` is.
 
 use crate::editor::Tab;
 use adw::prelude::*;
@@ -32,10 +34,11 @@ pub enum PreviewOp {
     },
 }
 
-/// What the bar needs from the window. Two closures, so `find.rs` never names `App`.
+/// What the bar needs from the window. Three closures, so `find.rs` never names `App`; all three
+/// answer for the bar's own pane, not for whichever pane has the keyboard.
 pub struct Wiring {
-    /// Whether something other than the editor — the rendered preview, or a PDF — is what the
-    /// user is looking at, so find and go-to are addressed there instead.
+    /// Whether something other than this pane's editor — the rendered preview, or a PDF — is what
+    /// the user is looking at, so find and go-to are addressed there instead.
     pub presenting: Box<dyn Fn() -> bool>,
     pub preview: Box<dyn Fn(PreviewOp)>,
     /// How many pages the thing being looked at has, when it is counted in pages rather than
@@ -250,10 +253,13 @@ impl Bar {
         let _ = self.wiring.set(wiring);
     }
 
-    /// Point the bar at the tab that just became active, dropping the highlight on the old one.
+    /// Point the bar at the tab that just came to the front of its pane.
+    ///
+    /// The old tab keeps its query and its marks: they are the tab's, not the bar's, so a note
+    /// opened from a search hit is still marked after a switch away and back. Only the handler
+    /// watching its match count goes, or one accumulates per tab switch.
     pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
         if let Some((old, handler)) = self.target.borrow_mut().take() {
-            old.set_highlight(false);
             old.search_context().disconnect(handler);
         }
         let Some(tab) = tab else { return };

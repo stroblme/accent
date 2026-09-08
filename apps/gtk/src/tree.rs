@@ -582,7 +582,7 @@ pub fn build(
         source.connect_drag_end(move |_, _, _| end(false));
         expander.add_controller(source);
         // Dropped on a row: into the folder, or into the folder holding the file, which is where
-        // that row's New Note would have put one too.
+        // that row's New File would have put one too.
         expander.add_controller(move_target(&row_moves, |target, _, _| {
             let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
             let row = expander.list_row()?.item().as_ref().and_then(decode)?;

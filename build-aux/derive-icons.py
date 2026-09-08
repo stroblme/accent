@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """Derive the two installed app icons from the master drawing.
 
-`data/icons/logo.svg` is the Inkscape master and the only file an artist edits.
-The hicolor icons the app actually installs used to be hand-copied from it, so
-they went stale the moment the master changed. This regenerates both.
-
 Inkscape does the one step a stylesheet cannot: `object-stroke-to-path` turns
 every stroke into a filled outline, which is what a symbolic icon has to be
 (GNOME recolours symbolics by setting a fill, so a stroked glyph would not
