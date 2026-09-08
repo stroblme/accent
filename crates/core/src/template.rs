@@ -45,6 +45,19 @@ fn expand(name: &str, title: &str, now: NaiveDateTime) -> Option<String> {
     }
 }
 
+/// The vault-relative paths a configured template name may mean, best first.
+///
+/// A bare `DailyNote.md` is what the preferences invite, and it means the file of that name in the
+/// templates directory. The name is still tried verbatim first, so a setting that resolves against
+/// the vault root today keeps resolving there.
+pub fn candidates(templates_dir: &str, template: &str) -> Vec<String> {
+    let mut out = vec![template.to_string()];
+    if !templates_dir.is_empty() && !template.contains('/') {
+        out.push(format!("{templates_dir}/{template}"));
+    }
+    out
+}
+
 /// `strftime`-style formatting, or `None` when the format string is invalid.
 pub fn strftime(fmt: &str, now: NaiveDateTime) -> Option<String> {
     use std::fmt::Write;
@@ -100,6 +113,17 @@ mod tests {
         let (out, cursor) = render("{{nope}} {{date:%Q}} {{title}} {{", "Note", now());
         assert_eq!(out, "{{nope}} {{date:%Q}} Note {{");
         assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn candidates_fall_back_to_the_templates_directory() {
+        assert_eq!(
+            candidates("Templates", "DailyNote.md"),
+            ["DailyNote.md", "Templates/DailyNote.md"]
+        );
+        // A path says where it means; an unset templates directory has nowhere else to look.
+        assert_eq!(candidates("Templates", "Sub/X.md"), ["Sub/X.md"]);
+        assert_eq!(candidates("", "X.md"), ["X.md"]);
     }
 
     #[test]

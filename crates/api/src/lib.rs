@@ -1007,6 +1007,22 @@ impl Local {
         Ok(())
     }
 
+    /// A template's text, whether it is named by a vault-relative path or by a bare file name in
+    /// the templates directory. Failing, it names both places it looked.
+    fn read_template(&self, name: &str) -> Result<String> {
+        // The config lock is taken before the filesystem, never inside the index lock.
+        let tried = template::candidates(&self.config().templates_dir, name);
+        for rel in &tried {
+            let path = self.resolve(rel)?;
+            if path.is_file() {
+                let (text, _) =
+                    fs::read_note(&path).with_context(|| format!("reading template {rel}"))?;
+                return Ok(text);
+            }
+        }
+        anyhow::bail!("no template {name}: looked at {}", tried.join(" and "))
+    }
+
     /// Create a file, optionally from a template. Returns the path it was created at and where
     /// the caret belongs. The name is taken as it is given: `notes` is a file called `notes`, not
     /// a note called `notes.md`. Callers that mean markdown say so (`daily_note` does).
@@ -1017,11 +1033,11 @@ impl Local {
     ) -> Result<(String, Option<usize>)> {
         let rel = rel.to_string();
         let (text, cursor) = match template {
-            Some(t) => {
-                let (raw, _) = fs::read_note(&self.resolve(t)?)
-                    .with_context(|| format!("reading template {t}"))?;
-                template::render(&raw, &stem(&rel), chrono::Local::now().naive_local())
-            }
+            Some(t) => template::render(
+                &self.read_template(t)?,
+                &stem(&rel),
+                chrono::Local::now().naive_local(),
+            ),
             None => (String::new(), None),
         };
         fs::create_note(&self.resolve(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
@@ -2550,6 +2566,22 @@ mod tests {
         assert_eq!(again, rel);
         assert_eq!(cursor, None, "an existing note is opened, not rewritten");
         assert_eq!(f.read(&rel), text);
+    }
+
+    #[test]
+    fn a_template_named_by_itself_is_looked_for_in_the_templates_directory() {
+        let f = Fixture::open(VaultConfig {
+            daily_dir: "Daily".to_string(),
+            daily_template: Some("DailyNote.md".to_string()),
+            templates_dir: "Templates".to_string(),
+            ..VaultConfig::default()
+        });
+        f.write("Templates/DailyNote.md", "# {{title}}\n\nbody\n");
+
+        let (rel, _) = f.vault.daily_note().unwrap();
+
+        let title = rel.trim_start_matches("Daily/").trim_end_matches(".md");
+        assert_eq!(f.read(&rel), format!("# {title}\n\nbody\n"));
     }
 
     #[test]
