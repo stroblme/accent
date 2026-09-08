@@ -49,6 +49,7 @@ use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
 use gtk::{gdk, gio, glib};
 use panes::{Pane, Place, Side, Spot, Zone};
+use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -6611,6 +6612,19 @@ fn bench_keys(app: &Rc<App>) {
         println!("bench caret_down {:?}", view.caret_positions());
         view.press(gdk::Key::Up, gdk::ModifierType::empty());
         println!("bench caret_columns {:?}", view.caret_positions());
+        view.clear_carets();
+
+        // Tab at every caret is what the view says it is, from the column each caret is in.
+        view.set_tab_width(4);
+        for spaces in [true, false] {
+            view.set_insert_spaces_instead_of_tabs(spaces);
+            buffer.set_text("ab\ncd");
+            buffer.place_cursor(&buffer.iter_at_offset(1));
+            view.add_caret(true);
+            view.press(gdk::Key::Tab, gdk::ModifierType::empty());
+            println!("bench caret_tab spaces={spaces} {:?}", text(&buffer));
+            view.clear_carets();
+        }
 
         window.close();
         bench_quit(&app);

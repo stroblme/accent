@@ -35,10 +35,13 @@
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
+use sourceview5::prelude::ViewExt as _;
 
 /// What a key means at every caret. Anything outside this list clears the carets instead.
 enum Edit {
     Insert(String),
+    /// Resolved per caret, because what Tab inserts depends on the column it is pressed in.
+    Tab,
     Backspace,
     Delete,
     /// `Ctrl+Delete` forwards, `Ctrl+Backspace` backwards.
@@ -77,7 +80,7 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     }
     match key {
         gdk::Key::Return | gdk::Key::KP_Enter => Some(Edit::Insert("\n".to_string())),
-        gdk::Key::Tab | gdk::Key::KP_Tab => Some(Edit::Insert("\t".to_string())),
+        gdk::Key::Tab | gdk::Key::KP_Tab => Some(Edit::Tab),
         gdk::Key::BackSpace => Some(Edit::Backspace),
         gdk::Key::Delete | gdk::Key::KP_Delete => Some(Edit::Delete),
         gdk::Key::Left | gdk::Key::KP_Left => Some(Edit::Move(Motion::Left)),
@@ -86,8 +89,6 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
         gdk::Key::Down | gdk::Key::KP_Down => Some(Edit::Move(Motion::Down)),
         gdk::Key::Home | gdk::Key::KP_Home => Some(Edit::Move(Motion::Home)),
         gdk::Key::End | gdk::Key::KP_End => Some(Edit::Move(Motion::End)),
-        // ponytail: a literal tab above, and no `insert-spaces-instead-of-tabs`, because the
-        // editor does not turn that on. Ask the view when it ever does.
         _ => key
             .to_unicode()
             .filter(|c| !c.is_control())
@@ -101,6 +102,22 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
 fn vertical_step(goal: Option<i32>, column: i32, len: i32) -> (i32, i32) {
     let goal = goal.unwrap_or(column);
     (goal.min(len), goal)
+}
+
+/// The column `prefix` ends at, a tab counting on to the next stop rather than as one character.
+fn visual_column(prefix: &str, width: usize) -> usize {
+    prefix.chars().fold(0, |column, c| match c {
+        '\t' => column + width - column % width,
+        _ => column + 1,
+    })
+}
+
+/// What Tab inserts at `column`: a literal tab, or the spaces that reach the next tab stop.
+fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
+    match spaces {
+        true => " ".repeat(width - column % width),
+        false => "\t".to_string(),
+    }
 }
 
 /// The run of spaces and tabs the caret is sitting in front of, or `None` where it is not on one
@@ -547,6 +564,17 @@ impl View {
             let mut aim = None;
             match edit {
                 Edit::Insert(text) => buffer.insert(&mut at, text),
+                // The view already knows what Tab means here — `editor.rs` sets both properties
+                // for code and leaves a note with its literal tab — so every caret answers the
+                // way the primary one does, each from the column it is actually in.
+                Edit::Tab => {
+                    let width = self.tab_width() as usize;
+                    let mut start = at;
+                    start.set_line_offset(0);
+                    let column = visual_column(&buffer.text(&start, &at, true), width);
+                    let text = tab_insert(column, width, self.is_insert_spaces_instead_of_tabs());
+                    buffer.insert(&mut at, &text);
+                }
                 Edit::Backspace => {
                     let mut from = at;
                     if from.backward_char() {
@@ -661,7 +689,7 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{spaces_ahead, spaces_behind, vertical_step};
+    use super::{spaces_ahead, spaces_behind, tab_insert, vertical_step, visual_column};
 
     /// A caret moving into a shorter line stops at its end rather than off it, and keeps aiming
     /// at the column it came from, so the line after that brings it back.
@@ -684,5 +712,19 @@ mod tests {
         assert_eq!(spaces_behind("a   "), Some(3));
         assert_eq!(spaces_behind("a b"), None);
         assert_eq!(spaces_behind(""), None);
+    }
+
+    /// Tab reaches the next stop from wherever the caret happens to be, which is why each caret
+    /// in a column has to be asked separately.
+    #[test]
+    fn tab_lands_on_the_next_stop_at_whatever_column_the_caret_is_in() {
+        assert_eq!(visual_column("", 4), 0);
+        assert_eq!(visual_column("ab", 4), 2);
+        assert_eq!(visual_column("\ta", 4), 5);
+        assert_eq!(visual_column("ab\t", 4), 4);
+        assert_eq!(tab_insert(0, 4, true), "    ");
+        assert_eq!(tab_insert(3, 4, true), " ");
+        assert_eq!(tab_insert(4, 4, true), "    ");
+        assert_eq!(tab_insert(2, 4, false), "\t");
     }
 }
