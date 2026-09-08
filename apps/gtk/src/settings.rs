@@ -263,6 +263,21 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&minimap);
 
+    // The Git pane's own toggle writes the same value, so the two surfaces are one preference.
+    let git_tree = adw::SwitchRow::builder()
+        .title("Group Git Changes by Folder")
+        .subtitle("Show the Git pane's changed files as a tree instead of a flat list")
+        .active(config.borrow().git_tree)
+        .build();
+    git_tree.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().git_tree = r.is_active();
+            save();
+        }
+    });
+    group.add(&git_tree);
+
     group
 }
 

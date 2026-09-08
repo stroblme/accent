@@ -21,6 +21,7 @@ spellcheck = true
 ghost_text = true
 minimap = false
 line_numbers = false
+git_tree = true
 column_width = 50
 theme = "solarized"
 
@@ -75,6 +76,10 @@ pub struct Config {
     /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
     /// what an ATX heading's markers hang in.
     pub line_numbers: bool,
+    /// Group the Git pane's changed files by folder rather than listing them flat. On by default:
+    /// a vault's changes arrive a folder at a time, and a flat list of thirty repeats the same
+    /// directory thirty times.
+    pub git_tree: bool,
     /// How much of the editor's width the document column may fill, as a percentage. 50 is what
     /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
     /// window keeps a readable line.
@@ -118,6 +123,7 @@ impl Default for Config {
             ghost_text: true,
             minimap: false,
             line_numbers: false,
+            git_tree: true,
             column_width: 50,
             theme: Theme::System,
             shortcuts: BTreeMap::new(),
@@ -405,6 +411,7 @@ mod tests {
         assert!(c.ghost_text);
         assert!(!c.minimap);
         assert!(!c.line_numbers);
+        assert!(c.git_tree);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.editor_font, None);

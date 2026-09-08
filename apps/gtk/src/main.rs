@@ -4491,6 +4491,9 @@ impl App {
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
         }
+        if let Some(git) = self.git.get() {
+            git.set_tree(config.git_tree);
+        }
         self.restyle_terminals();
     }
 
@@ -5292,7 +5295,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, trash, changed, syncing) = (
+    let (toast, open, diff, trash, changed, syncing, set_tree) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -5301,6 +5305,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         Rc::downgrade(app),
     );
     git::Panel::new(git::Hooks {
+        tree: app.config.borrow().git_tree,
         vault: vault.clone(),
         window: app.window.clone(),
         toast: Box::new(move |text| {
@@ -5332,6 +5337,18 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
         syncing: Box::new(move |on| {
             if let Some(app) = syncing.upgrade() {
                 app.statusbar.set_syncing(on);
+            }
+        }),
+        // The pane has already redrawn itself; this only writes the preference the Preferences
+        // switch edits, so the two surfaces stay one value.
+        set_tree: Box::new(move |on| {
+            let Some(app) = set_tree.upgrade() else {
+                return;
+            };
+            let mut config = app.config.borrow_mut();
+            config.git_tree = on;
+            if let Err(e) = config.save() {
+                tracing::warn!("saving config: {e:#}");
             }
         }),
     })
@@ -6480,9 +6497,10 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
     None
 }
 
-/// Show the Git pane, print how many rows its history list holds, activate the last one — the
-/// Load More row — and print the count again. The headless image has no pointer, so this is the
-/// only way "Load More is the end of the list and paging it in works" is provable.
+/// Show the Git pane, print how many rows its two lists hold, flip the changes list between the
+/// tree and the flat view, and activate the history's last row — the Load More row — printing the
+/// counts again. The headless image has no pointer, so this is the only way "Load More is the end
+/// of the list and paging it in works" and "the tree adds a row per folder" are provable.
 fn bench_git(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
@@ -6491,6 +6509,17 @@ fn bench_git(app: &Rc<App>) {
         let Some(git) = app.git.get() else {
             return bench_quit(&app);
         };
+        println!(
+            "bench git_changes tree={} {}",
+            git.tree(),
+            git.changes_rows()
+        );
+        git.set_tree(!git.tree());
+        println!(
+            "bench git_changes tree={} {}",
+            git.tree(),
+            git.changes_rows()
+        );
         println!("bench git_rows {}", git.log_rows());
         git.activate_last_log_row();
         let app = app.clone();
