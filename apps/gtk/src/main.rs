@@ -99,7 +99,7 @@ const SAVES: &str = "accent::saves";
 const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
     ("win.open-file", "Open File…", &["<Control>o"]),
-    ("win.new-note", "New Note", &["<Control>n"]),
+    ("win.new-file", "New File", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
     ("win.upload", "Upload Files…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
@@ -271,6 +271,13 @@ fn main() -> glib::ExitCode {
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
     });
+    // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
+    // leaves exactly that behind. Said once per process; there is no migration.
+    for name in shell.config.borrow().shortcuts.keys() {
+        if !ACTIONS.iter().any(|(action, _, _)| action == name) {
+            tracing::warn!("shortcut for unknown action {name:?} in config.toml");
+        }
+    }
     shell.install_app_actions(&app);
     app.connect_command_line({
         let shell = shell.clone();
@@ -3343,15 +3350,15 @@ impl App {
         match name {
             "save" => self.save_active(),
             "open-file" => self.open_file_dialog(),
-            "new-note" => {
+            "new-file" => {
                 let Some(vault) = self.vault() else {
-                    return self.needs_vault("create a note");
+                    return self.needs_vault("create a file");
                 };
                 let dir = self
                     .selected_dir()
                     .unwrap_or_else(|| vault.config().new_note_dir);
                 if let Some(ops) = self.ops() {
-                    fileops::new_note(ops, &dir);
+                    fileops::new_file(ops, &dir);
                 }
             }
             "new-folder" => {
@@ -4698,6 +4705,13 @@ fn build_window(
         .map(|url| url.host)
         .unwrap_or_default();
     let title = adw::WindowTitle::new(&vault_name, &host);
+    // What the task manager and the window switcher show, which is the one place a window has to
+    // be told apart from the others: the vault, and the machine it is on when that is not this
+    // one. Fixed for the life of the window — the header bar is where the open file is named.
+    let window_title = match host.is_empty() {
+        true => vault_name.clone(),
+        false => format!("{vault_name} ({host})"),
+    };
     let first = Pane::new(&tab_menu());
     let toasts = adw::ToastOverlay::new();
     // Hidden until something goes wrong with a connection, which for a local vault is never.
@@ -4856,6 +4870,7 @@ fn build_window(
 
     let window = adw::ApplicationWindow::builder()
         .application(gtk_app)
+        .title(&window_title)
         .default_width(1100)
         .default_height(760)
         .content(&split)
@@ -6065,7 +6080,7 @@ fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     for group in [
         [
-            "win.new-note",
+            "win.new-file",
             "win.new-folder",
             "win.open-file",
             "win.save",

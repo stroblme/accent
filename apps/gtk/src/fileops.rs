@@ -53,21 +53,31 @@ pub struct Ops {
 
 // --------------------------------------------------------------------------------- creating
 
-/// New note in `dir` ("" is the vault root), from a template when the vault has any.
-pub fn new_note(ops: &Rc<Ops>, dir: &str) {
-    let entry = name_entry("Note name", "");
+/// New file in `dir` ("" is the vault root), from a template when the vault has any.
+///
+/// The name is created exactly as typed: `notes` is a file called `notes`, `main.rs` is a source
+/// file, and only `notes.md` is a note. A template is markdown, so the picker is on screen only
+/// while the typed name says the file will be one.
+pub fn new_file(ops: &Rc<Ops>, dir: &str) {
+    let entry = name_entry("File name", "");
     let form = form();
     form.append(&entry);
 
-    form.append(&name_preview(&entry));
+    form.append(&name_preview(&entry, false));
 
     let templates = ops.vault.templates().unwrap_or_default();
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
-        form.append(&labelled("Template", picker));
+        let row = labelled("Template", picker);
+        row.set_visible(false);
+        entry.connect_changed({
+            let row = row.clone();
+            move |e| row.set_visible(is_markdown(e.text().trim()))
+        });
+        form.append(&row);
     }
 
-    let dialog = name_dialog("New Note", "Create", &form);
+    let dialog = name_dialog("New File", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     let typed = entry.clone();
     dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
@@ -78,8 +88,11 @@ pub fn new_note(ops: &Rc<Ops>, dir: &str) {
             Ok(name) => name,
             Err(why) => return (ops.toast)(why),
         };
+        // Read only where the picker is on screen, so a name that stopped being markdown after a
+        // template was picked does not carry the leftover selection into a non-note file.
         let template = picker
             .as_ref()
+            .filter(|_| is_markdown(&name))
             .and_then(|p| (p.selected() as usize).checked_sub(1))
             .and_then(|i| templates.get(i));
         match ops
@@ -87,9 +100,7 @@ pub fn new_note(ops: &Rc<Ops>, dir: &str) {
             .create_note(&child_path(&dir, &name), template.map(String::as_str))
         {
             Ok((created, _cursor)) => (ops.open)(&created),
-            Err(e) if already_exists(&e) => {
-                (ops.toast)(&format!("{} already exists", with_extension(&name)))
-            }
+            Err(e) if already_exists(&e) => (ops.toast)(&format!("{name} already exists")),
             Err(e) => (ops.toast)(&format!("Cannot create {name}: {e:#}")),
         }
     });
@@ -153,11 +164,11 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let form = form();
     form.append(&entry);
     // A note that loses its `.md` drops out of the index and stops being a note, so renaming one
-    // follows the same extension policy `create_note` does, and says so as the name is typed.
+    // keeps the extension that makes it one, and says so as the name is typed.
     // A folder or a PDF keeps whatever the user types.
     let note = is_markdown(&current);
     if note {
-        form.append(&name_preview(&entry));
+        form.append(&name_preview(&entry, true));
     }
 
     let dialog = name_dialog("Rename", "Rename", &form);
@@ -665,7 +676,7 @@ pub fn context_menu(
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
     let dir = row_dir(row);
-    menu.append_item(&item("New Note", "new-note", dir));
+    menu.append_item(&item("New File", "new-file", dir));
     menu.append_item(&item("New Folder", "new-folder", dir));
     // Putting files in is only worth offering where they are not here already; a folder of a
     // local vault is one the file manager can be dropped onto.
@@ -702,7 +713,7 @@ pub fn context_menu(
 
 /// The folder a row stands for: the folder itself, the one holding the file, and the vault root
 /// where there is no row at all — the blank area below the last one, or the root label above the
-/// first. It is where New Note, New Folder and Upload put what they create, and where a drop
+/// first. It is where New File, New Folder and Upload put what they create, and where a drop
 /// moves what was dragged, so the two ways of putting a file somewhere agree by construction.
 pub fn row_dir(row: Option<(&str, bool)>) -> &str {
     match row {
@@ -756,7 +767,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         group.add_action(&action);
     };
     add("open", Box::new(|ops, rel| (ops.open)(rel)));
-    add("new-note", Box::new(new_note));
+    add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));
     add("copy-rel", Box::new(copy_relative_path));
@@ -793,8 +804,8 @@ fn is_markdown(name: &str) -> bool {
     })
 }
 
-/// The name the vault will actually create. Mirrors `Vault::create_note`, which appends `.md` to
-/// anything that is not already markdown, so the dialog cannot promise a file it will not make.
+/// The name with the extension that keeps a note a note. Only renaming uses it: a note that
+/// loses its `.md` drops out of the index, while creating takes the name as it was typed.
 fn with_extension(name: &str) -> String {
     match is_markdown(name) {
         true => name.to_string(),
@@ -919,9 +930,10 @@ fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {
     dialog
 }
 
-/// The dim line under a name entry showing the file name that will really be used, since the
-/// vault appends the `.md` the user did not type.
-fn name_preview(entry: &gtk::Entry) -> gtk::Label {
+/// The dim line under a name entry showing the file name that will really be used. `md` is the
+/// rename dialog's policy, where a note keeps the extension that makes it one; New File creates
+/// the name as typed, so there the line only spells out what will be created.
+fn name_preview(entry: &gtk::Entry, md: bool) -> gtk::Label {
     let preview = gtk::Label::builder().xalign(0.0).build();
     preview.add_css_class("dim-label");
     entry.connect_changed({
@@ -931,14 +943,14 @@ fn name_preview(entry: &gtk::Entry) -> gtk::Label {
             let typed = typed.trim();
             preview.set_label(&match typed.is_empty() {
                 true => String::new(),
-                false => with_extension(typed),
+                false => renamed_to(typed, md),
             });
         }
     });
     let initial = entry.text();
     preview.set_label(&match initial.trim() {
         "" => String::new(),
-        typed => with_extension(typed),
+        typed => renamed_to(typed, md),
     });
     preview
 }
@@ -1018,7 +1030,7 @@ mod tests {
         assert_eq!(with_extension("note.md"), "note.md");
         assert_eq!(with_extension("NOTE.MD"), "NOTE.MD");
         assert_eq!(with_extension("note.markdown"), "note.markdown");
-        // What `Vault::create_note` does with a non-markdown extension: notes are markdown.
+        // Renaming a note to a non-markdown extension would demote it out of the index.
         assert_eq!(with_extension("chart.pdf"), "chart.pdf.md");
     }
 
