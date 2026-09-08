@@ -1113,7 +1113,7 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     // ---- real templates: written verbatim, because template expansion is what they are for
     g.write(
         "Templates/Daily.md",
-        b"---\ndate: {{date}}\ntags: [daily]\n---\n\n\
+        b"---\naccent-target: Daily/{{date:%Y-%m-%d}}.md\ndate: {{date}}\ntags: [daily]\n---\n\n\
           # {{date:%A, %d %B %Y}}\n\n\
           ## Log\n\n\
           - {{time}} {{cursor}}\n",
@@ -1517,6 +1517,11 @@ mod tests {
         let daily = fs::read_to_string(vault.join("Templates/Daily.md")).unwrap();
         assert!(daily.contains("{{cursor}}"), "{daily}");
         assert!(daily.contains("{{date:"), "{daily}");
+        // New from Template lists a template only where one of these says where its notes go.
+        assert!(
+            daily.contains("accent-target: Daily/{{date:%Y-%m-%d}}.md"),
+            "{daily}"
+        );
         assert!(vault.join(".obsidian/daily-notes.json").is_file());
 
         // Attachments are decodable images, not noise behind the right magic bytes.
