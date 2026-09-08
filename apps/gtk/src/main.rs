@@ -6626,6 +6626,13 @@ fn bench_keys(app: &Rc<App>) {
             view.clear_carets();
         }
 
+        // A column takes the blink over, GTK's own caret going transparent with the class, and
+        // hands it back when it goes. How it looks is a manual check; that it toggles is not.
+        view.add_caret(true);
+        println!("bench caret_blink {}", view.has_css_class("accent-carets"));
+        view.clear_carets();
+        println!("bench caret_blink {}", view.has_css_class("accent-carets"));
+
         window.close();
         bench_quit(&app);
     });
@@ -6815,6 +6822,7 @@ fn install_chrome_css() {
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
+             textview.accent-carets text {{ caret-color: transparent; }} \
              textview border gutter {{ background-color: var(--view-bg-color); }} \
              GtkSourceAssistant {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); \

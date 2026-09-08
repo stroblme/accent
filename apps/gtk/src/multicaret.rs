@@ -18,7 +18,9 @@
 //!   drops the secondaries;
 //! * while secondaries exist the key controller runs ahead of the input method, so dead keys and
 //!   CJK preedit go to the primary caret only, once the secondaries are cleared;
-//! * secondary carets do not blink, they are painted;
+//! * while a column of carets exists this widget paints every caret, the primary one included,
+//!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
+//!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
 //! * the completion popup can open at several carets at once, since it follows the primary.
 //!
 //! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
@@ -178,9 +180,24 @@ fn word_range(
     }
 }
 
+/// The alpha a caret is painted at `elapsed` µs into a blink of period `period` µs: solid for the
+/// first two thirds, then down to nothing and back over the last third. Ramped rather than
+/// snapped, which is what GTK4 does with the primary caret this stands in for.
+fn blink_alpha(elapsed: i64, period: i64) -> f32 {
+    let phase = elapsed.rem_euclid(period) as f32 / period as f32;
+    match phase < 2.0 / 3.0 {
+        true => 1.0,
+        false => ((phase - 5.0 / 6.0).abs() * 6.0).clamp(0.0, 1.0),
+    }
+}
+
 /// How much of the text colour ghost text keeps. Enough to read, little enough that it is never
 /// mistaken for what the document says.
 const GHOST_ALPHA: f32 = 0.45;
+
+/// The class whose CSS (`main::install_chrome_css`) makes GTK's own caret transparent, so this
+/// widget can paint every caret on one phase.
+const CARETS_CLASS: &str = "accent-carets";
 
 mod imp {
     use super::*;
@@ -205,6 +222,11 @@ mod imp {
         /// The primary caret's goal column, the counterpart of [`Caret::goal`]. Dropped by any
         /// other movement, any edit and any caret move this widget did not make.
         pub goal: Cell<Option<i32>>,
+        /// The frame time the blink phase last restarted at, so every caret fades together and a
+        /// caret being typed at is solid.
+        pub blinked_at: Cell<i64>,
+        /// The tick callback that repaints the blink, while there is one to repaint.
+        pub blink: RefCell<Option<gtk::TickCallbackId>>,
     }
 
     #[glib::object_subclass]
@@ -273,13 +295,27 @@ mod imp {
             let obj = self.obj();
             let buffer = obj.buffer();
             let colour = obj.color();
-            // This layer draws in buffer coordinates, which is what `iter_location` reports.
-            for caret in self.carets.borrow().iter() {
-                let at = obj.iter_location(&buffer.iter_at_mark(&caret.mark));
-                snapshot.append_color(
-                    &colour,
-                    &graphene::Rect::new(at.x() as f32, at.y() as f32, 1.0, at.height() as f32),
+            // Every caret on one phase, the primary one included: GTK's is transparent while the
+            // column exists, because its own blink cannot be read and two out of step is worse
+            // than one we draw. This layer draws in buffer coordinates, which is what
+            // `iter_location` reports.
+            let carets = self.carets.borrow();
+            if !carets.is_empty() {
+                let alpha = obj.blink_phase().map_or(1.0, |(e, p)| blink_alpha(e, p));
+                let tint = gdk::RGBA::new(
+                    colour.red(),
+                    colour.green(),
+                    colour.blue(),
+                    colour.alpha() * alpha,
                 );
+                let insert = buffer.get_insert();
+                for mark in carets.iter().map(|c| &c.mark).chain([&insert]) {
+                    let at = obj.iter_location(&buffer.iter_at_mark(mark));
+                    snapshot.append_color(
+                        &tint,
+                        &graphene::Rect::new(at.x() as f32, at.y() as f32, 1.0, at.height() as f32),
+                    );
+                }
             }
             // The suggestion sits after the caret in the text's own font, dimmed enough to read
             // as not-yet-written. It is only ever asked for at the end of a line, so there is
@@ -404,7 +440,48 @@ impl View {
             mark,
             goal: Some(goal),
         });
+        self.blink_on();
         self.queue_draw();
+    }
+
+    /// How long the blink has been running and the period it runs at, or `None` once it has
+    /// settled: blinking switched off, or GTK's blink timeout passed with the carets left solid.
+    fn blink_phase(&self) -> Option<(i64, i64)> {
+        let settings = self.settings();
+        let elapsed = self.frame_clock()?.frame_time() - self.imp().blinked_at.get();
+        (settings.is_gtk_cursor_blink()
+            && elapsed <= settings.gtk_cursor_blink_timeout() as i64 * 1_000_000)
+            .then(|| (elapsed, settings.gtk_cursor_blink_time() as i64 * 1_000))
+    }
+
+    /// Take the blink over and restart its phase, so a caret is solid the moment it is typed at
+    /// the way GTK's own is. The tick callback stops itself once the phase has settled.
+    fn blink_on(&self) {
+        let imp = self.imp();
+        self.add_css_class(CARETS_CLASS);
+        if let Some(clock) = self.frame_clock() {
+            imp.blinked_at.set(clock.frame_time());
+        }
+        if imp.blink.borrow().is_some() {
+            return;
+        }
+        let id = self.add_tick_callback(|obj, _| {
+            obj.queue_draw();
+            if obj.blink_phase().is_some() {
+                return glib::ControlFlow::Continue;
+            }
+            obj.imp().blink.take();
+            glib::ControlFlow::Break
+        });
+        *imp.blink.borrow_mut() = Some(id);
+    }
+
+    /// Hand the caret back to GTK: no column left to keep in step.
+    fn blink_off(&self) {
+        self.remove_css_class(CARETS_CLASS);
+        if let Some(id) = self.imp().blink.take() {
+            id.remove();
+        }
     }
 
     /// Whether a key press is going to be replayed at more than one caret. `typing.rs` asks
@@ -425,6 +502,7 @@ impl View {
                 buffer.delete_mark(&caret.mark);
             }
         }
+        self.blink_off();
         self.queue_draw();
     }
 
@@ -651,6 +729,11 @@ impl View {
         imp.busy.set(false);
 
         self.collapse();
+        // Solid again from here, and back to GTK's caret if the column has collapsed into one.
+        match self.has_carets() {
+            true => self.blink_on(),
+            false => self.blink_off(),
+        }
         self.scroll_mark_onscreen(&insert);
         self.queue_draw();
     }
@@ -689,7 +772,9 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{spaces_ahead, spaces_behind, tab_insert, vertical_step, visual_column};
+    use super::{
+        blink_alpha, spaces_ahead, spaces_behind, tab_insert, vertical_step, visual_column,
+    };
 
     /// A caret moving into a shorter line stops at its end rather than off it, and keeps aiming
     /// at the column it came from, so the line after that brings it back.
@@ -726,5 +811,17 @@ mod tests {
         assert_eq!(tab_insert(3, 4, true), " ");
         assert_eq!(tab_insert(4, 4, true), "    ");
         assert_eq!(tab_insert(2, 4, false), "\t");
+    }
+
+    /// One phase for every caret: solid most of the way through, a ramp down to nothing and back,
+    /// and the same value again a period later.
+    #[test]
+    fn the_blink_is_solid_most_of_the_period_and_ramps_through_the_rest() {
+        assert_eq!(blink_alpha(0, 1200), 1.0);
+        assert_eq!(blink_alpha(600, 1200), 1.0);
+        assert!(blink_alpha(1000, 1200) < 0.01);
+        assert!((0.01..0.99).contains(&blink_alpha(900, 1200)));
+        assert_eq!(blink_alpha(1200, 1200), blink_alpha(0, 1200));
+        assert_eq!(blink_alpha(2400, 1200), 1.0);
     }
 }
