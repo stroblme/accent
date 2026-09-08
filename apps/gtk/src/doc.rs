@@ -10,6 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::diff::DiffTab;
 use crate::editor::Tab;
 use crate::fileops;
 use crate::pdftab::PdfTab;
@@ -21,7 +22,7 @@ pub struct Viewer {
     key: RefCell<String>,
     pub page: adw::TabPage,
     /// How far the document is zoomed, `None` while it is fitted to the window. Only an image
-    /// has one: a status page and a diff draw at a size nobody chose.
+    /// has one: a status page draws at a size nobody chose.
     pub zoom: Cell<Option<f64>>,
 }
 
@@ -47,8 +48,9 @@ pub enum Doc {
     Image(Rc<Viewer>),
     Pdf(Rc<PdfTab>),
     Status(Rc<Viewer>),
-    /// A comparison of two texts: a git diff, a note against what is on disk, a sync conflict.
-    Diff(Rc<Viewer>),
+    /// A comparison of two texts that are not files: a staged change, a commit against its
+    /// parent. A comparison that involves a file happens inside that file's own `Text` tab.
+    Diff(Rc<DiffTab>),
     /// A shell. A document like any other, so it splits and drags with the rest.
     Terminal(Rc<Term>),
 }
@@ -59,7 +61,8 @@ impl Doc {
         match self {
             Doc::Text(tab) => tab.rel(),
             Doc::Pdf(pdf) => pdf.key(),
-            Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => v.key(),
+            Doc::Image(v) | Doc::Status(v) => v.key(),
+            Doc::Diff(d) => d.key(),
             Doc::Terminal(t) => t.key(),
         }
     }
@@ -74,7 +77,8 @@ impl Doc {
         match self {
             Doc::Text(tab) => &tab.page,
             Doc::Pdf(pdf) => &pdf.page,
-            Doc::Image(v) | Doc::Status(v) | Doc::Diff(v) => &v.page,
+            Doc::Image(v) | Doc::Status(v) => &v.page,
+            Doc::Diff(d) => &d.page,
             Doc::Terminal(t) => &t.page,
         }
     }
@@ -82,6 +86,13 @@ impl Doc {
     pub fn tab(&self) -> Option<&Rc<Tab>> {
         match self {
             Doc::Text(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    pub fn diff(&self) -> Option<&Rc<DiffTab>> {
+        match self {
+            Doc::Diff(d) => Some(d),
             _ => None,
         }
     }

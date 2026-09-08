@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{comment, diagnostics, fold, highlight, lang, multicaret, typing};
+use crate::{comment, diagnostics, diff, fold, highlight, lang, multicaret, typing};
 use accent_api::{Diagnostic, Fold, Pos};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::Link;
@@ -170,6 +170,16 @@ pub struct Prefs {
     pub line_numbers: bool,
 }
 
+/// A comparison the tab is hosting: see [`Tab::compare`].
+struct Comparing {
+    compare: Rc<diff::Compare>,
+    /// What the content shows in the document's place: the paned, and what the host put under it.
+    shown: Vec<gtk::Widget>,
+    /// The box the document sits in, on its side of the paned.
+    holder: gtk::Box,
+    label: String,
+}
+
 pub struct Tab {
     /// Behind a cell because a rename retargets the tab instead of closing and reopening it.
     rel: RefCell<String>,
@@ -180,6 +190,13 @@ pub struct Tab {
     /// it differs. `None` when the file is in no repository, or is not tracked in one.
     head: RefCell<Option<String>>,
     marks: crate::marks::Renderer,
+    /// The page's content and the document inside it, kept so a comparison can put a paned
+    /// between the two and take it away again. See [`Tab::compare`].
+    content: gtk::Box,
+    document: gtk::Box,
+    comparing: RefCell<Option<Comparing>>,
+    /// The buttons a comparison lays over the editor, kept across comparisons: see `diff::Pool`.
+    overlays: Rc<diff::Pool>,
     /// Kept for [`Tab::scroll_lines`] and for the scrollbar the minimap replaces.
     scroller: gtk::ScrolledWindow,
     /// The width cap on the document column, sized by [`Tab::set_clamp`]. Scrollable, so the
@@ -252,31 +269,13 @@ pub struct Tab {
     pub lang: lang::State,
 }
 
-/// Open `key` in a new tab of `tabs`, with `text` already read from disk.
-///
-/// The bytes are read by the caller rather than here, because deciding what a file is — text,
-/// binary, too large — is what picks the kind of tab in the first place, and by the time we are
-/// called that question is settled.
-///
-/// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
-/// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
-pub fn open(
-    root: &Path,
-    key: &str,
-    text: fs::Text,
+/// A buffer and a view over `text`, set up for `flavour`: what the editor and a comparison's
+/// read-only companion have in common, so the two sides of a diff render one note alike.
+fn build(
     flavour: Flavour,
-    tabs: &adw::TabView,
-    prefs: &Prefs,
-) -> Rc<Tab> {
-    let path = root.join(key);
-    let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
-
-    // A language for code, none for a note (our own spans do that) and none for a CSV, whose
-    // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
-    let language = match flavour {
-        Flavour::Code => guess_language(&path, &text.text),
-        Flavour::Note | Flavour::Csv => None,
-    };
+    language: Option<sourceview5::Language>,
+    text: &str,
+) -> (sourceview5::View, sourceview5::Buffer) {
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_language(language.as_ref());
     match flavour {
@@ -288,7 +287,7 @@ pub fn open(
     // sections as a source file folds its functions.
     diagnostics::install_tags(&buffer);
     fold::install_tag(&buffer);
-    buffer.set_text(&text.text);
+    buffer.set_text(text);
     // `set_text` leaves the insert mark where the text ended, so a note opened without one — every
     // note but a search hit or a template's `{{cursor}}` — had its caret on the last line while the
     // view sat at the top. Invisible in the editor, but the preview follows the caret, so a note
@@ -324,14 +323,43 @@ pub fn open(
         let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
         view.set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
     }
-    // Not valid UTF-8: what is on screen is lossy, so it must not be written back.
-    if text.lossy {
-        view.set_editable(false);
-    }
     // Apostrophe-like page: generous side gutters, room to breathe at the ends. `set_page`,
     // called from `set_font` below, puts the zoomed values here.
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
+    (view, buffer)
+}
+
+/// Open `key` in a new tab of `tabs`, with `text` already read from disk.
+///
+/// The bytes are read by the caller rather than here, because deciding what a file is — text,
+/// binary, too large — is what picks the kind of tab in the first place, and by the time we are
+/// called that question is settled.
+///
+/// `key` is vault-relative, or absolute for a file from outside the vault; `root` is the vault's
+/// and is only used to build the path and the tooltip, so an absolute key simply ignores it.
+pub fn open(
+    root: &Path,
+    key: &str,
+    text: fs::Text,
+    flavour: Flavour,
+    tabs: &adw::TabView,
+    prefs: &Prefs,
+) -> Rc<Tab> {
+    let path = root.join(key);
+    let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
+
+    // A language for code, none for a note (our own spans do that) and none for a CSV, whose
+    // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
+    let language = match flavour {
+        Flavour::Code => guess_language(&path, &text.text),
+        Flavour::Note | Flavour::Csv => None,
+    };
+    let (view, buffer) = build(flavour, language, &text.text);
+    // Not valid UTF-8: what is on screen is lossy, so it must not be written back.
+    if text.lossy {
+        view.set_editable(false);
+    }
     let numbers = line_numbers(&view, &buffer);
     // Between the numbers and the text: a change bar belongs next to the line it is about.
     let marks = crate::marks::Renderer::new();
@@ -445,6 +473,10 @@ pub fn open(
         path: RefCell::new(path),
         view: view.clone(),
         buffer: buffer.clone(),
+        content: column.clone(),
+        document: document.clone(),
+        comparing: RefCell::new(None),
+        overlays: Rc::default(),
         scroller: scroller.clone(),
         clamp,
         zoom: Cell::new(zoom),
@@ -806,12 +838,106 @@ fn title_of(rel: &str) -> &str {
         .unwrap_or(rel)
 }
 
+/// Name the font `zoom` scales for the views called `name`, replacing the provider from last time.
+///
+/// At the default zoom and with no font of its own a note needs no provider at all: the
+/// display-wide document font rule already says exactly the right thing. Zooming has to name a
+/// font anyway, because CSS has no way to scale a size it cannot see. Code names its font every
+/// time: the display-wide rule installed for prose is the GNOME *document* font, and a source
+/// file wants the monospace one instead.
+pub(crate) fn install_font(
+    slot: &RefCell<Option<gtk::CssProvider>>,
+    flavour: Flavour,
+    font: Option<&str>,
+    zoom: f64,
+    name: &str,
+) {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    if let Some(old) = slot.borrow_mut().take() {
+        gtk::style_context_remove_provider_for_display(&display, &old);
+    }
+    let family = match flavour {
+        Flavour::Note => match font.filter(|f| !f.is_empty()) {
+            Some(font) => Some(font.to_string()),
+            None if zoom != 1.0 => Some(default_font()),
+            None => None,
+        },
+        _ => Some(
+            adw::StyleManager::default()
+                .monospace_font_name()
+                .to_string(),
+        ),
+    };
+    if let Some(family) = family {
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&font_css(&family, &format!("#{name}"), zoom));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        *slot.borrow_mut() = Some(provider);
+    }
+}
+
+/// A read-only view over `text` for a comparison, built the way the editor builds its own so the
+/// two sides of a diff render one note alike, and named `name` so the font and zoom CSS written
+/// for the editor applies here too.
+pub fn companion(
+    flavour: Flavour,
+    text: &str,
+    name: &str,
+    language: Option<&sourceview5::Language>,
+) -> (sourceview5::View, sourceview5::Buffer) {
+    let (view, buffer) = build(flavour, language.cloned(), text);
+    view.set_editable(false);
+    view.set_cursor_visible(false);
+    view.set_widget_name(name);
+    // A comparison is about lines, so the numbers are always on here.
+    line_numbers(&view, &buffer).set_visible(true);
+    style_companion(flavour, &buffer);
+    (view, buffer)
+}
+
+/// The styling a companion's text implies: what [`Tab::analyse`] does for the editor, less the
+/// parts that need a tab.
+pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer) {
+    match flavour {
+        Flavour::Note => {
+            highlight::apply(buffer);
+        }
+        Flavour::Csv => highlight::apply_csv(buffer),
+        Flavour::Code => {}
+    }
+}
+
+/// A companion's colours after the theme moved: what [`Tab::restyle`] does, less the gutters a
+/// tab has.
+pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+    sync_scheme(buffer);
+    match flavour {
+        Flavour::Note => {
+            highlight::restyle(buffer, view);
+            highlight::hang(buffer, view);
+        }
+        Flavour::Csv => highlight::restyle_csv(buffer),
+        Flavour::Code => {}
+    }
+}
+
+/// The language a file called `key` holding `text` is coloured as.
+pub fn language_for(key: &str, text: &str) -> Option<sourceview5::Language> {
+    guess_language(Path::new(key), text)
+}
+
 /// A per-view CSS name, so the font override can be one provider per tab.
 ///
 /// ponytail: `#name` is the only per-widget CSS hook GTK 4 still offers — `StyleContext` and its
 /// `add_provider` are deprecated since 4.10 — and the font is a global preference, so one
 /// display-wide provider would do. Swap for that if the provider count ever matters.
-fn next_view_name() -> String {
+pub(crate) fn next_view_name() -> String {
     thread_local! {
         static NEXT: Cell<u32> = const { Cell::new(0) };
     }
@@ -1121,6 +1247,9 @@ impl Tab {
         self.marks.restyle(&self.view);
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
+        if let Some(compare) = self.comparison() {
+            compare.restyle();
+        }
     }
 
     /// What the language server last said about this file. Replaces the previous answer whole,
@@ -1287,9 +1416,13 @@ impl Tab {
     fn tab_title(&self) -> String {
         let rel = self.rel();
         let name = tab_name(&rel, self.flavour);
+        let name = match self.comparing.borrow().as_ref() {
+            Some(comparing) => format!("{name} ({})", comparing.label),
+            None => name.to_string(),
+        };
         match self.modified.get() {
             true => format!("• {name}"),
-            false => name.to_string(),
+            false => name,
         }
     }
 
@@ -1324,43 +1457,13 @@ impl Tab {
     /// `zoom` scales whichever of the two applies, and only this tab's document.
     pub fn set_font(self: &Rc<Self>, font: Option<&str>, zoom: f64) {
         self.set_page(zoom);
-        let Some(display) = gdk::Display::default() else {
-            return;
-        };
-        if let Some(old) = self.font.borrow_mut().take() {
-            gtk::style_context_remove_provider_for_display(&display, &old);
-        }
-        // At the default zoom and with no font of its own a tab needs no provider at all: the
-        // display-wide document font rule already says exactly the right thing. Zooming has to
-        // name a font anyway, because CSS has no way to scale a size it cannot see.
-        let name = match self.flavour {
-            Flavour::Note => match font.filter(|f| !f.is_empty()) {
-                Some(font) => Some(font.to_string()),
-                None if zoom != 1.0 => Some(default_font()),
-                None => None,
-            },
-            // Code names its font every time: the display-wide rule installed for prose is the
-            // GNOME *document* font, and a source file wants the monospace one instead.
-            _ => Some(
-                adw::StyleManager::default()
-                    .monospace_font_name()
-                    .to_string(),
-            ),
-        };
-        if let Some(name) = name {
-            let provider = gtk::CssProvider::new();
-            provider.load_from_string(&font_css(
-                &name,
-                &format!("#{}", self.view.widget_name()),
-                zoom,
-            ));
-            gtk::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-            *self.font.borrow_mut() = Some(provider);
-        }
+        install_font(
+            &self.font,
+            self.flavour,
+            font,
+            zoom,
+            &self.view.widget_name(),
+        );
         // Only a note has markers hanging in the gutter to re-measure.
         if self.flavour.is_note() {
             self.rehang();
@@ -1389,7 +1492,11 @@ impl Tab {
         // The scroller's own width, not the horizontal adjustment's page size: with the view as
         // the scrollable child that page size *is* the clamped column, so it would feed back.
         let available = self.scroller.width();
-        let max = column_max(available, self.column.get(), self.zoom.get());
+        let max = match self.comparing.borrow().is_some() {
+            // Beside another pane the column has no width to spare, so the cap comes off.
+            true => i32::MAX / 4,
+            false => column_max(available, self.column.get(), self.zoom.get()),
+        };
         self.clamp.set_maximum_size(max);
         // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
         // is given, so a window too narrow for the cap loses no text to the gutters.
@@ -1414,6 +1521,92 @@ impl Tab {
     }
 
     /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in.
+    /// Show `other` (title, text) beside this tab's editor with the diff laid over both. The
+    /// editor is the `side` column and is never rewritten: what the user types is the merge.
+    /// `hunk_buttons` puts Take / Keep Both on the other pane, `below` goes under the panes for
+    /// the host's own buttons, and `label` says in the tab title what is being compared.
+    pub fn compare(
+        self: &Rc<Self>,
+        mine: &str,
+        other: (&str, &str),
+        side: diff::Side,
+        hunk_buttons: bool,
+        below: Option<gtk::Widget>,
+        label: &str,
+    ) -> Rc<diff::Compare> {
+        self.leave_compare();
+        let close = gtk::Button::from_icon_name("window-close-symbolic");
+        close.add_css_class("flat");
+        close.set_tooltip_text(Some("Stop Comparing"));
+        close.connect_clicked(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_| tab.leave_compare()
+        ));
+        let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        holder.append(&diff::header(mine, Some(close.upcast_ref())));
+        holder.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        self.content.remove(&self.document);
+        holder.append(&self.document);
+        let editor = diff::Pane {
+            root: holder.clone().upcast(),
+            view: self.view.clone(),
+            buffer: self.buffer.clone(),
+            scroller: self.scroller.clone(),
+            flavour: self.flavour,
+            pool: self.overlays.clone(),
+        };
+        let companion = diff::pane(
+            other.0,
+            self.flavour,
+            other.1,
+            &self.view.widget_name(),
+            self.buffer.language().as_ref(),
+        );
+        let (old, new) = match side {
+            diff::Side::Old => (editor, companion),
+            diff::Side::New => (companion, editor),
+        };
+        let compare = diff::Compare::new(old, new, Some(side), hunk_buttons);
+        compare.widget().set_vexpand(true);
+        self.content.append(compare.widget());
+        let mut shown = vec![compare.widget().clone()];
+        if let Some(below) = below {
+            let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+            self.content.append(&separator);
+            self.content.append(&below);
+            shown.extend([separator.upcast(), below]);
+        }
+        *self.comparing.borrow_mut() = Some(Comparing {
+            compare: compare.clone(),
+            shown,
+            holder,
+            label: label.to_string(),
+        });
+        self.set_clamp();
+        self.page.set_title(&self.tab_title());
+        compare
+    }
+
+    pub fn comparison(&self) -> Option<Rc<diff::Compare>> {
+        self.comparing.borrow().as_ref().map(|c| c.compare.clone())
+    }
+
+    /// The editor alone again. A no-op when nothing is being compared.
+    pub fn leave_compare(&self) {
+        let Some(comparing) = self.comparing.borrow_mut().take() else {
+            return;
+        };
+        comparing.compare.leave();
+        comparing.holder.remove(&self.document);
+        for widget in &comparing.shown {
+            self.content.remove(widget);
+        }
+        self.content.append(&self.document);
+        self.set_clamp();
+        self.page.set_title(&self.tab_title());
+    }
+
     pub fn set_line_numbers(&self, on: bool) {
         // The preference is about prose, where a number beside every line is clutter. Code is
         // read by line number — a compiler error names one — so it always has them.
@@ -1955,6 +2148,9 @@ impl Tab {
         self.update_marks();
         // The tags the sticky title reads are the ones that were just re-applied.
         self.update_sticky();
+        if let Some(compare) = self.comparison() {
+            compare.refresh();
+        }
     }
 
     /// Redraw the gutter's change bars from the committed text. Rides the same path as styling,
