@@ -3409,7 +3409,7 @@ impl App {
                 };
                 let dir = self
                     .selected_dir()
-                    .unwrap_or_else(|| vault.config().new_note_dir);
+                    .unwrap_or_else(|| vault.config().new_file_dir);
                 if let Some(ops) = self.ops() {
                     fileops::new_file(ops, &dir);
                 }

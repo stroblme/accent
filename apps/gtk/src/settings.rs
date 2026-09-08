@@ -329,11 +329,11 @@ fn vault_group(
     group.add(&entry_row(
         "New Files Folder",
         Some("Empty means the vault root"),
-        &vault.new_note_dir,
+        &vault.new_file_dir,
         config,
         root,
         save,
-        |cfg, text| cfg.new_note_dir = folder(text),
+        |cfg, text| cfg.new_file_dir = folder(text),
     ));
 
     group
