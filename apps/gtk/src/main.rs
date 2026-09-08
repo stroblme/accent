@@ -6413,15 +6413,20 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
+/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
-    if expand.is_none() && switcher.is_none() {
+    let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
+    if expand.is_none() && switcher.is_none() && !git {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if git {
+            return bench_git(&app);
+        }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);
         }
@@ -6473,6 +6478,29 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
         child = c.next_sibling();
     }
     None
+}
+
+/// Show the Git pane, print how many rows its history list holds, activate the last one — the
+/// Load More row — and print the count again. The headless image has no pointer, so this is the
+/// only way "Load More is the end of the list and paging it in works" is provable.
+fn bench_git(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    // Long enough for the debounced refresh and its `git status` and `git log` to land.
+    glib::timeout_add_local_once(Duration::from_millis(2500), move || {
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        println!("bench git_rows {}", git.log_rows());
+        git.activate_last_log_row();
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            if let Some(git) = app.git.get() {
+                println!("bench git_rows {}", git.log_rows());
+            }
+            bench_quit(&app);
+        });
+    });
 }
 
 /// Closing the window is not enough to end the process while a dialog is up: quit the

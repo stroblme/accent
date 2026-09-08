@@ -661,8 +661,31 @@ pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
     write(repo, &["add"], paths)
 }
 
+/// Take paths back out of the index.
+///
+/// `restore --staged` restores them from HEAD, so a repository whose first commit has not been
+/// made yet needs the other spelling: with nothing to restore from, every index entry is an
+/// addition and removing it is exactly "unstage". `--cached` touches nothing on disk, `-r` lets a
+/// directory row be unstaged as one path, and `-f` is load-bearing — the safety check refuses a
+/// path whose index content differs from both the worktree and HEAD, and with no HEAD that would
+/// be any file edited after it was staged.
 pub fn unstage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
-    write(repo, &["restore", "--staged"], paths)
+    match unborn(repo) {
+        true => write(repo, &["rm", "--cached", "-r", "-f", "-q"], paths),
+        false => write(repo, &["restore", "--staged"], paths),
+    }
+}
+
+/// Whether HEAD points at a branch that has no commit yet. `--quiet` makes git exit non-zero
+/// without a message rather than complain on stderr.
+fn unborn(repo: &Repo) -> bool {
+    run(
+        &repo.root,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+        None,
+        true,
+    )
+    .is_err()
 }
 
 pub fn discard(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
@@ -1240,6 +1263,34 @@ mod tests {
         write_file(dir, "a.md", "clobbered\n");
         discard(&repo, &["a.md"]).unwrap();
         assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "one\n");
+    }
+
+    #[test]
+    fn unstage_without_a_commit_takes_the_file_back_out_of_the_index() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        let repo = open(dir);
+
+        write_file(dir, "a.md", "one\n");
+        stage(&repo, &["a.md"]).unwrap();
+        assert_eq!(paths(status(&repo).unwrap().staged()), ["a.md"]);
+
+        unstage(&repo, &["a.md"]).unwrap();
+        let st = status(&repo).unwrap();
+        assert_eq!(paths(st.changes()), ["a.md"]);
+        assert_eq!(st.entries[0].x, '?', "back to untracked");
+
+        // Edited after staging: the index matches neither the worktree nor a HEAD that is not
+        // there, which is the case `rm --cached` refuses without `-f`.
+        stage(&repo, &["a.md"]).unwrap();
+        write_file(dir, "a.md", "two\n");
+        unstage(&repo, &["a.md"]).unwrap();
+        assert_eq!(paths(status(&repo).unwrap().changes()), ["a.md"]);
+        assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), "two\n");
     }
 
     #[test]

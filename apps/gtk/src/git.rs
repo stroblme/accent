@@ -111,6 +111,10 @@ enum LogItem {
         letter: char,
         path: String,
     },
+    /// The last row while git has history the store does not: activating it pages the next
+    /// [`PAGE`] in. A row rather than a button under the list, so it is reached by scrolling to
+    /// the end of the history it continues.
+    More,
 }
 
 /// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
@@ -153,7 +157,11 @@ pub struct Panel {
     divider: gtk::Paned,
     changes: gio::ListStore,
     log: gio::ListStore,
-    more: gtk::Button,
+    /// The history list, so the bench can activate a row without a pointer.
+    log_view: gtk::ListView,
+    /// Whether git has history the store does not hold, which is what puts the Load More row at
+    /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
+    has_more: Cell<bool>,
     state: RefCell<State>,
     /// The debounce timer, replaced rather than stacked.
     pending: RefCell<Option<glib::SourceId>>,
@@ -304,19 +312,11 @@ impl Panel {
         // gap between its line and the next one's and the graph comes out dashed. The rule in
         // `install_chrome_css` takes the margin off; the breathing room moves onto the text.
         log_view.add_css_class("git-log");
-        let more = gtk::Button::builder()
-            .label("Load More")
-            .visible(false)
-            .build();
-        more.add_css_class("flat");
-        let log_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        log_box.append(&scroller(&log_view));
-        log_box.append(&more);
 
         let divider = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
             .start_child(&scroller(&changes_view))
-            .end_child(&log_box)
+            .end_child(&scroller(&log_view))
             .resize_start_child(true)
             .resize_end_child(true)
             .shrink_start_child(false)
@@ -360,7 +360,8 @@ impl Panel {
             divider,
             changes,
             log,
-            more,
+            log_view: log_view.clone(),
+            has_more: Cell::new(false),
             state: RefCell::new(State::default()),
             pending: RefCell::new(None),
             busy: Cell::new(false),
@@ -393,6 +394,19 @@ impl Panel {
         !self.state.borrow().repos.is_empty()
     }
 
+    /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
+    /// calls these: the headless image has no pointer, and the Load More row is only worth
+    /// anything if activating the end of the list really pages the next chunk in.
+    pub fn log_rows(&self) -> u32 {
+        self.log.n_items()
+    }
+
+    pub fn activate_last_log_row(&self) {
+        if let Some(last) = self.log.n_items().checked_sub(1) {
+            self.log_view.emit_by_name::<()>("activate", &[&last]);
+        }
+    }
+
     /// Ask git again, once, in [`DEBOUNCE`]. Calling this ten times in a row is one query.
     pub fn schedule_refresh(self: &Rc<Self>) {
         if let Some(id) = self.pending.borrow_mut().take() {
@@ -411,7 +425,6 @@ impl Panel {
     fn wire_header(self: &Rc<Self>, check: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
         on_click(self, check, |panel| panel.refresh());
-        on_click(self, &self.more, |panel| panel.load_more());
 
         let weak = Rc::downgrade(self);
         self.chooser.connect_selected_notify(move |chooser| {
@@ -551,6 +564,7 @@ impl Panel {
                 LogItem::File {
                     oid, parent, path, ..
                 } => panel.compare(&path, &path, Sides::Commit { oid, parent }),
+                LogItem::More => panel.load_more(),
             }
         });
     }
@@ -651,7 +665,7 @@ impl Panel {
         // has not moved also leaves whatever Load More added below it alone.
         let moved = !same_head(&self.state.borrow().commits, &fetched.commits);
         if moved {
-            self.more.set_visible(fetched.commits.len() >= PAGE);
+            self.has_more.set(fetched.commits.len() >= PAGE);
             self.fill_log(fetched.commits.clone(), 0);
         }
 
@@ -697,11 +711,16 @@ impl Panel {
         self.collapse();
         let rows = git::lanes(commits);
         let keep = keep.min(rows.len()) as u32;
-        let items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
+        let mut items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
             .iter()
             .cloned()
             .map(|row| glib::BoxedAnyObject::new(LogItem::Commit(row)))
             .collect();
+        // The splice reaches the end of the store, so this is also what takes the row away again
+        // once the last page has come in.
+        if self.has_more.get() {
+            items.push(glib::BoxedAnyObject::new(LogItem::More));
+        }
         self.log
             .splice(keep, self.log.n_items().saturating_sub(keep), &items);
     }
@@ -786,21 +805,28 @@ impl Panel {
                 None => return,
             }
         };
-        self.more.set_sensitive(false);
+        // Cleared for the whole hop: the row stays where it is, and activating it again while
+        // the page is in flight finds nothing left to ask for.
+        if !self.has_more.replace(false) {
+            return;
+        }
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let vault = panel.hooks.vault.clone();
             let page = gio::spawn_blocking(move || vault.git_log(&repo, skip, PAGE)).await;
-            panel.more.set_sensitive(true);
             let page = match page {
                 Ok(Ok(page)) => page,
-                Ok(Err(e)) => return tracing::debug!("git log: {e}"),
-                Err(_) => return tracing::warn!("the git worker panicked"),
+                // Whatever went wrong, the history behind the row is still there, so it stays.
+                Ok(Err(e)) => {
+                    tracing::debug!("git log: {e}");
+                    return panel.has_more.set(true);
+                }
+                Err(_) => {
+                    tracing::warn!("the git worker panicked");
+                    return panel.has_more.set(true);
+                }
             };
-            panel.more.set_visible(page.len() >= PAGE);
-            if page.is_empty() {
-                return;
-            }
+            panel.has_more.set(page.len() >= PAGE);
             let commits = {
                 let mut state = panel.state.borrow_mut();
                 state.commits.extend(page);
@@ -1587,6 +1613,16 @@ fn log_row(item: &gtk::ListItem) -> gtk::Stack {
     file.set_margin_top(2);
     file.set_margin_bottom(2);
 
+    // Centred and quiet: it continues the history above it rather than competing with it.
+    let more = gtk::Label::builder()
+        .label("Load More")
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+    for class in ["caption", "dim-label"] {
+        more.add_css_class(class);
+    }
+
     // Not homogeneous, for the reason `change_row` gives: a commit row is two lines tall and a
     // file row one, and every row taking the taller of the two would be a ladder.
     let stack = gtk::Stack::builder()
@@ -1595,6 +1631,7 @@ fn log_row(item: &gtk::ListItem) -> gtk::Stack {
         .build();
     stack.add_named(&commit, Some("commit"));
     stack.add_named(&file, Some("file"));
+    stack.add_named(&more, Some("more"));
     stack
 }
 
@@ -1628,6 +1665,11 @@ fn bind_log(item: &gtk::ListItem) {
             name.set_text(base);
             dir.set_text(directory);
             stack.set_tooltip_text(Some(&path));
+            return;
+        }
+        LogItem::More => {
+            stack.set_visible_child_name("more");
+            stack.set_tooltip_text(None);
             return;
         }
     };
@@ -1924,9 +1966,15 @@ fn ago(now: i64, then: i64) -> String {
 
 /// A path split into the directory and the file name, both borrowed. A file at the top level has
 /// an empty directory rather than a `.`, because the row shows the string as it is.
+///
+/// git reports a wholly untracked directory as one entry ending in `/`. That slash belongs to the
+/// name — it is what tells the row apart from a file — so the split ignores it and the name keeps
+/// it; otherwise the name would come out empty and the whole row would read as its dimmed
+/// directory label.
 fn split_name(path: &str) -> (&str, &str) {
-    match path.rsplit_once('/') {
-        Some((dir, name)) => (dir, name),
+    let body = path.strip_suffix('/').unwrap_or(path);
+    match body.rsplit_once('/') {
+        Some((dir, _)) => (dir, &path[dir.len() + 1..]),
         None => ("", path),
     }
 }
@@ -2107,6 +2155,10 @@ mod tests {
     fn split_name_leaves_a_top_level_file_without_a_directory() {
         assert_eq!(split_name("note.md"), ("", "note.md"));
         assert_eq!(split_name("a/b/note.md"), ("a/b", "note.md"));
+        // A wholly untracked directory is one entry with a trailing slash, and the slash is the
+        // only thing on the row that says so, so it stays with the name.
+        assert_eq!(split_name("newdir/"), ("", "newdir/"));
+        assert_eq!(split_name("a/b/c/"), ("a/b", "c/"));
     }
 
     #[test]
