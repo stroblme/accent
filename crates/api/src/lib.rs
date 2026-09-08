@@ -960,14 +960,15 @@ impl Local {
         Ok(())
     }
 
-    /// Create a note, optionally from a template. Returns the final path, which may have gained
-    /// the `.md` the user did not type, and where the caret belongs.
+    /// Create a file, optionally from a template. Returns the path it was created at and where
+    /// the caret belongs. The name is taken as it is given: `notes` is a file called `notes`, not
+    /// a note called `notes.md`. Callers that mean markdown say so (`daily_note` does).
     pub fn create_note(
         &self,
         rel: &str,
         template: Option<&str>,
     ) -> Result<(String, Option<usize>)> {
-        let rel = with_md(rel);
+        let rel = rel.to_string();
         let (text, cursor) = match template {
             Some(t) => {
                 let (raw, _) = fs::read_note(&self.resolve(t)?)
@@ -1872,7 +1873,7 @@ fn stem_key(rel: &str) -> String {
     markdown::link_key(&stem(rel))
 }
 
-/// Notes are markdown, and the UI lets the user leave the extension off.
+/// The daily note is markdown whatever the configured date pattern spells.
 fn with_md(rel: &str) -> String {
     match rel.rsplit_once('.') {
         Some((_, ext))
@@ -2469,7 +2470,7 @@ mod tests {
 
         let (rel, cursor) = f
             .vault
-            .create_note("Inbox/Weekly sync", Some("Templates/Note.md"))
+            .create_note("Inbox/Weekly sync.md", Some("Templates/Note.md"))
             .unwrap();
 
         assert_eq!(rel, "Inbox/Weekly sync.md");
@@ -2791,7 +2792,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep me\n");
 
         // A path that stays inside still works, `..` in the middle of it and all.
-        vault.create_note("sub/Nested", None).unwrap();
+        vault.create_note("sub/Nested.md", None).unwrap();
         vault.save("sub/../sub/Nested.md", "fine\n", None).unwrap();
         assert_eq!(
             std::fs::read_to_string(root.join("sub/Nested.md")).unwrap(),
