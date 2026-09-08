@@ -6470,7 +6470,8 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away.
+/// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
+/// prints widths and the text its keys apply.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6478,12 +6479,16 @@ fn install_bench_hooks(app: &Rc<App>) {
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome && !templates {
+    let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
+    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome && !templates && !paths {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if paths {
+            return bench_paths(&app);
+        }
         if templates {
             return bench_templates(&app);
         }
@@ -6699,6 +6704,107 @@ fn bench_keys(app: &Rc<App>) {
         window.close();
         bench_quit(&app);
     });
+}
+
+/// What a path entry's completion does with the keyboard, and whether the entry takes the width
+/// the list gives the dialog.
+///
+/// Layout is real under Xvfb — an allocation wants a mapped window, not a window manager — so the
+/// width either side of the list appearing is measured rather than argued. The keys are emitted on
+/// the entry's own controller, which proves the handler, the selection and the text it applies but
+/// **not** the propagation phase: emitting a signal skips phase dispatch altogether, so that Return
+/// beats `GtkText`'s own binding is still a claim only a real session can settle.
+fn bench_paths(app: &Rc<App>) {
+    let entry = gtk::Entry::new();
+    let field = fileops::path_field(&entry, "bench", |_| {
+        ["Archive/", "Attachments/", "Notes/"]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    });
+    let window = gtk::Window::builder()
+        .default_width(600)
+        .child(&field)
+        .build();
+    window.present();
+    // Fills the list. The toplevel never goes active under Xvfb, so `show_completions` leaves it
+    // put away and the first Down is what opens it.
+    entry.set_text("A");
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        print_width("shut", &entry);
+        // Nothing has been aimed at, so Return belongs to the dialog and the text stays as typed.
+        press_key(&entry, gdk::Key::Return);
+        println!("bench path_applied none {:?}", entry.text());
+        press_key(&entry, gdk::Key::Down);
+        println!("bench path_selected {:?}", selected_offer(&field));
+        // A second frame, because the row the list just grew is what widens the dialog.
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            print_width("open", &entry);
+            press_key(&entry, gdk::Key::Down);
+            println!("bench path_selected {:?}", selected_offer(&field));
+            press_key(&entry, gdk::Key::Return);
+            println!("bench path_applied selected {:?}", entry.text());
+            // The pointer's way in, which applies from an idle rather than on the spot.
+            if let Some(list) = completion_list(&field)
+                && let Some(row) = list.row_at_index(2)
+            {
+                list.emit_by_name::<()>("row-activated", &[&row]);
+            }
+            glib::idle_add_local_once(move || {
+                println!("bench path_activated {:?}", entry.text());
+                window.close();
+                bench_quit(&app);
+            });
+        });
+    });
+}
+
+/// The entry's allocated width against the `.linked` row it sits in, whose surplus is the folder
+/// button. `state` says whether the completion list was showing.
+fn print_width(state: &str, entry: &gtk::Entry) {
+    let row = entry.parent().map_or(0, |row| row.width());
+    println!("bench path_entry_width {state} {} {row}", entry.width());
+}
+
+/// Emit a key press on the entry's own key controller: the headless image has no window manager
+/// to give the toplevel the keyboard, and no xdotool to press anything with.
+fn press_key(entry: &gtk::Entry, key: gdk::Key) {
+    use glib::translate::IntoGlib;
+    let controllers = entry.observe_controllers();
+    for i in 0..controllers.n_items() {
+        let Some(keys) = controllers
+            .item(i)
+            .and_downcast::<gtk::EventControllerKey>()
+        else {
+            continue;
+        };
+        keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&key.into_glib(), &0u32, &gdk::ModifierType::empty()],
+        );
+    }
+}
+
+/// A path field's completion list: the revealer's, and the scroller hands back the viewport it
+/// wrapped a `GtkListBox` in rather than the list itself.
+fn completion_list(field: &gtk::Widget) -> Option<gtk::ListBox> {
+    field
+        .last_child()
+        .and_downcast::<gtk::Revealer>()
+        .and_then(|revealer| revealer.child())
+        .and_downcast::<gtk::ScrolledWindow>()
+        .and_then(|scroller| scroller.child())
+        .and_then(|viewport| viewport.first_child())
+        .and_downcast::<gtk::ListBox>()
+}
+
+/// The completion that list has highlighted, by the text it stands for.
+fn selected_offer(field: &gtk::Widget) -> Option<String> {
+    completion_list(field)
+        .and_then(|list| list.selected_row())
+        .and_then(|row| row.child().and_downcast::<gtk::Label>())
+        .map(|label| label.label().into())
 }
 
 /// Fire the actions the chords go through at a faded window, and print whether the chrome came
