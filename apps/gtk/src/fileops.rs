@@ -38,8 +38,9 @@ pub struct Ops {
     pub vault: Arc<Vault>,
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
-    /// Open a note in a tab.
-    pub open: Box<dyn Fn(&str)>,
+    /// Open a note in a tab, putting the caret at a byte offset when one is asked for — which is
+    /// where a template's `{{cursor}}` lands.
+    pub open: Box<dyn Fn(&str, Option<usize>)>,
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
@@ -110,7 +111,7 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&why);
         }
         match ops.vault.create_note(&rel, template.map(String::as_str)) {
-            Ok((created, _cursor)) => (ops.open)(&created),
+            Ok((created, cursor)) => (ops.open)(&created, cursor),
             Err(e) if already_exists(&e) => (ops.toast)(&format!("{name} already exists")),
             Err(e) => (ops.toast)(&format!("Cannot create {name}: {e:#}")),
         }
@@ -147,6 +148,51 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         }
     });
     focus_name(&entry, None);
+}
+
+/// New note from a template that says where its notes go.
+///
+/// Only the templates carrying an `accent-target:` are listed: the rest have no destination to
+/// create anything at, and New File is where they are picked with a name typed by hand. A target
+/// naming a note that already exists opens it untouched, which is what makes a dated one a daily
+/// note.
+pub fn new_from_template(ops: &Rc<Ops>) {
+    let templates: Vec<String> = ops
+        .vault
+        .templates()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|t| matches!(ops.vault.template_target(t), Ok(Some(_))))
+        .collect();
+    if templates.is_empty() {
+        let dir = ops.vault.config().templates_dir;
+        return (ops.toast)(&format!(
+            "No template says where its notes go. Add `accent-target:` to one in {dir}"
+        ));
+    }
+
+    let labels: Vec<&str> = templates.iter().map(|t| basename(t)).collect();
+    let picker = gtk::DropDown::from_strings(&labels);
+    let form = form();
+    form.append(&labelled("Template", &picker));
+
+    let dialog = name_dialog("New from Template", "Create", &form);
+    let (ops, window) = (ops.clone(), ops.window.clone());
+    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+        if response != CONFIRM {
+            return;
+        }
+        let Some(template) = templates.get(picker.selected() as usize) else {
+            return;
+        };
+        let name = basename(template);
+        match ops.vault.note_from_template(template) {
+            Ok(Some((rel, cursor))) => (ops.open)(&rel, cursor),
+            // The file changed under the dialog; nothing was created, so nothing to undo.
+            Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
+            Err(e) => (ops.toast)(&format!("Cannot create a note from {name}: {e:#}")),
+        }
+    });
 }
 
 /// "None" plus one row per template, or `None` when the vault has no templates.
@@ -823,7 +869,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         });
         group.add_action(&action);
     };
-    add("open", Box::new(|ops, rel| (ops.open)(rel)));
+    add("open", Box::new(|ops, rel| (ops.open)(rel, None)));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));

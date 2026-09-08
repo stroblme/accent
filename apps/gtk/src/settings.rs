@@ -7,14 +7,10 @@
 
 use accent_core::config::{Config, Theme, VaultConfig};
 use adw::prelude::*;
-use gtk::glib;
 use gtk::pango;
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-
-/// Shown instead of today's file name when chrono rejects the daily pattern.
-const INVALID: &str = "Invalid format";
 
 /// The theme choices, in the order the combo row lists them.
 const THEMES: [(Theme, &str); 4] = [
@@ -317,45 +313,6 @@ fn vault_group(
     let vault = config.borrow().vault(root);
 
     group.add(&entry_row(
-        "Daily Notes Folder",
-        None,
-        &vault.daily_dir,
-        config,
-        root,
-        save,
-        |cfg, text| cfg.daily_dir = folder(text),
-    ));
-
-    let pattern = entry_row(
-        "Daily Note Filename",
-        Some("A strftime format; the .md is added for you"),
-        &vault.daily_pattern,
-        config,
-        root,
-        save,
-        |cfg, text| cfg.daily_pattern = text.trim().to_string(),
-    );
-    // The one setting a user can silently break, so the row carries today's name as it is typed.
-    // It hangs off the suffix rather than a subtitle, which AdwEntryRow does not have.
-    let preview = gtk::Label::builder().valign(gtk::Align::Center).build();
-    set_preview(&preview, &vault.daily_pattern);
-    pattern.connect_changed({
-        let preview = preview.clone();
-        move |r| set_preview(&preview, r.text().trim())
-    });
-    pattern.add_suffix(&preview);
-    group.add(&pattern);
-
-    group.add(&entry_row(
-        "Daily Note Template",
-        Some("Leave empty for no template"),
-        vault.daily_template.as_deref().unwrap_or_default(),
-        config,
-        root,
-        save,
-        |cfg, text| cfg.daily_template = Some(folder(text)).filter(|t| !t.is_empty()),
-    ));
-    group.add(&entry_row(
         "Templates Folder",
         None,
         &vault.templates_dir,
@@ -481,51 +438,14 @@ fn entry_row(
 }
 
 /// Trim a folder entry and drop any leading or trailing `/`: these paths are vault-relative, and
-/// a leading slash is the mistake that would quietly point daily notes outside the vault.
+/// a leading slash is the mistake that would quietly point one outside the vault.
 fn folder(text: &str) -> String {
     text.trim().trim_matches('/').trim().to_string()
-}
-
-fn set_preview(label: &gtk::Label, pattern: &str) {
-    let text = daily_preview(pattern, &now_local_iso());
-    let broken = text == INVALID;
-    label.set_label(&text);
-    label.set_css_classes(if broken { &["error"] } else { &["dim-label"] });
-}
-
-/// Today's daily-note name for `pattern`, or [`INVALID`] when chrono rejects it. `now` is an
-/// ISO-8601 local timestamp.
-fn daily_preview(pattern: &str, now: &str) -> String {
-    let name = now
-        .parse()
-        .ok()
-        .and_then(|now| accent_core::template::strftime(pattern, now))
-        .filter(|name| !name.is_empty());
-    match name {
-        Some(name) => format!("{name}.md"),
-        None => INVALID.to_string(),
-    }
-}
-
-/// Local wall-clock time, ISO-8601, seconds resolution.
-///
-/// ponytail: apps/gtk has no chrono dependency and `template::strftime` wants a
-/// `chrono::NaiveDateTime`, so GLib supplies the local time and chrono's `FromStr` turns it back
-/// into one, with the type inferred rather than named. Replace both halves with
-/// `chrono::Local::now().naive_local()` the day the GTK app depends on chrono directly.
-fn now_local_iso() -> String {
-    glib::DateTime::now_local()
-        .and_then(|t| t.format("%Y-%m-%dT%H:%M:%S"))
-        .map(|s| s.to_string())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A Thursday afternoon, the same instant `template`'s own tests use.
-    const NOW: &str = "2026-09-03T14:05:00";
 
     #[test]
     fn every_theme_has_a_row_to_pick_it_with() {
@@ -541,17 +461,5 @@ mod tests {
         assert_eq!(folder("/ Templates/Daily "), "Templates/Daily");
         assert_eq!(folder(""), "");
         assert_eq!(folder("   "), "");
-    }
-
-    #[test]
-    fn daily_preview_shows_todays_file_name() {
-        assert_eq!(daily_preview("%Y-%m-%d", NOW), "2026-09-03.md");
-        assert_eq!(daily_preview("%Y/%B/%d", NOW), "2026/September/03.md");
-    }
-
-    #[test]
-    fn daily_preview_marks_a_pattern_chrono_rejects() {
-        assert_eq!(daily_preview("%Q", NOW), INVALID);
-        assert_eq!(daily_preview("", NOW), INVALID);
     }
 }
