@@ -6671,6 +6671,7 @@ fn install_chrome_css() {
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
+             popover.git-menu > contents {{ background-color: var(--popover-bg-color); }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              paned > separator:hover {{ box-shadow: none; \

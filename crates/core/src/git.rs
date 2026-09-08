@@ -92,6 +92,8 @@ pub struct Commit {
     /// Author time, unix seconds.
     pub time: i64,
     pub summary: String,
+    /// Everything after the subject and its blank line. Empty for a one-line message.
+    pub body: String,
 }
 
 /// A commit placed on the history graph: which column it sits in, and which columns the edges
@@ -392,8 +394,9 @@ pub fn log(repo: &Repo, skip: usize, n: usize) -> Result<Vec<Commit>, Error> {
             &n,
             "--skip",
             &skip,
-            // Unit and record separators: a summary line can hold anything else, including tabs.
-            "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1e",
+            // Unit and record separators: a summary line can hold anything else, including tabs,
+            // and a body holds newlines, so the record separator has to be neither.
+            "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1f%b%x1e",
         ],
         None,
         true,
@@ -426,6 +429,9 @@ pub fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 author: fields.next()?.to_string(),
                 time: fields.next()?.parse().unwrap_or(0),
                 summary: fields.next().unwrap_or_default().to_string(),
+                // Last, so its newlines are the record's own trailing whitespace and the trim
+                // above has already taken them.
+                body: fields.next().unwrap_or_default().to_string(),
             })
         })
         .collect()
@@ -655,6 +661,44 @@ pub fn parse_branches(bytes: &[u8]) -> Vec<String> {
 pub fn checkout(repo: &Repo, branch: &str) -> Result<(), Error> {
     run(&repo.root, &["switch", "--", branch], None, false)?;
     Ok(())
+}
+
+/// Move HEAD onto one commit, detached, which is how a past state is looked at without a branch
+/// being moved. Git refuses this too where the working tree would be clobbered.
+pub fn checkout_commit(repo: &Repo, oid: &str) -> Result<(), Error> {
+    run(&repo.root, &["switch", "--detach", oid], None, false)?;
+    Ok(())
+}
+
+/// Create `name` at HEAD, checking it out as it is created when `checkout` is set, which is what
+/// `git switch -c` does. The name is git's to validate: both spellings refuse one that is not a
+/// legal ref, and their refusal is the answer.
+pub fn create_branch(repo: &Repo, name: &str, checkout: bool) -> Result<(), Error> {
+    let args: &[&str] = match checkout {
+        true => &["switch", "-c"],
+        false => &["branch", "--"],
+    };
+    run(&repo.root, &[args, &[name]].concat(), None, false)?;
+    Ok(())
+}
+
+/// Delete a local branch. `force` is `-D`, which deletes one whose commits are not merged
+/// anywhere; without it git refuses that case and [`unmerged`] recognises the refusal.
+pub fn delete_branch(repo: &Repo, name: &str, force: bool) -> Result<(), Error> {
+    let flag = match force {
+        true => "-D",
+        false => "-d",
+    };
+    run(&repo.root, &["branch", flag, "--", name], None, false)?;
+    Ok(())
+}
+
+/// Whether git refused a delete because the branch is not fully merged, which is the one refusal
+/// worth offering to force. A string test rather than an [`Error`] variant on purpose: the RPC
+/// boundary flattens every git error into its message, so a variant would stop recognising it on
+/// a remote vault.
+pub fn unmerged(message: &str) -> bool {
+    message.contains("not fully merged")
 }
 
 pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
@@ -1040,6 +1084,15 @@ mod tests {
         let rows = lanes(commits);
         check_invariants(&rows);
         assert!(rows.iter().all(|r| r.column == 0 && r.through.is_empty()));
+
+        // The subject and the rest of the message are two fields, and the body's own newlines
+        // survive the record split because the record separator is not one of them.
+        write_file(dir, "a.md", "four");
+        commit_all(dir, "four\n\nwhy it happened\nand a second line");
+        let head = log(&repo, 0, 1).unwrap();
+        assert_eq!(head[0].summary, "four");
+        assert_eq!(head[0].body, "why it happened\nand a second line");
+        assert_eq!(log(&repo, 1, 1).unwrap()[0].body, "", "a one-line message");
     }
 
     #[test]
@@ -1327,6 +1380,84 @@ mod tests {
             Some("main"),
             "a refused switch leaves HEAD where it was"
         );
+    }
+
+    #[test]
+    fn checkout_commit_detaches_head_and_a_branch_takes_it_back() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "first");
+        let first = head(dir);
+        write_file(dir, "a.md", "two\n");
+        commit_all(dir, "second");
+        let repo = open(dir);
+
+        checkout_commit(&repo, &first).unwrap();
+        let detached = status(&repo).unwrap().branch;
+        assert_eq!(detached.head, None, "no branch to be on");
+        assert_eq!(detached.oid.as_deref(), Some(first.as_str()));
+
+        checkout(&repo, "main").unwrap();
+        assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "root");
+        let repo = open(dir);
+
+        create_branch(&repo, "side", false).unwrap();
+        assert_eq!(branches(&repo).unwrap(), ["main", "side"]);
+        assert_eq!(
+            status(&repo).unwrap().branch.head.as_deref(),
+            Some("main"),
+            "created without being switched to"
+        );
+        assert!(
+            create_branch(&repo, "side", false).is_err(),
+            "already taken"
+        );
+
+        create_branch(&repo, "work", true).unwrap();
+        assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("work"));
+
+        // Nothing on `side` that `main` does not already have, so `-d` is enough.
+        checkout(&repo, "main").unwrap();
+        delete_branch(&repo, "side", false).unwrap();
+        assert_eq!(branches(&repo).unwrap(), ["main", "work"]);
+
+        checkout(&repo, "work").unwrap();
+        write_file(dir, "b.md", "b\n");
+        commit_all(dir, "work moves on");
+        checkout(&repo, "main").unwrap();
+        let refused = delete_branch(&repo, "work", false).unwrap_err().to_string();
+        assert!(unmerged(&refused), "{refused}");
+        delete_branch(&repo, "work", true).unwrap();
+        assert_eq!(branches(&repo).unwrap(), ["main"]);
+
+        // The checked-out branch is a refusal nothing can force, so it must not read as one.
+        let refused = delete_branch(&repo, "main", false).unwrap_err().to_string();
+        assert!(!unmerged(&refused), "{refused}");
+    }
+
+    #[test]
+    fn unmerged_is_gits_own_wording() {
+        assert!(unmerged("error: the branch 'side' is not fully merged."));
+        assert!(!unmerged(
+            "error: cannot delete branch 'main' used by worktree at '/tmp/v'"
+        ));
     }
 
     #[test]

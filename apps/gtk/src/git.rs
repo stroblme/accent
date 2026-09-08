@@ -28,6 +28,9 @@ const PAGE: usize = 200;
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;
 
+/// The action group the history's context menu resolves its items against.
+const MENU_GROUP: &str = "gitlog";
+
 /// How long the pane waits after being poked before asking git again. Long enough that a burst of
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -143,6 +146,10 @@ pub struct Panel {
     root: gtk::Widget,
     /// "empty" (no repository) or "repo".
     stack: gtk::Stack,
+    /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
+    /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
+    /// (`fileops::context_menu` documents the symptom).
+    column: gtk::Box,
     names: gtk::StringList,
     chooser: gtk::DropDown,
     branch_names: gtk::StringList,
@@ -347,6 +354,7 @@ impl Panel {
             hooks,
             root: stack.clone().upcast(),
             stack,
+            column,
             names,
             chooser,
             branch_names,
@@ -537,9 +545,10 @@ impl Panel {
 
     fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
+        let weak = Rc::downgrade(self);
+        factory.connect_setup(move |_, item| {
             if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                item.set_child(Some(&log_row(item)));
+                item.set_child(Some(&log_row(item, &weak)));
             }
         });
         factory.connect_bind(|_, item| {
@@ -973,6 +982,37 @@ impl Panel {
         });
     }
 
+    /// Put HEAD on one commit, detached, so the repository can be read at that point.
+    ///
+    /// No confirmation, for the reason [`Panel::checkout`] gives: `git switch --detach` refuses
+    /// where it would clobber uncommitted work, and that refusal is the whole answer. The refresh
+    /// that follows puts `Detached at …` in the branch button and the status bar.
+    fn detach(self: &Rc<Self>, oid: String) {
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let asked = oid.clone();
+            let done = gio::spawn_blocking(move || vault.git_checkout_commit(&repo, &asked)).await;
+            match done {
+                Ok(Ok(())) => (panel.hooks.toast)(&format!("Checked out {}", short(&oid))),
+                Ok(Err(e)) => (panel.hooks.toast)(&format!(
+                    "Could not check out {}: {}",
+                    short(&oid),
+                    reason(&format!("{e:#}"))
+                )),
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            panel.refresh();
+        });
+    }
+
     fn stage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
         self.write("Stage", paths, move |vault, repo, paths| {
@@ -1055,6 +1095,64 @@ impl Panel {
                 }
             },
         );
+    }
+
+    // --- the history's context menu -------------------------------------------------------------
+
+    /// What can be done with the commit under the pointer.
+    ///
+    /// The shape `fileops::context_menu` uses, and for the reasons documented there: the popover
+    /// hangs off a layout-managed box rather than off the list, the actions live on that same box
+    /// so an item can resolve them, and the unparent waits for an idle because `closed` is emitted
+    /// from inside the item's own click and an unparented popover has no path to the action group.
+    fn commit_menu(self: &Rc<Self>, oid: &str, anchor: gdk::Rectangle) {
+        self.column
+            .insert_action_group(MENU_GROUP, Some(&self.commit_actions()));
+
+        let menu = gio::Menu::new();
+        menu.append_item(&menu_item("Check Out Commit", "checkout-commit", oid));
+        // Its own section: reading an id out is not a thing that moves HEAD.
+        let copy = gio::Menu::new();
+        copy.append_item(&menu_item("Copy Commit ID", "copy-id", oid));
+        menu.append_section(None, &copy);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        // The sidebar behind it is a list, so the menu needs a background of its own.
+        popover.add_css_class("git-menu");
+        popover.set_parent(&self.column);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&anchor));
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
+    }
+
+    /// The two actions the menu items name, each taking the commit's id as its parameter.
+    fn commit_actions(self: &Rc<Self>) -> gio::SimpleActionGroup {
+        let group = gio::SimpleActionGroup::new();
+        for (name, detach) in [("checkout-commit", true), ("copy-id", false)] {
+            let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+            let weak = Rc::downgrade(self);
+            action.connect_activate(move |_, target| {
+                let (Some(panel), Some(oid)) = (weak.upgrade(), target.and_then(|t| t.str()))
+                else {
+                    return;
+                };
+                match detach {
+                    true => panel.detach(oid.to_string()),
+                    // No toast for the clipboard alone would be truer to DESIGN.md, but nothing
+                    // else on screen says the id was taken: the row looks the same either way.
+                    false => {
+                        panel.hooks.window.clipboard().set_text(oid);
+                        (panel.hooks.toast)(&format!("Copied {}", short(oid)));
+                    }
+                }
+            });
+            group.add_action(&action);
+        }
+        group
     }
 
     // --- rows ---------------------------------------------------------------------------------
@@ -1554,7 +1652,7 @@ fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)>
 }
 
 /// One log row: the graph on the left, the summary and its author on the right.
-fn log_row(item: &gtk::ListItem) -> gtk::Stack {
+fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
     // graph of the commit that used to be in it.
@@ -1632,6 +1730,36 @@ fn log_row(item: &gtk::ListItem) -> gtk::Stack {
     stack.add_named(&commit, Some("commit"));
     stack.add_named(&file, Some("file"));
     stack.add_named(&more, Some("more"));
+
+    // A secondary click on a commit opens its menu. The gesture holds the `GtkListItem` rather
+    // than the row's data, for the reason `change_row`'s buttons do: the data under a recycled
+    // row is replaced without the widgets being rebuilt.
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .build();
+    let weak = panel.clone();
+    click.connect_pressed(glib::clone!(
+        #[weak]
+        item,
+        move |gesture, _, x, y| {
+            let (Some(panel), Some(LogItem::Commit(row))) = (weak.upgrade(), log_of(&item)) else {
+                return;
+            };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            // Out of the row's coordinates and into the host box's, or the menu would point at
+            // wherever that row happened to be when the list was last scrolled.
+            let point = gtk::graphene::Point::new(x as f32, y as f32);
+            let Some(at) = item
+                .child()
+                .and_then(|child| child.compute_point(&panel.column, &point))
+            else {
+                return;
+            };
+            let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            panel.commit_menu(&row.commit.id, anchor);
+        }
+    ));
+    stack.add_controller(click);
     stack
 }
 
@@ -1704,7 +1832,7 @@ fn bind_log(item: &gtk::ListItem) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    stack.set_tooltip_text(Some(&row.commit.id));
+    stack.set_tooltip_text(Some(&commit_tooltip(&row.commit)));
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -1803,6 +1931,17 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
         }
     });
     factory
+}
+
+/// One context-menu item carrying its commit id as a `String` target rather than in a
+/// detailed-action string, which is the shape `fileops::item` settled on.
+fn menu_item(label: &str, action: &str, oid: &str) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(
+        Some(&format!("{MENU_GROUP}.{action}")),
+        Some(&oid.to_variant()),
+    );
+    item
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -1979,6 +2118,22 @@ fn split_name(path: &str) -> (&str, &str) {
     }
 }
 
+/// What hovering a commit says: where it sits, what it is called, and the whole message.
+///
+/// The decorations `git log` already fetched rather than a `git branch --contains` per hover, so
+/// a commit that is no branch tip simply has no first line.
+fn commit_tooltip(c: &Commit) -> String {
+    let head = match c.refs.is_empty() {
+        true => short(&c.id),
+        false => format!("{}\n{}", c.refs.join(", "), short(&c.id)),
+    };
+    let message = match c.body.is_empty() {
+        true => c.summary.clone(),
+        false => format!("{}\n\n{}", c.summary, c.body),
+    };
+    format!("{head}\n\n{message}")
+}
+
 /// A repository-relative path as the rest of the app names it: vault-relative where the file is
 /// in the vault, absolute where the repository reaches outside it.
 fn vault_key(vault_root: &Path, repo: &Repo, repo_rel: &str) -> String {
@@ -2036,8 +2191,12 @@ fn branch_parts(b: &Branch) -> Option<(String, String)> {
     if b.head.is_none() && b.oid.is_none() {
         return None;
     }
-    // A detached HEAD has no name, and "HEAD" is what git itself calls that state.
-    let name = b.head.clone().unwrap_or_else(|| "HEAD".to_string());
+    // A detached HEAD has no name, so it says where it is instead: this string reaches the branch
+    // button and the status bar alike, and both of them otherwise read as a branch called HEAD.
+    let name = b.head.clone().unwrap_or_else(|| match &b.oid {
+        Some(oid) => format!("Detached at {}", short(oid)),
+        None => "Detached".to_string(),
+    });
     let counts = [(b.ahead, '↑'), (b.behind, '↓')]
         .iter()
         .filter(|(count, _)| *count > 0)
@@ -2195,7 +2354,7 @@ mod tests {
         };
         assert_eq!(branch_text(&both).as_deref(), Some("main ↑1 ↓2"));
         let detached = Branch { head: None, ..main };
-        assert_eq!(branch_text(&detached).as_deref(), Some("HEAD"));
+        assert_eq!(branch_text(&detached).as_deref(), Some("Detached at abc"));
         assert_eq!(branch_text(&Branch::default()), None, "nothing to say");
     }
 
@@ -2258,7 +2417,27 @@ mod tests {
             author: "a".to_string(),
             time: 0,
             summary: "s".to_string(),
+            body: String::new(),
         }
+    }
+
+    #[test]
+    fn commit_tooltip_says_where_the_commit_is_and_what_it_says() {
+        let mut c = commit_at("abcdef1234567");
+        c.summary = "subject".to_string();
+        assert_eq!(commit_tooltip(&c), "abcdef1\n\nsubject");
+
+        c.body = "why it happened\nand a second line".to_string();
+        assert_eq!(
+            commit_tooltip(&c),
+            "abcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+        );
+
+        c.refs = vec!["HEAD -> main".to_string(), "origin/main".to_string()];
+        assert_eq!(
+            commit_tooltip(&c),
+            "HEAD -> main, origin/main\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+        );
     }
 
     #[test]
