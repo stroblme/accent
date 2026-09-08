@@ -2911,6 +2911,10 @@ impl App {
                     }
                 }
             }
+            Event::Busy { what, busy } => {
+                self.statusbar
+                    .set_provider_busy(busy.then_some(what.as_str()));
+            }
             Event::Reconciled(stats) => {
                 tracing::debug!(
                     t_ms = ms(),

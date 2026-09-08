@@ -10,6 +10,8 @@
 //! document nobody is looking at while they are writing into it, and an exception would be one
 //! thing left lit under a window that is otherwise out of the way.
 
+use std::cell::RefCell;
+
 use gtk::prelude::*;
 
 /// The bar itself. Every label hides when it has nothing to say, so an empty bar is an empty
@@ -17,6 +19,10 @@ use gtk::prelude::*;
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
+    /// What the two writers of the [`Bar::progress`] label have each said, so neither erases the
+    /// other: the vault's own work, and a background job in a language provider.
+    vault_busy: RefCell<Option<String>>,
+    provider_busy: RefCell<Option<String>>,
     /// The branch readout, which is also the Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
@@ -85,6 +91,8 @@ impl Bar {
         Bar {
             row,
             progress,
+            vault_busy: RefCell::new(None),
+            provider_busy: RefCell::new(None),
             branch,
             branch_label,
             branch_spinner,
@@ -102,7 +110,24 @@ impl Bar {
 
     /// What the window is busy with: "Indexing… 1200/42700 files", "Opening the document…".
     pub fn set_progress(&self, text: Option<&str>) {
-        set(&self.progress, text);
+        *self.vault_busy.borrow_mut() = text.map(str::to_string);
+        self.show_busy();
+    }
+
+    /// A language provider is busy with something worth waiting for, named: "suggestions" while
+    /// the ghost-text index is rebuilt. Nothing is shown when it is idle.
+    pub fn set_provider_busy(&self, what: Option<&str>) {
+        *self.provider_busy.borrow_mut() = what.map(|w| format!("Indexing {w}…"));
+        self.show_busy();
+    }
+
+    /// One line for both, and the vault's own work wins: opening a document or reading the vault
+    /// is what the reader is waiting for, while a suggestion index is a convenience they did not
+    /// ask about.
+    fn show_busy(&self) {
+        let vault = self.vault_busy.borrow();
+        let provider = self.provider_busy.borrow();
+        set(&self.progress, vault.as_deref().or(provider.as_deref()));
     }
 
     /// The branch of the repository holding the active document, "main ↑1 ↓2".

@@ -419,11 +419,18 @@ pub(crate) struct External {
 ///
 /// `root` is the session root (a crate, a checkout); `vault_root` is what paths are relative to.
 /// They differ whenever a vault holds more than one project.
+/// Start `argv` and wire it up as a provider.
+///
+/// `busy_as` is what a background job in this server is called in the UI, or `None` for a server
+/// whose progress is not worth showing — which is every language server: rust-analyzer reports
+/// every `cargo check` and would never let the status bar settle. The ghost session is the one
+/// that says something the reader wants, because its index is the reason a suggestion is missing.
 pub(crate) async fn start(
     argv: Vec<String>,
     root: PathBuf,
     vault_root: PathBuf,
     events: Sender<Event>,
+    busy_as: Option<&'static str>,
 ) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
     let (client, notifications) =
@@ -435,11 +442,12 @@ pub(crate) async fn start(
     let docs: Docs = Arc::new(Mutex::new(HashMap::new()));
     // The task holds the documents and the channel, never the provider: it has to end when the
     // server's reader drops the sender, not when the last tab lets go of the session.
-    accent_lsp::runtime().spawn(forward_diagnostics(
+    accent_lsp::runtime().spawn(forward_notifications(
         notifications,
         docs.clone(),
         vault_root.clone(),
         encoding,
+        busy_as,
         events,
     ));
 
@@ -452,34 +460,62 @@ pub(crate) async fn start(
     }))
 }
 
-/// Turn what the server publishes into events for the tabs that can paint them.
+/// Turn what the server publishes into events for the UI that can show it: diagnostics for the
+/// tabs that paint them, and — for a server named by `busy_as` — whether it is busy.
 ///
 /// A server analyses more than it was asked about — rust-analyzer publishes for every file in a
 /// crate — and a diagnostic for a file nobody has open has nowhere to go, so it is dropped.
-async fn forward_diagnostics(
+async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
     vault_root: PathBuf,
     encoding: Encoding,
+    busy_as: Option<&'static str>,
     events: Sender<Event>,
 ) {
     while let Some(n) = notifications.recv().await {
-        if n.method != "textDocument/publishDiagnostics" {
-            continue;
+        match n.method.as_str() {
+            "textDocument/publishDiagnostics" => {
+                let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params)
+                else {
+                    continue;
+                };
+                let Some(rel) = rel_of(&params.uri, &vault_root) else {
+                    continue;
+                };
+                let Some(text) = locked(&docs).get(&rel).map(|d| d.text.clone()) else {
+                    continue;
+                };
+                let items = diagnostics_of(params.diagnostics, &text, encoding);
+                if events.send(Event::Diagnostics { rel, items }).is_err() {
+                    break;
+                }
+            }
+            "$/progress" => {
+                let Some(what) = busy_as else { continue };
+                // `begin` and `end`; a `report` in between only refines a message nothing here
+                // shows, so it is not a change of state.
+                let busy = match n.params.pointer("/value/kind").and_then(Value::as_str) {
+                    Some("begin") => true,
+                    Some("end") => false,
+                    _ => continue,
+                };
+                let what = what.to_string();
+                tracing::debug!("{what}: busy={busy}");
+                if events.send(Event::Busy { what, busy }).is_err() {
+                    break;
+                }
+            }
+            _ => continue,
         }
-        let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params) else {
-            continue;
-        };
-        let Some(rel) = rel_of(&params.uri, &vault_root) else {
-            continue;
-        };
-        let Some(text) = locked(&docs).get(&rel).map(|d| d.text.clone()) else {
-            continue;
-        };
-        let items = diagnostics_of(params.diagnostics, &text, encoding);
-        if events.send(Event::Diagnostics { rel, items }).is_err() {
-            break;
-        }
+    }
+    // The server exited, so whatever it was busy with is over. Without this a crash mid-index
+    // would leave the status bar saying so for the life of the vault.
+    if let Some(what) = busy_as {
+        let _ = events.send(Event::Busy {
+            what: what.to_string(),
+            busy: false,
+        });
     }
 }
 
