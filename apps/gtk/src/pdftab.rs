@@ -20,10 +20,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::{Sender, TryRecvError, channel};
 
-/// How many places back the reader can go. A reading history is not an undo stack; a hundred is
-/// far past what anyone follows in one sitting.
-const HISTORY: usize = 100;
-
 /// How tall a link preview's band is, in the low-resolution page's own pixels. Roughly a quarter
 /// of a portrait page at [`pdfview::LOWRES_W`], which is a heading and the lines under it: a
 /// whole page shrunk to a popover says nothing a reader can read.
@@ -166,9 +162,6 @@ pub struct PdfTab {
     /// Requests to the render thread. Dropping it is what ends the thread, so it is dropped with
     /// the tab and nothing else has to be joined.
     tx: RefCell<Option<Sender<Request>>>,
-    /// Reading positions behind and ahead, for the mouse's back button and Alt+Left.
-    history: RefCell<Vec<Anchor>>,
-    future: RefCell<Vec<Anchor>>,
     /// Colours inverted against the system's choice, for a document that renders badly either way.
     inverted: Cell<bool>,
     /// The palette the cached tiles were rendered in, so a theme change can tell that they are
@@ -211,6 +204,8 @@ pub struct PdfTab {
     current: Cell<Option<usize>>,
     on_zoom: Hook,
     on_page: Hook,
+    /// Fired just before a jump, so the pane can record where the reader was.
+    on_jump: Hook,
     on_outline: Hook,
     /// Fired when the document's pages are known, which is when it stops being "opening".
     on_open: Hook,
@@ -277,8 +272,6 @@ pub fn open(
             .child(&thumbs)
             .build(),
         tx: RefCell::new(None),
-        history: RefCell::new(Vec::new()),
-        future: RefCell::new(Vec::new()),
         inverted: Cell::new(false),
         theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
         failed: Cell::new(false),
@@ -300,6 +293,7 @@ pub fn open(
         current: Cell::new(None),
         on_zoom: RefCell::new(None),
         on_page: RefCell::new(None),
+        on_jump: RefCell::new(None),
         on_outline: RefCell::new(None),
         on_open: RefCell::new(None),
         on_matches: RefCell::new(None),
@@ -421,7 +415,7 @@ impl PdfTab {
 
     /// Go to a page, remembering where the reader was so Back returns there.
     pub fn goto_page(self: &Rc<Self>, page: usize) {
-        self.push_history();
+        self.jumping();
         self.view.goto_page(page, None);
     }
 
@@ -439,20 +433,14 @@ impl PdfTab {
         self.show_page(self.view.current_page().saturating_sub(1));
     }
 
-    pub fn back(self: &Rc<Self>) {
-        let Some(to) = self.history.borrow_mut().pop() else {
-            return;
-        };
-        self.future.borrow_mut().push(self.view.anchor());
-        self.view.scroll_to(to);
+    /// Where the reader is, and how to put them back there. The pane's history is what holds
+    /// these; a PDF keeps no stack of its own.
+    pub fn anchor(&self) -> Anchor {
+        self.view.anchor()
     }
 
-    pub fn forward(self: &Rc<Self>) {
-        let Some(to) = self.future.borrow_mut().pop() else {
-            return;
-        };
-        self.history.borrow_mut().push(self.view.anchor());
-        self.view.scroll_to(to);
+    pub fn scroll_to(&self, anchor: Anchor) {
+        self.view.scroll_to(anchor);
     }
 
     /// Put the selected text on the clipboard. Nothing selected is not an error: Ctrl+C on a
@@ -520,7 +508,7 @@ impl PdfTab {
         if self.view.page_count() == 0 {
             return;
         }
-        self.push_history();
+        self.jumping();
         match self.glyphs.borrow().contains_key(&page) {
             true => self.apply_show(),
             false => self.ask(Request::Text(page)),
@@ -751,6 +739,10 @@ impl PdfTab {
         *self.on_zoom.borrow_mut() = Some(Rc::new(f));
     }
 
+    pub fn connect_jump(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_jump.borrow_mut() = Some(Rc::new(f));
+    }
+
     pub fn connect_page(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
         *self.on_page.borrow_mut() = Some(Rc::new(f));
     }
@@ -808,13 +800,10 @@ impl PdfTab {
         }
     }
 
-    fn push_history(&self) {
-        let mut history = self.history.borrow_mut();
-        history.push(self.view.anchor());
-        if history.len() > HISTORY {
-            history.remove(0);
-        }
-        self.future.borrow_mut().clear();
+    /// About to jump: the window records where the reader is, so Back returns here. Fired before
+    /// the view moves, which is what makes `anchor()` still the place being left.
+    fn jumping(self: &Rc<Self>) {
+        self.emit(&self.on_jump);
     }
 }
 
@@ -1353,7 +1342,7 @@ impl PdfTab {
         };
         match target {
             LinkTarget::Page { page, top } => {
-                self.push_history();
+                self.jumping();
                 self.view.goto_page(page, top);
             }
             LinkTarget::Uri(uri) => {

@@ -47,7 +47,7 @@ use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
 use gtk::{gdk, gio, glib};
-use panes::{Pane, Side, Zone};
+use panes::{Pane, Place, Side, Spot, Zone};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -192,10 +192,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
-    // The PDF reader. Back and forward take the chords a browser uses for the same idea;
-    // the rest live in the palette, where they are found by name rather than by chord.
-    ("win.pdf-back", "Back", &["<Alt>Left"]),
-    ("win.pdf-forward", "Forward", &["<Alt>Right"]),
+    // Back and forward walk the active pane's history, over every kind of document. They take
+    // the chords a browser uses for the same idea, and the mouse's side buttons with them.
+    ("win.back", "Back", &["<Alt>Left"]),
+    ("win.forward", "Forward", &["<Alt>Right"]),
+    // The PDF reader. The rest live in the palette, found by name rather than by chord.
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
@@ -996,6 +997,10 @@ struct App {
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
     chrome_hidden: Cell<bool>,
+    /// True while Back or Forward is walking a pane's history, so the selection change and the
+    /// caret move it makes are not recorded as places of their own — which would clear the
+    /// forward side the moment Back used it.
+    navigating: Cell<bool>,
     /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
     /// rather than the status label, which is also hidden before the first `Progress` arrives.
     reconciled: Cell<bool>,
@@ -1128,6 +1133,97 @@ impl App {
         for pane in self.panes.borrow().iter() {
             pane.end_cycle();
         }
+    }
+
+    // --- back and forward ---------------------------------------------------------------------
+
+    /// Where a document is being read: the caret in a text tab, the reading anchor in a PDF, and
+    /// the document itself for anything with no position of its own.
+    fn place_of(doc: &Doc) -> Place {
+        let at = match doc {
+            Doc::Text(tab) => {
+                let iter = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+                Spot::Caret(iter.line() + 1, iter.line_offset() + 1)
+            }
+            Doc::Pdf(pdf) => Spot::Page(pdf.anchor()),
+            _ => Spot::Whole,
+        };
+        Place { key: doc.key(), at }
+    }
+
+    /// Where the reader is in `pane` right now.
+    fn here(&self, pane: &Pane) -> Option<Place> {
+        let page = pane.tabs.selected_page()?;
+        self.doc_for_page(&page).as_ref().map(Self::place_of)
+    }
+
+    /// Record where the reader is in the active pane, so Back returns there. Every jump calls
+    /// this before it moves; a place that coalesces with the last one replaces it.
+    fn mark(&self) {
+        let pane = self.pane();
+        if let Some(here) = self.here(&pane) {
+            self.record(&pane, here);
+        }
+    }
+
+    /// The same, for a document that is about to stop being the selected one: the tab being left
+    /// still holds its caret, so this is read before the switch has happened.
+    fn mark_page(&self, page: &adw::TabPage) {
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        if let Some(doc) = self.doc_for_page(page) {
+            self.record(&pane, Self::place_of(&doc));
+        }
+    }
+
+    fn record(&self, pane: &Pane, place: Place) {
+        if self.navigating.get() {
+            return;
+        }
+        pane.nav.borrow_mut().record(place, Instant::now());
+    }
+
+    /// `Alt+Left` / `Alt+Right` and the mouse's side buttons: one step through the active pane's
+    /// history. It may switch tabs inside the pane; it never moves the keyboard to another one.
+    ///
+    /// Entries whose document has left the pane are stepped over rather than dropped on the
+    /// floor, which is what a tab dragged into a neighbouring pane leaves behind.
+    fn navigate(self: &Rc<Self>, forward: bool) {
+        let pane = self.pane();
+        let Some(mut here) = self.here(&pane) else {
+            return;
+        };
+        self.navigating.set(true);
+        while let Some(to) = match forward {
+            true => pane.nav.borrow_mut().forward(here.clone()),
+            false => pane.nav.borrow_mut().back(here.clone()),
+        } {
+            if self.go_to(&pane, &to) {
+                break;
+            }
+            here = to;
+        }
+        self.navigating.set(false);
+    }
+
+    /// Put the reader at `to`, if the document it names is still one of this pane's.
+    fn go_to(&self, pane: &Pane, to: &Place) -> bool {
+        let Some(doc) = self
+            .docs()
+            .into_iter()
+            .find(|d| d.key() == to.key && pane.has(d.page()))
+        else {
+            return false;
+        };
+        tracing::debug!("navigating to {to:?}");
+        pane.tabs.set_selected_page(doc.page());
+        match (&doc, to.at) {
+            (Doc::Text(tab), Spot::Caret(line, column)) => tab.goto_line(line, column),
+            (Doc::Pdf(pdf), Spot::Page(anchor)) => pdf.scroll_to(anchor),
+            _ => {}
+        }
+        true
     }
 
     /// Put the pane on the tab its reader was on before `page`, in time for `page` to go.
@@ -1551,6 +1647,13 @@ impl App {
                 app.save_session_soon();
             }
         ));
+        // A page jump, a link followed, an outline row: the reader is leaving a place, and the
+        // pane's history is where that goes. Fired before the view moves.
+        pdf.connect_jump(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| app.mark_page(&pdf.page)
+        ));
         pdf.connect_page(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1948,6 +2051,7 @@ impl App {
     /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
     /// the note opens as a preview and the next such click takes the same tab.
     fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
+        self.mark();
         self.open_preview(rel);
         let Some(at) = at else { return };
         self.on_tab(rel.to_string(), move |tab| {
@@ -2015,6 +2119,9 @@ impl App {
         };
         // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
         let (target, anchor) = split_pdf_anchor(target);
+        // Where the link was, so Back returns to it. Before the open, and before the selection
+        // change it causes records the same place, which coalesces into this one.
+        self.mark();
         match vault.resolve_link(target) {
             Ok(Some(rel)) => {
                 self.open_preview(&rel);
@@ -2666,6 +2773,9 @@ impl App {
             if let Some(at) = pdf.ring_at() {
                 self.ring_at.set(Some(at));
             }
+        }
+        if let Some((pane, doc)) = self.pane_of(page).zip(self.doc_for_page(page)) {
+            pane.nav.borrow_mut().forget(&doc.key());
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.sync_active();
@@ -3348,6 +3458,9 @@ impl App {
         if !tab.view.has_focus() {
             return;
         }
+        // Where the edit is. Consecutive keystrokes in one paragraph coalesce into one entry, so
+        // typing leaves a mark rather than hundreds (`panes::coalesces`).
+        self.mark_page(&tab.page);
         self.hide_chrome();
         self.promote(&tab.page);
     }
@@ -3525,16 +3638,8 @@ impl App {
                 }
             }
             "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
-            "pdf-back" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.back();
-                }
-            }
-            "pdf-forward" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.forward();
-                }
-            }
+            "back" => self.navigate(false),
+            "forward" => self.navigate(true),
             "pdf-invert" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.toggle_invert();
@@ -4067,6 +4172,7 @@ impl App {
         // page reaches the page (`language/notes.rs`, `definition`).
         let (path, anchor) = split_pdf_anchor(&loc.path);
         let (key, at) = (path.to_string(), loc.range.start);
+        self.mark();
         match doc::is_loose_key(&key) {
             // Outside the vault: the same door a file dropped on the window comes through, and
             // the tab it opens gets no language server of its own.
@@ -4524,6 +4630,11 @@ impl App {
         if let Some(doc) = session.active.as_deref().and_then(|key| self.doc_for(key)) {
             self.tabs().set_selected_page(doc.page());
         }
+        // Restoring tabs selects each in turn, and none of that is somewhere the reader went, so
+        // the pane starts with an empty history rather than with the order the restore happened in.
+        for pane in self.panes.borrow().iter() {
+            pane.nav.replace(panes::Nav::default());
+        }
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
         // answer to a question they asked in another sitting.
@@ -4976,6 +5087,7 @@ fn build_window(
         zoom: Cell::new(1.0),
         presenting: Cell::new(None),
         chrome_hidden: Cell::new(false),
+        navigating: Cell::new(false),
         reconciled: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
@@ -5352,6 +5464,17 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             None,
             move || app.pdf_of(&pane).map(|pdf| pdf.page_count())
         )),
+        mark: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            move || {
+                if let Some(here) = app.here(&pane) {
+                    app.record(&pane, here);
+                }
+            }
+        )),
     });
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
@@ -5401,6 +5524,11 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         move |tabs| {
             if let Some(page) = tabs.selected_page() {
+                // The tab being left is still the front of the MRU order until `touch` runs, and
+                // it still holds its caret, so this is where the reader was.
+                if let Some(left) = pane.recent().first().filter(|p| **p != page) {
+                    app.mark_page(left);
+                }
                 pane.touch(&page);
             }
             // This pane's bar, whether or not this pane has the keyboard: a tab dragged out of a
@@ -6152,8 +6280,8 @@ fn install_actions(app: &Rc<App>) {
 /// have meant back and forward by them for twenty years.
 fn nav_action(button: u32) -> Option<&'static str> {
     match button {
-        8 => Some("win.pdf-back"),
-        9 => Some("win.pdf-forward"),
+        8 => Some("win.back"),
+        9 => Some("win.forward"),
         _ => None,
     }
 }
@@ -6778,8 +6906,8 @@ mod tests {
     /// the window actually has.
     #[test]
     fn the_side_buttons_name_actions_that_exist() {
-        assert_eq!(nav_action(8), Some("win.pdf-back"));
-        assert_eq!(nav_action(9), Some("win.pdf-forward"));
+        assert_eq!(nav_action(8), Some("win.back"));
+        assert_eq!(nav_action(9), Some("win.forward"));
         // The three GTK does name are everyone else's: click, paste, context menu.
         for button in [1, 2, 3] {
             assert_eq!(nav_action(button), None);
