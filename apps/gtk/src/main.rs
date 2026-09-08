@@ -233,7 +233,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.fold-all", "Fold All", &[]),
     ("win.unfold-all", "Unfold All", &[]),
     ("win.rename", "Rename", &["F2"]),
-    ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
+    (
+        "win.new-from-template",
+        "New from Template…",
+        &["<Control><Shift>d"],
+    ),
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
@@ -1518,11 +1522,6 @@ impl App {
         }
     }
 
-    /// Open a note. Kept as its own name because most callers mean exactly this, and it says so.
-    fn open_note(self: &Rc<Self>, rel: &str) {
-        self.open_path(rel);
-    }
-
     /// A preview tab has arrived: it replaces whichever tab this pane was previewing before.
     ///
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
@@ -2056,7 +2055,14 @@ impl App {
     fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.mark();
         self.open_preview(rel);
-        let Some(at) = at else { return };
+        if let Some(at) = at {
+            self.select_when_open(rel, at);
+        }
+    }
+
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a followed
+    /// link, or the `{{cursor}}` a template just placed in a note it created.
+    fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
         self.on_tab(rel.to_string(), move |tab| {
             if let Some(chars) = char_range(&tab.text(), at.clone()) {
                 tab.goto_range(chars);
@@ -3781,11 +3787,11 @@ impl App {
                     fileops::rename(ops, &rel);
                 }
             }
-            "daily-note" => match self.vault().map(|v| v.daily_note()) {
-                Some(Ok((rel, _))) => self.open_note(&rel),
-                Some(Err(e)) => self.toast(&format!("Cannot open today's note: {e:#}")),
-                None => self.needs_vault("open today's note"),
-            },
+            "new-from-template" => {
+                if let Some(ops) = self.need_ops("create a note from a template") {
+                    fileops::new_from_template(ops);
+                }
+            }
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
@@ -5151,6 +5157,8 @@ fn build_window(
         #[weak]
         app,
         move || {
+            // Before the save below, which is what rewrites the keys it reads out of the file.
+            retired_daily_keys(&app);
             // The recent list, written once the window the user asked for is on screen.
             if app.vault().is_some()
                 && let Err(e) = app.config.borrow().save()
@@ -5398,6 +5406,34 @@ fn adopt_sidebar(
     let _ = app.sidebar.set(pane);
 }
 
+/// Say once, in the window and in the log, what a vault's retired `daily_*` settings mean now.
+///
+/// The keys are gone, so a vault configured for a daily note would simply stop making one with
+/// nothing saying why. Nothing is written into the vault — the `accent-target:` line is the
+/// user's to add, and a template travels with the vault where these keys never did — and the
+/// keys leave `config.toml` with the caller's next save, so this is said once. A courtesy: a
+/// config that will not re-read says nothing at all.
+fn retired_daily_keys(app: &Rc<App>) {
+    let Some(root) = app.vault().map(|v| v.root()) else {
+        return;
+    };
+    let Some((target, template)) = accent_core::config::daily_keys(&root) else {
+        return;
+    };
+    let dir = app.config.borrow().vault(&root).templates_dir;
+    let file = match template {
+        Some(t) => accent_core::template::candidates(&dir, &t)
+            .pop()
+            .unwrap_or(t),
+        None => format!("a template in {dir}"),
+    };
+    let say = format!(
+        "Daily notes are a template directive now: add `accent-target: {target}` to {file}"
+    );
+    tracing::warn!("{say}");
+    app.toast(&say);
+}
+
 /// Everything `fileops` needs from the window, as closures. Weak throughout: the operations
 /// outlive nothing, and a strong capture here would keep a closed window's vault open.
 /// The file operations the tree, the tab menus and the palette share. `None` without a vault:
@@ -5417,9 +5453,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 app.toast(message);
             }
         }),
-        open: Box::new(move |rel| {
-            if let Some(app) = open.upgrade() {
-                app.open_path(rel);
+        open: Box::new(move |rel, at| {
+            let Some(app) = open.upgrade() else { return };
+            app.open_path(rel);
+            if let Some(at) = at {
+                app.select_when_open(rel, at..at);
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
@@ -6439,12 +6477,16 @@ fn install_bench_hooks(app: &Rc<App>) {
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome {
+    let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
+    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome && !templates {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if templates {
+            return bench_templates(&app);
+        }
         if chrome {
             return bench_chrome(&app);
         }
@@ -6505,6 +6547,24 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
         child = c.next_sibling();
     }
     None
+}
+
+/// What New from Template would list: every template, and the destination each one names today.
+///
+/// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
+/// `accent-target:` directive and the rendered target end to end without a widget.
+fn bench_templates(app: &Rc<App>) {
+    let Some(vault) = app.vault() else {
+        return bench_quit(app);
+    };
+    let templates = vault.templates().unwrap_or_default();
+    println!("bench templates {}", templates.len());
+    for rel in &templates {
+        if let Ok(Some(target)) = vault.template_target(rel) {
+            println!("bench template_target {rel} {target}");
+        }
+    }
+    bench_quit(app);
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the

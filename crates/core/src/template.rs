@@ -1,4 +1,4 @@
-//! Template expansion for new notes and daily notes.
+//! Template expansion for new notes.
 
 use chrono::NaiveDateTime;
 use chrono::format::StrftimeItems;
@@ -42,6 +42,61 @@ fn expand(name: &str, title: &str, now: NaiveDateTime) -> Option<String> {
             Some(("date" | "time", fmt)) => strftime(fmt, now),
             _ => None,
         },
+    }
+}
+
+/// The front-matter key a template says its destination with.
+const TARGET: &str = "accent-target";
+
+/// A template split into the directive accent reads and the text a note made from it gets.
+#[derive(Debug, PartialEq)]
+pub struct Template {
+    /// The `accent-target:` value as written, still to be rendered; `None` when the template
+    /// says nothing about where its notes go.
+    pub target: Option<String>,
+    pub body: String,
+}
+
+/// Lift `accent-target:` out of a template's leading `---` block.
+///
+/// The directive is accent's, not the note's, so it never reaches the note: the line goes, and the
+/// whole block goes with it when the line was all it held — together with the blank line that
+/// separated the block from the text, so the note starts where its first heading does. Everything
+/// else is copied byte for byte, including a second `accent-target:` and any `---` further down.
+pub fn parse(text: &str) -> Template {
+    let fence = |line: &str| line.trim_end() == "---";
+    let mut lines = text.split_inclusive('\n');
+    let Some(open) = lines.next().filter(|l| fence(l)) else {
+        return verbatim(text);
+    };
+    let mut kept = String::new();
+    let mut target = None;
+    let mut read = open.len();
+    for line in lines {
+        read += line.len();
+        if fence(line) {
+            let rest = &text[read..];
+            let body = match target.is_some() && kept.is_empty() {
+                true => rest.strip_prefix('\n').unwrap_or(rest).to_string(),
+                false => format!("{open}{kept}{line}{rest}"),
+            };
+            return Template { target, body };
+        }
+        match line.split_once(':') {
+            Some((key, value)) if key.trim() == TARGET && target.is_none() => {
+                target = Some(value.trim().to_string());
+            }
+            _ => kept.push_str(line),
+        }
+    }
+    // An unclosed `---` is not front matter, so nothing in it was a directive.
+    verbatim(text)
+}
+
+fn verbatim(text: &str) -> Template {
+    Template {
+        target: None,
+        body: text.to_string(),
     }
 }
 
@@ -113,6 +168,46 @@ mod tests {
         let (out, cursor) = render("{{nope}} {{date:%Q}} {{title}} {{", "Note", now());
         assert_eq!(out, "{{nope}} {{date:%Q}} Note {{");
         assert_eq!(cursor, None);
+    }
+
+    #[test]
+    fn parse_lifts_the_target_out_of_the_front_matter() {
+        let t = parse("---\ntags: [daily]\naccent-target: Daily/{{date}}.md\n---\n\n# x\n");
+        assert_eq!(t.target.as_deref(), Some("Daily/{{date}}.md"));
+        // The rest of the block is the note's own front matter and stays exactly as written.
+        assert_eq!(t.body, "---\ntags: [daily]\n---\n\n# x\n");
+    }
+
+    #[test]
+    fn parse_drops_a_block_the_target_was_alone_in() {
+        let t = parse("---\naccent-target: Log.md\n---\n\n# Log\n");
+        assert_eq!(t.target.as_deref(), Some("Log.md"));
+        assert_eq!(t.body, "# Log\n");
+    }
+
+    #[test]
+    fn parse_leaves_a_template_that_says_nothing_alone() {
+        for text in ["# {{title}}\n", "---\ntags: [x]\n---\n\nbody\n"] {
+            assert_eq!(
+                parse(text),
+                Template {
+                    target: None,
+                    body: text.to_string()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parse_only_reads_a_closed_leading_block() {
+        // Below the block, and in a block that never closes, the line is text like any other.
+        for text in [
+            "# x\n\naccent-target: Nope.md\n",
+            "---\naccent-target: Nope.md\n\n# x\n",
+        ] {
+            assert_eq!(parse(text).target, None);
+            assert_eq!(parse(text).body, text);
+        }
     }
 
     #[test]
