@@ -17,6 +17,7 @@ use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, S
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
+use crate::fileops;
 use crate::highlight;
 
 /// The changes list gets the top half of the pane, the log the bottom.
@@ -172,8 +173,14 @@ pub struct Panel {
     column: gtk::Box,
     names: gtk::StringList,
     chooser: gtk::DropDown,
-    branch_names: gtk::StringList,
-    branch: gtk::DropDown,
+    /// What the branch button says, which is the branch HEAD is on or where it is detached.
+    branch_label: gtk::Label,
+    branch_menu: gtk::Popover,
+    branch_list: gtk::ListBox,
+    /// The names the popover is showing and which of them HEAD is on. A refresh that says the
+    /// same thing leaves the rows alone: one fires on every save, and rebuilding them would take
+    /// a row out from under the pointer already on it.
+    branch_shown: RefCell<(Vec<String>, Option<usize>)>,
     counts: gtk::Label,
     sync: gtk::Button,
     message: gtk::TextView,
@@ -195,8 +202,8 @@ pub struct Panel {
     busy: Cell<bool>,
     /// Something asked for a refresh while one was in flight; run once more when it lands.
     again: Cell<bool>,
-    /// Set while a chooser's list is being filled, so the selection notify that follows is not
-    /// read as the user picking a repository or a branch.
+    /// Set while the repository chooser's list is being filled, so the selection notify that
+    /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
     /// filled: this is the transfer the status bar spins for.
@@ -226,19 +233,46 @@ impl Panel {
             .list_factory(&name_factory(false))
             .build();
 
-        // The branch is a chooser built exactly like the repository one above it, and for the
-        // same reasons: the button ellipsizes so that a long branch name is not what decides how
-        // narrow the sidebar can be dragged, while the popup keeps the names whole. Flat and
-        // `heading`, because it stands where the branch label stood and reads as the branch first
-        // and as a control second. It claims the row's spare width without taking it, so Sync and
-        // Commit stay at the trailing edge.
-        let branch_names = gtk::StringList::new(&[]);
-        let branch = gtk::DropDown::builder()
-            .model(&branch_names)
+        // The branch is a menu button rather than a chooser: its popover is a list of the local
+        // branches, each row switching to that branch and carrying a trash button, with Create
+        // Branch… underneath. A `GtkDropDown` can only ever pick one of the rows it already has.
+        // Flat and `heading`, because it stands where the branch label stood and reads as the
+        // branch first and as a control second; the label ellipsizes so that a long branch name
+        // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
+        // width without taking it, so Sync and Commit stay at the trailing edge.
+        let branch_label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
+        let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        face.append(&branch_label);
+        face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+
+        let branch_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        branch_list.add_css_class("navigation-sidebar");
+        let create = gtk::Button::builder().label("Create Branch…").build();
+        create.add_css_class("flat");
+        let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // A repository with fifty branches is a list that scrolls, not a popover taller than the
+        // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
+        branch_box.append(
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .max_content_height(280)
+                .child(&branch_list)
+                .build(),
+        );
+        branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        branch_box.append(&create);
+        let branch_menu = gtk::Popover::builder().child(&branch_box).build();
+        let branch = gtk::MenuButton::builder()
             .hexpand(true)
             .halign(gtk::Align::Start)
-            .factory(&name_factory(true))
-            .list_factory(&name_factory(false))
+            .child(&face)
+            .popover(&branch_menu)
             .build();
         for class in ["flat", "heading"] {
             branch.add_css_class(class);
@@ -385,8 +419,10 @@ impl Panel {
             column,
             names,
             chooser,
-            branch_names,
-            branch,
+            branch_label,
+            branch_menu,
+            branch_list,
+            branch_shown: RefCell::new((Vec::new(), None)),
             counts,
             sync,
             message,
@@ -408,7 +444,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check);
+        panel.wire_header(&check, &create);
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
@@ -477,9 +513,10 @@ impl Panel {
 
     // --- wiring -------------------------------------------------------------------------------
 
-    fn wire_header(self: &Rc<Self>, check: &gtk::Button) {
+    fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
         on_click(self, check, |panel| panel.refresh());
+        on_click(self, create, |panel| panel.create_branch());
 
         let weak = Rc::downgrade(self);
         self.chooser.connect_selected_notify(move |chooser| {
@@ -492,19 +529,6 @@ impl Panel {
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
             panel.refresh();
-        });
-
-        let weak = Rc::downgrade(self);
-        self.branch.connect_selected_notify(move |chooser| {
-            let (Some(panel), Some(picked)) = (
-                weak.upgrade(),
-                chooser.selected_item().and_downcast::<gtk::StringObject>(),
-            ) else {
-                return;
-            };
-            if !panel.syncing.get() {
-                panel.checkout(picked.string().to_string());
-            }
         });
     }
 
@@ -762,21 +786,57 @@ impl Panel {
         self.changes.splice(0, self.changes.n_items(), &items);
     }
 
-    /// Put the branch chooser on `names` with `at` picked, without the selection notify that
-    /// follows being read as the user asking for a checkout.
-    fn set_branches(&self, names: &[String], at: Option<usize>) {
-        self.syncing.set(true);
-        let held: Vec<String> = (0..self.branch_names.n_items())
-            .filter_map(|i| self.branch_names.string(i).map(|s| s.to_string()))
-            .collect();
-        if held != names {
-            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            self.branch_names
-                .splice(0, self.branch_names.n_items(), &refs);
+    /// Put the branch popover on `names`, `at` being the row HEAD is on.
+    fn set_branches(self: &Rc<Self>, names: &[String], at: Option<usize>) {
+        self.branch_label
+            .set_text(at.and_then(|i| names.get(i)).map_or("", String::as_str));
+        if *self.branch_shown.borrow() == (names.to_vec(), at) {
+            return;
         }
-        self.branch
-            .set_selected(at.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
-        self.syncing.set(false);
+        self.branch_shown.replace((names.to_vec(), at));
+        while let Some(row) = self.branch_list.first_child() {
+            self.branch_list.remove(&row);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let row = self.branch_row(name, Some(i) != at);
+            self.branch_list.append(&row);
+        }
+    }
+
+    /// One row of the branch popover: the name, which switches to it, and — where git would let
+    /// it go — a trash button. The branch HEAD is on has none: git refuses to delete it, and a
+    /// control that cannot work is dead chrome (DESIGN.md, Principle 1).
+    fn branch_row(self: &Rc<Self>, name: &str, deletable: bool) -> gtk::Box {
+        let switch = gtk::Button::builder()
+            .child(&gtk::Label::builder().label(name).xalign(0.0).build())
+            .hexpand(true)
+            .build();
+        switch.add_css_class("flat");
+        let (weak, asked) = (Rc::downgrade(self), name.to_string());
+        switch.connect_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.branch_menu.popdown();
+                panel.checkout(asked.clone());
+            }
+        });
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.append(&switch);
+        if deletable {
+            let trash = icon_button("user-trash-symbolic", "Delete Branch");
+            // The hover rule the changed files' actions already follow, and the same class: a
+            // `GtkListBoxRow`'s node is `row`, which is what that CSS selects on.
+            trash.add_css_class("git-actions");
+            let (weak, asked) = (Rc::downgrade(self), name.to_string());
+            trash.connect_clicked(move |_| {
+                if let Some(panel) = weak.upgrade() {
+                    panel.branch_menu.popdown();
+                    panel.delete_branch(asked.clone(), false);
+                }
+            });
+            row.append(&trash);
+        }
+        row
     }
 
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
@@ -1046,6 +1106,95 @@ impl Panel {
             }
             panel.refresh();
         });
+    }
+
+    /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
+    /// because the base a reader means is the state they are looking at.
+    ///
+    /// The name is git's to validate — a bad ref name, one already taken and a worktree the
+    /// switch would clobber are all its refusals, and they come back through [`Panel::command`]'s
+    /// dialog, which also brings the refresh.
+    fn create_branch(self: &Rc<Self>) {
+        self.branch_menu.popdown();
+        let entry = fileops::name_entry("Branch name", "");
+        let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        form.append(&entry);
+        let dialog = fileops::name_dialog("Create Branch", "Create", &form);
+
+        let (panel, field) = (self.clone(), entry.clone());
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                let name = field.text().trim().to_string();
+                if response != fileops::CONFIRM || name.is_empty() {
+                    return;
+                }
+                panel.command("Create Branch", None, move |vault, repo| {
+                    vault
+                        .git_create_branch(repo, &name, true)
+                        .map(|()| format!("Switched to {name}"))
+                });
+            },
+        );
+        // After `choose` has presented the dialog: the entry is mapped only by then.
+        entry.grab_focus();
+    }
+
+    /// Delete a local branch.
+    ///
+    /// `git branch -d` first, so that whether the work would be lost is git's answer and not a
+    /// guess of ours at a default branch. Its one refusal worth escalating is "not fully merged",
+    /// which asks before running `-D`; every other refusal is reported as it comes.
+    fn delete_branch(self: &Rc<Self>, name: String, force: bool) {
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let asked = name.clone();
+            let done =
+                gio::spawn_blocking(move || vault.git_delete_branch(&repo, &asked, force)).await;
+            match done {
+                Ok(Ok(())) => (panel.hooks.toast)(&format!("Deleted {name}")),
+                Ok(Err(e)) => {
+                    let message = format!("{e:#}");
+                    match !force && git::unmerged(&message) {
+                        true => panel.confirm_delete(name),
+                        false => panel.failed("Delete Branch", &message),
+                    }
+                }
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            panel.refresh();
+        });
+    }
+
+    /// The one delete that loses commits, so it asks first (DESIGN.md, States).
+    fn confirm_delete(self: &Rc<Self>, name: String) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Delete {name}?")),
+            Some("Its commits are not merged into any other branch and will be lost."),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let panel = self.clone();
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                if response == "delete" {
+                    panel.delete_branch(name, true);
+                }
+            },
+        );
     }
 
     /// Put HEAD on one commit, detached, so the repository can be read at that point.
