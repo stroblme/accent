@@ -47,7 +47,7 @@ use accent_core::markdown::LinkKind;
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 use panes::{Pane, Place, Side, Spot, Zone};
 use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
@@ -134,6 +134,18 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
+    // Move the tab into the pane that way, splitting one off only when there is none. Left and
+    // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
+    // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
+    // `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
+    ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
+    (
+        "win.move-tab-right",
+        "Move Tab Right",
+        &["<Shift><Alt>Right"],
+    ),
+    ("win.move-tab-up", "Move Tab Up", &[]),
+    ("win.move-tab-down", "Move Tab Down", &[]),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
@@ -1301,6 +1313,40 @@ impl App {
         };
         let at = self.pane_of(&page).unwrap_or_else(|| self.pane());
         self.split_page(&at, side, &page);
+    }
+
+    /// Move the tab into the pane on `side`, or split one off when there is none that way. The
+    /// fallback is what makes the chord worth having in the common single-pane window, where
+    /// there is nowhere to move to yet; `win.split-*` stays the always-split.
+    fn move_tab(self: &Rc<Self>, side: Side) {
+        let Some(page) = self
+            .menu_page
+            .borrow()
+            .clone()
+            .or_else(|| self.tabs().selected_page())
+        else {
+            return;
+        };
+        let Some(from) = self.pane_of(&page) else {
+            return;
+        };
+        // Cloned out, and the borrow dropped: a transfer runs `page-detached` and `page-attached`
+        // synchronously, and both reach back into `panes`.
+        let panes: Vec<Rc<Pane>> = self.panes.borrow().clone();
+        let root = self.window.clone().upcast::<gtk::Widget>();
+        let rects: Vec<graphene::Rect> = panes.iter().map(|p| pane_rect(p, &root)).collect();
+        let Some(i) = panes
+            .iter()
+            .position(|p| Rc::ptr_eq(p, &from))
+            .and_then(|at| panes::neighbour(rects[at], &rects, side))
+        else {
+            return self.split_active(side);
+        };
+        let to = &panes[i];
+        from.tabs.transfer_page(&page, &to.tabs, to.tabs.n_pages());
+        // Selecting it is what makes the destination the active pane, retargets its find bar and
+        // saves the session, all through the `selected-page` handler the pane already has.
+        to.tabs.set_selected_page(&page);
     }
 
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
@@ -3591,6 +3637,10 @@ impl App {
             "split-right" => self.split_active(Side::Right),
             "split-up" => self.split_active(Side::Up),
             "split-down" => self.split_active(Side::Down),
+            "move-tab-left" => self.move_tab(Side::Left),
+            "move-tab-right" => self.move_tab(Side::Right),
+            "move-tab-up" => self.move_tab(Side::Up),
+            "move-tab-down" => self.move_tab(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
@@ -6264,6 +6314,10 @@ fn reserved(action: &str, accel: &str) -> bool {
         "win.close-tab"
             | "win.next-tab"
             | "win.previous-tab"
+            | "win.move-tab-left"
+            | "win.move-tab-right"
+            | "win.move-tab-up"
+            | "win.move-tab-down"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
@@ -6415,6 +6469,12 @@ fn tab_menu() -> gio::Menu {
         split.append(label_of_owned(&action), Some(&action));
     }
     menu.append_section(None, &split);
+    let move_tab = gio::Menu::new();
+    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+        let action = format!("win.move-tab-{}", side.action());
+        move_tab.append(label_of_owned(&action), Some(&action));
+    }
+    menu.append_section(None, &move_tab);
     for action in [
         "win.copy-relative-path",
         "win.copy-absolute-path",
@@ -6429,6 +6489,14 @@ fn tab_menu() -> gio::Menu {
     );
     menu.append_section(None, &reveal);
     menu
+}
+
+/// Where `pane` sits in the window, for [`panes::neighbour`]. A pane that has not been allocated
+/// yet — a split in the same main-loop turn — has no bounds, and a zero rect is what says so.
+fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
+    pane.widget()
+        .compute_bounds(root)
+        .unwrap_or_else(graphene::Rect::zero)
 }
 
 /// One button rather than a two-item group: there are only two states, so the pressed look plus
@@ -6479,6 +6547,7 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
 /// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
 /// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
+/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6488,9 +6557,11 @@ fn install_bench_hooks(app: &Rc<App>) {
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
+    let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
+        && panes.is_none()
         && !git
         && !keys
         && !chrome
@@ -6502,6 +6573,9 @@ fn install_bench_hooks(app: &Rc<App>) {
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(rels) = panes {
+            return bench_panes(&app, &rels);
+        }
         if paths {
             return bench_paths(&app);
         }
@@ -6851,6 +6925,63 @@ fn bench_chrome(app: &Rc<App>) {
         }
     }
     bench_quit(app);
+}
+
+/// Open the two notes `rels` names in one pane, then split the second one off to the right, move
+/// it back, and ask for a move where there is no pane to move into.
+///
+/// What is printed is the **geometry** of the pane holding that tab, not its index: panes are
+/// kept in the order they were made, which is not the order they are drawn in, so only the
+/// rectangle says a tab really changed side.
+fn bench_panes(app: &Rc<App>, rels: &str) {
+    let Some((a, b)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    app.open_path(a);
+    app.open_path(b);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        let Some(page) = app.tabs().selected_page() else {
+            return bench_quit(&app);
+        };
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, 0);
+    });
+}
+
+/// One step of [`bench_panes`], read back after the frame it needs: `panes::neighbour` is
+/// geometric, so it wants the allocation a split has not been given yet, and an emptied pane
+/// closes itself from an idle.
+fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
+    const STEPS: &[&str] = &["win.split-right", "win.move-tab-left", "win.move-tab-right"];
+    let Some(action) = STEPS.get(step) else {
+        if let Some(gtk_app) = app.window.application() {
+            for accel in ["<Shift><Alt>Left", "<Shift><Alt>Right"] {
+                println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
+            }
+        }
+        return bench_quit(app);
+    };
+    println!("bench step {action}");
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    let (app, page) = (app.clone(), page.clone());
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, step + 1);
+    });
+}
+
+/// How many panes there are, and where in the window the one holding `page` sits.
+fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
+    println!("bench panes {}", app.panes.borrow().len());
+    let root = app.window.clone().upcast::<gtk::Widget>();
+    match app.pane_of(page) {
+        Some(pane) => {
+            let r = pane_rect(&pane, &root);
+            println!("bench tab_at x={} y={}", r.x().round(), r.y().round());
+        }
+        None => println!("bench tab_at none"),
+    }
 }
 
 /// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
@@ -7374,6 +7505,21 @@ mod tests {
         }
     }
 
+    /// The tab menu builds its action names with `format!`, so nothing but this says that what it
+    /// puts on a menu is a command the window has and the palette lists.
+    #[test]
+    fn the_tab_menu_names_actions_that_exist() {
+        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+            for prefix in ["win.split-", "win.move-tab-"] {
+                let action = format!("{prefix}{}", side.action());
+                assert!(
+                    ACTIONS.iter().any(|(name, _, _)| *name == action),
+                    "{action} is on the tab menu but not in ACTIONS"
+                );
+            }
+        }
+    }
+
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
     /// the window actually has.
     #[test]
@@ -7404,6 +7550,10 @@ mod tests {
         assert!(reserved("win.new-folder", "<Control><Shift>n"));
         assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
         assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
+        // Moving a tab has to mean the same thing over every tab, terminals included, and
+        // `Shift+Alt`+arrow has no readline meaning to cost a shell.
+        assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
+        assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
         for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {

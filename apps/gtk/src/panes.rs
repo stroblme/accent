@@ -13,7 +13,7 @@
 use crate::find;
 use crate::pdfview::Anchor;
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -331,6 +331,59 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
         Side::Up => (gtk::Orientation::Vertical, true),
         Side::Down => (gtk::Orientation::Vertical, false),
     }
+}
+
+/// The pane on `side` of `from`, as an index into `others`: the nearest one that starts at or
+/// past `from`'s far edge on that axis and faces it on the other. Ties — two panes stacked
+/// against the same edge — go to whichever faces more of `from`.
+///
+/// Geometry rather than a walk up the `GtkPaned` ancestors, because the widget tree says which
+/// splits nest and not which pane a reader would call "the one on the left". `others` may hold
+/// `from` itself: it cannot be past its own far edge, so it never matches. An unallocated pane
+/// has no neighbours, as it has no edges in [`zone`].
+pub fn neighbour(from: graphene::Rect, others: &[graphene::Rect], side: Side) -> Option<usize> {
+    if from.width() <= 0.0 || from.height() <= 0.0 {
+        return None;
+    }
+    // Every rect reduces to two spans: the one the side steps along, and the one it has to face.
+    // Left is the mirror of right and up of down, so turning the axis around is all that
+    // separates the four cases.
+    let (horizontal, forward) = match side {
+        Side::Left => (true, false),
+        Side::Right => (true, true),
+        Side::Up => (false, false),
+        Side::Down => (false, true),
+    };
+    let across = |r: &graphene::Rect| match horizontal {
+        true => (r.y(), r.y() + r.height()),
+        false => (r.x(), r.x() + r.width()),
+    };
+    // With the axis pointing the way `side` does, the near end is the smaller of the two.
+    let ends = |r: &graphene::Rect| {
+        let (a, b) = match horizontal {
+            true => (r.x(), r.x() + r.width()),
+            false => (r.y(), r.y() + r.height()),
+        };
+        match forward {
+            true => (a, b),
+            false => (-b, -a),
+        }
+    };
+    let far = ends(&from).1;
+    let (lo, hi) = across(&from);
+    others
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.width() > 0.0 && r.height() > 0.0)
+        .filter_map(|(i, r)| {
+            let near = ends(r).0;
+            let (a, b) = across(r);
+            let overlap = hi.min(b) - lo.max(a);
+            (near >= far && overlap > 0.0).then_some((i, near, overlap))
+        })
+        // Nearest first; among equals, the one facing more of `from`.
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(b.2.total_cmp(&a.2)))
+        .map(|(i, _, _)| i)
 }
 
 /// One pane: its tab bar, its tab view, and the sheet that shows where a drop would land.
@@ -872,5 +925,52 @@ mod tests {
             .iter()
             .fold(adw::TabViewShortcuts::NONE, |all, (flag, _, _)| all | *flag);
         assert_eq!(listed, adw::TabViewShortcuts::ALL_SHORTCUTS);
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> graphene::Rect {
+        graphene::Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn two_columns_have_one_neighbour_each_and_only_sideways() {
+        let left = rect(0.0, 0.0, 700.0, 900.0);
+        let right = rect(700.0, 0.0, 700.0, 900.0);
+        let panes = [left, right];
+        assert_eq!(neighbour(left, &panes, Side::Right), Some(1));
+        assert_eq!(neighbour(right, &panes, Side::Left), Some(0));
+        // Nothing beyond the window's edge, and nothing above or below a full-height column.
+        assert_eq!(neighbour(left, &panes, Side::Left), None);
+        assert_eq!(neighbour(left, &panes, Side::Up), None);
+        assert_eq!(neighbour(left, &panes, Side::Down), None);
+    }
+
+    #[test]
+    fn a_nested_split_hands_over_the_pane_it_overlaps_most() {
+        let left = rect(0.0, 0.0, 700.0, 900.0);
+        let top = rect(700.0, 0.0, 700.0, 600.0);
+        let bottom = rect(700.0, 600.0, 700.0, 300.0);
+        let panes = [left, top, bottom];
+        // Both start at the same edge, so the tie is broken by how much of the left column each
+        // of them faces.
+        assert_eq!(neighbour(left, &panes, Side::Right), Some(1));
+        assert_eq!(neighbour(top, &panes, Side::Down), Some(2));
+        assert_eq!(neighbour(bottom, &panes, Side::Up), Some(1));
+        assert_eq!(neighbour(top, &panes, Side::Left), Some(0));
+    }
+
+    #[test]
+    fn a_pane_that_is_only_diagonally_away_is_not_a_neighbour() {
+        let top_left = rect(0.0, 0.0, 700.0, 450.0);
+        let bottom_right = rect(700.0, 450.0, 700.0, 450.0);
+        let panes = [top_left, bottom_right];
+        // They touch at a corner and nowhere else, so neither is to the right of the other.
+        assert_eq!(neighbour(top_left, &panes, Side::Right), None);
+        assert_eq!(neighbour(top_left, &panes, Side::Down), None);
+    }
+
+    #[test]
+    fn an_unallocated_pane_has_no_neighbours() {
+        let panes = [rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 700.0, 900.0)];
+        assert_eq!(neighbour(panes[0], &panes, Side::Right), None);
     }
 }
