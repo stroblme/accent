@@ -16,6 +16,7 @@ mod editor;
 mod fileops;
 mod find;
 mod fold;
+mod ghost;
 mod git;
 mod highlight;
 mod hover;
@@ -1542,6 +1543,7 @@ impl App {
         let config = self.config.borrow();
         Prefs {
             spellcheck: config.spellcheck,
+            ghost_text: config.ghost_text,
             font: config.editor_font.clone(),
             zoom: self.zoom.get(),
             column_width: config.column_width,
@@ -4460,6 +4462,7 @@ impl App {
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
             vault.set_config(config.vault(&self.root()));
+            vault.set_ghost(config.ghost_text);
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
@@ -4468,6 +4471,7 @@ impl App {
         for tab in self.open_tabs() {
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
             tab.set_spellcheck(config.spellcheck);
+            lang::set_ghost(&tab, config.ghost_text);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
@@ -4849,7 +4853,10 @@ fn build_window(
                 false => Vault::open(root, vault_config),
             };
             match opened {
-                Ok((vault, events)) => (Some(Arc::new(vault)), Some(events)),
+                Ok((vault, events)) => {
+                    vault.set_ghost(shell.config.borrow().ghost_text);
+                    (Some(Arc::new(vault)), Some(events))
+                }
                 Err(e) => {
                     eprintln!("cannot open {}: {e:#}", root.display());
                     return None;

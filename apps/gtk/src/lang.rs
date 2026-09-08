@@ -53,6 +53,8 @@ pub struct State {
     hooks: RefCell<Option<Rc<Hooks>>>,
     /// The signature popover of this tab, and the request that would fill it.
     pub signature: crate::signature::Help,
+    /// Whether ghost text is wanted here and whether anything is standing in its way.
+    pub ghost: crate::ghost::State,
 }
 
 impl State {
@@ -112,6 +114,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
     crate::completion::install(tab);
     crate::hover::install(tab);
     crate::signature::install(tab);
+    crate::ghost::install(tab);
 
     let (rel, id, text) = (tab.rel(), language_id(tab), tab.text());
     let weak = Rc::downgrade(tab);
@@ -155,6 +158,37 @@ pub fn saved(tab: &Rc<Tab>) {
             tracing::debug!("saved {rel}: {e:#}");
         }
     });
+}
+
+/// The user left this document. A provider too expensive to tell about every save hears about
+/// it here instead: ghost text re-reads the vault on a save, which is a second's work on a large
+/// one and not something to do a second after every keystroke.
+pub fn settle(tab: &Rc<Tab>) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let tab = tab.clone();
+    glib::spawn_future_local(async move {
+        flush(tab.clone()).await;
+        let rel = tab.rel();
+        if let Err(e) = vault.settle(&rel).await {
+            tracing::debug!("settling {rel}: {e:#}");
+        }
+    });
+}
+
+/// Turn ghost text on or off under an open tab.
+///
+/// Off is immediate. On has to reopen the document when the tab was opened without a ghost
+/// session: whether there is one is decided in `open_document`, and `retarget` is the path that
+/// asks again — the same one a rename uses.
+pub fn set_ghost(tab: &Rc<Tab>, on: bool) {
+    let was = tab.lang.ghost.on.replace(on);
+    tab.set_ghost_text(on);
+    let armed = tab.lang.support().is_some_and(|s| s.inline);
+    if on && !was && !armed {
+        retarget(tab, &tab.rel());
+    }
 }
 
 /// Close the document and drop whatever is still in flight for it. Called from `Tab::drop`, so
@@ -238,6 +272,9 @@ async fn refresh(tab: Rc<Tab>) {
         return;
     };
     flush(tab.clone()).await;
+    // First, because it is the one answer the user is waiting to see: the symbols and folds
+    // behind it feed panes that are already drawn.
+    crate::ghost::request(&tab).await;
     let rel = tab.rel();
     match vault.symbols(&rel).await {
         Ok(symbols) => *tab.lang.symbols.borrow_mut() = symbols,

@@ -221,6 +221,20 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&spell);
 
+    let ghost = adw::SwitchRow::builder()
+        .title("Ghost Text")
+        .subtitle("Suggest the rest of the line from what the vault already says; Tab accepts")
+        .active(config.borrow().ghost_text)
+        .build();
+    ghost.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().ghost_text = r.is_active();
+            save();
+        }
+    });
+    group.add(&ghost);
+
     let numbers = adw::SwitchRow::builder()
         .title("Line Numbers")
         .subtitle("Number every line in a gutter of its own, left of the page")
