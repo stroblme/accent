@@ -1121,6 +1121,15 @@ impl App {
         }
     }
 
+    /// Ctrl came up, or the window stopped being the active one mid-chord: whichever pane was
+    /// cycling commits the tab it landed on. Every pane rather than the active one, because a
+    /// chord started in one pane and abandoned in another must not leave a cursor behind.
+    fn end_cycle(&self) {
+        for pane in self.panes.borrow().iter() {
+            pane.end_cycle();
+        }
+    }
+
     /// Put the pane on the tab its reader was on before `page`, in time for `page` to go.
     ///
     /// Here rather than after the detach, because `AdwTabView` moves the selection to the left
@@ -5760,7 +5769,31 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             glib::Propagation::Proceed
         }
     ));
+    // The other half of `Ctrl+Tab`: an action activation says nothing about the modifier still
+    // being down, so the release is what commits the tab the chord landed on to the front of the
+    // pane's order. Capture phase at the window, like the press above, because the release goes to
+    // whatever has the keyboard and that is the document the chord has just switched to.
+    keys.connect_key_released(glib::clone!(
+        #[weak]
+        app,
+        move |_, key, _, _| {
+            if matches!(key, gdk::Key::Control_L | gdk::Key::Control_R) {
+                app.end_cycle();
+            }
+        }
+    ));
     app.window.add_controller(keys);
+    // A chord whose release never arrives because the window stopped being the active one — a
+    // dialog, another window, the session locking — ends here instead.
+    app.window.connect_is_active_notify(glib::clone!(
+        #[weak]
+        app,
+        move |window| {
+            if !window.is_active() {
+                app.end_cycle();
+            }
+        }
+    ));
 
     // The other half of the find bar's Escape: the bar has one of its own, but only for a key
     // pressed inside it, and the user who typed a query and went back to reading has the focus in
