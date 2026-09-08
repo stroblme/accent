@@ -10,6 +10,7 @@
 //! `AdwTabView:is-transferring-page` says when one is in flight. What is added here is the drop
 //! *zones*: an edge of a pane means "split", which libadwaita has no notion of.
 
+use crate::find;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
@@ -121,9 +122,12 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
 
 /// One pane: its tab bar, its tab view, and the sheet that shows where a drop would land.
 pub struct Pane {
-    /// Bar above, document below. This is what the paneds hold.
+    /// Tab bar, find bar, document. This is what the paneds hold.
     column: gtk::Box,
     pub bar: adw::TabBar,
+    /// Find, replace and go to line for this pane's document alone, so a split can search two
+    /// notes at once. Revealed between the tab bar and the document rather than over it.
+    pub find: Rc<find::Bar>,
     pub tabs: adw::TabView,
     overlay: gtk::Overlay,
     /// Covers the whole document while a drag is in flight, and carries [`Pane::drop`]. It is an
@@ -178,13 +182,16 @@ impl Pane {
         let overlay = gtk::Overlay::builder().child(&tabs).build();
         overlay.add_overlay(&hint);
 
+        let find = find::Bar::new();
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
         column.append(&bar);
+        column.append(find.widget());
         column.append(&overlay);
 
         Rc::new(Pane {
             column,
             bar,
+            find,
             tabs,
             overlay,
             hint,
@@ -197,6 +204,19 @@ impl Pane {
 
     pub fn widget(&self) -> &gtk::Widget {
         self.column.upcast_ref()
+    }
+
+    /// Put the find bar back between the tab bar and the document, after presentation mode has
+    /// borrowed it (`App::hoist_find`). A no-op while it is already there.
+    pub fn hold_find(&self) {
+        let bar = self.find.widget();
+        if bar.parent().as_ref() == Some(self.widget()) {
+            return;
+        }
+        if let Some(old) = bar.parent().and_downcast::<gtk::Box>() {
+            old.remove(bar);
+        }
+        self.column.insert_child_after(bar, Some(&self.bar));
     }
 
     /// The document area, whose size the drop zones are measured in.

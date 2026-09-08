@@ -941,8 +941,6 @@ struct App {
     /// How far a remote vault has got in coming up, across the top of the document column. Only
     /// a remote vault's window puts it in the layout at all.
     connect: connect::Bar,
-    /// Find, replace and go to line, one bar for the window rather than one per tab.
-    find: Rc<find::Bar>,
     /// The bar along the bottom of the editor column: progress, branch, file type, word count.
     statusbar: statusbar::Bar,
     /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
@@ -974,6 +972,9 @@ struct App {
     /// The editor column: presentation mode unreveals its top bars, which is the header. The tab
     /// bars belong to the panes and go with `content`.
     toolbar: adw::ToolbarView,
+    /// What `toolbar` holds: the connection bar, the toasts, and — only while presentation mode
+    /// has the panes off screen — the find bar of the pane being presented.
+    editor_column: gtk::Box,
     header: adw::HeaderBar,
     modes: gtk::ToggleButton,
     /// The header's Drawing toggle, shown only over a PDF.
@@ -1216,6 +1217,9 @@ impl App {
         if self.panes.borrow().len() <= 1 {
             return;
         }
+        // Whatever presentation mode borrowed goes with the pane rather than being left behind
+        // in a column that no longer has an owner for it.
+        pane.hold_find();
         panes::detach(pane);
         self.panes.borrow_mut().retain(|p| !Rc::ptr_eq(p, pane));
         if Rc::ptr_eq(&self.pane(), pane)
@@ -1300,8 +1304,26 @@ impl App {
     }
 
     fn active_doc(&self) -> Option<Doc> {
-        let page = self.tabs().selected_page()?;
-        self.doc_for_page(&page)
+        self.doc_of(&self.pane())
+    }
+
+    /// What `pane` is showing, active or not. A pane's find bar asks all four of these questions
+    /// about its own pane, so none of them may go through the active one.
+    fn doc_of(&self, pane: &Pane) -> Option<Doc> {
+        self.doc_for_page(&pane.tabs.selected_page()?)
+    }
+
+    fn tab_of(&self, pane: &Pane) -> Option<Rc<Tab>> {
+        self.doc_of(pane)?.tab().cloned()
+    }
+
+    fn pdf_of(&self, pane: &Pane) -> Option<Rc<pdftab::PdfTab>> {
+        self.doc_of(pane)?.pdf().cloned()
+    }
+
+    /// Point a pane's find bar at whatever it is showing now.
+    fn retarget_find(&self, pane: &Pane) {
+        pane.find.retarget(self.tab_of(pane));
     }
 
     fn doc_for_page(&self, page: &adw::TabPage) -> Option<Doc> {
@@ -1567,7 +1589,11 @@ impl App {
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf| app.find.set_matches_text(&pdf.matches_label())
+            move |pdf| {
+                if let Some(pane) = app.pane_of(&pdf.page) {
+                    pane.find.set_matches_text(&pdf.matches_label());
+                }
+            }
         ));
         pdf.connect_uri(glib::clone!(
             #[weak(rename_to = app)]
@@ -2183,7 +2209,7 @@ impl App {
 
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
-        self.find.retarget(self.active());
+        self.retarget_find(&self.pane());
         // The tools belong to the window, so they follow the tab in front.
         self.sync_drawing();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
@@ -3043,6 +3069,7 @@ impl App {
             self.ensure_preview();
         }
         self.content.set_visible(!presenting || own_view);
+        self.hoist_find(presenting && !own_view);
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview
                 .widget()
@@ -3059,6 +3086,32 @@ impl App {
         }
         if let Some(tab) = self.active() {
             self.render(&tab);
+        }
+    }
+
+    /// Lend the presented pane's find bar to the editor column, or give every bar back.
+    ///
+    /// A bar lives in its pane, and presentation mode takes the whole pane tree off screen — the
+    /// one thing the old window-wide bar had over this. `Ctrl+F` over a rendered note still has to
+    /// reach something visible, so the pane being presented lends its bar to the column above for
+    /// as long as that lasts. A tab that draws its own document keeps its pane, and its bar with
+    /// it, so this only ever moves one bar and only while a *note* is being presented.
+    fn hoist_find(&self, up: bool) {
+        let active = self.pane();
+        let column: &gtk::Widget = self.editor_column.upcast_ref();
+        for pane in self.panes.borrow().iter() {
+            let bar = pane.find.widget();
+            if !(up && Rc::ptr_eq(pane, &active)) {
+                pane.hold_find();
+            } else if bar.parent().as_ref() != Some(column) {
+                if let Some(old) = bar.parent().and_downcast::<gtk::Box>() {
+                    old.remove(bar);
+                }
+                self.editor_column.append(bar);
+                // Above the document, not below it: appending put it after the toasts.
+                self.editor_column
+                    .reorder_child_after(&self.toasts, Some(bar));
+            }
         }
     }
 
@@ -3184,7 +3237,7 @@ impl App {
         preview.connect_found(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |label| app.find.set_matches_text(label)
+            move |label| app.pane().find.set_matches_text(label)
         ));
         *self.preview.borrow_mut() = Some(preview);
     }
@@ -3232,11 +3285,11 @@ impl App {
         *self.refresh.borrow_mut() = Some(id);
     }
 
-    /// The find bar addressing the rendered preview, which is what it does while presenting.
-    fn preview_find(&self, op: find::PreviewOp) {
+    /// A pane's find bar addressing the rendered preview, which is what it does while presenting.
+    fn preview_find(&self, pane: &Pane, op: find::PreviewOp) {
         // A PDF gets first refusal: it is what the user is looking at, and it counts its own
         // matches rather than letting the bar count them.
-        if let Some(pdf) = self.active_pdf() {
+        if let Some(pdf) = self.pdf_of(pane) {
             match op {
                 find::PreviewOp::Find(text) => pdf.find(&text),
                 find::PreviewOp::Next => pdf.step_match(true),
@@ -3340,7 +3393,7 @@ impl App {
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
         in_popover
-            || self.find.is_open()
+            || self.panes.borrow().iter().any(|pane| pane.find.is_open())
             || self.active().is_some_and(|tab| tab.banner.is_revealed())
     }
 
@@ -3406,11 +3459,13 @@ impl App {
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
-            "find" => self.find.open(find::Mode::Find),
-            "replace" => self.find.open(find::Mode::Replace),
-            "goto-line" => self.find.open(find::Mode::Goto),
-            "find-next" => self.find.step(true),
-            "find-previous" => self.find.step(false),
+            // The bar belongs to the pane, so the chord opens the one in the pane the reader is
+            // in and leaves the other pane's query and open state alone.
+            "find" => self.pane().find.open(find::Mode::Find),
+            "replace" => self.pane().find.open(find::Mode::Replace),
+            "goto-line" => self.pane().find.open(find::Mode::Goto),
+            "find-next" => self.pane().find.step(true),
+            "find-previous" => self.pane().find.step(false),
             "duplicate-line" => {
                 if let Some(tab) = self.active() {
                     tab.duplicate_line();
@@ -4822,9 +4877,6 @@ fn build_window(
     sidebar_header.add_css_class("chrome-fade");
     header.add_css_class("chrome-fade");
 
-    // The find bar goes in the toolbar's content rather than among its top bars: presentation
-    // mode unreveals those *and* hides the tab stack, and Ctrl+F has to outlive both.
-    let find = find::Bar::new();
     // A first connection to a remote host is the window becoming usable, not a list being
     // replaced, so its bar spans the document column rather than sitting in the status bar
     // beside the text (DESIGN.md, Loading). The text stays in the status bar either way. Only a
@@ -4835,7 +4887,6 @@ fn build_window(
     if vault.as_ref().is_some_and(|v| v.is_remote()) {
         editor_column.append(connect.widget());
     }
-    editor_column.append(find.widget());
     editor_column.append(&toasts);
 
     // Only the header is a top bar now: the tab bars belong to the panes, so they sit inside
@@ -4889,7 +4940,6 @@ fn build_window(
         connection,
         connect,
         corpus: RefCell::new(Corpus::default()),
-        find,
         statusbar,
         docs: RefCell::new(Vec::new()),
         tree: OnceCell::new(),
@@ -4903,6 +4953,7 @@ fn build_window(
         sidebar_column,
         sidebar_header,
         toolbar,
+        editor_column,
         header,
         modes: modes.clone(),
         drawing_button: drawing.clone(),
@@ -5261,6 +5312,38 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
 fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
+    // While presenting there is no editor on screen, so find and go to line address the rendered
+    // preview instead. Three closures rather than a back-reference, so `find.rs` never sees `App`,
+    // and each of them answers for *this* pane: the other pane's PDF must not decide whether this
+    // bar counts in pages.
+    pane.find.wire(find::Wiring {
+        presenting: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            false,
+            // A PDF answers find and go-to itself, whether or not anything is being presented.
+            move || app.presenting.get().is_some() || app.pdf_of(&pane).is_some()
+        )),
+        preview: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            move |op| app.preview_find(&pane, op)
+        )),
+        pages: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            None,
+            move || app.pdf_of(&pane).map(|pdf| pdf.page_count())
+        )),
+    });
     // A tab may only go once its buffer is on disk. When the save fails the close stops here and
     // `AdwTabView` waits for `close_page_finish`, which the dialog calls with the user's answer.
     pane.tabs.connect_close_page(glib::clone!(
@@ -5311,6 +5394,9 @@ fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             if let Some(page) = tabs.selected_page() {
                 pane.touch(&page);
             }
+            // This pane's bar, whether or not this pane has the keyboard: a tab dragged out of a
+            // background pane must not leave that pane's bar holding a tab it no longer has.
+            app.retarget_find(&pane);
             app.set_active_pane(&pane);
             app.sync_active();
             app.save_session_soon();
@@ -5473,31 +5559,6 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
 }
 
 fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
-    // While presenting there is no editor on screen, so find and go to line address the rendered
-    // preview instead. Two closures rather than a back-reference, so `find.rs` never sees `App`.
-    app.find.wire(find::Wiring {
-        presenting: Box::new(glib::clone!(
-            #[weak]
-            app,
-            #[upgrade_or]
-            false,
-            // A PDF answers find and go-to itself, whether or not anything is being presented.
-            move || app.presenting.get().is_some() || app.active_pdf().is_some()
-        )),
-        preview: Box::new(glib::clone!(
-            #[weak]
-            app,
-            move |op| app.preview_find(op)
-        )),
-        pages: Box::new(glib::clone!(
-            #[weak]
-            app,
-            #[upgrade_or]
-            None,
-            move || app.active_pdf().map(|pdf| pdf.page_count())
-        )),
-    });
-
     // The bottom bar of an `AdwToolbarView` is a `GtkWindowHandle`, so a secondary press anywhere
     // in it asks the shell for the window menu — Restore / Minimize / Maximize / Close under a
     // footer that is one line of the document's own facts. Claim the press and do nothing with it.
@@ -5712,9 +5773,9 @@ fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, _| match key == gdk::Key::Escape && app.find.is_open() {
+        move |_, key, _, _| match key == gdk::Key::Escape && app.pane().find.is_open() {
             true => {
-                app.find.close();
+                app.pane().find.close();
                 glib::Propagation::Stop
             }
             false => glib::Propagation::Proceed,
