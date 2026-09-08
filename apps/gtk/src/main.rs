@@ -289,6 +289,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
+        shell_keys: Cell::new(false),
     });
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
     // leaves exactly that behind. Said once per process; there is no migration.
@@ -298,6 +299,12 @@ fn main() -> glib::ExitCode {
         }
     }
     shell.install_app_actions(&app);
+    // The keyboard moving to another window changes no `focus-widget` — each window keeps its
+    // own — so which shell has it is asked again here, of the window that has it now.
+    app.connect_active_window_notify({
+        let shell = shell.clone();
+        move |gtk_app| shell.sync_accels(gtk_app.upcast_ref())
+    });
     app.connect_command_line({
         let shell = shell.clone();
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
@@ -320,6 +327,10 @@ struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     landing: RefCell<Option<Landing>>,
+    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
+    /// One flag, not one per window, because the table is the application's: a window keeping
+    /// its own left every other window without its chords while a shell here had the keyboard.
+    shell_keys: Cell<bool>,
 }
 
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
@@ -416,6 +427,38 @@ impl Shell {
             .iter()
             .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
             .map(|(_, app)| app.clone())
+    }
+
+    /// Push the accelerators in force into the application. Done wholesale: forty
+    /// `set_accels_for_action` calls are cheaper than working out which of them a config change
+    /// touched.
+    ///
+    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
+    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
+    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
+    /// the same rule as the default it replaced. The shell asked about is the active window's,
+    /// whichever window is rebuilding: the table is one for all of them.
+    fn apply_accels(&self, gtk_app: &gtk::Application) {
+        let config = self.config.borrow();
+        let shell = terminal::has_focus(gtk_app);
+        self.shell_keys.set(shell);
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels
+                .iter()
+                .map(String::as_str)
+                .filter(|accel| !shell || reserved(action, accel))
+                .collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+    }
+
+    /// The keyboard moved: rebuild the table if it crossed into or out of a shell. Only a change
+    /// is worth acting on — focus moves on every click, and the rebuild is sixty calls.
+    fn sync_accels(&self, gtk_app: &gtk::Application) {
+        if terminal::has_focus(gtk_app) != self.shell_keys.get() {
+            self.apply_accels(gtk_app);
+        }
     }
 
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
@@ -1038,10 +1081,6 @@ struct App {
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
     /// rebind has to rebuild it: see [`fill_captured`].
     captured: gtk::ShortcutController,
-    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
-    /// Only a change is worth acting on: focus moves on every click, and the rebuild is sixty
-    /// `set_accels_for_action` calls.
-    shell_keys: Cell<bool>,
 }
 
 impl App {
@@ -4473,29 +4512,15 @@ impl App {
         );
     }
 
-    /// Push the accelerators in force into the application and rebuild the four captured chords.
-    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
-    /// them a config change touched.
-    ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced.
+    /// Push the accelerators in force into the application and rebuild this window's captured
+    /// chords. The table is the application's and lives with the [`Shell`]; the captured
+    /// controller is the window's own.
     fn apply_accels(&self) {
-        let Some(gtk_app) = self.window.application() else {
+        let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) else {
             return;
         };
+        shell.apply_accels(&gtk_app);
         let config = self.config.borrow();
-        let shell = terminal::has_focus(&self.window);
-        for (action, _, _) in ACTIONS {
-            let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels
-                .iter()
-                .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
-                .collect();
-            gtk_app.set_accels_for_action(action, &accels);
-        }
         let captured: Vec<(&str, String)> = CAPTURED
             .iter()
             .flat_map(|action| {
@@ -5173,7 +5198,6 @@ fn build_window(
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
-        shell_keys: Cell::new(false),
     });
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
@@ -6289,7 +6313,7 @@ const CAPTURED: &[&str] = &[
 ///
 /// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
 /// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
-/// unbinding it in `App::apply_accels` is what lets the key through. The reserved set is small
+/// unbinding it in `Shell::apply_accels` is what lets the key through. The reserved set is small
 /// and each entry earns its place:
 ///
 /// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
@@ -6386,15 +6410,15 @@ fn install_actions(app: &Rc<App>) {
     app.apply_accels();
 
     // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
-    // crosses into or out of a terminal. `focus-widget` is the one signal that hears every way
-    // that happens: a click, a tab switch, a dialog, `Ctrl+J` itself.
+    // crosses into or out of a terminal. `focus-widget` hears every way that happens inside a
+    // window: a click, a tab switch, a dialog, `Ctrl+J` itself. Between windows it is the
+    // application's `active-window`, hooked in `main`.
     app.window.connect_focus_widget_notify(glib::clone!(
         #[weak]
         app,
         move |window| {
-            let shell = terminal::has_focus(window);
-            if shell != app.shell_keys.replace(shell) {
-                app.apply_accels();
+            if let Some((shell, gtk_app)) = app.shell.upgrade().zip(window.application()) {
+                shell.sync_accels(&gtk_app);
             }
         }
     ));
@@ -6548,6 +6572,8 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
 /// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
+/// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
+/// prints what `Ctrl+S` activates.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6558,6 +6584,7 @@ fn install_bench_hooks(app: &Rc<App>) {
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
+    let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -6567,6 +6594,7 @@ fn install_bench_hooks(app: &Rc<App>) {
         && !chrome
         && !templates
         && !paths
+        && !shell_keys
     {
         return;
     }
@@ -6575,6 +6603,9 @@ fn install_bench_hooks(app: &Rc<App>) {
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
         if let Some(rels) = panes {
             return bench_panes(&app, &rels);
+        }
+        if shell_keys {
+            return bench_shell_keys(&app);
         }
         if paths {
             return bench_paths(&app);
@@ -7063,6 +7094,42 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
     tab.buffer
         .iter_at_line(line)
         .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// A shell focused in a window that does not have the keyboard must not narrow the application's
+/// accelerator table, and one in the window that does must. Under Xvfb no window is ever
+/// activated, so the active one is the last added: a second window is opened first and the shell
+/// then opens in this one, which is the state after switching windows away from a shell. Closing
+/// the second window hands the keyboard back through the same `active-window` notify a real
+/// switch goes through. Prints what `Ctrl+S` activates: `["win.save"]`, then `[]`.
+fn bench_shell_keys(app: &Rc<App>) {
+    let Some(gtk_app) = app.window.application().and_downcast::<adw::Application>() else {
+        return bench_quit(app);
+    };
+    let Some(other) = app
+        .shell
+        .upgrade()
+        .and_then(|shell| shell.loose_window(&gtk_app))
+    else {
+        return bench_quit(app);
+    };
+    app.open_terminal();
+    let print = move |when: &str| {
+        println!(
+            "bench shell_keys {when} {:?}",
+            gtk_app.actions_for_accel("<Control>s")
+        );
+    };
+    // The shell takes focus from an idle.
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        print("shell-elsewhere");
+        other.window.close();
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            print("shell-here");
+            bench_quit(&app);
+        });
+    });
 }
 
 /// Closing the window is not enough to end the process while a dialog is up: quit the
