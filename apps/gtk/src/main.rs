@@ -6471,16 +6471,26 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
-/// prints widths and the text its keys apply.
+/// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
+/// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
+    let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome && !templates && !paths {
+    if expand.is_none()
+        && switcher.is_none()
+        && style.is_none()
+        && !git
+        && !keys
+        && !chrome
+        && !templates
+        && !paths
+    {
         return;
     }
     let app = app.clone();
@@ -6500,6 +6510,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if git {
             return bench_git(&app);
+        }
+        if let Some(rel) = style {
+            return bench_style(&app, &rel);
         }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);
@@ -6832,6 +6845,87 @@ fn bench_chrome(app: &Rc<App>) {
         }
     }
     bench_quit(app);
+}
+
+/// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
+/// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
+/// loop turns again*. `changed` is emitted from inside the insert, so a `true` here can only have
+/// come from the synchronous path — which is the whole question this bench answers.
+fn bench_style(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        for chars in [2 * 1024, 32 * 1024] {
+            bench_style_typing(&tab, chars);
+        }
+        bench_style_fenced(&tab);
+        // A heading typed far from the caret is what the fast path deliberately leaves out: it
+        // belongs to the debounced pass, and this says the pass still lands and still fixes it.
+        tab.buffer.insert(&mut tab.buffer.start_iter(), "# Far\n");
+        println!("bench style_far_sync {}", bench_heading_at(&tab, 0));
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            println!("bench style_debounced {}", bench_heading_at(&tab, 0));
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
+/// time the way a keyboard delivers it.
+fn bench_style_typing(tab: &Rc<Tab>, chars: usize) {
+    // Exactly 32 bytes, so the body is exactly the size the numbers are labelled with.
+    let body = "filler text for a long-ish note\n";
+    tab.set_text(&body.repeat(chars / body.len()));
+    tab.buffer.place_cursor(&tab.buffer.end_iter());
+    for ch in "\n# Headin".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let t0 = Instant::now();
+    tab.buffer.insert_at_cursor("g");
+    let us = t0.elapsed().as_micros();
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_sync chars={chars} {}",
+        bench_heading_at(tab, line)
+    );
+    println!("bench style_us {us}");
+}
+
+/// Type the same heading *inside a fenced block* on a note too long for a full pass. The line is
+/// tagged from a parse of the whole document, so the fence above it is what decides what it is:
+/// this is the claim a per-line pass stands or falls on, printed rather than argued.
+fn bench_style_fenced(tab: &Rc<Tab>) {
+    let body = "filler text for a long-ish note\n".repeat(1024);
+    tab.set_text(&format!("{body}```\n\n```\n"));
+    let Some(inside) = tab.buffer.iter_at_line(1025) else {
+        return;
+    };
+    tab.buffer.place_cursor(&inside);
+    for ch in "# Heading".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_fenced h1={} codeblock={}",
+        bench_tag_at(tab, line, "h1"),
+        bench_tag_at(tab, line, "codeblock")
+    );
+}
+
+fn bench_heading_at(tab: &Rc<Tab>, line: i32) -> bool {
+    bench_tag_at(tab, line, "h1")
+}
+
+fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
+    let Some(tag) = tab.buffer.tag_table().lookup(name) else {
+        return false;
+    };
+    tab.buffer
+        .iter_at_line(line)
+        .is_some_and(|iter| iter.has_tag(&tag))
 }
 
 /// Closing the window is not enough to end the process while a dialog is up: quit the

@@ -2,9 +2,10 @@
 
 use crate::typing;
 use accent_core::csv;
-use accent_core::markdown::{self, Style};
+use accent_core::markdown::{self, Span, Style};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
+use std::ops::Range;
 
 /// Byte offset -> char offset. `markdown::analyze` reports byte ranges, `TextBuffer` iters count
 /// characters, so every span boundary needs translating.
@@ -221,14 +222,7 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
     let analysis = markdown::analyze(&text);
     let offsets = Offsets::new(&text);
     for span in &analysis.spans {
-        let s = buffer.iter_at_offset(offsets.char_of(span.range.start));
-        let e = buffer.iter_at_offset(offsets.char_of(span.range.end));
-        buffer.apply_tag_by_name(tag_name(span.style), &s, &e);
-        if let Style::Heading(level) = span.style
-            && is_atx(&text, span.range.start)
-        {
-            buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
-        }
+        tag_span(buffer, &offsets, &text, span);
     }
     // Line by line rather than from the spans: a plain indented line carries no span of its own,
     // and a list marker's span stops short of the space behind it that the text starts after.
@@ -245,6 +239,82 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
         buffer.apply_tag_by_name(WRAP_TAGS[column - 1], &s, &e);
     }
     analysis
+}
+
+/// Tag one span, with the hanging indent that pulls an ATX heading's `#` markers out into the
+/// gutter where the span is one. Shared with [`apply_line`], which hands it spans clipped to a
+/// single line: clipping can only move a start past the `#` markers, and a line that has not got
+/// them has nothing to hang.
+fn tag_span(buffer: &sourceview5::Buffer, offsets: &Offsets, text: &str, span: &Span) {
+    let s = buffer.iter_at_offset(offsets.char_of(span.range.start));
+    let e = buffer.iter_at_offset(offsets.char_of(span.range.end));
+    buffer.apply_tag_by_name(tag_name(span.style), &s, &e);
+    if let Style::Heading(level) = span.style
+        && is_atx(text, span.range.start)
+    {
+        buffer.apply_tag_by_name(&format!("hang{}", level.clamp(1, 6)), &s, &e);
+    }
+}
+
+/// The bytes of `line` in `text`, its newline excluded, or `None` past the last line.
+fn line_bytes(text: &str, line: usize) -> Option<Range<usize>> {
+    let mut start = 0;
+    let mut lines = 0;
+    for piece in text.split_inclusive('\n') {
+        if lines == line {
+            return Some(start..start + piece.strip_suffix('\n').unwrap_or(piece).len());
+        }
+        start += piece.len();
+        lines += 1;
+    }
+    // The two lines `split_inclusive` does not yield and a `GtkTextBuffer` still counts: the empty
+    // one after a trailing newline, and the single line of an empty buffer.
+    (line == lines && (text.is_empty() || text.ends_with('\n'))).then_some(start..start)
+}
+
+/// Every span that overlaps `range`, clipped to it, in the order [`apply`] would tag them. A span
+/// that *encloses* the range survives across its full width, which is how a line inside a fence or
+/// frontmatter keeps the block's styling.
+fn clipped(spans: &[Span], range: &Range<usize>) -> Vec<Span> {
+    spans
+        .iter()
+        .filter(|s| s.range.start < range.end && s.range.end > range.start)
+        .map(|s| Span {
+            range: s.range.start.max(range.start)..s.range.end.min(range.end),
+            style: s.style,
+        })
+        .collect()
+}
+
+/// Re-tag one line from a fresh analysis of the whole document, for the long notes that cannot
+/// afford [`apply`] on the keystroke. The parse is the cheap half of a pass and the tag churn the
+/// expensive one, so the line under the caret is styled as it is typed and the rest waits for the
+/// debounced full pass. Parsing everything is also what makes it correct: a line inside a fence or
+/// frontmatter is covered by the span the parse emits for the block, so nothing is read out of
+/// context.
+pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
+    let (start, end) = buffer.bounds();
+    let text = buffer.text(&start, &end, true);
+    let Some(bytes) = usize::try_from(line)
+        .ok()
+        .and_then(|n| line_bytes(&text, n))
+    else {
+        return;
+    };
+    let analysis = markdown::analyze(&text);
+    let offsets = Offsets::new(&text);
+    let s = buffer.iter_at_offset(offsets.char_of(bytes.start));
+    let e = buffer.iter_at_offset(offsets.char_of(bytes.end));
+    for name in TAG_NAMES.iter().chain(WRAP_TAGS.iter()) {
+        buffer.remove_tag_by_name(name, &s, &e);
+    }
+    for span in clipped(&analysis.spans, &bytes) {
+        tag_span(buffer, &offsets, &text, &span);
+    }
+    let column = typing::wrap_column(&text[bytes]).min(WRAP_COLUMNS);
+    if column > 0 {
+        buffer.apply_tag_by_name(WRAP_TAGS[column - 1], &s, &e);
+    }
 }
 
 /// Whether the heading starting at byte `start` writes its own `#` markers *and* has closed them
@@ -481,6 +551,59 @@ mod tests {
             let (s, e) = (o.char_of(span.range.start), o.char_of(span.range.end));
             assert!(s <= e && e <= chars, "{span:?} -> {s}..{e} of {chars}");
         }
+    }
+
+    /// A line's bytes without its newline, including the two lines `split_inclusive` cannot see:
+    /// the empty one a `GtkTextBuffer` reports after a trailing newline, and the one line an
+    /// empty buffer has.
+    #[test]
+    fn a_line_is_its_own_bytes_without_the_newline() {
+        assert_eq!(line_bytes("a\nb\n", 0), Some(0..1));
+        assert_eq!(line_bytes("a\nb\n", 1), Some(2..3));
+        assert_eq!(
+            line_bytes("a\nb\n", 2),
+            Some(4..4),
+            "the empty line after the last newline"
+        );
+        assert_eq!(line_bytes("a\nb\n", 3), None);
+        assert_eq!(line_bytes("a\nb", 1), Some(2..3), "no trailing newline");
+        assert_eq!(line_bytes("a\nb", 2), None);
+        assert_eq!(
+            line_bytes("a\n\nb", 1),
+            Some(2..2),
+            "an empty line in the middle"
+        );
+        assert_eq!(
+            line_bytes("", 0),
+            Some(0..0),
+            "an empty buffer still has line 0"
+        );
+        assert_eq!(line_bytes("", 1), None);
+    }
+
+    /// What [`apply_line`] tags: everything the line touches, clipped to it. The enclosing case is
+    /// the one that matters — a line inside a fence keeps the block's span across its full width,
+    /// which is how a whole-document parse gives a per-line pass its context.
+    #[test]
+    fn clipping_keeps_every_span_the_line_touches() {
+        let span = |range: Range<usize>| Span {
+            range,
+            style: Style::CodeBlock,
+        };
+        let spans = [
+            span(12..15),
+            span(5..12),
+            span(18..25),
+            span(0..100),
+            span(25..30),
+            span(5..10),
+            span(20..25),
+        ];
+        let got: Vec<Range<usize>> = clipped(&spans, &(10..20))
+            .into_iter()
+            .map(|s| s.range)
+            .collect();
+        assert_eq!(got, vec![12..15, 10..12, 18..20, 10..20]);
     }
 
     /// The six column hues: distinct, a sixth of the wheel apart, wrapping once past 1.0, with the

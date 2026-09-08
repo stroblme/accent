@@ -24,12 +24,13 @@ use std::time::Duration;
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
 const DEBOUNCE: Duration = Duration::from_millis(150);
-/// Notes at or below this many characters are re-styled on the keystroke instead, so markup is
-/// styled as it is typed the way Apostrophe does it, rather than snapping into place once the
-/// typist pauses. Measured cost of a full pass, tag churn included, which dominates the parsing:
-/// 0.7 ms at 2 KB, 2.5 ms at 8 KB, 10 ms at 32 KB, 21 ms at 64 KB. This size stays inside a frame
-/// and still covers the notes people actually write (median 3.5 KB in the test vault). A longer
-/// note keeps the debounce, because a pass that outlasts a frame is felt as input lag.
+/// Notes at or below this many characters get a *full* re-style on the keystroke. Measured cost
+/// of a full pass, tag churn included, which dominates the parsing: 0.7 ms at 2 KB, 2.5 ms at
+/// 8 KB, 10 ms at 32 KB, 21 ms at 64 KB. This size stays inside a frame and still covers the notes
+/// people actually write (median 3.5 KB in the test vault). A longer note keeps the debounce for
+/// the full pass, because a pass that outlasts a frame is felt as input lag — but it is not left
+/// unstyled while typing: [`highlight::apply_line`] re-tags the caret's line on every keystroke,
+/// so markup appears as it is typed the way Apostrophe does it either side of the threshold.
 const INSTANT: i32 = 16 * 1024;
 /// DESIGN.md, Motion: save 1 s after the last edit.
 const AUTOSAVE: Duration = Duration::from_secs(1);
@@ -1912,6 +1913,12 @@ impl Tab {
         if self.buffer.char_count() <= INSTANT {
             self.reanalyse();
         } else {
+            // Too long for a full pass inside a frame, so the line under the caret is styled now
+            // and everything else waits: what a typist watches change is the line they are typing.
+            if self.flavour.is_note() {
+                let line = self.buffer.iter_at_mark(&self.buffer.get_insert()).line();
+                highlight::apply_line(&self.buffer, line);
+            }
             let id = glib::timeout_add_local_once(
                 DEBOUNCE,
                 glib::clone!(
