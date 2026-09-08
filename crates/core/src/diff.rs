@@ -66,6 +66,115 @@ pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
         .collect()
 }
 
+/// One row of a side-by-side view: indices into the `DiffLine` list, `None` where a side has no
+/// line and shows a filler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+}
+
+/// Turn the flat diff into rows: an `Equal` line sits on both sides, a run of `Delete`s is paired
+/// row by row with the `Insert` run beside it, and whichever run is shorter gets `None` fillers so
+/// the two columns stay in step.
+///
+/// This is the whole correctness surface of a side-by-side widget, so it lives here as a plain
+/// function over plain data rather than inside a toolkit.
+pub fn align(lines: &[DiffLine]) -> Vec<Row> {
+    let mut rows = Vec::new();
+    let (mut dels, mut ins) = (Vec::new(), Vec::new());
+    for (i, line) in lines.iter().enumerate() {
+        match line.op {
+            Op::Equal => {
+                flush(&mut dels, &mut ins, &mut rows);
+                rows.push(Row {
+                    old: Some(i),
+                    new: Some(i),
+                });
+            }
+            // A delete after an insert starts a new pairing: `similar` emits deletes before
+            // inserts within a hunk, so this only guards against input that does not.
+            Op::Delete => {
+                if !ins.is_empty() {
+                    flush(&mut dels, &mut ins, &mut rows);
+                }
+                dels.push(i);
+            }
+            Op::Insert => ins.push(i),
+        }
+    }
+    flush(&mut dels, &mut ins, &mut rows);
+    rows
+}
+
+fn flush(dels: &mut Vec<usize>, ins: &mut Vec<usize>, rows: &mut Vec<Row>) {
+    for i in 0..dels.len().max(ins.len()) {
+        rows.push(Row {
+            old: dels.get(i).copied(),
+            new: ins.get(i).copied(),
+        });
+    }
+    dels.clear();
+    ins.clear();
+}
+
+/// Whether a row shows the same unchanged line on both sides.
+fn is_equal(lines: &[DiffLine], row: &Row) -> bool {
+    match (row.old, row.new) {
+        (Some(old), Some(new)) => old == new && lines.get(old).is_some_and(|l| l.op == Op::Equal),
+        _ => false,
+    }
+}
+
+/// The maximal runs of rows that are not unchanged on both sides, as ranges into `rows`.
+pub fn hunks(lines: &[DiffLine], rows: &[Row]) -> Vec<Range<usize>> {
+    let mut out: Vec<Range<usize>> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        if is_equal(lines, row) {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.end == i => last.end = i + 1,
+            _ => out.push(i..i + 1),
+        }
+    }
+    out
+}
+
+/// The rows a changes-only view hides, as ranges into `rows`: non-empty, sorted and
+/// non-overlapping.
+///
+/// A run of unchanged rows between two hunks keeps `context` rows at each end, so it is hidden
+/// only where it is longer than both margins together. The runs at the start and end of the file
+/// have a hunk on one side only and keep one margin. A file with no hunks at all has nothing to
+/// show, so all of it is one gap.
+pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize>> {
+    let hunks = hunks(lines, rows);
+    let (Some(first), Some(last)) = (hunks.first(), hunks.last()) else {
+        // Nothing changed, so a changes-only view shows nothing and hides all of it.
+        let whole = 0..rows.len();
+        return if rows.is_empty() {
+            Vec::new()
+        } else {
+            vec![whole]
+        };
+    };
+    let mut out = Vec::new();
+    if first.start > context {
+        out.push(0..first.start - context);
+    }
+    for pair in hunks.windows(2) {
+        let (start, end) = (pair[0].end, pair[1].start);
+        if end - start > 2 * context {
+            out.push(start + context..end - context);
+        }
+    }
+    if rows.len() - last.end > context {
+        out.push(last.end + context..rows.len());
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +220,136 @@ mod tests {
             ]
         );
         assert!(lines("same\n", "same\n")[0].emphasis.is_empty());
+    }
+
+    fn texts<'a>(
+        d: &'a [DiffLine],
+        rows: &[Row],
+        side: fn(&Row) -> Option<usize>,
+    ) -> Vec<Option<&'a str>> {
+        rows.iter()
+            .map(|r| side(r).map(|i| d[i].text.as_str()))
+            .collect()
+    }
+
+    /// A one-gap expectation, spelled without a `[a..b]` literal so clippy does not read it as a
+    /// range that was meant to be collected.
+    fn one(range: Range<usize>) -> Vec<Range<usize>> {
+        vec![range]
+    }
+
+    fn old(r: &Row) -> Option<usize> {
+        r.old
+    }
+
+    fn new(r: &Row) -> Option<usize> {
+        r.new
+    }
+
+    #[test]
+    fn alignment_pairs_equal_lines_and_pads_changes() {
+        let d = lines("alpha\nbravo\ncharlie\n", "alpha\nbravo two\ncharlie\n");
+        let rows = align(&d);
+        assert_eq!(rows.len(), 3, "one row per line, the change paired up");
+        assert_eq!(
+            texts(&d, &rows, old),
+            vec![Some("alpha"), Some("bravo"), Some("charlie")]
+        );
+        assert_eq!(
+            texts(&d, &rows, new),
+            vec![Some("alpha"), Some("bravo two"), Some("charlie")]
+        );
+    }
+
+    #[test]
+    fn alignment_handles_pure_insert_and_pure_delete() {
+        let d = lines("alpha\n", "alpha\nbravo\ncharlie\n");
+        let rows = align(&d);
+        assert_eq!(texts(&d, &rows, old), vec![Some("alpha"), None, None]);
+        assert_eq!(
+            texts(&d, &rows, new),
+            vec![Some("alpha"), Some("bravo"), Some("charlie")]
+        );
+
+        let d = lines("alpha\nbravo\ncharlie\n", "alpha\n");
+        let rows = align(&d);
+        assert_eq!(
+            texts(&d, &rows, old),
+            vec![Some("alpha"), Some("bravo"), Some("charlie")]
+        );
+        assert_eq!(texts(&d, &rows, new), vec![Some("alpha"), None, None]);
+    }
+
+    #[test]
+    fn alignment_keeps_source_line_numbers() {
+        let d = lines("alpha\nbravo\ncharlie\n", "alpha\nx\ny\nbravo\ncharlie\n");
+        let rows = align(&d);
+        let numbers = |side: fn(&Row) -> Option<usize>, pick: fn(&DiffLine) -> Option<usize>| {
+            rows.iter()
+                .map(|r| side(r).and_then(|i| pick(&d[i])))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            numbers(old, |l| l.old_line),
+            vec![Some(1), None, None, Some(2), Some(3)],
+            "filler rows carry no number and the rest keep their old-text line"
+        );
+        assert_eq!(
+            numbers(new, |l| l.new_line),
+            vec![Some(1), Some(2), Some(3), Some(4), Some(5)]
+        );
+    }
+
+    #[test]
+    fn hunks_are_the_runs_of_rows_that_changed() {
+        let d = lines("a\nb\nc\nd\n", "a\nB\nc\nD\nE\n");
+        let rows = align(&d);
+        assert_eq!(rows.len(), 5);
+        assert_eq!(hunks(&d, &rows), vec![1..2, 3..5]);
+    }
+
+    /// Ten unchanged lines with one of them rewritten: four rows lead up to the change and five
+    /// follow it, so three rows of context leaves one row hidden above and two below.
+    #[test]
+    fn a_lone_change_hides_the_run_that_outgrows_its_context() {
+        let old_text: String = (1..=10).map(|i| format!("l{i}\n")).collect();
+        let new_text: String = (1..=10)
+            .map(|i| {
+                if i == 5 {
+                    "L5\n".to_string()
+                } else {
+                    format!("l{i}\n")
+                }
+            })
+            .collect();
+        let d = lines(&old_text, &new_text);
+        let rows = align(&d);
+        assert_eq!(hunks(&d, &rows), vec![4..5]);
+        assert_eq!(gaps(&d, &rows, 3), vec![0..1, 8..10]);
+    }
+
+    #[test]
+    fn a_long_run_between_two_changes_keeps_a_margin_at_each_end() {
+        let middle: String = (1..=20).map(|i| format!("e{i}\n")).collect();
+        let d = lines(
+            &format!("first\n{middle}last\n"),
+            &format!("FIRST\n{middle}LAST\n"),
+        );
+        let rows = align(&d);
+        assert_eq!(hunks(&d, &rows), vec![0..1, 21..22]);
+        assert_eq!(gaps(&d, &rows, 3), one(4..18), "20 rows less two margins");
+    }
+
+    #[test]
+    fn identical_texts_are_one_gap_and_no_context_hides_every_equal_row() {
+        let same = "a\nb\nc\n";
+        let d = lines(same, same);
+        let rows = align(&d);
+        assert!(hunks(&d, &rows).is_empty());
+        assert_eq!(gaps(&d, &rows, 3), one(0..3));
+
+        let d = lines("a\nb\nc\nd\n", "a\nB\nc\nD\nE\n");
+        let rows = align(&d);
+        assert_eq!(gaps(&d, &rows, 0), vec![0..1, 2..3]);
     }
 }

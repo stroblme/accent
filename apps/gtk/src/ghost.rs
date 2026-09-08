@@ -1,4 +1,5 @@
-//! Ghost text: the rest of the line, suggested where the caret is and accepted with Tab.
+//! Ghost text: the rest of the line, suggested where the caret is, accepted with Tab or one
+//! word at a time with Ctrl+Right.
 //!
 //! The suggestion comes from the vault's own notes, through the language layer's
 //! `inline_completion` (merl answers it; see `crates/api/src/language.rs`). It is never in the
@@ -15,10 +16,14 @@
 //!   painted mid-line would sit on top of the text after the caret, and moving that text out of
 //!   the way is a widget of its own.
 //!
-//! ponytail: end of line only, one line at a time, and the whole suggestion or none of it. Word
-//! by word (Ctrl+Right in VS Code) and a mid-line ghost are the two obvious extensions.
+//! Typing what is painted does not chase it away: `connect_insert_text` sees the characters
+//! before they land, and what is left of the suggestion is painted again the moment the caret
+//! reaches them. Ctrl+Right does the same thing on purpose, writing one word of the suggestion
+//! and leaving the rest standing.
+//!
+//! ponytail: end of line only, one line at a time. A mid-line ghost is the obvious extension.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -35,6 +40,9 @@ pub struct State {
     pub on: Cell<bool>,
     /// The completion popup is up, so the ghost path stands aside.
     popup: Cell<bool>,
+    /// A suggestion being typed through: what is left of it, and the caret offset it belongs
+    /// at once the insert that was announced has landed.
+    typed: RefCell<Option<(String, i32)>>,
 }
 
 impl State {
@@ -60,20 +68,44 @@ pub fn install(tab: &Rc<Tab>) {
     completion.connect_hide(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| tab.lang.ghost.popup.set(false)
+        move |_| {
+            tab.lang.ghost.popup.set(false);
+            // The popup was in the way of every answer while it was up, and nothing has been
+            // edited since, so there is no refresh coming: ask again here.
+            glib::spawn_future_local(async move { request(&tab).await });
+        }
     ));
 
-    // Any edit and any move of the caret makes the suggestion about the wrong place. The next
-    // one arrives with the post-edit refresh, 300 ms after the typing stops.
+    // Before the insert lands, so the suggestion is still up and the location iter still says
+    // where the characters go: what is typed on top of a suggestion only shortens it.
+    tab.buffer.connect_insert_text(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, at, text| {
+            let showing = tab
+                .ghost_view()
+                .and_then(|v| v.ghost())
+                .filter(|_| !tab.lang.ghost.popup.get())
+                .filter(|_| at.offset() == caret_of(&tab).offset());
+            *tab.lang.ghost.typed.borrow_mut() = showing.and_then(|ghost| {
+                let rest = remainder(&ghost, text)?.to_string();
+                Some((rest, at.offset() + text.chars().count() as i32))
+            });
+        }
+    ));
+
+    // Any edit and any move of the caret makes the suggestion about the wrong place, unless the
+    // move is the one the typing above just announced. The next suggestion arrives with the
+    // post-edit refresh, 100 ms after the typing stops.
     tab.buffer.connect_changed(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| clear(&tab)
+        move |_| settle(&tab)
     ));
     tab.buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| clear(&tab)
+        move |_| settle(&tab)
     ));
 
     // Capture, so Tab is taken before the view turns it into an indent. Everything else is left
@@ -95,10 +127,21 @@ fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propa
     let Some(text) = showing.filter(|_| !tab.lang.ghost.popup.get()) else {
         return glib::Propagation::Proceed;
     };
-    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
-        return glib::Propagation::Proceed;
-    }
     match key {
+        // Ctrl+Right writes one word of the suggestion; the rest stays painted, because the
+        // insert goes through the buffer like a keystroke. Shift means a selection and Alt
+        // belongs to the compositor, so both are left alone.
+        gdk::Key::Right | gdk::Key::KP_Right
+            if state.contains(gdk::ModifierType::CONTROL_MASK)
+                && !state
+                    .intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK) =>
+        {
+            accept(tab, word_of(&text));
+            glib::Propagation::Stop
+        }
+        _ if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) => {
+            glib::Propagation::Proceed
+        }
         gdk::Key::Tab | gdk::Key::KP_Tab => {
             accept(tab, &text);
             glib::Propagation::Stop
@@ -111,19 +154,55 @@ fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propa
     }
 }
 
-/// Write the suggestion where it was painted, as one undo step.
+/// Write `text` where the suggestion was painted, as one undo step. Whatever is left of the
+/// suggestion is kept by the same path a keystroke takes: the insert is one.
 fn accept(tab: &Rc<Tab>, text: &str) {
-    clear(tab);
     tab.buffer.begin_user_action();
     tab.buffer.insert_at_cursor(text);
     tab.buffer.end_user_action();
 }
 
+/// The first word of a suggestion, through the whitespace after it: what Ctrl+Right writes, so
+/// that the next press starts on a word rather than on the space before it.
+fn word_of(text: &str) -> &str {
+    let after = text
+        .trim_start()
+        .trim_start_matches(|c: char| !c.is_whitespace());
+    &text[..text.len() - after.trim_start().len()]
+}
+
+/// What is left of `ghost` once `typed` has been written at its head, or `None` when the two
+/// have parted company. `Some("")` means the suggestion has been typed out in full.
+fn remainder<'a>(ghost: &'a str, typed: &str) -> Option<&'a str> {
+    ghost.strip_prefix(typed)
+}
+
+/// The buffer changed or the caret moved. A suggestion survives exactly one thing: the caret
+/// arriving where the characters typed into it said it would.
+fn settle(tab: &Tab) {
+    let typed = tab.lang.ghost.typed.borrow().clone();
+    match typed {
+        Some((rest, at)) if at == caret_of(tab).offset() => {
+            if let Some(view) = tab.ghost_view() {
+                view.set_ghost((!rest.is_empty()).then_some(rest));
+            }
+        }
+        _ => clear(tab),
+    }
+}
+
 /// Take the suggestion off the screen. Cheap enough to call from every signal that could
 /// invalidate one.
 pub fn clear(tab: &Tab) {
+    set(tab, None);
+}
+
+/// Paint a suggestion, or none, and forget the one being typed through: this is the suggestion
+/// now, and what was left of the old one is about the text before this answer.
+fn set(tab: &Tab, text: Option<String>) {
+    *tab.lang.ghost.typed.borrow_mut() = None;
     if let Some(view) = tab.ghost_view() {
-        view.set_ghost(None);
+        view.set_ghost(text);
     }
 }
 
@@ -152,11 +231,8 @@ pub async fn request(tab: &Rc<Tab>) {
         Ok(Some(text)) => {
             tracing::debug!("ghost for {rel} at {pos:?}: {text:?}");
             // The answer took a round trip; the caret may have moved on since.
-            if tab.lang.ghost.armed(tab)
-                && lang::pos_of(&caret_of(tab)) == pos
-                && let Some(view) = tab.ghost_view()
-            {
-                view.set_ghost(Some(text));
+            if tab.lang.ghost.armed(tab) && lang::pos_of(&caret_of(tab)) == pos {
+                set(tab, Some(text));
             }
         }
         Ok(None) => clear(tab),
@@ -166,4 +242,25 @@ pub async fn request(tab: &Rc<Tab>) {
 
 fn caret_of(tab: &Tab) -> gtk::TextIter {
     tab.buffer.iter_at_mark(&tab.buffer.get_insert())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Typing what is painted leaves the rest of it; anything else ends the suggestion.
+    #[test]
+    fn typing_through_a_suggestion_leaves_what_is_left_of_it() {
+        assert_eq!(remainder("hello", "h"), Some("ello"));
+        assert_eq!(remainder("hello", "hello"), Some(""));
+        assert_eq!(remainder("hello", "j"), None);
+    }
+
+    /// One word and the space after it, wherever the suggestion starts.
+    #[test]
+    fn a_word_is_taken_with_the_space_behind_it() {
+        assert_eq!(word_of("hello world"), "hello ");
+        assert_eq!(word_of(" the rest"), " the ");
+        assert_eq!(word_of("hello"), "hello");
+    }
 }

@@ -33,9 +33,6 @@ theme = "solarized"
 exclude = ["Archive", "Code/vendor"]
 
 [vaults."/home/me/Notes"]
-daily_dir = "Daily"
-daily_pattern = "%Y-%m-%d"
-daily_template = "Templates/Daily.md"
 templates_dir = "Templates"
 new_file_dir = "Inbox"
 
@@ -137,10 +134,6 @@ impl Default for Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VaultConfig {
-    pub daily_dir: String,
-    pub daily_pattern: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub daily_template: Option<String>,
     pub templates_dir: String,
     /// Empty means the vault root.
     pub new_file_dir: String,
@@ -158,9 +151,6 @@ pub struct LspConfig {
 impl Default for VaultConfig {
     fn default() -> Self {
         VaultConfig {
-            daily_dir: "Daily".to_string(),
-            daily_pattern: "%Y-%m-%d".to_string(),
-            daily_template: None,
             templates_dir: "Templates".to_string(),
             new_file_dir: String::new(),
             lsp: LspConfig::default(),
@@ -366,6 +356,38 @@ pub fn vault_hash(root: &Path) -> String {
     digest[..16].to_string()
 }
 
+/// What a vault's retired daily-note settings mean now: the `accent-target` its three `daily_*`
+/// keys spelled, and the template file they named.
+///
+/// `None` unless `config.toml` still carries one of them for `root`. Serde drops an unknown field
+/// before anything can see it, so a second parse into a table is the only place they are still
+/// visible. Nothing is written here, and nothing is ever written into the vault: the directive is
+/// the user's line to add, and the dead keys leave `config.toml` the next time [`Config::save`]
+/// writes it, the struct they were parsed into no longer having them.
+pub fn daily_keys(root: &Path) -> Option<(String, Option<String>)> {
+    let text = std::fs::read_to_string(config_path()).ok()?;
+    retired_daily(&text.parse().ok()?, &vault_key(root))
+}
+
+/// The pure half of [`daily_keys`], so the table shape is testable without a config file.
+fn retired_daily(config: &toml::Table, key: &str) -> Option<(String, Option<String>)> {
+    let vault = config.get("vaults")?.get(key)?;
+    let at = |k| vault.get(k).and_then(toml::Value::as_str);
+    let (dir, pattern, template) = (at("daily_dir"), at("daily_pattern"), at("daily_template"));
+    (dir.is_some() || pattern.is_some() || template.is_some())
+        .then(|| (daily_target(dir, pattern), template.map(str::to_string)))
+}
+
+/// The `accent-target` pattern a pair of old daily keys spelled, e.g. `Daily/{{date:%Y-%m-%d}}.md`.
+/// An absent key means what its default meant.
+pub fn daily_target(dir: Option<&str>, pattern: Option<&str>) -> String {
+    let name = format!("{{{{date:{}}}}}.md", pattern.unwrap_or("%Y-%m-%d"));
+    match dir.unwrap_or("Daily").trim_matches('/') {
+        "" => name,
+        dir => format!("{dir}/{name}"),
+    }
+}
+
 pub fn config_path() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config")
         .join("accent")
@@ -400,6 +422,40 @@ mod tests {
     }
 
     #[test]
+    fn daily_target_spells_what_the_old_keys_meant() {
+        assert_eq!(
+            daily_target(Some("Daily"), Some("%Y-%m-%d")),
+            "Daily/{{date:%Y-%m-%d}}.md"
+        );
+        // Absent keys are the defaults they used to have.
+        assert_eq!(daily_target(None, None), "Daily/{{date:%Y-%m-%d}}.md");
+        // An empty folder was the vault root, and a root-relative target carries no leading slash.
+        assert_eq!(daily_target(Some(""), Some("%d")), "{{date:%d}}.md");
+    }
+
+    #[test]
+    fn retired_daily_keys_are_only_reported_where_they_are() {
+        let with: toml::Table = r#"[vaults."/v"]
+daily_pattern = "%d"
+daily_template = "DailyNote.md"
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            retired_daily(&with, "/v"),
+            Some((
+                "Daily/{{date:%d}}.md".to_string(),
+                Some("DailyNote.md".to_string())
+            ))
+        );
+        assert_eq!(retired_daily(&with, "/other"), None);
+
+        let without: toml::Table = "[vaults.\"/v\"]\ntemplates_dir = \"T\"\n".parse().unwrap();
+        assert_eq!(retired_daily(&without, "/v"), None);
+        assert_eq!(retired_daily(&toml::Table::new(), "/v"), None);
+    }
+
+    #[test]
     fn config_roundtrip_parses_the_documented_example() {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().join("config.toml");
@@ -416,9 +472,6 @@ mod tests {
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
-        assert_eq!(v.daily_dir, "Daily");
-        assert_eq!(v.daily_pattern, "%Y-%m-%d");
-        assert_eq!(v.daily_template.as_deref(), Some("Templates/Daily.md"));
         assert_eq!(v.templates_dir, "Templates");
         assert_eq!(v.new_file_dir, "Inbox");
         // An override is a list, so an action can keep several chords, and an empty list is how

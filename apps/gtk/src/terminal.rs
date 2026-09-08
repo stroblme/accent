@@ -10,8 +10,8 @@
 //! action table, and everything else — `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R` and the
 //! rest of readline — reaches the shell. The window is where that happens, not here: GTK
 //! dispatches a window's application accelerators ahead of the VTE, so nothing a controller on
-//! this widget claims can beat them, and `main::apply_accels` unbinds the rest of the table for
-//! as long as a terminal has the focus (`main::reserved`, `has_focus`).
+//! this widget claims can beat them, and `Shell::apply_accels` in `main` unbinds the rest of the
+//! table for as long as the active window's focus is a terminal (`main::reserved`, `has_focus`).
 //!
 //! Nothing hung on the shell's widgets may hold them: the page owns the scroller, the scroller owns
 //! the view, so a strong reference captured by a signal handler, a gesture or an action group the
@@ -94,11 +94,16 @@ impl Term {
     }
 }
 
-/// Whether the keyboard is in a shell right now. `vte4::Terminal` is a leaf widget, so its own
-/// focus is the whole question, and `App::apply_accels` narrows the window's accelerators on the
-/// answer.
-pub fn has_focus(window: &adw::ApplicationWindow) -> bool {
-    gtk::prelude::GtkWindowExt::focus(window).is_some_and(|w| w.is::<vte4::Terminal>())
+/// Whether the keyboard is in a shell right now: whether the focus widget of the window that has
+/// it is a `vte4::Terminal`, a leaf widget whose own focus is the whole question. Asked of the
+/// application rather than of a window because the accelerator table `Shell::apply_accels`
+/// narrows on the answer is the application's, and the window rebuilding it is not always the
+/// one with the keyboard.
+pub fn has_focus(gtk_app: &gtk::Application) -> bool {
+    gtk_app
+        .active_window()
+        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
+        .is_some_and(|widget| widget.is::<vte4::Terminal>())
 }
 
 /// Open a shell in `cwd` as a tab of `tabs`.

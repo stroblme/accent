@@ -47,10 +47,11 @@ use accent_core::markdown::LinkKind;
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 use panes::{Pane, Place, Side, Spot, Zone};
 use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -134,6 +135,18 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
+    // Move the tab into the pane that way, splitting one off only when there is none. Left and
+    // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
+    // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
+    // `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
+    ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
+    (
+        "win.move-tab-right",
+        "Move Tab Right",
+        &["<Shift><Alt>Right"],
+    ),
+    ("win.move-tab-up", "Move Tab Up", &[]),
+    ("win.move-tab-down", "Move Tab Down", &[]),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
@@ -233,7 +246,11 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.fold-all", "Fold All", &[]),
     ("win.unfold-all", "Unfold All", &[]),
     ("win.rename", "Rename", &["F2"]),
-    ("win.daily-note", "Daily Note", &["<Control><Shift>d"]),
+    (
+        "win.new-from-template",
+        "New from Template…",
+        &["<Control><Shift>d"],
+    ),
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
@@ -273,6 +290,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
+        shell_keys: Cell::new(false),
     });
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
     // leaves exactly that behind. Said once per process; there is no migration.
@@ -282,6 +300,12 @@ fn main() -> glib::ExitCode {
         }
     }
     shell.install_app_actions(&app);
+    // The keyboard moving to another window changes no `focus-widget` — each window keeps its
+    // own — so which shell has it is asked again here, of the window that has it now.
+    app.connect_active_window_notify({
+        let shell = shell.clone();
+        move |gtk_app| shell.sync_accels(gtk_app.upcast_ref())
+    });
     app.connect_command_line({
         let shell = shell.clone();
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
@@ -304,6 +328,10 @@ struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     landing: RefCell<Option<Landing>>,
+    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
+    /// One flag, not one per window, because the table is the application's: a window keeping
+    /// its own left every other window without its chords while a shell here had the keyboard.
+    shell_keys: Cell<bool>,
 }
 
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
@@ -400,6 +428,38 @@ impl Shell {
             .iter()
             .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
             .map(|(_, app)| app.clone())
+    }
+
+    /// Push the accelerators in force into the application. Done wholesale: forty
+    /// `set_accels_for_action` calls are cheaper than working out which of them a config change
+    /// touched.
+    ///
+    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
+    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
+    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
+    /// the same rule as the default it replaced. The shell asked about is the active window's,
+    /// whichever window is rebuilding: the table is one for all of them.
+    fn apply_accels(&self, gtk_app: &gtk::Application) {
+        let config = self.config.borrow();
+        let shell = terminal::has_focus(gtk_app);
+        self.shell_keys.set(shell);
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels
+                .iter()
+                .map(String::as_str)
+                .filter(|accel| !shell || reserved(action, accel))
+                .collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+    }
+
+    /// The keyboard moved: rebuild the table if it crossed into or out of a shell. Only a change
+    /// is worth acting on — focus moves on every click, and the rebuild is sixty calls.
+    fn sync_accels(&self, gtk_app: &gtk::Application) {
+        if terminal::has_focus(gtk_app) != self.shell_keys.get() {
+            self.apply_accels(gtk_app);
+        }
     }
 
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
@@ -919,6 +979,9 @@ struct Corpus {
     tags: Rc<Vec<String>>,
 }
 
+/// Something to do with a tab once it is open: see [`App::with_tab`].
+type Waiting = Box<dyn FnOnce(&Rc<App>, &Rc<Tab>)>;
+
 struct App {
     /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
     /// no index, no watcher, no session, and every tab keyed by an absolute path.
@@ -949,6 +1012,8 @@ struct App {
     /// Every open tab, whatever it holds. A `Vec`, not a map: a rename retargets an open tab,
     /// so its key is not a stable one.
     docs: RefCell<Vec<Doc>>,
+    /// Work waiting for a tab that is still being opened, by key: see [`App::with_tab`].
+    awaiting: RefCell<HashMap<String, Waiting>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     sidebar: OnceCell<sidebar::Sidebar>,
@@ -1022,10 +1087,6 @@ struct App {
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
     /// rebind has to rebuild it: see [`fill_captured`].
     captured: gtk::ShortcutController,
-    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
-    /// Only a change is worth acting on: focus moves on every click, and the rebuild is sixty
-    /// `set_accels_for_action` calls.
-    shell_keys: Cell<bool>,
 }
 
 impl App {
@@ -1299,6 +1360,40 @@ impl App {
         self.split_page(&at, side, &page);
     }
 
+    /// Move the tab into the pane on `side`, or split one off when there is none that way. The
+    /// fallback is what makes the chord worth having in the common single-pane window, where
+    /// there is nowhere to move to yet; `win.split-*` stays the always-split.
+    fn move_tab(self: &Rc<Self>, side: Side) {
+        let Some(page) = self
+            .menu_page
+            .borrow()
+            .clone()
+            .or_else(|| self.tabs().selected_page())
+        else {
+            return;
+        };
+        let Some(from) = self.pane_of(&page) else {
+            return;
+        };
+        // Cloned out, and the borrow dropped: a transfer runs `page-detached` and `page-attached`
+        // synchronously, and both reach back into `panes`.
+        let panes: Vec<Rc<Pane>> = self.panes.borrow().clone();
+        let root = self.window.clone().upcast::<gtk::Widget>();
+        let rects: Vec<graphene::Rect> = panes.iter().map(|p| pane_rect(p, &root)).collect();
+        let Some(i) = panes
+            .iter()
+            .position(|p| Rc::ptr_eq(p, &from))
+            .and_then(|at| panes::neighbour(rects[at], &rects, side))
+        else {
+            return self.split_active(side);
+        };
+        let to = &panes[i];
+        from.tabs.transfer_page(&page, &to.tabs, to.tabs.n_pages());
+        // Selecting it is what makes the destination the active pane, retargets its find bar and
+        // saves the session, all through the `selected-page` handler the pane already has.
+        to.tabs.set_selected_page(&page);
+    }
+
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
     /// this always splits: the note may not be open at all, so there is something new to show.
     fn open_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side, rel: &str) {
@@ -1516,11 +1611,6 @@ impl App {
             Kind::Pdf => self.open_pdf(&key, &path, how),
             Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
         }
-    }
-
-    /// Open a note. Kept as its own name because most callers mean exactly this, and it says so.
-    fn open_note(self: &Rc<Self>, rel: &str) {
-        self.open_path(rel);
     }
 
     /// A preview tab has arrived: it replaces whichever tab this pane was previewing before.
@@ -2009,21 +2099,45 @@ impl App {
 
     /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
     /// [`App::open_status`].
-    /// A comparison as a tab. `key` says which comparison it is, so asking for the same one twice
-    /// reveals the tab already showing it rather than stacking a second copy; `title` is what the
-    /// tab is called, since the key is not a path and would not read as one.
-    fn open_diff(self: &Rc<Self>, key: &str, title: &str, body: &impl IsA<gtk::Widget>) {
-        if let Some(doc) = self.doc_for(key) {
-            return self.reveal_page(doc.page());
+    /// A comparison of two texts that are not files, as a tab. `key` says which comparison it is,
+    /// so asking for the same one twice brings the tab already showing it up to date rather than
+    /// stacking a second copy; `file` is the name behind it, which decides how it is coloured.
+    /// It opens as the pane's preview, like a file clicked in the tree: a list of changed files
+    /// is exactly the surface that would otherwise stack a tab per click.
+    fn open_diff(
+        self: &Rc<Self>,
+        key: &str,
+        file: &str,
+        title: &str,
+        old: (&str, &str),
+        new: (&str, &str),
+    ) -> Rc<diff::DiffTab> {
+        if let Some(Doc::Diff(tab)) = self.doc_for(key) {
+            tab.set_texts(old.1, new.1);
+            self.reveal_page(&tab.page);
+            return tab;
         }
-        let page = self.tabs().append(body);
-        page.set_title(title);
-        page.set_icon(Some(&gio::ThemedIcon::new("view-dual-symbolic")));
-        self.docs
-            .borrow_mut()
-            .push(Doc::Diff(doc::Viewer::new(key, page.clone())));
-        self.tabs().set_selected_page(&page);
+        let flavour = match doc::kind_of(file) {
+            Kind::Note => Flavour::Note,
+            _ => flavour_of(file),
+        };
+        let font = self.config.borrow().editor_font.clone();
+        let tab = diff::DiffTab::open(
+            &self.tabs(),
+            key,
+            file,
+            title,
+            flavour,
+            old,
+            new,
+            font.as_deref(),
+            self.zoom.get(),
+        );
+        self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
+        self.tabs().set_selected_page(&tab.page);
+        self.mark_opened(&tab.page, Opened::Preview);
         self.sync_active();
+        tab
     }
 
     fn adopt_viewer(
@@ -2056,7 +2170,14 @@ impl App {
     fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.mark();
         self.open_preview(rel);
-        let Some(at) = at else { return };
+        if let Some(at) = at {
+            self.select_when_open(rel, at);
+        }
+    }
+
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a followed
+    /// link, or the `{{cursor}}` a template just placed in a note it created.
+    fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
         self.on_tab(rel.to_string(), move |tab| {
             if let Some(chars) = char_range(&tab.text(), at.clone()) {
                 tab.goto_range(chars);
@@ -2319,11 +2440,33 @@ impl App {
         self.mark_loose(&tab.page, &tab.rel());
         let page = tab.page.clone();
         self.fetch_head(&tab);
-        self.docs.borrow_mut().push(Doc::Text(tab));
+        self.docs.borrow_mut().push(Doc::Text(tab.clone()));
         self.tabs().set_selected_page(&page);
         self.mark_opened(&page, how);
         self.sync_active();
         self.save_session_soon();
+        if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
+            waiting(self, &tab);
+        }
+    }
+
+    /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
+    /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
+    /// text never gets there, and its `f` is simply never run.
+    fn with_tab(
+        self: &Rc<Self>,
+        key: &str,
+        how: Opened,
+        f: impl FnOnce(&Rc<App>, &Rc<Tab>) + 'static,
+    ) {
+        if let Some(tab) = self.tab_for(key) {
+            self.reveal_page(&tab.page);
+            return f(self, &tab);
+        }
+        self.awaiting
+            .borrow_mut()
+            .insert(key.to_string(), Box::new(f));
+        self.open_as(key, how);
     }
 
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
@@ -2819,57 +2962,59 @@ impl App {
         }
     }
 
-    /// The unsaved buffer against the file underneath it, in the conflict resolver.
+    /// The unsaved buffer against the file underneath it, in the tab itself: the editor is the
+    /// Mine pane, so a merge is typed straight into the note.
     fn compare_with_disk(self: &Rc<Self>, tab: &Rc<Tab>) {
         let rel = tab.rel();
         let read = match self.vault().filter(|_| !doc::is_loose_key(&rel)) {
-            Some(vault) => vault.read(&rel).map(|(text, _)| text),
-            None => accent_core::fs::read_note(&tab.path()).map(|(text, _)| text),
+            Some(vault) => vault.read(&rel),
+            None => accent_core::fs::read_note(&tab.path()),
         };
-        let Ok(disk) = read else {
+        let Ok((disk, disk_etag)) = read else {
             return self.toast(&format!("Cannot read {rel} from disk"));
         };
-        let mine = tab.text();
-        let resolve = {
-            let (app, tab) = (self.clone(), tab.clone());
-            move |choice| match choice {
-                // Keeping mine forces the buffer over the file; keeping theirs drops the buffer,
-                // which is a loss the user has now seen spelled out line by line. A pane edited
-                // in the dialog replaces the buffer first, so what was compared is what is saved.
-                diff::Choice::KeepMine { edited } => {
-                    if let Some(text) = edited {
-                        tab.set_text(&text);
+        let keep_theirs = gtk::Button::with_label("Keep Theirs");
+        let keep_mine = gtk::Button::with_label("Keep Mine");
+        keep_mine.add_css_class("suggested-action");
+        // Keeping theirs drops the buffer, which is a loss the user has now seen spelled out
+        // line by line.
+        keep_theirs.connect_clicked(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            tab,
+            move |_| {
+                tab.leave_compare();
+                tab.discard();
+                app.refresh_tab(&tab);
+            }
+        ));
+        // Keeping mine writes the buffer over the file — gated on the version that was on screen
+        // as Theirs, so a file that moved again while the panes were open is not overwritten
+        // unseen: the banner stays up, and Compare shows the newer text.
+        keep_mine.connect_clicked(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            tab,
+            move |_| {
+                tab.leave_compare();
+                match app.write_tab(&tab, Some(disk_etag)) {
+                    Ok(()) => app.toast("Saved"),
+                    Err(SaveError::ChangedOnDisk { .. }) => {
+                        app.toast(&format!("{} changed on disk again", tab.rel()));
                     }
-                    match app.write_tab(&tab, None) {
-                        Ok(()) => app.toast("Saved"),
-                        Err(e) => app.toast(&format!("Save failed: {e}")),
-                    }
-                }
-                diff::Choice::KeepTheirs => {
-                    tab.discard();
-                    app.refresh_tab(&tab);
+                    Err(e) => app.toast(&format!("Save failed: {e}")),
                 }
             }
-        };
-        let key = format!("conflict:disk:{rel}");
-        let body = diff::conflict(
-            (&format!("{rel} (unsaved)"), &mine),
+        ));
+        tab.compare(
+            &format!("{rel} (unsaved)"),
             (&format!("{rel} (on disk)"), &disk),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                #[strong]
-                key,
-                move |choice| {
-                    resolve(choice);
-                    app.close_diff(&key);
-                }
-            ),
-        );
-        self.open_diff(
-            &key,
-            &format!("{} (Changed on Disk)", doc::file_name(&rel)),
-            &body,
+            diff::Side::Old,
+            true,
+            Some(choice_row(&keep_theirs, &keep_mine)),
+            "Changed on Disk",
         );
     }
 
@@ -3092,81 +3237,83 @@ impl App {
         }
     }
 
+    /// A sync conflict copy beside the note it was copied from, in the note's own tab: the editor
+    /// is Mine, live, so an unsaved edit is in the comparison rather than older than it.
     fn resolve_conflict(self: &Rc<Self>, original: &str, conflict: &str) {
         let Some(vault) = self.vault() else {
             return;
         };
-        let (Ok((mine, mine_etag)), Ok((theirs, theirs_etag))) =
-            (vault.read(original), vault.read(conflict))
-        else {
-            return self.toast("Cannot read the conflicting notes");
+        let Ok((theirs, theirs_etag)) = vault.read(conflict) else {
+            return self.toast("Cannot read the conflict copy");
         };
-        let resolve = {
-            let (app, original, conflict) =
-                (self.clone(), original.to_string(), conflict.to_string());
-            move |choice| {
-                // Keeping mine is only the copy going away, unless the dialog was edited: then
-                // the merged text is written first. Keeping theirs adopts the copy.
-                let rewritten = match choice {
-                    diff::Choice::KeepTheirs => {
-                        let Some(vault) = app.vault() else { return };
-                        if let Err(e) = vault.adopt_conflict(&original, &conflict) {
-                            return app.toast(&format!("Cannot resolve: {e:#}"));
-                        }
-                        true
-                    }
-                    diff::Choice::KeepMine { edited: Some(text) } => {
-                        let Some(vault) = app.vault() else { return };
-                        // Gated on the version the resolver was built from, not forced. This is
-                        // a tab and not a modal: it can sit open while the note is typed into
-                        // and autosaved, and a merge decided against an older Mine must not
-                        // undo what has been written since.
-                        if let Err(e) = vault.save(&original, &text, Some(mine_etag)) {
-                            return app.toast(&format!("Cannot resolve: {e}"));
-                        }
-                        true
-                    }
-                    diff::Choice::KeepMine { edited: None } => false,
-                };
-                // The note on disk is new text now, but a tab with unsaved edits still holds the
-                // only copy of them: it gets the banner, not a silent overwrite.
-                if rewritten && let Some(tab) = app.tab_for(&original) {
-                    app.refresh_tab(&tab);
-                }
-                if let Some(ops) = app.ops() {
-                    fileops::trash(ops, &conflict);
-                }
-                // The copy is named here because the index has not seen it go yet.
-                app.sync_conflict_banner(&original, Some(&conflict));
-            }
-        };
-        let key = format!("conflict:sync:{original}");
-        let body = diff::conflict(
-            (&written_at(original, &mine_etag), &mine),
-            (&written_at(conflict, &theirs_etag), &theirs),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
+        let (original, conflict) = (original.to_string(), conflict.to_string());
+        let theirs_title = written_at(&conflict, &theirs_etag);
+        self.with_tab(&original.clone(), Opened::Kept, move |app, tab| {
+            let mine_title = match tab.etag.get() {
+                Some(etag) => written_at(&original, &etag),
+                None => original.clone(),
+            };
+            let keep_theirs = gtk::Button::with_label("Keep Theirs");
+            let keep_mine = gtk::Button::with_label("Keep Mine");
+            keep_mine.add_css_class("suggested-action");
+            // Keeping theirs adopts the copy and reloads the tab over it: what was Mine, unsaved
+            // edits included, was on screen and is the side the user gave up.
+            keep_theirs.connect_clicked(glib::clone!(
+                #[weak]
+                app,
+                #[weak]
+                tab,
                 #[strong]
-                key,
-                move |choice| {
-                    resolve(choice);
-                    app.close_diff(&key);
+                original,
+                #[strong]
+                conflict,
+                move |_| {
+                    tab.leave_compare();
+                    let Some(vault) = app.vault() else { return };
+                    if let Err(e) = vault.adopt_conflict(&original, &conflict) {
+                        return app.toast(&format!("Cannot resolve: {e:#}"));
+                    }
+                    tab.discard();
+                    app.refresh_tab(&tab);
+                    app.finish_conflict(&original, &conflict);
                 }
-            ),
-        );
-        self.open_diff(
-            &key,
-            &format!("{} (Sync Conflict)", doc::file_name(original)),
-            &body,
-        );
+            ));
+            // Keeping mine is only the copy going away: the merge is the buffer, and the buffer
+            // saves as it always does, through the tab's own etag gate.
+            keep_mine.connect_clicked(glib::clone!(
+                #[weak]
+                app,
+                #[weak]
+                tab,
+                #[strong]
+                original,
+                #[strong]
+                conflict,
+                move |_| {
+                    tab.leave_compare();
+                    if tab.modified.get() {
+                        app.save_tab(&tab, false);
+                    }
+                    app.finish_conflict(&original, &conflict);
+                }
+            ));
+            tab.compare(
+                &mine_title,
+                (&theirs_title, &theirs),
+                diff::Side::Old,
+                true,
+                Some(choice_row(&keep_theirs, &keep_mine)),
+                "Sync Conflict",
+            );
+        });
     }
 
-    /// Close a diff tab once its question has been answered.
-    fn close_diff(self: &Rc<Self>, key: &str) {
-        if let Some(doc) = self.doc_for(key) {
-            self.close_page(doc.page());
+    /// The copy goes to the trash, and the banner is told before the index has seen it go.
+    fn finish_conflict(&self, original: &str, conflict: &str) {
+        if let Some(ops) = self.ops() {
+            fileops::trash(ops, conflict);
         }
+        self.sync_conflict_banner(original, Some(conflict));
     }
 
     // --- view modes and preview -----------------------------------------------------------
@@ -3585,6 +3732,10 @@ impl App {
             "split-right" => self.split_active(Side::Right),
             "split-up" => self.split_active(Side::Up),
             "split-down" => self.split_active(Side::Down),
+            "move-tab-left" => self.move_tab(Side::Left),
+            "move-tab-right" => self.move_tab(Side::Right),
+            "move-tab-up" => self.move_tab(Side::Up),
+            "move-tab-down" => self.move_tab(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
@@ -3781,11 +3932,11 @@ impl App {
                     fileops::rename(ops, &rel);
                 }
             }
-            "daily-note" => match self.vault().map(|v| v.daily_note()) {
-                Some(Ok((rel, _))) => self.open_note(&rel),
-                Some(Err(e)) => self.toast(&format!("Cannot open today's note: {e:#}")),
-                None => self.needs_vault("open today's note"),
-            },
+            "new-from-template" => {
+                if let Some(ops) = self.need_ops("create a note from a template") {
+                    fileops::new_from_template(ops);
+                }
+            }
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
@@ -3798,8 +3949,8 @@ impl App {
     /// One of the three zoom chords, dispatched to whatever the active tab is.
     ///
     /// A PDF fits its pages, an image is given a size of its own, a shell scales its own font and
-    /// a document scales the display-wide one; a status page and a diff draw at a size nobody
-    /// chose, so the chords do nothing there. It is matched in the same shape as
+    /// a document or a comparison scales the display-wide one; a status page draws at a size
+    /// nobody chose, so the chords do nothing there. It is matched in the same shape as
     /// [`App::sync_status`] and [`App::refresh_zoom`] on purpose: what the chords reach and what
     /// the readout says have to be the same list, or the bar says 120 % over something drawn at
     /// its own size.
@@ -3821,7 +3972,7 @@ impl App {
                 term.set_zoom(stepped(term.zoom()));
                 self.refresh_zoom();
             }
-            Some(Doc::Text(_)) => self.set_zoom(stepped(self.zoom.get())),
+            Some(Doc::Text(_)) | Some(Doc::Diff(_)) => self.set_zoom(stepped(self.zoom.get())),
             Some(Doc::Image(image)) => self.zoom_image(
                 &image,
                 match name {
@@ -3830,7 +3981,7 @@ impl App {
                     _ => None,
                 },
             ),
-            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => {}
+            Some(Doc::Status(_)) | None => {}
         }
     }
 
@@ -3861,6 +4012,11 @@ impl App {
         let font = self.config.borrow().editor_font.clone();
         for tab in self.open_tabs() {
             tab.set_font(font.as_deref(), zoom);
+        }
+        for doc in self.docs() {
+            if let Some(diff) = doc.diff() {
+                diff.set_font(font.as_deref(), zoom);
+            }
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
@@ -4098,12 +4254,12 @@ impl App {
         let label = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
             Some(Doc::Terminal(term)) => term.zoom_label(),
-            Some(Doc::Text(_)) => {
+            Some(Doc::Text(_)) | Some(Doc::Diff(_)) => {
                 let zoom = self.zoom.get();
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }
             Some(Doc::Image(image)) => Some(image_zoom_label(&image)),
-            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => None,
+            Some(Doc::Status(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -4366,6 +4522,12 @@ impl App {
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.
             vaults: start::other_vaults(&config.recent_vaults, self.vault().map(|v| v.key())),
+            // The tab bar's own chords: no command runs them, so they are not rows, but a
+            // rebind that took one would be shadowed by a controller the dialog cannot see.
+            taken: panes::widget_chords()
+                .into_iter()
+                .map(|(accel, what)| (accel.to_string(), what.to_string()))
+                .collect(),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
             on_rebind: Box::new({
@@ -4411,29 +4573,15 @@ impl App {
         );
     }
 
-    /// Push the accelerators in force into the application and rebuild the four captured chords.
-    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
-    /// them a config change touched.
-    ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced.
+    /// Push the accelerators in force into the application and rebuild this window's captured
+    /// chords. The table is the application's and lives with the [`Shell`]; the captured
+    /// controller is the window's own.
     fn apply_accels(&self) {
-        let Some(gtk_app) = self.window.application() else {
+        let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) else {
             return;
         };
+        shell.apply_accels(&gtk_app);
         let config = self.config.borrow();
-        let shell = terminal::has_focus(&self.window);
-        for (action, _, _) in ACTIONS {
-            let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels
-                .iter()
-                .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
-                .collect();
-            gtk_app.set_accels_for_action(action, &accels);
-        }
         let captured: Vec<(&str, String)> = CAPTURED
             .iter()
             .flat_map(|action| {
@@ -4481,6 +4629,12 @@ impl App {
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
             tab.restyle();
+        }
+        for doc in self.docs() {
+            if let Some(diff) = doc.diff() {
+                diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+                diff.restyle();
+            }
         }
         // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
         // though the system's dark state, and with it the notify handler, never moved.
@@ -5077,6 +5231,7 @@ fn build_window(
         corpus: RefCell::new(Corpus::default()),
         statusbar,
         docs: RefCell::new(Vec::new()),
+        awaiting: RefCell::new(HashMap::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
@@ -5111,7 +5266,6 @@ fn build_window(
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
-        shell_keys: Cell::new(false),
     });
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
@@ -5151,6 +5305,8 @@ fn build_window(
         #[weak]
         app,
         move || {
+            // Before the save below, which is what rewrites the keys it reads out of the file.
+            retired_daily_keys(&app);
             // The recent list, written once the window the user asked for is on screen.
             if app.vault().is_some()
                 && let Err(e) = app.config.borrow().save()
@@ -5296,7 +5452,8 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, trash, changed, syncing, set_tree) = (
+    let (toast, open, diff, compare, trash, changed, syncing, set_tree) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -5320,10 +5477,28 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 app.open_preview(key);
             }
         }),
-        open_diff: Box::new(move |key, title, body| {
-            if let Some(app) = diff.upgrade() {
-                app.open_diff(key, title, body);
-            }
+        open_diff: Box::new(move |key, file, title, old, new| {
+            diff.upgrade()
+                .map(|app| app.open_diff(key, file, title, old, new))
+        }),
+        compare_file: Box::new(move |key, title, text, register| {
+            let Some(app) = compare.upgrade() else {
+                return;
+            };
+            let (title, text) = (title.to_string(), text.to_string());
+            // The file's own tab, as a preview like any other single click in the sidebar.
+            app.with_tab(key, Opened::Preview, move |_, tab| {
+                let name = doc::file_name(&tab.rel()).to_string();
+                let compare = tab.compare(
+                    &format!("{name} (Working Tree)"),
+                    (&title, &text),
+                    diff::Side::New,
+                    false,
+                    None,
+                    "Working Tree",
+                );
+                register(Rc::downgrade(&compare));
+            });
         }),
         trash: Box::new(move |key| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
@@ -5398,6 +5573,34 @@ fn adopt_sidebar(
     let _ = app.sidebar.set(pane);
 }
 
+/// Say once, in the window and in the log, what a vault's retired `daily_*` settings mean now.
+///
+/// The keys are gone, so a vault configured for a daily note would simply stop making one with
+/// nothing saying why. Nothing is written into the vault — the `accent-target:` line is the
+/// user's to add, and a template travels with the vault where these keys never did — and the
+/// keys leave `config.toml` with the caller's next save, so this is said once. A courtesy: a
+/// config that will not re-read says nothing at all.
+fn retired_daily_keys(app: &Rc<App>) {
+    let Some(root) = app.vault().map(|v| v.root()) else {
+        return;
+    };
+    let Some((target, template)) = accent_core::config::daily_keys(&root) else {
+        return;
+    };
+    let dir = app.config.borrow().vault(&root).templates_dir;
+    let file = match template {
+        Some(t) => accent_core::template::candidates(&dir, &t)
+            .pop()
+            .unwrap_or(t),
+        None => format!("a template in {dir}"),
+    };
+    let say = format!(
+        "Daily notes are a template directive now: add `accent-target: {target}` to {file}"
+    );
+    tracing::warn!("{say}");
+    app.toast(&say);
+}
+
 /// Everything `fileops` needs from the window, as closures. Weak throughout: the operations
 /// outlive nothing, and a strong capture here would keep a closed window's vault open.
 /// The file operations the tree, the tab menus and the palette share. `None` without a vault:
@@ -5417,9 +5620,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 app.toast(message);
             }
         }),
-        open: Box::new(move |rel| {
-            if let Some(app) = open.upgrade() {
-                app.open_path(rel);
+        open: Box::new(move |rel, at| {
+            let Some(app) = open.upgrade() else { return };
+            app.open_path(rel);
+            if let Some(at) = at {
+                app.select_when_open(rel, at..at);
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
@@ -6132,6 +6337,22 @@ fn wire_tree(app: &Rc<App>) {
 /// The two sides of a sync conflict are one note twice, and which of them is called Mine is
 /// decided by which one kept the original name — that is Syncthing's decision, not ours, and the
 /// copy it renames can be the newer of the two. The time is the only thing here that says so.
+/// The Keep Theirs / Keep Mine bar under a comparison's panes.
+fn choice_row(theirs: &gtk::Button, mine: &gtk::Button) -> gtk::Widget {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .halign(gtk::Align::End)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    row.append(theirs);
+    row.append(mine);
+    row.upcast()
+}
+
 fn written_at(rel: &str, etag: &Etag) -> String {
     match glib::DateTime::from_unix_local(etag.mtime_ns / 1_000_000_000)
         .and_then(|when| when.format("%d %b %H:%M"))
@@ -6195,7 +6416,7 @@ const CAPTURED: &[&str] = &[
 ///
 /// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
 /// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
-/// unbinding it in `App::apply_accels` is what lets the key through. The reserved set is small
+/// unbinding it in `Shell::apply_accels` is what lets the key through. The reserved set is small
 /// and each entry earns its place:
 ///
 /// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
@@ -6220,6 +6441,10 @@ fn reserved(action: &str, accel: &str) -> bool {
         "win.close-tab"
             | "win.next-tab"
             | "win.previous-tab"
+            | "win.move-tab-left"
+            | "win.move-tab-right"
+            | "win.move-tab-up"
+            | "win.move-tab-down"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
@@ -6288,15 +6513,15 @@ fn install_actions(app: &Rc<App>) {
     app.apply_accels();
 
     // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
-    // crosses into or out of a terminal. `focus-widget` is the one signal that hears every way
-    // that happens: a click, a tab switch, a dialog, `Ctrl+J` itself.
+    // crosses into or out of a terminal. `focus-widget` hears every way that happens inside a
+    // window: a click, a tab switch, a dialog, `Ctrl+J` itself. Between windows it is the
+    // application's `active-window`, hooked in `main`.
     app.window.connect_focus_widget_notify(glib::clone!(
         #[weak]
         app,
         move |window| {
-            let shell = terminal::has_focus(window);
-            if shell != app.shell_keys.replace(shell) {
-                app.apply_accels();
+            if let Some((shell, gtk_app)) = app.shell.upgrade().zip(window.application()) {
+                shell.sync_accels(&gtk_app);
             }
         }
     ));
@@ -6371,6 +6596,12 @@ fn tab_menu() -> gio::Menu {
         split.append(label_of_owned(&action), Some(&action));
     }
     menu.append_section(None, &split);
+    let move_tab = gio::Menu::new();
+    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+        let action = format!("win.move-tab-{}", side.action());
+        move_tab.append(label_of_owned(&action), Some(&action));
+    }
+    menu.append_section(None, &move_tab);
     for action in [
         "win.copy-relative-path",
         "win.copy-absolute-path",
@@ -6385,6 +6616,14 @@ fn tab_menu() -> gio::Menu {
     );
     menu.append_section(None, &reveal);
     menu
+}
+
+/// Where `pane` sits in the window, for [`panes::neighbour`]. A pane that has not been allocated
+/// yet — a split in the same main-loop turn — has no bounds, and a zero rect is what says so.
+fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
+    pane.widget()
+        .compute_bounds(root)
+        .unwrap_or_else(graphene::Rect::zero)
 }
 
 /// One button rather than a two-item group: there are only two states, so the pressed look plus
@@ -6432,19 +6671,58 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away.
+/// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
+/// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
+/// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
+/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
+/// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
+/// what the panes hold and whether their rows line up.
+/// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
+/// prints what `Ctrl+S` activates.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
+    let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome {
+    let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
+    let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
+    let panes = std::env::var("ACCENT_BENCH_PANES").ok();
+    let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
+    let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
+    if expand.is_none()
+        && switcher.is_none()
+        && style.is_none()
+        && panes.is_none()
+        && compare.is_none()
+        && !git
+        && !keys
+        && !chrome
+        && !templates
+        && !paths
+        && !shell_keys
+    {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(rels) = panes {
+            return bench_panes(&app, &rels);
+        }
+        if let Some(rel) = compare {
+            return bench_compare(&app, &rel);
+        }
+        if shell_keys {
+            return bench_shell_keys(&app);
+        }
+        if paths {
+            return bench_paths(&app);
+        }
+        if templates {
+            return bench_templates(&app);
+        }
         if chrome {
             return bench_chrome(&app);
         }
@@ -6453,6 +6731,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if git {
             return bench_git(&app);
+        }
+        if let Some(rel) = style {
+            return bench_style(&app, &rel);
         }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);
@@ -6505,6 +6786,24 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
         child = c.next_sibling();
     }
     None
+}
+
+/// What New from Template would list: every template, and the destination each one names today.
+///
+/// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
+/// `accent-target:` directive and the rendered target end to end without a widget.
+fn bench_templates(app: &Rc<App>) {
+    let Some(vault) = app.vault() else {
+        return bench_quit(app);
+    };
+    let templates = vault.templates().unwrap_or_default();
+    println!("bench templates {}", templates.len());
+    for rel in &templates {
+        if let Ok(Some(target)) = vault.template_target(rel) {
+            println!("bench template_target {rel} {target}");
+        }
+    }
+    bench_quit(app);
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the
@@ -6641,6 +6940,107 @@ fn bench_keys(app: &Rc<App>) {
     });
 }
 
+/// What a path entry's completion does with the keyboard, and whether the entry takes the width
+/// the list gives the dialog.
+///
+/// Layout is real under Xvfb — an allocation wants a mapped window, not a window manager — so the
+/// width either side of the list appearing is measured rather than argued. The keys are emitted on
+/// the entry's own controller, which proves the handler, the selection and the text it applies but
+/// **not** the propagation phase: emitting a signal skips phase dispatch altogether, so that Return
+/// beats `GtkText`'s own binding is still a claim only a real session can settle.
+fn bench_paths(app: &Rc<App>) {
+    let entry = gtk::Entry::new();
+    let field = fileops::path_field(&entry, "bench", |_| {
+        ["Archive/", "Attachments/", "Notes/"]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    });
+    let window = gtk::Window::builder()
+        .default_width(600)
+        .child(&field)
+        .build();
+    window.present();
+    // Fills the list. The toplevel never goes active under Xvfb, so `show_completions` leaves it
+    // put away and the first Down is what opens it.
+    entry.set_text("A");
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        print_width("shut", &entry);
+        // Nothing has been aimed at, so Return belongs to the dialog and the text stays as typed.
+        press_key(&entry, gdk::Key::Return);
+        println!("bench path_applied none {:?}", entry.text());
+        press_key(&entry, gdk::Key::Down);
+        println!("bench path_selected {:?}", selected_offer(&field));
+        // A second frame, because the row the list just grew is what widens the dialog.
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            print_width("open", &entry);
+            press_key(&entry, gdk::Key::Down);
+            println!("bench path_selected {:?}", selected_offer(&field));
+            press_key(&entry, gdk::Key::Return);
+            println!("bench path_applied selected {:?}", entry.text());
+            // The pointer's way in, which applies from an idle rather than on the spot.
+            if let Some(list) = completion_list(&field)
+                && let Some(row) = list.row_at_index(2)
+            {
+                list.emit_by_name::<()>("row-activated", &[&row]);
+            }
+            glib::idle_add_local_once(move || {
+                println!("bench path_activated {:?}", entry.text());
+                window.close();
+                bench_quit(&app);
+            });
+        });
+    });
+}
+
+/// The entry's allocated width against the `.linked` row it sits in, whose surplus is the folder
+/// button. `state` says whether the completion list was showing.
+fn print_width(state: &str, entry: &gtk::Entry) {
+    let row = entry.parent().map_or(0, |row| row.width());
+    println!("bench path_entry_width {state} {} {row}", entry.width());
+}
+
+/// Emit a key press on the entry's own key controller: the headless image has no window manager
+/// to give the toplevel the keyboard, and no xdotool to press anything with.
+fn press_key(entry: &gtk::Entry, key: gdk::Key) {
+    use glib::translate::IntoGlib;
+    let controllers = entry.observe_controllers();
+    for i in 0..controllers.n_items() {
+        let Some(keys) = controllers
+            .item(i)
+            .and_downcast::<gtk::EventControllerKey>()
+        else {
+            continue;
+        };
+        keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&key.into_glib(), &0u32, &gdk::ModifierType::empty()],
+        );
+    }
+}
+
+/// A path field's completion list: the revealer's, and the scroller hands back the viewport it
+/// wrapped a `GtkListBox` in rather than the list itself.
+fn completion_list(field: &gtk::Widget) -> Option<gtk::ListBox> {
+    field
+        .last_child()
+        .and_downcast::<gtk::Revealer>()
+        .and_then(|revealer| revealer.child())
+        .and_downcast::<gtk::ScrolledWindow>()
+        .and_then(|scroller| scroller.child())
+        .and_then(|viewport| viewport.first_child())
+        .and_downcast::<gtk::ListBox>()
+}
+
+/// The completion that list has highlighted, by the text it stands for.
+fn selected_offer(field: &gtk::Widget) -> Option<String> {
+    completion_list(field)
+        .and_then(|list| list.selected_row())
+        .and_then(|row| row.child().and_downcast::<gtk::Label>())
+        .map(|label| label.label().into())
+}
+
 /// Fire the actions the chords go through at a faded window, and print whether the chrome came
 /// back. An action on its own must not bring it back: focus mode ends on pointer motion, Escape,
 /// a focus change or a view-mode change, and an action is none of those (DESIGN.md, Chrome
@@ -6668,8 +7068,288 @@ fn bench_chrome(app: &Rc<App>) {
     bench_quit(app);
 }
 
+/// Open the two notes `rels` names in one pane, then split the second one off to the right, move
+/// it back, and ask for a move where there is no pane to move into.
+///
+/// What is printed is the **geometry** of the pane holding that tab, not its index: panes are
+/// kept in the order they were made, which is not the order they are drawn in, so only the
+/// rectangle says a tab really changed side.
+fn bench_panes(app: &Rc<App>, rels: &str) {
+    let Some((a, b)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    app.open_path(a);
+    app.open_path(b);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        let Some(page) = app.tabs().selected_page() else {
+            return bench_quit(&app);
+        };
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, 0);
+    });
+}
+
+/// One step of [`bench_panes`], read back after the frame it needs: `panes::neighbour` is
+/// geometric, so it wants the allocation a split has not been given yet, and an emptied pane
+/// closes itself from an idle.
+fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
+    const STEPS: &[&str] = &["win.split-right", "win.move-tab-left", "win.move-tab-right"];
+    let Some(action) = STEPS.get(step) else {
+        if let Some(gtk_app) = app.window.application() {
+            for accel in ["<Shift><Alt>Left", "<Shift><Alt>Right"] {
+                println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
+            }
+        }
+        return bench_quit(app);
+    };
+    println!("bench step {action}");
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    let (app, page) = (app.clone(), page.clone());
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, step + 1);
+    });
+}
+
+/// How many panes there are, and where in the window the one holding `page` sits.
+fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
+    println!("bench panes {}", app.panes.borrow().len());
+    let root = app.window.clone().upcast::<gtk::Widget>();
+    match app.pane_of(page) {
+        Some(pane) => {
+            let r = pane_rect(&pane, &root);
+            println!("bench tab_at x={} y={}", r.x().round(), r.y().round());
+        }
+        None => println!("bench tab_at none"),
+    }
+}
+
+/// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
+/// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
+/// loop turns again*. `changed` is emitted from inside the insert, so a `true` here can only have
+/// come from the synchronous path — which is the whole question this bench answers.
+fn bench_style(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        for chars in [2 * 1024, 32 * 1024] {
+            bench_style_typing(&tab, chars);
+        }
+        bench_style_fenced(&tab);
+        // A heading typed far from the caret is what the fast path deliberately leaves out: it
+        // belongs to the debounced pass, and this says the pass still lands and still fixes it.
+        tab.buffer.insert(&mut tab.buffer.start_iter(), "# Far\n");
+        println!("bench style_far_sync {}", bench_heading_at(&tab, 0));
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            println!("bench style_debounced {}", bench_heading_at(&tab, 0));
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
+/// time the way a keyboard delivers it.
+fn bench_style_typing(tab: &Rc<Tab>, chars: usize) {
+    // Exactly 32 bytes, so the body is exactly the size the numbers are labelled with.
+    let body = "filler text for a long-ish note\n";
+    tab.set_text(&body.repeat(chars / body.len()));
+    tab.buffer.place_cursor(&tab.buffer.end_iter());
+    for ch in "\n# Headin".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let t0 = Instant::now();
+    tab.buffer.insert_at_cursor("g");
+    let us = t0.elapsed().as_micros();
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_sync chars={chars} {}",
+        bench_heading_at(tab, line)
+    );
+    println!("bench style_us {us}");
+}
+
+/// Type the same heading *inside a fenced block* on a note too long for a full pass. The line is
+/// tagged from a parse of the whole document, so the fence above it is what decides what it is:
+/// this is the claim a per-line pass stands or falls on, printed rather than argued.
+fn bench_style_fenced(tab: &Rc<Tab>) {
+    let body = "filler text for a long-ish note\n".repeat(1024);
+    tab.set_text(&format!("{body}```\n\n```\n"));
+    let Some(inside) = tab.buffer.iter_at_line(1025) else {
+        return;
+    };
+    tab.buffer.place_cursor(&inside);
+    for ch in "# Heading".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_fenced h1={} codeblock={}",
+        bench_tag_at(tab, line, "h1"),
+        bench_tag_at(tab, line, "codeblock")
+    );
+}
+
+fn bench_heading_at(tab: &Rc<Tab>, line: i32) -> bool {
+    bench_tag_at(tab, line, "h1")
+}
+
+fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
+    let Some(tag) = tab.buffer.tag_table().lookup(name) else {
+        return false;
+    };
+    tab.buffer
+        .iter_at_line(line)
+        .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// A shell focused in a window that does not have the keyboard must not narrow the application's
+/// accelerator table, and one in the window that does must. Under Xvfb no window is ever
+/// activated, so the active one is the last added: a second window is opened first and the shell
+/// then opens in this one, which is the state after switching windows away from a shell. Closing
+/// the second window hands the keyboard back through the same `active-window` notify a real
+/// switch goes through. Prints what `Ctrl+S` activates: `["win.save"]`, then `[]`.
+fn bench_shell_keys(app: &Rc<App>) {
+    let Some(gtk_app) = app.window.application().and_downcast::<adw::Application>() else {
+        return bench_quit(app);
+    };
+    let Some(other) = app
+        .shell
+        .upgrade()
+        .and_then(|shell| shell.loose_window(&gtk_app))
+    else {
+        return bench_quit(app);
+    };
+    app.open_terminal();
+    let print = move |when: &str| {
+        println!(
+            "bench shell_keys {when} {:?}",
+            gtk_app.actions_for_accel("<Control>s")
+        );
+    };
+    // The shell takes focus from an idle.
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        print("shell-elsewhere");
+        other.window.close();
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            print("shell-here");
+            bench_quit(&app);
+        });
+    });
+}
+
 /// Closing the window is not enough to end the process while a dialog is up: quit the
 /// application so the bench always terminates.
+/// The note is given fifty lines, written out, then edited in two places: a rewrite near the
+/// top and a line added at the end. The comparison with the disk copy is then read back — rows,
+/// hunks, hidden runs, buttons, and how many rows GTK lays out at a height other than the one
+/// the alignment asked for (0 is the claim) — before the first hunk is taken from Theirs, the
+/// hidden run is opened, and the same is read again. Then two blobs in a tab of their own, at a
+/// zoom, for the same numbers.
+fn bench_compare(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        tab.set_text(&body);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare write_failed {e}");
+            return bench_quit(&app);
+        }
+        let (mut a, mut b) = (
+            tab.buffer
+                .iter_at_line(2)
+                .unwrap_or_else(|| tab.buffer.end_iter()),
+            tab.buffer
+                .iter_at_line(3)
+                .unwrap_or_else(|| tab.buffer.end_iter()),
+        );
+        tab.buffer.delete(&mut a, &mut b);
+        tab.buffer.insert(&mut a, "line three\n");
+        tab.buffer
+            .insert(&mut tab.buffer.end_iter(), "added at the end\n");
+        app.compare_with_disk(&tab);
+        glib::timeout_add_local_once(Duration::from_millis(600), move || {
+            let Some(compare) = tab.comparison() else {
+                println!("bench compare none");
+                return bench_quit(&app);
+            };
+            println!("bench compare {}", bench_compare_line(&compare));
+            compare.take_hunk(0, false);
+            compare.open_gap(0);
+            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                let line = tab
+                    .buffer
+                    .iter_at_line(2)
+                    .map(|start| {
+                        let mut end = start;
+                        end.forward_to_line_end();
+                        tab.buffer.text(&start, &end, true).to_string()
+                    })
+                    .unwrap_or_default();
+                println!(
+                    "bench compare_after {} line3={line:?}",
+                    bench_compare_line(&compare)
+                );
+                tab.leave_compare();
+                println!(
+                    "bench compare_left comparing={}",
+                    tab.comparison().is_some()
+                );
+                let new = body.replace("line 10\n", "line ten\n");
+                let diff = app.open_diff(
+                    "diff:bench",
+                    "bench.md",
+                    "bench",
+                    ("old", &body),
+                    ("new", &new),
+                );
+                app.set_zoom(1.5);
+                glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                    println!(
+                        "bench compare_blobs {}",
+                        bench_compare_line(diff.comparison())
+                    );
+                    // With the vault under git: the working tree against the index, in the
+                    // note's tab, which the Git pane reaches through the same door as a row.
+                    let Some(git) = app.git.get().filter(|git| git.has_repos()) else {
+                        println!("bench compare_worktree no_repo");
+                        return bench_quit(&app);
+                    };
+                    git.compare_worktree(&tab.rel());
+                    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                        match tab.comparison() {
+                            Some(compare) => println!(
+                                "bench compare_worktree title={:?} {} first={:?}",
+                                tab.page.title(),
+                                bench_compare_line(&compare),
+                                compare.first_misaligned()
+                            ),
+                            None => println!("bench compare_worktree none"),
+                        }
+                        bench_quit(&app);
+                    });
+                });
+            });
+        });
+    });
+}
+
+fn bench_compare_line(compare: &diff::Compare) -> String {
+    let (rows, hunks, hidden, buttons) = compare.counts();
+    format!(
+        "rows={rows} hunks={hunks} hidden={hidden} buttons={buttons} misaligned={}",
+        compare.misaligned()
+    )
+}
+
 fn bench_quit(app: &Rc<App>) {
     match app.window.application() {
         Some(gtk_app) => gtk_app.quit(),
@@ -7108,6 +7788,21 @@ mod tests {
         }
     }
 
+    /// The tab menu builds its action names with `format!`, so nothing but this says that what it
+    /// puts on a menu is a command the window has and the palette lists.
+    #[test]
+    fn the_tab_menu_names_actions_that_exist() {
+        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+            for prefix in ["win.split-", "win.move-tab-"] {
+                let action = format!("{prefix}{}", side.action());
+                assert!(
+                    ACTIONS.iter().any(|(name, _, _)| *name == action),
+                    "{action} is on the tab menu but not in ACTIONS"
+                );
+            }
+        }
+    }
+
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
     /// the window actually has.
     #[test]
@@ -7138,6 +7833,10 @@ mod tests {
         assert!(reserved("win.new-folder", "<Control><Shift>n"));
         assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
         assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
+        // Moving a tab has to mean the same thing over every tab, terminals included, and
+        // `Shift+Alt`+arrow has no readline meaning to cost a shell.
+        assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
+        assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
         for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
@@ -7200,6 +7899,53 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    /// The chords DESIGN.md's never-bind list reserves, as they are spelled in an accelerator.
+    /// `Super`+anything and `Ctrl+Alt`+anything are patterns rather than chords, so they are not
+    /// here; nothing binds a modifier by itself.
+    const NEVER_BIND: &[&str] = &[
+        "<Alt>Tab",
+        "<Alt>F4",
+        "<Alt>F7",
+        "<Alt>F8",
+        "F1",
+        "<Control><Shift>u",
+        "<Control>space",
+        "<Control>z",
+        "<Control>y",
+        "<Control>a",
+        "<Control>x",
+        "<Control>c",
+        "<Control>v",
+        "<Alt>Up",
+        "<Alt>Down",
+        "<Control>Home",
+        "<Control>End",
+        "<Control><Shift>Home",
+        "<Control><Shift>End",
+    ];
+
+    /// `AdwTabView` binds its own chords in the capture phase, ahead of both our accelerators and
+    /// the focused view's class shortcuts, so a chord it keeps is a chord nothing else can have.
+    /// Neither half of that is visible in `ACTIONS`, which is why it takes a test: one direction
+    /// is two controllers fighting over one chord, the other is the tab bar quietly holding a
+    /// GtkSourceView built-in — how `Ctrl+Home` in a note left the note instead of going to its
+    /// start.
+    #[test]
+    fn the_tab_bar_keeps_no_chord_that_is_ours_or_forbidden() {
+        for (accel, what) in panes::widget_chords() {
+            for (name, _, accels) in ACTIONS {
+                assert!(
+                    !accels.contains(&accel),
+                    "{accel} is {name} and AdwTabView's {what}"
+                );
+            }
+            assert!(
+                !NEVER_BIND.contains(&accel),
+                "AdwTabView holds {accel} for {what}, which the never-bind list reserves"
+            );
+        }
     }
 
     #[test]

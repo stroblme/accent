@@ -463,8 +463,22 @@ impl Vault {
         )
     }
 
-    pub fn daily_note(&self) -> Result<(String, Option<usize>)> {
-        ask!(self, |v: &Local| v.daily_note(), "daily_note", json!([]))
+    pub fn template_target(&self, template: &str) -> Result<Option<String>> {
+        ask!(
+            self,
+            |v: &Local| v.template_target(template),
+            "template_target",
+            json!([template])
+        )
+    }
+
+    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Option<usize>)>> {
+        ask!(
+            self,
+            |v: &Local| v.note_from_template(template),
+            "note_from_template",
+            json!([template])
+        )
     }
 
     pub fn templates(&self) -> Result<Vec<String>> {
@@ -887,8 +901,8 @@ impl Local {
     }
 
     /// Join `rel` to the vault root, refusing anything that would land outside it. Every
-    /// path-taking method goes through this: the GTK app sanitises its own input, but a
-    /// `daily_dir` of `../Outside` arrives here straight from the config, and Phase 2's MCP
+    /// path-taking method goes through this: the GTK app sanitises its own input, but an
+    /// `accent-target:` of `../Outside/x.md` arrives here straight from a template, and Phase 2's MCP
     /// server and Phase 3's Android bindings call the façade with whatever their caller said.
     ///
     /// The test is deliberately lexical and never `canonicalize`s: a vault links external
@@ -1007,9 +1021,25 @@ impl Local {
         Ok(())
     }
 
+    /// A template's text, whether it is named by a vault-relative path or by a bare file name in
+    /// the templates directory. Failing, it names both places it looked.
+    fn read_template(&self, name: &str) -> Result<String> {
+        // The config lock is taken before the filesystem, never inside the index lock.
+        let tried = template::candidates(&self.config().templates_dir, name);
+        for rel in &tried {
+            let path = self.resolve(rel)?;
+            if path.is_file() {
+                let (text, _) =
+                    fs::read_note(&path).with_context(|| format!("reading template {rel}"))?;
+                return Ok(text);
+            }
+        }
+        anyhow::bail!("no template {name}: looked at {}", tried.join(" and "))
+    }
+
     /// Create a file, optionally from a template. Returns the path it was created at and where
     /// the caret belongs. The name is taken as it is given: `notes` is a file called `notes`, not
-    /// a note called `notes.md`. Callers that mean markdown say so (`daily_note` does).
+    /// a note called `notes.md`. Callers that mean markdown say so (`note_from_template` does).
     pub fn create_note(
         &self,
         rel: &str,
@@ -1017,11 +1047,12 @@ impl Local {
     ) -> Result<(String, Option<usize>)> {
         let rel = rel.to_string();
         let (text, cursor) = match template {
-            Some(t) => {
-                let (raw, _) = fs::read_note(&self.resolve(t)?)
-                    .with_context(|| format!("reading template {t}"))?;
-                template::render(&raw, &stem(&rel), chrono::Local::now().naive_local())
-            }
+            // Through `parse` first: `accent-target:` is accent's directive, not the note's text.
+            Some(t) => template::render(
+                &template::parse(&self.read_template(t)?).body,
+                &stem(&rel),
+                chrono::Local::now().naive_local(),
+            ),
             None => (String::new(), None),
         };
         fs::create_note(&self.resolve(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
@@ -1241,25 +1272,33 @@ impl Local {
         Ok(diff::lines(&mine, &theirs))
     }
 
-    /// Today's note, created from the configured template the first time it is asked for.
-    pub fn daily_note(&self) -> Result<(String, Option<usize>)> {
-        let cfg = self.config();
-        let name = template::strftime(&cfg.daily_pattern, chrono::Local::now().naive_local())
-            .with_context(|| {
-                format!(
-                    "daily_pattern {:?} is not a strftime format",
-                    cfg.daily_pattern
-                )
-            })?;
-        let rel = with_md(&if cfg.daily_dir.is_empty() {
-            name
-        } else {
-            format!("{}/{name}", cfg.daily_dir.trim_end_matches('/'))
-        });
+    /// Where a template says its notes go today, or `None` when it does not say.
+    ///
+    /// The `accent-target:` directive goes through the same renderer the body does, so
+    /// `Daily/{{date:%Y-%m-%d}}.md` is today's daily note. `{{title}}` in a target is the
+    /// template's own name: there is no note yet to take one from.
+    pub fn template_target(&self, template: &str) -> Result<Option<String>> {
+        let Some(target) = template::parse(&self.read_template(template)?).target else {
+            return Ok(None);
+        };
+        let (rel, _) =
+            template::render(&target, &stem(template), chrono::Local::now().naive_local());
+        Ok(Some(with_md(&rel)))
+    }
+
+    /// Create the note a template names, or open the one it already made.
+    ///
+    /// Invoked twice on the same day, a dated target hands back the note it made the first time,
+    /// byte for byte: that is what makes a daily note daily. `None` is a template that says
+    /// nothing about where its notes go, which is the caller's cue that it needs a name.
+    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Option<usize>)>> {
+        let Some(rel) = self.template_target(template)? else {
+            return Ok(None);
+        };
         if self.resolve(&rel)?.exists() {
-            return Ok((rel, None));
+            return Ok(Some((rel, None)));
         }
-        self.create_note(&rel, cfg.daily_template.as_deref())
+        self.create_note(&rel, Some(template)).map(Some)
     }
 
     /// The markdown files directly inside the configured templates directory.
@@ -1920,7 +1959,7 @@ fn stem_key(rel: &str) -> String {
     markdown::link_key(&stem(rel))
 }
 
-/// The daily note is markdown whatever the configured date pattern spells.
+/// A template's target is markdown whatever its date pattern spells.
 fn with_md(rel: &str) -> String {
     match rel.rsplit_once('.') {
         Some((_, ext))
@@ -2532,24 +2571,53 @@ mod tests {
         ));
     }
 
+    /// The daily note, now that it is only a template with a dated target: created the first
+    /// time it is asked for and opened untouched every time after, which is the whole behaviour.
     #[test]
-    fn daily_note_is_created_once_and_reused() {
-        let f = Fixture::open(VaultConfig {
-            daily_dir: "Daily".to_string(),
-            daily_template: Some("Templates/Daily.md".to_string()),
-            ..VaultConfig::default()
-        });
-        f.write("Templates/Daily.md", "# {{date}}\n\n{{cursor}}");
+    fn a_dated_target_is_created_once_and_reused() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write(
+            "Templates/Daily.md",
+            "---\naccent-target: Daily/{{date:%Y-%m-%d}}.md\n---\n\n# {{date}}\n\n{{cursor}}",
+        );
 
-        let (rel, cursor) = f.vault.daily_note().unwrap();
+        let (rel, cursor) = f.vault.note_from_template("Daily.md").unwrap().unwrap();
         assert!(rel.starts_with("Daily/") && rel.ends_with(".md"), "{rel}");
-        assert!(cursor.is_some(), "a fresh daily note places the caret");
+        assert!(cursor.is_some(), "a fresh note places the caret");
         let text = f.read(&rel);
+        assert!(
+            !text.contains("accent-target"),
+            "the directive is accent's: {text}"
+        );
 
-        let (again, cursor) = f.vault.daily_note().unwrap();
+        let (again, cursor) = f.vault.note_from_template("Daily.md").unwrap().unwrap();
         assert_eq!(again, rel);
         assert_eq!(cursor, None, "an existing note is opened, not rewritten");
         assert_eq!(f.read(&rel), text);
+    }
+
+    #[test]
+    fn a_template_that_names_no_target_creates_nothing() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Templates/Meeting.md", "# {{title}}\n\nbody\n");
+
+        assert_eq!(f.vault.template_target("Meeting.md").unwrap(), None);
+        assert_eq!(f.vault.note_from_template("Meeting.md").unwrap(), None);
+    }
+
+    #[test]
+    fn a_target_is_rendered_and_made_markdown() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write(
+            "Templates/Weekly.md",
+            "---\naccent-target: Logs/{{title}}\n---\n\nx\n",
+        );
+
+        // `{{title}}` is the template's own stem, and a target without `.md` is still a note.
+        assert_eq!(
+            f.vault.template_target("Weekly.md").unwrap().as_deref(),
+            Some("Logs/Weekly.md")
+        );
     }
 
     #[test]
@@ -2809,7 +2877,7 @@ mod tests {
     }
 
     /// The façade is the boundary MCP and Android call directly, so it decides what is inside
-    /// the vault; `daily_dir: "../Outside"` reaches it too.
+    /// the vault; an `accent-target:` of `../Outside/x.md` reaches it too.
     #[test]
     fn paths_outside_the_vault_are_refused() {
         let outer = tempfile::tempdir().unwrap();
