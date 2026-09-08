@@ -6274,8 +6274,6 @@ fn install_actions(app: &Rc<App>) {
                 #[weak]
                 app,
                 move |_, _| {
-                    // Any action fired is attention leaving the text (DESIGN.md).
-                    app.show_chrome();
                     app.command_used(full);
                     app.run_action(name);
                 }
@@ -6433,18 +6431,23 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
-/// positions.
+/// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
+/// chrome stayed away.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys {
+    let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
+    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if chrome {
+            return bench_chrome(&app);
+        }
         if keys {
             return bench_keys(&app);
         }
@@ -6636,6 +6639,33 @@ fn bench_keys(app: &Rc<App>) {
         window.close();
         bench_quit(&app);
     });
+}
+
+/// Fire the actions the chords go through at a faded window, and print whether the chrome came
+/// back. An action on its own must not bring it back: focus mode ends on pointer motion, Escape,
+/// a focus change or a view-mode change, and an action is none of those (DESIGN.md, Chrome
+/// auto-hide). Find is the counter-example that proves the rule — its bar takes the keyboard, so
+/// the chrome returns through `focus-widget` rather than through the activation.
+///
+/// `Ctrl+Left` and `Ctrl+Right` are printed alongside as the accelerators they are not: nothing in
+/// [`ACTIONS`] claims either chord, so they activate nothing and reach no `show_chrome` at all. If
+/// focus mode still drops on them, the cause is elsewhere.
+fn bench_chrome(app: &Rc<App>) {
+    // Find last: it leaves its bar open, and an open find bar suspends the fade entirely.
+    for action in ["win.save", "win.scroll-down", "win.zoom-in", "win.find"] {
+        app.hide_chrome();
+        let _ = WidgetExt::activate_action(&app.window, action, None);
+        println!("bench chrome_hidden {action} {}", app.chrome_hidden.get());
+    }
+    if let Some(gtk_app) = app.window.application() {
+        for accel in ["<Control>Left", "<Control>Right"] {
+            println!(
+                "bench chrome_accel {accel} {:?}",
+                gtk_app.actions_for_accel(accel)
+            );
+        }
+    }
+    bench_quit(app);
 }
 
 /// Closing the window is not enough to end the process while a dialog is up: quit the
