@@ -47,6 +47,9 @@ pub struct Remote {
     /// it is behind a lock: every path the UI shows is relative to this.
     root: RwLock<PathBuf>,
     config: Mutex<VaultConfig>,
+    /// Ghost text is a global preference rather than a per-vault one, so it travels beside the
+    /// config on `hello` instead of inside it, and a reconnect carries it again.
+    ghost: Mutex<bool>,
     client: Mutex<Option<Arc<Client>>>,
     state: Mutex<State>,
     /// Woken when `state` changes, so a call made while connecting waits rather than failing.
@@ -64,6 +67,7 @@ impl Remote {
             url,
             ctl,
             config: Mutex::new(cfg),
+            ghost: Mutex::new(true),
             client: Mutex::new(None),
             state: Mutex::new(State::Connecting),
             ready: Condvar::new(),
@@ -98,7 +102,14 @@ impl Remote {
         *self.locked(&self.config) = cfg.clone();
         // Best effort: the server takes it at `hello` too, so a call that fails here is corrected
         // by the next connection rather than lost.
-        let _ = self.call::<serde_json::Value>("hello", json!([cfg]));
+        let ghost = *self.locked(&self.ghost);
+        let _ = self.call::<serde_json::Value>("hello", json!([cfg, ghost]));
+    }
+
+    pub fn set_ghost(&self, on: bool) {
+        *self.locked(&self.ghost) = on;
+        let cfg = self.config();
+        let _ = self.call::<serde_json::Value>("hello", json!([cfg, on]));
     }
 
     /// Try again after a failure. The master usually survives whatever killed the server, so the
@@ -442,7 +453,7 @@ impl Remote {
             self.events.clone(),
         ));
         let hello: Hello = client
-            .call("hello", json!([self.config()]))
+            .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
             .map_err(|e| format!("the server did not answer: {e}"))?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
         *self.locked(&self.client) = Some(client);

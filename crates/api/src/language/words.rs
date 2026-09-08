@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
@@ -212,18 +213,31 @@ impl Words {
 }
 
 /// A prose document's providers, answering as one: the primary (a language server, or the index
-/// for a note) for everything it does, with the words appended to its completion. A file with
-/// no primary at all (a `.txt`, a `.tex` without texlab) still gets its words.
+/// for a note) for everything it does, with the words appended to its completion and the ghost
+/// session answering beside both. A file with no primary at all (a `.txt`, a `.tex` without
+/// texlab) still gets its words.
+///
+/// The ghost session hears the document's whole life — open, change, close — because it answers
+/// about the buffer as it is now. What it does not hear is every save: it re-reads the vault on
+/// one, so it is told when the user leaves the document instead. See [`Layered::settle`].
 pub(crate) struct Layered {
     primary: Option<Arc<dyn Language>>,
+    ghost: Option<Arc<dyn Language>>,
     words: Words,
+    /// The document was saved since the ghost session last heard about it.
+    stale: AtomicBool,
 }
 
 impl Layered {
-    pub(crate) fn new(primary: Option<Arc<dyn Language>>) -> Layered {
+    pub(crate) fn new(
+        primary: Option<Arc<dyn Language>>,
+        ghost: Option<Arc<dyn Language>>,
+    ) -> Layered {
         Layered {
             primary,
+            ghost,
             words: Words::default(),
+            stale: AtomicBool::new(false),
         }
     }
 }
@@ -231,14 +245,22 @@ impl Layered {
 impl Language for Layered {
     fn open(&self, rel: &str, language_id: &str, text: String) -> Result<Support> {
         self.words.open(rel, text.clone());
-        match &self.primary {
-            Some(p) => p.open(rel, language_id, text),
-            None => Ok(Support::default()),
+        if let Some(g) = &self.ghost {
+            g.open(rel, language_id, text.clone())?;
         }
+        let mut support = match &self.primary {
+            Some(p) => p.open(rel, language_id, text)?,
+            None => Support::default(),
+        };
+        support.inline = self.ghost.is_some();
+        Ok(support)
     }
 
     fn change(&self, rel: &str, text: String) -> Result<()> {
         self.words.open(rel, text.clone());
+        if let Some(g) = &self.ghost {
+            g.change(rel, text.clone())?;
+        }
         match &self.primary {
             Some(p) => p.change(rel, text),
             None => Ok(()),
@@ -246,13 +268,34 @@ impl Language for Layered {
     }
 
     fn saved(&self, rel: &str) -> Result<()> {
+        self.stale.store(true, Ordering::Relaxed);
         self.primary.as_ref().map_or(Ok(()), |p| p.saved(rel))
+    }
+
+    /// The one save the ghost session is told about, and only if there was one: it re-reads the
+    /// whole vault on a `didSave`, which is a second's work on a large one. Leaving the document
+    /// is the moment where that is affordable and where it is worth doing.
+    fn settle(&self, rel: &str) -> Result<()> {
+        match &self.ghost {
+            Some(g) if self.stale.swap(false, Ordering::Relaxed) => g.saved(rel),
+            _ => Ok(()),
+        }
     }
 
     fn close(&self, rel: &str) {
         self.words.close(rel);
+        if let Some(g) = &self.ghost {
+            g.close(rel);
+        }
         if let Some(p) = &self.primary {
             p.close(rel);
+        }
+    }
+
+    fn inline_completion(&self, rel: &str, pos: Pos) -> Fut<'_, Option<String>> {
+        match &self.ghost {
+            Some(g) => g.inline_completion(rel, pos),
+            None => Box::pin(async { Ok(None) }),
         }
     }
 
@@ -325,6 +368,8 @@ impl Language for Layered {
         }
     }
 
+    /// ponytail: the ghost session is not counted. A dead merl would otherwise restart the
+    /// primary with it; it stays dead until the tab is reopened, which is the cheaper mistake.
     fn is_dead(&self) -> bool {
         self.primary.as_ref().is_some_and(|p| p.is_dead())
     }

@@ -18,6 +18,7 @@ macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
+ghost_text = true
 minimap = false
 line_numbers = false
 column_width = 50
@@ -66,6 +67,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
     pub spellcheck: bool,
+    /// Suggest the rest of the line as the caret sits, from what the vault already says. Needs
+    /// `merl-rt` on the path; the switch only says whether to ask for it.
+    pub ghost_text: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
     /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
@@ -111,6 +115,7 @@ impl Default for Config {
             recent_vaults: Vec::new(),
             editor_font: None,
             spellcheck: true,
+            ghost_text: true,
             minimap: false,
             line_numbers: false,
             column_width: 50,
@@ -397,6 +402,7 @@ mod tests {
         let c = Config::read(&p).unwrap();
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
+        assert!(c.ghost_text);
         assert!(!c.minimap);
         assert!(!c.line_numbers);
         assert_eq!(c.column_width, 50);

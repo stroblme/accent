@@ -240,6 +240,15 @@ impl Vault {
         }
     }
 
+    /// Whether a prose document opened from here on gets a ghost-text session. Global rather
+    /// than per vault, which is why it does not travel in [`VaultConfig`].
+    pub fn set_ghost(&self, on: bool) {
+        match &self.backend {
+            Backend::Local(v) => v.set_ghost(on),
+            Backend::Remote(r) => r.set_ghost(on),
+        }
+    }
+
     pub fn rescan(&self) {
         match &self.backend {
             Backend::Local(v) => v.rescan(),
@@ -832,6 +841,10 @@ impl Local {
 
     pub fn set_config(&self, cfg: VaultConfig) {
         *locked(&self.cfg) = cfg;
+    }
+
+    pub fn set_ghost(&self, on: bool) {
+        self.lang.set_ghost(on);
     }
 
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.

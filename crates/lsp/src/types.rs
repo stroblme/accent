@@ -110,6 +110,7 @@ pub struct ServerCapabilities {
     pub references_provider: Option<Value>,
     pub document_symbol_provider: Option<Value>,
     pub folding_range_provider: Option<Value>,
+    pub inline_completion_provider: Option<Value>,
 }
 
 /// Whether a capability gate is on: present, and not an explicit `false`.
@@ -180,6 +181,32 @@ pub enum CompletionTextEdit {
     /// Tried first: an [`InsertReplaceEdit`] has no `range`, so it cannot be mistaken for one.
     Edit(TextEdit),
     InsertReplace(InsertReplaceEdit),
+}
+
+// ------------------------------------------------------------------ inline completion
+
+/// What an inline-completion request answers, in the three shapes the spec permits: a list, a
+/// bare array, or `null` — which is the `Option` around this at the call site.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum InlineCompletionResponse {
+    List(InlineCompletionList),
+    Array(Vec<InlineCompletionItem>),
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct InlineCompletionList {
+    pub items: Vec<InlineCompletionItem>,
+}
+
+/// The spec also allows `insertText` to be a `{kind, value}` snippet object. Nothing accent talks
+/// to sends one, and a ghost line is not a snippet, so this simply fails to read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InlineCompletionItem {
+    pub insert_text: String,
+    pub range: Option<Range>,
 }
 
 // ------------------------------------------------------------------- hover and signatures
@@ -333,6 +360,33 @@ mod tests {
             panic!("an array is a list of items")
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn an_inline_completion_answer_reads_in_all_three_shapes() {
+        let list: Option<InlineCompletionResponse> =
+            serde_json::from_value(json!({"items": [{"insertText": " au lait"}]})).unwrap();
+        let Some(InlineCompletionResponse::List(list)) = list else {
+            panic!("an object is an InlineCompletionList")
+        };
+        assert_eq!(list.items[0].insert_text, " au lait");
+        assert!(list.items[0].range.is_none());
+
+        let array: Option<InlineCompletionResponse> =
+            serde_json::from_value(json!([{"insertText": "a"}, {"insertText": "b"}])).unwrap();
+        let Some(InlineCompletionResponse::Array(items)) = array else {
+            panic!("an array is a list of items")
+        };
+        assert_eq!(items.len(), 2);
+
+        let nothing: Option<InlineCompletionResponse> =
+            serde_json::from_value(json!(null)).unwrap();
+        assert!(nothing.is_none());
+
+        // A snippet object is refused rather than modelled: a ghost line is not a snippet.
+        let snippet: Result<InlineCompletionResponse, _> =
+            serde_json::from_value(json!({"items": [{"insertText": {"kind": 2, "value": "a"}}]}));
+        assert!(snippet.is_err());
     }
 
     #[test]
