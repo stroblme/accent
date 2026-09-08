@@ -95,6 +95,13 @@ pub enum Event {
         rel: String,
         items: Vec<Diagnostic>,
     },
+    /// A language provider started or finished a background job worth waiting for — the
+    /// ghost-text index rebuilding, and nothing else today. `what` is what to call it on screen.
+    /// Shown where the vault's own indexing is shown, and yielding to it: this one is optional.
+    Busy {
+        what: String,
+        busy: bool,
+    },
 }
 
 /// What a rename would do, so the UI can confirm before anything is written.
@@ -237,6 +244,15 @@ impl Vault {
         match &self.backend {
             Backend::Local(v) => v.set_config(cfg),
             Backend::Remote(r) => r.set_config(cfg),
+        }
+    }
+
+    /// Whether a prose document opened from here on gets a ghost-text session. Global rather
+    /// than per vault, which is why it does not travel in [`VaultConfig`].
+    pub fn set_ghost(&self, on: bool) {
+        match &self.backend {
+            Backend::Local(v) => v.set_ghost(on),
+            Backend::Remote(r) => r.set_ghost(on),
         }
     }
 
@@ -832,6 +848,10 @@ impl Local {
 
     pub fn set_config(&self, cfg: VaultConfig) {
         *locked(&self.cfg) = cfg;
+    }
+
+    pub fn set_ghost(&self, on: bool) {
+        self.lang.set_ghost(on);
     }
 
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.

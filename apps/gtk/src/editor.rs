@@ -161,6 +161,7 @@ impl Flavour {
 /// what they were until code tabs needed a sixth.
 pub struct Prefs {
     pub spellcheck: bool,
+    pub ghost_text: bool,
     pub font: Option<String>,
     pub zoom: f64,
     pub column_width: u32,
@@ -188,6 +189,9 @@ pub struct Tab {
     /// resize has to recompute the cap without being told the other two again.
     zoom: Cell<f64>,
     column: Cell<u32>,
+    /// Whether ghost text is wanted here. Mirrored onto `lang.ghost` so the request path reads
+    /// one cell, and kept here so a tab built while the preference was off can be turned on.
+    ghost_text: Cell<bool>,
     map: sourceview5::Map,
     /// The optional line-number gutter; hidden unless the preference turns it on.
     numbers: sourceview5::GutterRendererText,
@@ -264,7 +268,7 @@ pub fn open(
     prefs: &Prefs,
 ) -> Rc<Tab> {
     let path = root.join(key);
-    let (zoom, column_width) = (prefs.zoom, prefs.column_width);
+    let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
 
     // A language for code, none for a note (our own spans do that) and none for a CSV, whose
     // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
@@ -444,6 +448,7 @@ pub fn open(
         clamp,
         zoom: Cell::new(zoom),
         column: Cell::new(column_width),
+        ghost_text: Cell::new(ghost_text),
         map: map.clone(),
         numbers,
         sticky: sticky.clone(),
@@ -599,12 +604,17 @@ pub fn open(
     ));
 
     // Leaving the view is the other autosave trigger: switching tabs or windows mid-sentence
-    // should not be the one edit that is lost.
+    // should not be the one edit that is lost. It is also where the document settles: the save
+    // has just happened, and a provider that re-reads the vault on one is told now rather than
+    // after every autosave.
     let focus = gtk::EventControllerFocus::new();
     focus.connect_leave(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| tab.autosave_now()
+        move |_| {
+            tab.autosave_now();
+            crate::lang::settle(&tab);
+        }
     ));
     view.add_controller(focus);
 
@@ -1632,6 +1642,26 @@ impl Tab {
     pub fn add_caret(&self, below: bool) {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
             view.add_caret(below);
+        }
+    }
+
+    /// The view as the subclass that paints ghost text and holds the extra carets.
+    pub fn ghost_view(&self) -> Option<&multicaret::View> {
+        self.view.downcast_ref::<multicaret::View>()
+    }
+
+    /// Whether this tab was built with ghost text wanted; read once by `ghost::install`.
+    pub fn ghost_text_wanted(&self) -> bool {
+        self.ghost_text.get()
+    }
+
+    /// The preference changed under an open tab. Off clears whatever is on screen at once; on
+    /// only arms the path, since the session behind it is decided when the document is opened.
+    pub fn set_ghost_text(self: &Rc<Self>, on: bool) {
+        self.ghost_text.set(on);
+        self.lang.ghost.on.set(on);
+        if !on {
+            crate::ghost::clear(self);
         }
     }
 

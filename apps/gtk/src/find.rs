@@ -44,6 +44,8 @@ pub struct Wiring {
     /// How many pages the thing being looked at has, when it is counted in pages rather than
     /// lines. `None` for an editor, which counts lines.
     pub pages: Box<dyn Fn() -> Option<usize>>,
+    /// Record where the reader is in this pane, so Back returns to where the search started.
+    pub mark: Box<dyn Fn()>,
 }
 
 /// Which row the bar shows, and whether the replace controls come with it.
@@ -68,6 +70,11 @@ pub struct Bar {
     /// Set while the bar itself moves the caret, so the resulting count notification does not
     /// walk the label back to the value it had before the jump.
     busy: Cell<bool>,
+    /// Whether this run of the bar has already recorded where it started. The first search, step
+    /// or committed go-to marks the place and the rest of the walk does not, so Back returns to
+    /// where the search began rather than to the previous hit. Reset by opening and by closing,
+    /// the second because `F3` works with the bar shut.
+    marked: Cell<bool>,
     wiring: OnceCell<Wiring>,
 }
 
@@ -156,6 +163,7 @@ impl Bar {
             lines,
             target: RefCell::new(None),
             busy: Cell::new(false),
+            marked: Cell::new(false),
             wiring: OnceCell::new(),
         });
 
@@ -280,6 +288,7 @@ impl Bar {
 
     /// Reveal the bar in `mode`, prefilled from the selection when there is one worth searching.
     pub fn open(self: &Rc<Self>, mode: Mode) {
+        self.marked.set(false);
         match mode {
             Mode::Goto => {
                 // A PDF is counted in pages and everything else in lines, and the row says so
@@ -312,8 +321,20 @@ impl Bar {
         }
     }
 
+    /// Where the search started, recorded once per run of the bar, which is why every mover
+    /// calls it and only the first of them does anything.
+    fn mark_once(&self) {
+        if self.marked.replace(true) {
+            return;
+        }
+        if let Some(wiring) = self.wiring.get() {
+            (wiring.mark)();
+        }
+    }
+
     /// Next or previous match. Works with the bar closed too, which is what F3 is for.
     pub fn step(self: &Rc<Self>, forward: bool) {
+        self.mark_once();
         if self.presenting() {
             return self.to_preview(match forward {
                 true => PreviewOp::Next,
@@ -336,6 +357,7 @@ impl Bar {
     /// Put the bar away and give the document the keyboard back. Public because Escape reaches it
     /// from outside the bar too.
     pub fn close(&self) {
+        self.marked.set(false);
         self.bar.set_search_mode(false);
         if let Some(tab) = self.tab() {
             tab.view.grab_focus();
@@ -359,6 +381,7 @@ impl Bar {
     }
 
     fn search(self: &Rc<Self>, text: &str) {
+        self.mark_once();
         if self.presenting() {
             return self.to_preview(PreviewOp::Find(text.to_string()));
         }
@@ -416,6 +439,7 @@ impl Bar {
         let Some((line, column)) = goto_target(text) else {
             return;
         };
+        self.mark_once();
         match self.presenting() {
             true => self.to_preview(PreviewOp::Line {
                 line: line.max(1) as u32,

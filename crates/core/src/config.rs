@@ -18,6 +18,7 @@ macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
 spellcheck = true
+ghost_text = true
 minimap = false
 line_numbers = false
 column_width = 50
@@ -35,7 +36,7 @@ daily_dir = "Daily"
 daily_pattern = "%Y-%m-%d"
 daily_template = "Templates/Daily.md"
 templates_dir = "Templates"
-new_note_dir = "Inbox"
+new_file_dir = "Inbox"
 
 [vaults."/home/me/Notes".lsp.servers]
 python3 = ["pylsp"]
@@ -66,6 +67,9 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
     pub spellcheck: bool,
+    /// Suggest the rest of the line as the caret sits, from what the vault already says. Needs
+    /// `merl-rt` on the path; the switch only says whether to ask for it.
+    pub ghost_text: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
     /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
@@ -111,6 +115,7 @@ impl Default for Config {
             recent_vaults: Vec::new(),
             editor_font: None,
             spellcheck: true,
+            ghost_text: true,
             minimap: false,
             line_numbers: false,
             column_width: 50,
@@ -132,7 +137,7 @@ pub struct VaultConfig {
     pub daily_template: Option<String>,
     pub templates_dir: String,
     /// Empty means the vault root.
-    pub new_note_dir: String,
+    pub new_file_dir: String,
     pub lsp: LspConfig,
 }
 
@@ -151,7 +156,7 @@ impl Default for VaultConfig {
             daily_pattern: "%Y-%m-%d".to_string(),
             daily_template: None,
             templates_dir: "Templates".to_string(),
-            new_note_dir: String::new(),
+            new_file_dir: String::new(),
             lsp: LspConfig::default(),
         }
     }
@@ -397,6 +402,7 @@ mod tests {
         let c = Config::read(&p).unwrap();
         assert_eq!(c.recent_vaults, [PathBuf::from("/home/me/Notes")]);
         assert!(c.spellcheck);
+        assert!(c.ghost_text);
         assert!(!c.minimap);
         assert!(!c.line_numbers);
         assert_eq!(c.column_width, 50);
@@ -407,7 +413,7 @@ mod tests {
         assert_eq!(v.daily_pattern, "%Y-%m-%d");
         assert_eq!(v.daily_template.as_deref(), Some("Templates/Daily.md"));
         assert_eq!(v.templates_dir, "Templates");
-        assert_eq!(v.new_note_dir, "Inbox");
+        assert_eq!(v.new_file_dir, "Inbox");
         // An override is a list, so an action can keep several chords, and an empty list is how
         // the user says "no shortcut at all" rather than "fall back to the default".
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
@@ -419,7 +425,7 @@ mod tests {
         let again = Config::read(&back).unwrap();
         assert_eq!(again.recent_vaults, c.recent_vaults);
         assert_eq!(again.theme, Theme::Solarized);
-        assert_eq!(again.vaults["/home/me/Notes"].new_note_dir, "Inbox");
+        assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
     }
@@ -495,13 +501,13 @@ mod tests {
         c.set_vault(
             &link,
             VaultConfig {
-                new_note_dir: "Inbox".to_string(),
+                new_file_dir: "Inbox".to_string(),
                 ..Default::default()
             },
         );
         assert_eq!(c.vaults.len(), 1);
-        assert_eq!(c.vault(&real).new_note_dir, "Inbox");
-        assert_eq!(c.vault(&tmp.path().join("Other")).new_note_dir, "");
+        assert_eq!(c.vault(&real).new_file_dir, "Inbox");
+        assert_eq!(c.vault(&tmp.path().join("Other")).new_file_dir, "");
     }
 
     #[test]

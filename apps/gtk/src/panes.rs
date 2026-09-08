@@ -11,10 +11,12 @@
 //! *zones*: an edge of a pane means "split", which libadwaita has no notion of.
 
 use crate::find;
+use crate::pdfview::Anchor;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// The class `main::install_chrome_css` paints the drop hint with.
 const ZONE: &str = "accent-drop-zone";
@@ -56,6 +58,133 @@ pub fn recent_order<T: Clone + PartialEq>(history: &[T], live: &[T]) -> Vec<T> {
         .collect();
     order.extend(rest);
     order
+}
+
+/// Where a cursor at `at` in an order of `len` tabs lands after one `Ctrl+Tab`. Wraps, so a chord
+/// held past the end of the list comes round to the tab it started on.
+///
+/// Pure, and the whole of what a held chord decides: the order it walks is [`recent_order`]'s and
+/// does not move until the chord ends.
+pub fn cycle_to(len: usize, at: usize, forward: bool) -> usize {
+    match len {
+        0 => 0,
+        len if forward => (at + 1) % len,
+        len => (at + len - 1) % len,
+    }
+}
+
+/// `item` to the front of `order`: what selecting a tab does to the most recently used list.
+pub fn to_front<T: Clone + PartialEq>(order: &mut Vec<T>, item: &T) {
+    order.retain(|p| p != item);
+    order.insert(0, item.clone());
+}
+
+// --- back and forward ----------------------------------------------------------------------
+
+/// How many places back the reader can go. A navigation history is not an undo stack; a hundred
+/// is far past what anyone follows in one sitting. The PDF reader's number, now the pane's.
+const HISTORY: usize = 100;
+/// How far apart two lines are before they are two places rather than one. A paragraph typed in
+/// one sitting leaves one mark, not one per keystroke.
+const NEARBY: i32 = 10;
+/// How long a pause makes the same paragraph a second visit. Long enough to think mid-sentence,
+/// short enough that coming back to a note tomorrow is a place of its own.
+const COALESCE: Duration = Duration::from_secs(10);
+
+/// Where in a document a [`Place`] is. The smallest thing that covers both kinds of reader: a
+/// caret, and a PDF's [`Anchor`]. Everything else — an image, a diff, a shell — has one position
+/// and that is the whole document.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Spot {
+    /// A 1-based line and column, as [`crate::editor::Tab::goto_line`] takes them.
+    Caret(i32, i32),
+    Page(Anchor),
+    Whole,
+}
+
+/// Somewhere the reader has been: which document, and where in it.
+///
+/// The document is named by its `Doc::key` rather than held as a page, so an entry survives the
+/// tab moving along the bar and costs nothing to compare.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Place {
+    pub key: String,
+    pub at: Spot,
+}
+
+/// Whether `next` merges into `last` instead of being pushed behind it: the same document, near
+/// enough, and recorded within [`COALESCE`] of it — or exactly the same place, however long ago,
+/// which is what stops a jump recording the spot it starts from twice.
+///
+/// Pure, and the whole of the coalescing rule: `apart` is how long ago the last entry was made.
+pub fn coalesces(last: &Place, next: &Place, apart: Duration) -> bool {
+    if last.key != next.key {
+        return false;
+    }
+    match (last.at, next.at) {
+        (Spot::Caret(a, _), Spot::Caret(b, _)) => {
+            (a - b).abs() <= NEARBY && (apart <= COALESCE || last.at == next.at)
+        }
+        // A page is as near as a PDF's places get: the fractions move with every scroll.
+        (Spot::Page(a), Spot::Page(b)) => a.page == b.page,
+        (Spot::Whole, Spot::Whole) => true,
+        _ => false,
+    }
+}
+
+/// A pane's back/forward history: the places the reader has left, and the ones Back took them
+/// from. One per pane, so Back may switch tabs but never moves the keyboard to another pane.
+#[derive(Default)]
+pub struct Nav {
+    back: Vec<Place>,
+    forward: Vec<Place>,
+    /// When the top of `back` was recorded, which is what [`coalesces`] measures against.
+    at: Option<Instant>,
+}
+
+impl Nav {
+    /// Record `from` as somewhere to come back to. A place that coalesces with the last one
+    /// replaces it, so typing a paragraph leaves one mark rather than one per keystroke.
+    pub fn record(&mut self, from: Place, now: Instant) {
+        let apart = self
+            .at
+            .map_or(Duration::MAX, |then| now.saturating_duration_since(then));
+        match self.back.last_mut() {
+            Some(last) if coalesces(last, &from, apart) => *last = from,
+            _ => {
+                self.back.push(from);
+                if self.back.len() > HISTORY {
+                    self.back.remove(0);
+                }
+            }
+        }
+        self.at = Some(now);
+        // Going somewhere new is what ends the branch Back opened, as it is in a browser.
+        self.forward.clear();
+    }
+
+    /// Back: where to go, given that the reader is at `here`.
+    pub fn back(&mut self, here: Place) -> Option<Place> {
+        let to = self.back.pop()?;
+        self.forward.push(here);
+        // The entry now on top is older than whatever was recorded last, so nothing may coalesce
+        // into it on the strength of a timestamp that belonged to the entry just taken off.
+        self.at = None;
+        Some(to)
+    }
+
+    pub fn forward(&mut self, here: Place) -> Option<Place> {
+        let to = self.forward.pop()?;
+        self.back.push(here);
+        self.at = None;
+        Some(to)
+    }
+
+    /// A tab has closed: its places go with it, because there is nothing left to go back into.
+    pub fn forget(&mut self, key: &str) {
+        self.back.retain(|p| p.key != key);
+        self.forward.retain(|p| p.key != key);
+    }
 }
 
 /// Which side of a pane a new pane goes on.
@@ -144,6 +273,11 @@ pub struct Pane {
     /// another pane or another window need no bookkeeping of its own: it simply stops being one
     /// of this pane's pages, and joins the other pane's history the moment it is selected there.
     history: RefCell<Vec<adw::TabPage>>,
+    /// How deep into `history` a held `Ctrl+Tab` has walked, `None` when no chord is in flight.
+    /// See [`Pane::step`].
+    cycling: Cell<Option<usize>>,
+    /// Back and forward across this pane's documents. See [`Nav`].
+    pub nav: RefCell<Nav>,
     /// The preview tab, if this pane has one: the tab a single click in the sidebar or a followed
     /// link opened, which the next such open replaces instead of piling up beside it.
     preview: RefCell<Option<adw::TabPage>>,
@@ -198,6 +332,8 @@ impl Pane {
             shade,
             drop,
             history: RefCell::new(Vec::new()),
+            cycling: Cell::new(None),
+            nav: RefCell::new(Nav::default()),
             preview: RefCell::new(None),
         })
     }
@@ -250,10 +386,20 @@ impl Pane {
 
     /// Remember that `page` was just selected. Pruning happens here too, so a page that has left
     /// the pane is out of the history by the next question anyone asks of it.
+    ///
+    /// While a `Ctrl+Tab` chord is held the order is left alone: the step this made arrives here
+    /// through the selection notify and must not rewrite the list it is walking. A selection from
+    /// anywhere else ends the chord, which is what stops a modifier release that never arrives —
+    /// focus lost, the window unmapped mid-chord — from stranding the pane in cycling state.
     pub fn touch(&self, page: &adw::TabPage) {
+        if let Some(at) = self.cycling.get() {
+            if self.recent().get(at) == Some(page) {
+                return;
+            }
+            self.cycling.set(None);
+        }
         let mut order = self.recent();
-        order.retain(|p| p != page);
-        order.insert(0, page.clone());
+        to_front(&mut order, page);
         *self.history.borrow_mut() = order;
     }
 
@@ -262,20 +408,30 @@ impl Pane {
         self.recent().into_iter().find(|p| p != page)
     }
 
-    /// One step of `Ctrl+Tab`: the next most recently used tab, or going back, the least recently
-    /// used one.
+    /// One step of `Ctrl+Tab`: one deeper into the order the tabs were last used in, the order
+    /// itself left alone until the chord ends. Three presses are three tabs back, and
+    /// `Ctrl+Shift+Tab` walks the same cursor the other way.
     ///
-    /// ponytail: the step is taken and the history reordered at once, so a second press forward
-    /// comes back rather than going two tabs deep. The alternative is VS Code's modal overlay,
-    /// held while Ctrl is down and committed on release; that is a lot of machinery for a chord
-    /// whose common use is switching between the last two notes, which this does. Going back
-    /// walks the whole history one tab per press, because the least recently used tab is the one
-    /// step behind the front of a list that rotates.
+    /// ponytail: nothing is shown on screen while the chord is held. This is the cheap half of
+    /// VS Code's idiom — the deferred reorder without the modal overlay that lists the tabs and
+    /// says where the cursor is, which is a widget, a keyboard grab and a paint of its own. The
+    /// overlay is the upgrade path; the order it would list is [`Pane::recent`] and the cursor it
+    /// would highlight is `cycling`, so it is a view over what is already here.
     pub fn step(&self, forward: bool) -> Option<adw::TabPage> {
         let order = self.recent();
-        match forward {
-            true => order.get(1).cloned(),
-            false => order.last().cloned(),
+        let at = cycle_to(order.len(), self.cycling.get().unwrap_or(0), forward);
+        self.cycling.set(Some(at));
+        order.get(at).cloned()
+    }
+
+    /// Ctrl came up: the tab the chord landed on is the most recently used one now. A no-op when
+    /// no chord is in flight, which is what every other Ctrl release is.
+    pub fn end_cycle(&self) {
+        if self.cycling.take().is_none() {
+            return;
+        }
+        if let Some(page) = self.tabs.selected_page() {
+            self.touch(&page);
         }
     }
 
@@ -483,14 +639,11 @@ mod tests {
         assert_eq!(zone(0.0, 0.0, 0.0, 0.0), Zone::Here);
     }
 
-    /// What `Pane::step` does, over three tabs: forward is one off the front of the order and
-    /// back is one off the end.
+    /// What `Pane::step` does, over three tabs: one step of a chord that is not being held, so
+    /// the cursor starts at the selected tab each time.
     fn step<'a>(order: &[&'a str], forward: bool) -> Option<&'a str> {
         let order = recent_order(order, &["A", "B", "C"]);
-        match forward {
-            true => order.get(1).copied(),
-            false => order.last().copied(),
-        }
+        order.get(cycle_to(order.len(), 0, forward)).copied()
     }
 
     /// NOTEPAD's own example: tabs A, B and C, A opened first, then a jump to C. Closing C shows
@@ -517,11 +670,106 @@ mod tests {
     fn ctrl_tab_steps_one_off_the_front_and_back_one_off_the_end() {
         // Forward is the tab used before this one, which is the switch between two notes.
         assert_eq!(step(&["C", "A", "B"], true), Some("A"));
-        // Back is the least recently used, so repeated presses walk the whole history.
+        // Back wraps to the least recently used one.
         assert_eq!(step(&["C", "A", "B"], false), Some("B"));
         // With two tabs both directions are the other one, and with one there is nowhere to go.
-        assert_eq!(recent_order(&["A", "B"], &["A", "B"]).get(1), Some(&"B"));
+        assert_eq!(step(&["A", "B"], true), Some("B"));
         assert_eq!(recent_order(&["A"], &["A"]).get(1), None);
+    }
+
+    /// The reorder is deferred while Ctrl is held, so each press goes one tab deeper instead of
+    /// coming straight back — the whole of what `Pane::step` and `Pane::end_cycle` decide.
+    #[test]
+    fn a_held_chord_walks_deeper_and_commits_once() {
+        let live = ["A", "B", "C", "D"];
+        // D is in front, then C, then B, then A.
+        let mut history = vec!["D", "C", "B", "A"];
+        let order = recent_order(&history, &live);
+
+        // Three presses, the order untouched between them: three tabs back, not a flip.
+        let mut at = 0;
+        for landed in ["C", "B", "A"] {
+            at = cycle_to(order.len(), at, true);
+            assert_eq!(order[at], landed);
+        }
+        // Ctrl+Shift+Tab walks the same cursor the other way.
+        assert_eq!(order[cycle_to(order.len(), at, false)], "B");
+        // A fourth press comes round to where the chord started rather than running out.
+        assert_eq!(order[cycle_to(order.len(), at, true)], "D");
+
+        // Ctrl up: the tab landed on goes to the front, and nothing else moves.
+        to_front(&mut history, &order[at]);
+        assert_eq!(history, ["A", "D", "C", "B"]);
+    }
+
+    fn caret(key: &str, line: i32) -> Place {
+        Place {
+            key: key.to_string(),
+            at: Spot::Caret(line, 1),
+        }
+    }
+
+    /// Typing a paragraph is one place to come back to, not one per keystroke; a jump away from
+    /// it is not a second copy of the same place either.
+    #[test]
+    fn edits_in_one_paragraph_coalesce() {
+        let quick = Duration::from_millis(80);
+        // The same note, three lines apart, one keystroke after another.
+        assert!(coalesces(&caret("a.md", 10), &caret("a.md", 13), quick));
+        // Far enough down the note to be somewhere else.
+        assert!(!coalesces(&caret("a.md", 10), &caret("a.md", 30), quick));
+        // Another note is another place however near the line numbers are.
+        assert!(!coalesces(&caret("a.md", 10), &caret("b.md", 10), quick));
+        // A long pause makes the same paragraph a second visit...
+        let later = Duration::from_secs(60);
+        assert!(!coalesces(&caret("a.md", 10), &caret("a.md", 13), later));
+        // ...but exactly the same place is never worth two entries, however long ago.
+        assert!(coalesces(&caret("a.md", 10), &caret("a.md", 10), later));
+        // A PDF is coarser: a page is as near as its places get.
+        let page = |n| Place {
+            key: "p.pdf".to_string(),
+            at: Spot::Page(Anchor {
+                page: n,
+                u: 0.0,
+                v: 0.1 * n as f32,
+            }),
+        };
+        assert!(coalesces(&page(3), &page(3), later));
+        assert!(!coalesces(&page(3), &page(4), quick));
+    }
+
+    /// The whole of Back and Forward: what is recorded, what a walk hands back, and that going
+    /// somewhere new ends the branch Back opened.
+    #[test]
+    fn back_walks_the_places_that_were_recorded() {
+        let mut nav = Nav::default();
+        let now = Instant::now();
+        // An edit in a.md, then a jump to b.md: the jump records where it started, which the edit
+        // has already put there, so there is one entry and not two.
+        nav.record(caret("a.md", 10), now);
+        nav.record(caret("a.md", 10), now);
+        assert_eq!(nav.back.len(), 1);
+
+        // From b.md, Back returns to the edit and b.md becomes the way forward again.
+        assert_eq!(nav.back(caret("b.md", 5)), Some(caret("a.md", 10)));
+        assert_eq!(nav.forward(caret("a.md", 10)), Some(caret("b.md", 5)));
+        assert_eq!(nav.back(caret("b.md", 5)), Some(caret("a.md", 10)));
+
+        // Somewhere new from here: the forward side goes, as it does in a browser.
+        nav.record(caret("a.md", 10), now);
+        assert!(nav.forward(caret("c.md", 1)).is_none());
+
+        // Nothing left to go back to is not an error, it is the start of the history.
+        let mut nav = Nav::default();
+        assert!(nav.back(caret("a.md", 1)).is_none());
+
+        // A closed tab's places go with it.
+        let mut nav = Nav::default();
+        nav.record(caret("a.md", 1), now);
+        nav.record(caret("b.md", 1), now);
+        nav.forget("a.md");
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
+        assert!(nav.back(caret("c.md", 1)).is_none());
     }
 
     #[test]

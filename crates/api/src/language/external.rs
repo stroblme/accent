@@ -18,8 +18,8 @@ use serde_json::{Value, json};
 
 use accent_lsp::types::{
     self, CompletionItem, CompletionResponse, CompletionTextEdit, DocumentSymbolResponse,
-    Documentation, GotoDefinitionResponse, HoverContents, MarkedString, ParameterLabel,
-    PublishDiagnosticsParams, ServerCapabilities, SignatureHelp,
+    Documentation, GotoDefinitionResponse, HoverContents, InlineCompletionResponse, MarkedString,
+    ParameterLabel, PublishDiagnosticsParams, ServerCapabilities, SignatureHelp, on,
 };
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
@@ -225,6 +225,49 @@ fn completions_of(
     }
 }
 
+/// The line a ghost-text answer suggests, or nothing.
+///
+/// Only the first item is read: ghost text shows one suggestion, and cycling through several is
+/// a UI that does not exist. A server that sends a `range` is answering about a span that starts
+/// before the caret (Copilot rewrites the word being typed); what the buffer already holds there
+/// is stripped, so the caller can always insert what comes back verbatim. A suggestion that does
+/// not begin with what is already written is refused rather than guessed at.
+fn inline_of(
+    answer: Option<InlineCompletionResponse>,
+    text: &str,
+    pos: Pos,
+    enc: Encoding,
+) -> Option<String> {
+    let items = match answer {
+        Some(InlineCompletionResponse::List(list)) => list.items,
+        Some(InlineCompletionResponse::Array(items)) => items,
+        None => return None,
+    };
+    let item = items.into_iter().next()?;
+    let suggestion = match item.range {
+        None => item.insert_text,
+        Some(range) => {
+            let range = enc.char_range(text, range);
+            let typed = between(text, range.start, pos)?;
+            item.insert_text.strip_prefix(&typed)?.to_string()
+        }
+    };
+    // ponytail: merl's own walk can answer a single space (its s1); a ghost of whitespace is
+    // noise on screen either way, whoever sent it.
+    match suggestion.trim().is_empty() {
+        true => None,
+        false => Some(suggestion),
+    }
+}
+
+/// The text between two positions of the same document, or `None` where they do not name a span
+/// of it: a range starting after the caret, or past the end.
+fn between(text: &str, from: Pos, to: Pos) -> Option<String> {
+    let from = super::byte_of(text, from)?;
+    let to = super::byte_of(text, to)?;
+    text.get(from..to).map(str::to_string)
+}
+
 fn marked(s: MarkedString) -> String {
     match s {
         MarkedString::String(s) => s,
@@ -376,11 +419,18 @@ pub(crate) struct External {
 ///
 /// `root` is the session root (a crate, a checkout); `vault_root` is what paths are relative to.
 /// They differ whenever a vault holds more than one project.
+/// Start `argv` and wire it up as a provider.
+///
+/// `busy_as` is what a background job in this server is called in the UI, or `None` for a server
+/// whose progress is not worth showing — which is every language server: rust-analyzer reports
+/// every `cargo check` and would never let the status bar settle. The ghost session is the one
+/// that says something the reader wants, because its index is the reason a suggestion is missing.
 pub(crate) async fn start(
     argv: Vec<String>,
     root: PathBuf,
     vault_root: PathBuf,
     events: Sender<Event>,
+    busy_as: Option<&'static str>,
 ) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
     let (client, notifications) =
@@ -392,11 +442,12 @@ pub(crate) async fn start(
     let docs: Docs = Arc::new(Mutex::new(HashMap::new()));
     // The task holds the documents and the channel, never the provider: it has to end when the
     // server's reader drops the sender, not when the last tab lets go of the session.
-    accent_lsp::runtime().spawn(forward_diagnostics(
+    accent_lsp::runtime().spawn(forward_notifications(
         notifications,
         docs.clone(),
         vault_root.clone(),
         encoding,
+        busy_as,
         events,
     ));
 
@@ -409,34 +460,62 @@ pub(crate) async fn start(
     }))
 }
 
-/// Turn what the server publishes into events for the tabs that can paint them.
+/// Turn what the server publishes into events for the UI that can show it: diagnostics for the
+/// tabs that paint them, and — for a server named by `busy_as` — whether it is busy.
 ///
 /// A server analyses more than it was asked about — rust-analyzer publishes for every file in a
 /// crate — and a diagnostic for a file nobody has open has nowhere to go, so it is dropped.
-async fn forward_diagnostics(
+async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
     vault_root: PathBuf,
     encoding: Encoding,
+    busy_as: Option<&'static str>,
     events: Sender<Event>,
 ) {
     while let Some(n) = notifications.recv().await {
-        if n.method != "textDocument/publishDiagnostics" {
-            continue;
+        match n.method.as_str() {
+            "textDocument/publishDiagnostics" => {
+                let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params)
+                else {
+                    continue;
+                };
+                let Some(rel) = rel_of(&params.uri, &vault_root) else {
+                    continue;
+                };
+                let Some(text) = locked(&docs).get(&rel).map(|d| d.text.clone()) else {
+                    continue;
+                };
+                let items = diagnostics_of(params.diagnostics, &text, encoding);
+                if events.send(Event::Diagnostics { rel, items }).is_err() {
+                    break;
+                }
+            }
+            "$/progress" => {
+                let Some(what) = busy_as else { continue };
+                // `begin` and `end`; a `report` in between only refines a message nothing here
+                // shows, so it is not a change of state.
+                let busy = match n.params.pointer("/value/kind").and_then(Value::as_str) {
+                    Some("begin") => true,
+                    Some("end") => false,
+                    _ => continue,
+                };
+                let what = what.to_string();
+                tracing::debug!("{what}: busy={busy}");
+                if events.send(Event::Busy { what, busy }).is_err() {
+                    break;
+                }
+            }
+            _ => continue,
         }
-        let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params) else {
-            continue;
-        };
-        let Some(rel) = rel_of(&params.uri, &vault_root) else {
-            continue;
-        };
-        let Some(text) = locked(&docs).get(&rel).map(|d| d.text.clone()) else {
-            continue;
-        };
-        let items = diagnostics_of(params.diagnostics, &text, encoding);
-        if events.send(Event::Diagnostics { rel, items }).is_err() {
-            break;
-        }
+    }
+    // The server exited, so whatever it was busy with is over. Without this a crash mid-index
+    // would leave the status bar saying so for the life of the vault.
+    if let Some(what) = busy_as {
+        let _ = events.send(Event::Busy {
+            what: what.to_string(),
+            busy: false,
+        });
     }
 }
 
@@ -506,6 +585,7 @@ impl External {
                 .as_ref()
                 .map_or_else(Vec::new, |s| firsts(&s.trigger_characters)),
             missing: None,
+            inline: on(&self.caps.inline_completion_provider),
         }
     }
 
@@ -604,6 +684,21 @@ impl Language for External {
                 self.encoding,
                 completion.resolve_provider,
             ))
+        })
+    }
+
+    /// `triggerKind` is always 2, automatic: accent asks on a pause in the typing and has no
+    /// action that asks for a suggestion, so there is never a 1 to send.
+    fn inline_completion(&self, rel: &str, pos: Pos) -> Fut<'_, Option<String>> {
+        let rel = rel.to_string();
+        Box::pin(async move {
+            if !on(&self.caps.inline_completion_provider) {
+                return Ok(None);
+            }
+            let (mut params, text) = self.at(&rel, pos)?;
+            params["context"] = json!({"triggerKind": 2});
+            let answer = self.ask("textDocument/inlineCompletion", params).await?;
+            Ok(inline_of(answer, &text, pos, self.encoding))
         })
     }
 
@@ -825,6 +920,54 @@ mod tests {
         assert_eq!(out[2].replace.start.character, 8);
         assert_eq!(out[2].replace.end, pos);
         assert!(out[2].resolve.is_some(), "kept for completionItem/resolve");
+    }
+
+    #[test]
+    fn a_ghost_line_is_what_is_left_to_type() {
+        let text = "naive caf\n";
+        let pos = Pos {
+            line: 0,
+            character: 9,
+        };
+
+        // merl's shape: one item, no range, the rest of the line.
+        let plain = json!({"items": [{"insertText": "e au lait"}]});
+        assert_eq!(
+            inline_of(parse(plain), text, pos, Encoding::Utf8),
+            Some("e au lait".to_string())
+        );
+
+        // A range reaching back over the word: what is already written is stripped, so the
+        // caller inserts what comes back at the caret either way.
+        let over = json!({"items": [
+            {"insertText": "caffe latte", "range": range(0, 6, 0, 9)}
+        ]});
+        assert_eq!(
+            inline_of(parse(over), text, pos, Encoding::Utf8),
+            Some("fe latte".to_string())
+        );
+
+        // A suggestion that does not continue what is written is refused, not guessed at.
+        let elsewhere = json!({"items": [
+            {"insertText": "tea", "range": range(0, 6, 0, 9)}
+        ]});
+        assert_eq!(inline_of(parse(elsewhere), text, pos, Encoding::Utf8), None);
+
+        // Nothing to show: no items, a null answer, or a suggestion of pure whitespace.
+        assert_eq!(
+            inline_of(parse(json!({"items": []})), text, pos, Encoding::Utf8),
+            None
+        );
+        assert_eq!(inline_of(None, text, pos, Encoding::Utf8), None);
+        assert_eq!(
+            inline_of(
+                parse(json!([{"insertText": "  "}])),
+                text,
+                pos,
+                Encoding::Utf8
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1098,6 +1241,74 @@ mod tests {
 
     /// texlab answers the LaTeX row; what NOTEPAD asked for (`\\ref` and `\\cite` completion)
     /// is the server's own, so this is what proves it needs nothing accent-side.
+    #[test]
+    fn merl_suggests_the_rest_of_a_line_the_vault_has_written_before() {
+        if !super::super::in_path("merl-rt") {
+            eprintln!("merl-rt is not installed: skipping the ghost-text end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        // Twice, because a match has to have been seen more than once to be offered.
+        let seen = "The kettle was already boiling.\n";
+        std::fs::write(root.path().join("a.md"), format!("{seen}{seen}")).unwrap();
+        let (vault, _events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+
+        let typed = "The kettle was";
+        accent_lsp::runtime().block_on(async {
+            let support = vault
+                .open_document("b.md", "markdown", typed.to_string())
+                .await
+                .unwrap();
+            assert!(support.inline, "merl answers for a note");
+            let at = Pos {
+                line: 0,
+                character: typed.chars().count() as u32,
+            };
+            assert_eq!(
+                vault.inline_completion("b.md", at).await.unwrap(),
+                Some(" already boiling.".to_string()),
+                "the rest of the line the vault already wrote"
+            );
+
+            // A note written after the session started is not in the index until the document
+            // it was typed in settles.
+            let later = "Rhubarb crumble needs custard.\n";
+            std::fs::write(root.path().join("c.md"), format!("{later}{later}")).unwrap();
+            let typed = "Rhubarb crumble";
+            let at = Pos {
+                line: 0,
+                character: typed.chars().count() as u32,
+            };
+            vault
+                .change_document("b.md", typed.to_string())
+                .await
+                .unwrap();
+            assert_eq!(vault.inline_completion("b.md", at).await.unwrap(), None);
+            vault.save_document("b.md").await.unwrap();
+            vault.settle("b.md").await.unwrap();
+            // The rebuild runs on a thread of merl's own, so the answer arrives once it lands.
+            let mut got = None;
+            for _ in 0..100 {
+                got = vault.inline_completion("b.md", at).await.unwrap();
+                if got.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(
+                got,
+                Some(" needs custard.".to_string()),
+                "settle re-indexed"
+            );
+        });
+    }
+
     #[test]
     fn texlab_completes_labels_and_citations() {
         if !super::super::in_path("texlab") {

@@ -233,6 +233,41 @@ pub fn master(url: &Url, ctl: &Path) -> Vec<String> {
     argv
 }
 
+/// One command on the host for a dialog that has not connected yet — the folder completion in the
+/// Open Remote form, which dials out so a path can be typed against the real machine.
+///
+/// `BatchMode=yes` is the whole point: the user has not pressed Connect, so a passphrase or a
+/// host-key question is the one thing this must never produce. Agent or key auth, or nothing at
+/// all. `ControlMaster=auto` on a socket of the caller's own — never [`control_path`], which an
+/// open vault may be using — lets the first call make the master every later one reuses, and it
+/// can be shut down with [`exit`] when the dialog closes. `ConnectTimeout` is the caller's and is
+/// short: a field that goes quiet is worse than one that never completes.
+pub fn probe(url: &Url, ctl: &Path, seconds: u32, command: &str) -> Vec<String> {
+    let mut argv = base(url, ctl);
+    argv.extend([
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ControlMaster=auto".to_string(),
+        "-o".to_string(),
+        "ControlPersist=30".to_string(),
+        "-o".to_string(),
+        format!("ConnectTimeout={seconds}"),
+    ]);
+    argv.push(url.destination());
+    argv.push("--".to_string());
+    argv.push(command.to_string());
+    argv
+}
+
+/// The completion probe's own socket, so a dialog can never take down the master an open vault on
+/// the same host is talking through.
+pub fn probe_path(url: &Url) -> PathBuf {
+    runtime_dir()
+        .join("accent")
+        .join(format!("{}-probe", id(url)))
+}
+
 /// Ask whether the master is alive. Exits non-zero when it is not.
 pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "check")
@@ -703,6 +738,31 @@ mod tests {
                 "uname -s",
             ])
         );
+    }
+
+    #[test]
+    fn a_completion_probe_never_prompts_and_gives_up_quickly() {
+        assert_eq!(
+            probe(&plain(), ctl(), 5, "ls -1p"),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ControlMaster=auto",
+                "-o",
+                "ControlPersist=30",
+                "-o",
+                "ConnectTimeout=5",
+                "box",
+                "--",
+                "ls -1p",
+            ])
+        );
+        // Its own socket: an open vault on the same host must not be shut down with the dialog.
+        assert_ne!(probe_path(&plain()), control_path(&plain()));
     }
 
     #[test]

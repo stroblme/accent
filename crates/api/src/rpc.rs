@@ -406,6 +406,9 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
     match method {
         "hello" => {
             vault.set_config(arg(p, 0)?);
+            // Ghost text is a global preference, so it rides `hello` rather than `VaultConfig`.
+            // An older client sends nothing and gets the default.
+            vault.set_ghost(arg::<Option<bool>>(p, 1)?.unwrap_or(true));
             ok(Hello {
                 root: vault.root().to_path_buf(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -485,6 +488,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             vault.change_document(&arg::<String>(p, 0)?, arg(p, 1)?),
         )),
         "save_document" => any(block(vault.save_document(&arg::<String>(p, 0)?))),
+        "settle" => any(block(vault.settle(&arg::<String>(p, 0)?))),
         "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
         "completion" => any(block(vault.completion(
             &arg::<String>(p, 0)?,
@@ -502,6 +506,9 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "references" => any(block(vault.references(&arg::<String>(p, 0)?, arg(p, 1)?))),
         "symbols" => any(block(vault.symbols(&arg::<String>(p, 0)?))),
         "folds" => any(block(vault.folds(&arg::<String>(p, 0)?))),
+        "inline_completion" => any(block(
+            vault.inline_completion(&arg::<String>(p, 0)?, arg(p, 1)?),
+        )),
 
         // -------------------------------------------------------------- git
         "repos" => ok(vault.repos()),
@@ -691,6 +698,19 @@ mod tests {
         let symbols: Vec<crate::Symbol> = w.client.call("symbols", json!(["a.md"])).unwrap();
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "Title");
+
+        // Ghost text crosses the wire like everything else. Whether merl is installed on the
+        // host decides whether there is an answer, so only the round trip is asserted here.
+        let at = crate::Pos {
+            line: 2,
+            character: 3,
+        };
+        let ghost: Option<String> = w
+            .client
+            .call("inline_completion", json!(["a.md", at]))
+            .unwrap();
+        assert_eq!(ghost, None, "a two-line note has nothing to suggest");
+        let _: () = w.client.call("settle", json!(["a.md"])).unwrap();
 
         assert!(
             w.wait(|e| matches!(e, Event::Diagnostics { rel, items }
