@@ -47,7 +47,7 @@ use accent_core::markdown::LinkKind;
 use adw::prelude::*;
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 use panes::{Pane, Place, Side, Spot, Zone};
 use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
@@ -134,6 +134,18 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
+    // Move the tab into the pane that way, splitting one off only when there is none. Left and
+    // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
+    // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
+    // `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
+    ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
+    (
+        "win.move-tab-right",
+        "Move Tab Right",
+        &["<Shift><Alt>Right"],
+    ),
+    ("win.move-tab-up", "Move Tab Up", &[]),
+    ("win.move-tab-down", "Move Tab Down", &[]),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
@@ -277,6 +289,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
+        shell_keys: Cell::new(false),
     });
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
     // leaves exactly that behind. Said once per process; there is no migration.
@@ -286,6 +299,12 @@ fn main() -> glib::ExitCode {
         }
     }
     shell.install_app_actions(&app);
+    // The keyboard moving to another window changes no `focus-widget` — each window keeps its
+    // own — so which shell has it is asked again here, of the window that has it now.
+    app.connect_active_window_notify({
+        let shell = shell.clone();
+        move |gtk_app| shell.sync_accels(gtk_app.upcast_ref())
+    });
     app.connect_command_line({
         let shell = shell.clone();
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
@@ -308,6 +327,10 @@ struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     landing: RefCell<Option<Landing>>,
+    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
+    /// One flag, not one per window, because the table is the application's: a window keeping
+    /// its own left every other window without its chords while a shell here had the keyboard.
+    shell_keys: Cell<bool>,
 }
 
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
@@ -404,6 +427,38 @@ impl Shell {
             .iter()
             .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
             .map(|(_, app)| app.clone())
+    }
+
+    /// Push the accelerators in force into the application. Done wholesale: forty
+    /// `set_accels_for_action` calls are cheaper than working out which of them a config change
+    /// touched.
+    ///
+    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
+    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
+    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
+    /// the same rule as the default it replaced. The shell asked about is the active window's,
+    /// whichever window is rebuilding: the table is one for all of them.
+    fn apply_accels(&self, gtk_app: &gtk::Application) {
+        let config = self.config.borrow();
+        let shell = terminal::has_focus(gtk_app);
+        self.shell_keys.set(shell);
+        for (action, _, _) in ACTIONS {
+            let accels = accels_for(&config, action);
+            let accels: Vec<&str> = accels
+                .iter()
+                .map(String::as_str)
+                .filter(|accel| !shell || reserved(action, accel))
+                .collect();
+            gtk_app.set_accels_for_action(action, &accels);
+        }
+    }
+
+    /// The keyboard moved: rebuild the table if it crossed into or out of a shell. Only a change
+    /// is worth acting on — focus moves on every click, and the rebuild is sixty calls.
+    fn sync_accels(&self, gtk_app: &gtk::Application) {
+        if terminal::has_focus(gtk_app) != self.shell_keys.get() {
+            self.apply_accels(gtk_app);
+        }
     }
 
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
@@ -1026,10 +1081,6 @@ struct App {
     /// The four chords the editor would otherwise eat, claimed at the window. Kept because a
     /// rebind has to rebuild it: see [`fill_captured`].
     captured: gtk::ShortcutController,
-    /// Whether the accelerator table is currently narrowed to [`reserved`] for a focused shell.
-    /// Only a change is worth acting on: focus moves on every click, and the rebuild is sixty
-    /// `set_accels_for_action` calls.
-    shell_keys: Cell<bool>,
 }
 
 impl App {
@@ -1301,6 +1352,40 @@ impl App {
         };
         let at = self.pane_of(&page).unwrap_or_else(|| self.pane());
         self.split_page(&at, side, &page);
+    }
+
+    /// Move the tab into the pane on `side`, or split one off when there is none that way. The
+    /// fallback is what makes the chord worth having in the common single-pane window, where
+    /// there is nowhere to move to yet; `win.split-*` stays the always-split.
+    fn move_tab(self: &Rc<Self>, side: Side) {
+        let Some(page) = self
+            .menu_page
+            .borrow()
+            .clone()
+            .or_else(|| self.tabs().selected_page())
+        else {
+            return;
+        };
+        let Some(from) = self.pane_of(&page) else {
+            return;
+        };
+        // Cloned out, and the borrow dropped: a transfer runs `page-detached` and `page-attached`
+        // synchronously, and both reach back into `panes`.
+        let panes: Vec<Rc<Pane>> = self.panes.borrow().clone();
+        let root = self.window.clone().upcast::<gtk::Widget>();
+        let rects: Vec<graphene::Rect> = panes.iter().map(|p| pane_rect(p, &root)).collect();
+        let Some(i) = panes
+            .iter()
+            .position(|p| Rc::ptr_eq(p, &from))
+            .and_then(|at| panes::neighbour(rects[at], &rects, side))
+        else {
+            return self.split_active(side);
+        };
+        let to = &panes[i];
+        from.tabs.transfer_page(&page, &to.tabs, to.tabs.n_pages());
+        // Selecting it is what makes the destination the active pane, retargets its find bar and
+        // saves the session, all through the `selected-page` handler the pane already has.
+        to.tabs.set_selected_page(&page);
     }
 
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
@@ -3591,6 +3676,10 @@ impl App {
             "split-right" => self.split_active(Side::Right),
             "split-up" => self.split_active(Side::Up),
             "split-down" => self.split_active(Side::Down),
+            "move-tab-left" => self.move_tab(Side::Left),
+            "move-tab-right" => self.move_tab(Side::Right),
+            "move-tab-up" => self.move_tab(Side::Up),
+            "move-tab-down" => self.move_tab(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
@@ -4372,6 +4461,12 @@ impl App {
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.
             vaults: start::other_vaults(&config.recent_vaults, self.vault().map(|v| v.key())),
+            // The tab bar's own chords: no command runs them, so they are not rows, but a
+            // rebind that took one would be shadowed by a controller the dialog cannot see.
+            taken: panes::widget_chords()
+                .into_iter()
+                .map(|(accel, what)| (accel.to_string(), what.to_string()))
+                .collect(),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
             on_rebind: Box::new({
@@ -4417,29 +4512,15 @@ impl App {
         );
     }
 
-    /// Push the accelerators in force into the application and rebuild the four captured chords.
-    /// Done wholesale: forty `set_accels_for_action` calls are cheaper than working out which of
-    /// them a config change touched.
-    ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced.
+    /// Push the accelerators in force into the application and rebuild this window's captured
+    /// chords. The table is the application's and lives with the [`Shell`]; the captured
+    /// controller is the window's own.
     fn apply_accels(&self) {
-        let Some(gtk_app) = self.window.application() else {
+        let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) else {
             return;
         };
+        shell.apply_accels(&gtk_app);
         let config = self.config.borrow();
-        let shell = terminal::has_focus(&self.window);
-        for (action, _, _) in ACTIONS {
-            let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels
-                .iter()
-                .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
-                .collect();
-            gtk_app.set_accels_for_action(action, &accels);
-        }
         let captured: Vec<(&str, String)> = CAPTURED
             .iter()
             .flat_map(|action| {
@@ -5117,7 +5198,6 @@ fn build_window(
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
-        shell_keys: Cell::new(false),
     });
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
@@ -6233,7 +6313,7 @@ const CAPTURED: &[&str] = &[
 ///
 /// GTK dispatches a window's application accelerators at the window in the capture phase, ahead
 /// of the focused VTE, so a chord in the table is eaten whatever the terminal does with it —
-/// unbinding it in `App::apply_accels` is what lets the key through. The reserved set is small
+/// unbinding it in `Shell::apply_accels` is what lets the key through. The reserved set is small
 /// and each entry earns its place:
 ///
 /// * `win.close-tab` (`Ctrl+W`) — Close Tab has to mean the same thing over every tab. This is
@@ -6258,6 +6338,10 @@ fn reserved(action: &str, accel: &str) -> bool {
         "win.close-tab"
             | "win.next-tab"
             | "win.previous-tab"
+            | "win.move-tab-left"
+            | "win.move-tab-right"
+            | "win.move-tab-up"
+            | "win.move-tab-down"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
@@ -6326,15 +6410,15 @@ fn install_actions(app: &Rc<App>) {
     app.apply_accels();
 
     // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
-    // crosses into or out of a terminal. `focus-widget` is the one signal that hears every way
-    // that happens: a click, a tab switch, a dialog, `Ctrl+J` itself.
+    // crosses into or out of a terminal. `focus-widget` hears every way that happens inside a
+    // window: a click, a tab switch, a dialog, `Ctrl+J` itself. Between windows it is the
+    // application's `active-window`, hooked in `main`.
     app.window.connect_focus_widget_notify(glib::clone!(
         #[weak]
         app,
         move |window| {
-            let shell = terminal::has_focus(window);
-            if shell != app.shell_keys.replace(shell) {
-                app.apply_accels();
+            if let Some((shell, gtk_app)) = app.shell.upgrade().zip(window.application()) {
+                shell.sync_accels(&gtk_app);
             }
         }
     ));
@@ -6409,6 +6493,12 @@ fn tab_menu() -> gio::Menu {
         split.append(label_of_owned(&action), Some(&action));
     }
     menu.append_section(None, &split);
+    let move_tab = gio::Menu::new();
+    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+        let action = format!("win.move-tab-{}", side.action());
+        move_tab.append(label_of_owned(&action), Some(&action));
+    }
+    menu.append_section(None, &move_tab);
     for action in [
         "win.copy-relative-path",
         "win.copy-absolute-path",
@@ -6423,6 +6513,14 @@ fn tab_menu() -> gio::Menu {
     );
     menu.append_section(None, &reveal);
     menu
+}
+
+/// Where `pane` sits in the window, for [`panes::neighbour`]. A pane that has not been allocated
+/// yet — a split in the same main-loop turn — has no bounds, and a zero rect is what says so.
+fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
+    pane.widget()
+        .compute_bounds(root)
+        .unwrap_or_else(graphene::Rect::zero)
 }
 
 /// One button rather than a two-item group: there are only two states, so the pressed look plus
@@ -6470,20 +6568,48 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away.
+/// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
+/// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
+/// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
+/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
+/// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
+/// prints what `Ctrl+S` activates.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
+    let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
-    if expand.is_none() && switcher.is_none() && !git && !keys && !chrome && !templates {
+    let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
+    let panes = std::env::var("ACCENT_BENCH_PANES").ok();
+    let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
+    if expand.is_none()
+        && switcher.is_none()
+        && style.is_none()
+        && panes.is_none()
+        && !git
+        && !keys
+        && !chrome
+        && !templates
+        && !paths
+        && !shell_keys
+    {
         return;
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(rels) = panes {
+            return bench_panes(&app, &rels);
+        }
+        if shell_keys {
+            return bench_shell_keys(&app);
+        }
+        if paths {
+            return bench_paths(&app);
+        }
         if templates {
             return bench_templates(&app);
         }
@@ -6495,6 +6621,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if git {
             return bench_git(&app);
+        }
+        if let Some(rel) = style {
+            return bench_style(&app, &rel);
         }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);
@@ -6701,6 +6830,107 @@ fn bench_keys(app: &Rc<App>) {
     });
 }
 
+/// What a path entry's completion does with the keyboard, and whether the entry takes the width
+/// the list gives the dialog.
+///
+/// Layout is real under Xvfb — an allocation wants a mapped window, not a window manager — so the
+/// width either side of the list appearing is measured rather than argued. The keys are emitted on
+/// the entry's own controller, which proves the handler, the selection and the text it applies but
+/// **not** the propagation phase: emitting a signal skips phase dispatch altogether, so that Return
+/// beats `GtkText`'s own binding is still a claim only a real session can settle.
+fn bench_paths(app: &Rc<App>) {
+    let entry = gtk::Entry::new();
+    let field = fileops::path_field(&entry, "bench", |_| {
+        ["Archive/", "Attachments/", "Notes/"]
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    });
+    let window = gtk::Window::builder()
+        .default_width(600)
+        .child(&field)
+        .build();
+    window.present();
+    // Fills the list. The toplevel never goes active under Xvfb, so `show_completions` leaves it
+    // put away and the first Down is what opens it.
+    entry.set_text("A");
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        print_width("shut", &entry);
+        // Nothing has been aimed at, so Return belongs to the dialog and the text stays as typed.
+        press_key(&entry, gdk::Key::Return);
+        println!("bench path_applied none {:?}", entry.text());
+        press_key(&entry, gdk::Key::Down);
+        println!("bench path_selected {:?}", selected_offer(&field));
+        // A second frame, because the row the list just grew is what widens the dialog.
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            print_width("open", &entry);
+            press_key(&entry, gdk::Key::Down);
+            println!("bench path_selected {:?}", selected_offer(&field));
+            press_key(&entry, gdk::Key::Return);
+            println!("bench path_applied selected {:?}", entry.text());
+            // The pointer's way in, which applies from an idle rather than on the spot.
+            if let Some(list) = completion_list(&field)
+                && let Some(row) = list.row_at_index(2)
+            {
+                list.emit_by_name::<()>("row-activated", &[&row]);
+            }
+            glib::idle_add_local_once(move || {
+                println!("bench path_activated {:?}", entry.text());
+                window.close();
+                bench_quit(&app);
+            });
+        });
+    });
+}
+
+/// The entry's allocated width against the `.linked` row it sits in, whose surplus is the folder
+/// button. `state` says whether the completion list was showing.
+fn print_width(state: &str, entry: &gtk::Entry) {
+    let row = entry.parent().map_or(0, |row| row.width());
+    println!("bench path_entry_width {state} {} {row}", entry.width());
+}
+
+/// Emit a key press on the entry's own key controller: the headless image has no window manager
+/// to give the toplevel the keyboard, and no xdotool to press anything with.
+fn press_key(entry: &gtk::Entry, key: gdk::Key) {
+    use glib::translate::IntoGlib;
+    let controllers = entry.observe_controllers();
+    for i in 0..controllers.n_items() {
+        let Some(keys) = controllers
+            .item(i)
+            .and_downcast::<gtk::EventControllerKey>()
+        else {
+            continue;
+        };
+        keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&key.into_glib(), &0u32, &gdk::ModifierType::empty()],
+        );
+    }
+}
+
+/// A path field's completion list: the revealer's, and the scroller hands back the viewport it
+/// wrapped a `GtkListBox` in rather than the list itself.
+fn completion_list(field: &gtk::Widget) -> Option<gtk::ListBox> {
+    field
+        .last_child()
+        .and_downcast::<gtk::Revealer>()
+        .and_then(|revealer| revealer.child())
+        .and_downcast::<gtk::ScrolledWindow>()
+        .and_then(|scroller| scroller.child())
+        .and_then(|viewport| viewport.first_child())
+        .and_downcast::<gtk::ListBox>()
+}
+
+/// The completion that list has highlighted, by the text it stands for.
+fn selected_offer(field: &gtk::Widget) -> Option<String> {
+    completion_list(field)
+        .and_then(|list| list.selected_row())
+        .and_then(|row| row.child().and_downcast::<gtk::Label>())
+        .map(|label| label.label().into())
+}
+
 /// Fire the actions the chords go through at a faded window, and print whether the chrome came
 /// back. An action on its own must not bring it back: focus mode ends on pointer motion, Escape,
 /// a focus change or a view-mode change, and an action is none of those (DESIGN.md, Chrome
@@ -6726,6 +6956,180 @@ fn bench_chrome(app: &Rc<App>) {
         }
     }
     bench_quit(app);
+}
+
+/// Open the two notes `rels` names in one pane, then split the second one off to the right, move
+/// it back, and ask for a move where there is no pane to move into.
+///
+/// What is printed is the **geometry** of the pane holding that tab, not its index: panes are
+/// kept in the order they were made, which is not the order they are drawn in, so only the
+/// rectangle says a tab really changed side.
+fn bench_panes(app: &Rc<App>, rels: &str) {
+    let Some((a, b)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    app.open_path(a);
+    app.open_path(b);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        let Some(page) = app.tabs().selected_page() else {
+            return bench_quit(&app);
+        };
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, 0);
+    });
+}
+
+/// One step of [`bench_panes`], read back after the frame it needs: `panes::neighbour` is
+/// geometric, so it wants the allocation a split has not been given yet, and an emptied pane
+/// closes itself from an idle.
+fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
+    const STEPS: &[&str] = &["win.split-right", "win.move-tab-left", "win.move-tab-right"];
+    let Some(action) = STEPS.get(step) else {
+        if let Some(gtk_app) = app.window.application() {
+            for accel in ["<Shift><Alt>Left", "<Shift><Alt>Right"] {
+                println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
+            }
+        }
+        return bench_quit(app);
+    };
+    println!("bench step {action}");
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    let (app, page) = (app.clone(), page.clone());
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        bench_pane_at(&app, &page);
+        bench_pane_step(&app, &page, step + 1);
+    });
+}
+
+/// How many panes there are, and where in the window the one holding `page` sits.
+fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
+    println!("bench panes {}", app.panes.borrow().len());
+    let root = app.window.clone().upcast::<gtk::Widget>();
+    match app.pane_of(page) {
+        Some(pane) => {
+            let r = pane_rect(&pane, &root);
+            println!("bench tab_at x={} y={}", r.x().round(), r.y().round());
+        }
+        None => println!("bench tab_at none"),
+    }
+}
+
+/// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
+/// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
+/// loop turns again*. `changed` is emitted from inside the insert, so a `true` here can only have
+/// come from the synchronous path — which is the whole question this bench answers.
+fn bench_style(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        for chars in [2 * 1024, 32 * 1024] {
+            bench_style_typing(&tab, chars);
+        }
+        bench_style_fenced(&tab);
+        // A heading typed far from the caret is what the fast path deliberately leaves out: it
+        // belongs to the debounced pass, and this says the pass still lands and still fixes it.
+        tab.buffer.insert(&mut tab.buffer.start_iter(), "# Far\n");
+        println!("bench style_far_sync {}", bench_heading_at(&tab, 0));
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            println!("bench style_debounced {}", bench_heading_at(&tab, 0));
+            bench_quit(&app);
+        });
+    });
+}
+
+/// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
+/// time the way a keyboard delivers it.
+fn bench_style_typing(tab: &Rc<Tab>, chars: usize) {
+    // Exactly 32 bytes, so the body is exactly the size the numbers are labelled with.
+    let body = "filler text for a long-ish note\n";
+    tab.set_text(&body.repeat(chars / body.len()));
+    tab.buffer.place_cursor(&tab.buffer.end_iter());
+    for ch in "\n# Headin".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let t0 = Instant::now();
+    tab.buffer.insert_at_cursor("g");
+    let us = t0.elapsed().as_micros();
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_sync chars={chars} {}",
+        bench_heading_at(tab, line)
+    );
+    println!("bench style_us {us}");
+}
+
+/// Type the same heading *inside a fenced block* on a note too long for a full pass. The line is
+/// tagged from a parse of the whole document, so the fence above it is what decides what it is:
+/// this is the claim a per-line pass stands or falls on, printed rather than argued.
+fn bench_style_fenced(tab: &Rc<Tab>) {
+    let body = "filler text for a long-ish note\n".repeat(1024);
+    tab.set_text(&format!("{body}```\n\n```\n"));
+    let Some(inside) = tab.buffer.iter_at_line(1025) else {
+        return;
+    };
+    tab.buffer.place_cursor(&inside);
+    for ch in "# Heading".chars() {
+        tab.buffer.insert_at_cursor(&ch.to_string());
+    }
+    let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+    println!(
+        "bench style_fenced h1={} codeblock={}",
+        bench_tag_at(tab, line, "h1"),
+        bench_tag_at(tab, line, "codeblock")
+    );
+}
+
+fn bench_heading_at(tab: &Rc<Tab>, line: i32) -> bool {
+    bench_tag_at(tab, line, "h1")
+}
+
+fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
+    let Some(tag) = tab.buffer.tag_table().lookup(name) else {
+        return false;
+    };
+    tab.buffer
+        .iter_at_line(line)
+        .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// A shell focused in a window that does not have the keyboard must not narrow the application's
+/// accelerator table, and one in the window that does must. Under Xvfb no window is ever
+/// activated, so the active one is the last added: a second window is opened first and the shell
+/// then opens in this one, which is the state after switching windows away from a shell. Closing
+/// the second window hands the keyboard back through the same `active-window` notify a real
+/// switch goes through. Prints what `Ctrl+S` activates: `["win.save"]`, then `[]`.
+fn bench_shell_keys(app: &Rc<App>) {
+    let Some(gtk_app) = app.window.application().and_downcast::<adw::Application>() else {
+        return bench_quit(app);
+    };
+    let Some(other) = app
+        .shell
+        .upgrade()
+        .and_then(|shell| shell.loose_window(&gtk_app))
+    else {
+        return bench_quit(app);
+    };
+    app.open_terminal();
+    let print = move |when: &str| {
+        println!(
+            "bench shell_keys {when} {:?}",
+            gtk_app.actions_for_accel("<Control>s")
+        );
+    };
+    // The shell takes focus from an idle.
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(200), move || {
+        print("shell-elsewhere");
+        other.window.close();
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            print("shell-here");
+            bench_quit(&app);
+        });
+    });
 }
 
 /// Closing the window is not enough to end the process while a dialog is up: quit the
@@ -7168,6 +7572,21 @@ mod tests {
         }
     }
 
+    /// The tab menu builds its action names with `format!`, so nothing but this says that what it
+    /// puts on a menu is a command the window has and the palette lists.
+    #[test]
+    fn the_tab_menu_names_actions_that_exist() {
+        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+            for prefix in ["win.split-", "win.move-tab-"] {
+                let action = format!("{prefix}{}", side.action());
+                assert!(
+                    ACTIONS.iter().any(|(name, _, _)| *name == action),
+                    "{action} is on the tab menu but not in ACTIONS"
+                );
+            }
+        }
+    }
+
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
     /// the window actually has.
     #[test]
@@ -7198,6 +7617,10 @@ mod tests {
         assert!(reserved("win.new-folder", "<Control><Shift>n"));
         assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
         assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
+        // Moving a tab has to mean the same thing over every tab, terminals included, and
+        // `Shift+Alt`+arrow has no readline meaning to cost a shell.
+        assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
+        assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
         for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
@@ -7260,6 +7683,53 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    /// The chords DESIGN.md's never-bind list reserves, as they are spelled in an accelerator.
+    /// `Super`+anything and `Ctrl+Alt`+anything are patterns rather than chords, so they are not
+    /// here; nothing binds a modifier by itself.
+    const NEVER_BIND: &[&str] = &[
+        "<Alt>Tab",
+        "<Alt>F4",
+        "<Alt>F7",
+        "<Alt>F8",
+        "F1",
+        "<Control><Shift>u",
+        "<Control>space",
+        "<Control>z",
+        "<Control>y",
+        "<Control>a",
+        "<Control>x",
+        "<Control>c",
+        "<Control>v",
+        "<Alt>Up",
+        "<Alt>Down",
+        "<Control>Home",
+        "<Control>End",
+        "<Control><Shift>Home",
+        "<Control><Shift>End",
+    ];
+
+    /// `AdwTabView` binds its own chords in the capture phase, ahead of both our accelerators and
+    /// the focused view's class shortcuts, so a chord it keeps is a chord nothing else can have.
+    /// Neither half of that is visible in `ACTIONS`, which is why it takes a test: one direction
+    /// is two controllers fighting over one chord, the other is the tab bar quietly holding a
+    /// GtkSourceView built-in — how `Ctrl+Home` in a note left the note instead of going to its
+    /// start.
+    #[test]
+    fn the_tab_bar_keeps_no_chord_that_is_ours_or_forbidden() {
+        for (accel, what) in panes::widget_chords() {
+            for (name, _, accels) in ACTIONS {
+                assert!(
+                    !accels.contains(&accel),
+                    "{accel} is {name} and AdwTabView's {what}"
+                );
+            }
+            assert!(
+                !NEVER_BIND.contains(&accel),
+                "AdwTabView holds {accel} for {what}, which the never-bind list reserves"
+            );
+        }
     }
 
     #[test]

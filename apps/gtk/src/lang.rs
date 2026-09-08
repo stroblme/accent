@@ -19,8 +19,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// DESIGN.md, Motion: the symbols and folds behind the Outline pane, the sticky title and the
-/// gutter chevrons follow the last edit by 300 ms, as the preview does.
+/// gutter chevrons follow the last edit by 300 ms, as the preview does. The ghost text comes
+/// first and sooner, after [`GHOST`]; the rest of the wait is served after it.
 const REFRESH: Duration = Duration::from_millis(300);
+
+/// How long after the last keystroke ghost text is asked for. Short, because it is painted at
+/// the caret, where a wait is read as the suggestion being gone; the answer itself costs a
+/// fraction of a millisecond.
+const GHOST: Duration = Duration::from_millis(100);
 
 /// A callback the window registered, in the shape `editor.rs` uses for its own.
 pub type Hook = Rc<dyn Fn(&Rc<Tab>)>;
@@ -256,18 +262,27 @@ fn restart(tab: &Rc<Tab>, delay: Duration) {
     }
     let weak = Rc::downgrade(tab);
     let handle = glib::spawn_future_local(async move {
-        if !delay.is_zero() {
-            glib::timeout_future(delay).await;
-        }
+        pause(delay.min(GHOST)).await;
         let Some(tab) = weak.upgrade() else { return };
-        refresh(tab).await;
+        refresh(tab, delay.saturating_sub(GHOST)).await;
     });
     *tab.lang.refresh.borrow_mut() = Some(handle);
 }
 
+/// Wait, unless there is nothing to wait for: a zero-length timeout still costs a turn of the
+/// main loop, and the callers that pass no delay want the answers now.
+async fn pause(delay: Duration) {
+    if !delay.is_zero() {
+        glib::timeout_future(delay).await;
+    }
+}
+
 /// Give the server the edit, then re-read what it implies: the symbols the Outline pane and the
 /// sticky title are drawn from, and the blocks that can be folded.
-async fn refresh(tab: Rc<Tab>) {
+///
+/// One future for both halves, so the next keystroke's abort still cancels either. `rest` is
+/// what is left of the wait once the ghost has been asked for.
+async fn refresh(tab: Rc<Tab>, rest: Duration) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
@@ -275,6 +290,7 @@ async fn refresh(tab: Rc<Tab>) {
     // First, because it is the one answer the user is waiting to see: the symbols and folds
     // behind it feed panes that are already drawn.
     crate::ghost::request(&tab).await;
+    pause(rest).await;
     let rel = tab.rel();
     match vault.symbols(&rel).await {
         Ok(symbols) => *tab.lang.symbols.borrow_mut() = symbols,

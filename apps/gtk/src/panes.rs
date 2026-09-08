@@ -13,7 +13,7 @@
 use crate::find;
 use crate::pdfview::Anchor;
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, gio, glib, graphene};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -24,19 +24,103 @@ const ZONE: &str = "accent-drop-zone";
 /// without swallowing the middle, which is the far commoner drop.
 const EDGE: f64 = 0.25;
 
-/// What `AdwTabView` keeps of its own chords. Four are taken away: `Ctrl+Tab` and
+/// What `AdwTabView` keeps of its own chords. Six are taken away: `Ctrl+Tab` and
 /// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
-/// they were last used rather than along the bar, and `Ctrl+Home` / `Ctrl+End` go back to
-/// GtkSourceView, whose document start and end they are on DESIGN.md's never-bind list. What is
-/// left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab, and `Alt+1`
-/// to `Alt+9` — is libadwaita's and stays there, being chords no action of ours wants.
+/// they were last used rather than along the bar, and both Home / End pairs go back to
+/// GtkSourceView, whose document start and end — with the selection and without — are on
+/// DESIGN.md's never-bind list. The widget's controller runs in the capture phase, so keeping
+/// `Ctrl+Shift+Home` here meant a note could not be selected to its top at all.
+///
+/// What is left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab along the
+/// bar, and `Alt+0` to `Alt+9` — is libadwaita's and stays there, being chords no action of ours
+/// wants. [`CHORDS`] is what writes them down.
 fn shortcuts() -> adw::TabViewShortcuts {
     adw::TabViewShortcuts::ALL_SHORTCUTS.difference(
         adw::TabViewShortcuts::CONTROL_TAB
             | adw::TabViewShortcuts::CONTROL_SHIFT_TAB
             | adw::TabViewShortcuts::CONTROL_HOME
-            | adw::TabViewShortcuts::CONTROL_END,
+            | adw::TabViewShortcuts::CONTROL_END
+            | adw::TabViewShortcuts::CONTROL_SHIFT_HOME
+            | adw::TabViewShortcuts::CONTROL_SHIFT_END,
     )
+}
+
+/// Every chord `AdwTabView` binds, with the flag that carries it and what it does, spelled the
+/// way `main::ACTIONS` spells its accelerators. Exhaustive over `ALL_SHORTCUTS` — a test says so
+/// — because a chord no table names is a chord the palette and the rebind dialog cannot see.
+const CHORDS: &[(adw::TabViewShortcuts, &str, &str)] = &[
+    (
+        adw::TabViewShortcuts::CONTROL_TAB,
+        "<Control>Tab",
+        "Next Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_TAB,
+        "<Control><Shift>Tab",
+        "Previous Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_PAGE_UP,
+        "<Control>Page_Up",
+        "Previous Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_PAGE_DOWN,
+        "<Control>Page_Down",
+        "Next Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_HOME,
+        "<Control>Home",
+        "First Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_END,
+        "<Control>End",
+        "Last Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_PAGE_UP,
+        "<Control><Shift>Page_Up",
+        "Move Tab Back",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_PAGE_DOWN,
+        "<Control><Shift>Page_Down",
+        "Move Tab Forward",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_HOME,
+        "<Control><Shift>Home",
+        "Move Tab to Start",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_END,
+        "<Control><Shift>End",
+        "Move Tab to End",
+    ),
+    // One flag, nine chords.
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>1", "Tab 1"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>2", "Tab 2"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>3", "Tab 3"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>4", "Tab 4"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>5", "Tab 5"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>6", "Tab 6"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>7", "Tab 7"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>8", "Tab 8"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>9", "Tab 9"),
+    (adw::TabViewShortcuts::ALT_ZERO, "<Alt>0", "Last Tab"),
+];
+
+/// The chords the tab bar still holds, each with the name of what it does there. The rebind
+/// dialog refuses them by that name, and a test keeps `ACTIONS` and the never-bind list off them.
+pub fn widget_chords() -> Vec<(&'static str, &'static str)> {
+    let kept = shortcuts();
+    CHORDS
+        .iter()
+        .filter(|(flag, _, _)| kept.contains(*flag))
+        .map(|(_, accel, what)| (*accel, *what))
+        .collect()
 }
 
 /// The order `Ctrl+Tab` walks and a close falls back to: `history` filtered down to the pages
@@ -247,6 +331,59 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
         Side::Up => (gtk::Orientation::Vertical, true),
         Side::Down => (gtk::Orientation::Vertical, false),
     }
+}
+
+/// The pane on `side` of `from`, as an index into `others`: the nearest one that starts at or
+/// past `from`'s far edge on that axis and faces it on the other. Ties — two panes stacked
+/// against the same edge — go to whichever faces more of `from`.
+///
+/// Geometry rather than a walk up the `GtkPaned` ancestors, because the widget tree says which
+/// splits nest and not which pane a reader would call "the one on the left". `others` may hold
+/// `from` itself: it cannot be past its own far edge, so it never matches. An unallocated pane
+/// has no neighbours, as it has no edges in [`zone`].
+pub fn neighbour(from: graphene::Rect, others: &[graphene::Rect], side: Side) -> Option<usize> {
+    if from.width() <= 0.0 || from.height() <= 0.0 {
+        return None;
+    }
+    // Every rect reduces to two spans: the one the side steps along, and the one it has to face.
+    // Left is the mirror of right and up of down, so turning the axis around is all that
+    // separates the four cases.
+    let (horizontal, forward) = match side {
+        Side::Left => (true, false),
+        Side::Right => (true, true),
+        Side::Up => (false, false),
+        Side::Down => (false, true),
+    };
+    let across = |r: &graphene::Rect| match horizontal {
+        true => (r.y(), r.y() + r.height()),
+        false => (r.x(), r.x() + r.width()),
+    };
+    // With the axis pointing the way `side` does, the near end is the smaller of the two.
+    let ends = |r: &graphene::Rect| {
+        let (a, b) = match horizontal {
+            true => (r.x(), r.x() + r.width()),
+            false => (r.y(), r.y() + r.height()),
+        };
+        match forward {
+            true => (a, b),
+            false => (-b, -a),
+        }
+    };
+    let far = ends(&from).1;
+    let (lo, hi) = across(&from);
+    others
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.width() > 0.0 && r.height() > 0.0)
+        .filter_map(|(i, r)| {
+            let near = ends(r).0;
+            let (a, b) = across(r);
+            let overlap = hi.min(b) - lo.max(a);
+            (near >= far && overlap > 0.0).then_some((i, near, overlap))
+        })
+        // Nearest first; among equals, the one facing more of `from`.
+        .min_by(|a, b| a.1.total_cmp(&b.1).then(b.2.total_cmp(&a.2)))
+        .map(|(i, _, _)| i)
 }
 
 /// One pane: its tab bar, its tab view, and the sheet that shows where a drop would land.
@@ -778,5 +915,62 @@ mod tests {
         assert_eq!(arrange(Side::Right), (gtk::Orientation::Horizontal, false));
         assert_eq!(arrange(Side::Up), (gtk::Orientation::Vertical, true));
         assert_eq!(arrange(Side::Down), (gtk::Orientation::Vertical, false));
+    }
+
+    /// Nothing else stops a flag a future libadwaita adds from arriving unlisted, which would put
+    /// a chord back beyond the reach of both the rebind dialog and the never-bind test.
+    #[test]
+    fn the_chord_table_covers_every_shortcut_the_widget_has() {
+        let listed = CHORDS
+            .iter()
+            .fold(adw::TabViewShortcuts::NONE, |all, (flag, _, _)| all | *flag);
+        assert_eq!(listed, adw::TabViewShortcuts::ALL_SHORTCUTS);
+    }
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> graphene::Rect {
+        graphene::Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn two_columns_have_one_neighbour_each_and_only_sideways() {
+        let left = rect(0.0, 0.0, 700.0, 900.0);
+        let right = rect(700.0, 0.0, 700.0, 900.0);
+        let panes = [left, right];
+        assert_eq!(neighbour(left, &panes, Side::Right), Some(1));
+        assert_eq!(neighbour(right, &panes, Side::Left), Some(0));
+        // Nothing beyond the window's edge, and nothing above or below a full-height column.
+        assert_eq!(neighbour(left, &panes, Side::Left), None);
+        assert_eq!(neighbour(left, &panes, Side::Up), None);
+        assert_eq!(neighbour(left, &panes, Side::Down), None);
+    }
+
+    #[test]
+    fn a_nested_split_hands_over_the_pane_it_overlaps_most() {
+        let left = rect(0.0, 0.0, 700.0, 900.0);
+        let top = rect(700.0, 0.0, 700.0, 600.0);
+        let bottom = rect(700.0, 600.0, 700.0, 300.0);
+        let panes = [left, top, bottom];
+        // Both start at the same edge, so the tie is broken by how much of the left column each
+        // of them faces.
+        assert_eq!(neighbour(left, &panes, Side::Right), Some(1));
+        assert_eq!(neighbour(top, &panes, Side::Down), Some(2));
+        assert_eq!(neighbour(bottom, &panes, Side::Up), Some(1));
+        assert_eq!(neighbour(top, &panes, Side::Left), Some(0));
+    }
+
+    #[test]
+    fn a_pane_that_is_only_diagonally_away_is_not_a_neighbour() {
+        let top_left = rect(0.0, 0.0, 700.0, 450.0);
+        let bottom_right = rect(700.0, 450.0, 700.0, 450.0);
+        let panes = [top_left, bottom_right];
+        // They touch at a corner and nowhere else, so neither is to the right of the other.
+        assert_eq!(neighbour(top_left, &panes, Side::Right), None);
+        assert_eq!(neighbour(top_left, &panes, Side::Down), None);
+    }
+
+    #[test]
+    fn an_unallocated_pane_has_no_neighbours() {
+        let panes = [rect(0.0, 0.0, 0.0, 0.0), rect(0.0, 0.0, 700.0, 900.0)];
+        assert_eq!(neighbour(panes[0], &panes, Side::Right), None);
     }
 }

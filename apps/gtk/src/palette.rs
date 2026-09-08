@@ -80,6 +80,10 @@ pub struct Sources {
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
     /// Short and already filtered, so it is passed whole rather than behind a loader.
     pub vaults: Vec<String>,
+    /// Chords no command of ours holds but that a widget does, each with the name of what it does
+    /// there. They are not rows in the palette — nothing can run them — but the rebind dialog has
+    /// to refuse them, or a command bound to one would be silently shadowed.
+    pub taken: Vec<(String, String)>,
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
@@ -472,6 +476,7 @@ pub fn present(
         commands,
         load_tags,
         vaults,
+        taken,
         on_rebind,
     } = sources;
     let recent = Rc::new(recent);
@@ -676,6 +681,7 @@ pub fn present(
         let (entry, selection) = (entry.clone(), selection.clone());
         let dialog = dialog.downgrade();
         let on_rebind = Rc::new(on_rebind);
+        let widget_taken = Rc::new(taken);
         move |action: &str| {
             let Some(dialog) = dialog.upgrade() else {
                 return;
@@ -687,7 +693,7 @@ pub fn present(
                 return;
             };
             let label = commands.borrow()[index].text().to_string();
-            let taken: Vec<(String, String)> = commands
+            let mut taken: Vec<(String, String)> = commands
                 .borrow()
                 .iter()
                 .filter_map(|c| match &**c {
@@ -699,6 +705,7 @@ pub fn present(
                 })
                 .flatten()
                 .collect();
+            taken.extend(widget_taken.iter().cloned());
             capture_shortcut(dialog.upcast_ref::<gtk::Widget>(), &label, taken, {
                 let (commands, clashes, refresh) =
                     (commands.clone(), clashes.clone(), refresh.clone());
