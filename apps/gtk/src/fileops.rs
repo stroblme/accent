@@ -10,9 +10,11 @@
 //! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
 //! it needs more input before it can act (Upload Files…, Download…).
 
-use accent_api::{RenamePlan, Vault};
+use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,6 +27,8 @@ const GROUP: &str = "fileops";
 const LISTED: usize = 20;
 /// How many file names an upload's toast or dialog spells out before it counts instead.
 const NAMED: usize = 3;
+/// How many folders a path entry offers at once before the list stops.
+const COMPLETIONS: usize = 12;
 
 /// Everything the operations need from the app, without depending on it.
 // Boxed closures are the whole point of this struct; a type alias per field would only hide the
@@ -64,7 +68,7 @@ pub struct Ops {
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
     let entry = name_entry("File name", "");
     let form = form();
-    form.append(&entry);
+    form.append(&vault_path_field(&entry, &ops.vault, dir));
 
     form.append(&name_preview(&entry, {
         let dir = dir.to_string();
@@ -173,7 +177,7 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
     let form = form();
-    form.append(&entry);
+    form.append(&vault_path_field(&entry, &ops.vault, parent_dir(rel)));
     // Rename is the keyboard's move as well, so the line under the entry is where the file lands
     // rather than what it will be called: `../moved.md` says which folder that is.
     form.append(&name_preview(&entry, {
@@ -1062,6 +1066,202 @@ fn focus_name(entry: &gtk::Entry, stem: Option<i32>) {
     }
 }
 
+// ------------------------------------------------------------------------------- completion
+
+/// The whole texts a half-typed path could be completed to: every name in `folders` that carries
+/// on from the last segment, with the rest of the path kept in front of it and a `/` on the end so
+/// the next segment can be typed straight away.
+///
+/// Folders only. The last segment is the file's own name, which is being invented rather than
+/// looked up, so nothing can complete it and a file would only be a name to collide with.
+pub(crate) fn completions(typed: &str, folders: &[String]) -> Vec<String> {
+    let typed = typed.trim();
+    let (head, leaf) = match typed.rsplit_once('/') {
+        Some((_, leaf)) => (&typed[..typed.len() - leaf.len()], leaf),
+        None => ("", typed),
+    };
+    let leaf = leaf.to_lowercase();
+    folders
+        .iter()
+        .filter(|name| name.to_lowercase().starts_with(&leaf))
+        .take(COMPLETIONS)
+        .map(|name| format!("{head}{name}/"))
+        .collect()
+}
+
+/// A path entry with the folders it could go into listed under it as it is typed.
+///
+/// GTK4 deprecated `GtkEntryCompletion` and shipped nothing in its place. A popover is the shape
+/// `start::host_field` reaches for, but not here: a completion list stays up while the keyboard is
+/// still in the entry, and in a dialog this small every popover GTK will fit lands on top of
+/// Cancel and Rename. So the list is a revealer inside the form — it pushes the buttons down
+/// instead of covering them, it is reachable by Tab, and it needs no grab, no hand-parenting and
+/// no guessing about where there is room. The folder button beside the entry is the same list on
+/// demand, for an entry nothing is typed in yet.
+///
+/// `complete` answers with whole texts the entry could hold, so every bit of path arithmetic stays
+/// with the caller. It may answer with nothing while it is still finding out — a listing on a
+/// worker thread, or a host that has not replied — and [`look_again`] is how it comes back once it
+/// knows.
+pub(crate) fn path_field(
+    entry: &gtk::Entry,
+    tooltip: &str,
+    complete: impl Fn(&str) -> Vec<String> + 'static,
+) -> gtk::Widget {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A deep vault is a list that scrolls rather than a dialog taller than the window.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(160)
+        .child(&list)
+        .build();
+    scroller.add_css_class("card");
+    let revealer = gtk::Revealer::builder().child(&scroller).build();
+    let button = gtk::ToggleButton::builder()
+        .icon_name("folder-symbolic")
+        .tooltip_text(tooltip)
+        .build();
+    button
+        .bind_property("active", &revealer, "reveal-child")
+        .bidirectional()
+        .sync_create()
+        .build();
+
+    entry.connect_changed({
+        let (list, button) = (list.clone(), button.clone());
+        move |entry| {
+            while let Some(row) = list.first_child() {
+                list.remove(&row);
+            }
+            let text = entry.text();
+            let offers = complete(&text);
+            for candidate in &offers {
+                let row = gtk::Button::builder()
+                    .child(&gtk::Label::builder().label(candidate).xalign(0.0).build())
+                    .build();
+                row.add_css_class("flat");
+                row.connect_clicked({
+                    // Weak: the entry owns this list through its own handler, so a row holding it
+                    // back would be a cycle that outlives the dialog.
+                    let (asked, candidate) = (entry.downgrade(), candidate.clone());
+                    move |_| {
+                        // Setting the text rebuilds this very list, so it happens once the click
+                        // is over — the same reason `popup` unparents its menu from an idle. The
+                        // focus goes back first, so the rebuilt list is the new folder's.
+                        let (asked, candidate) = (asked.clone(), candidate.clone());
+                        glib::idle_add_local_once(move || {
+                            if let Some(entry) = asked.upgrade() {
+                                entry.grab_focus_without_selecting();
+                                entry.set_text(&candidate);
+                                entry.set_position(-1);
+                            }
+                        });
+                    }
+                });
+                list.append(&row);
+            }
+            show_completions(&button, entry, offers.is_empty());
+        }
+    });
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.add_css_class("linked");
+    row.append(entry);
+    row.append(&button);
+    // 6 px inside a control group, per DESIGN.md's spacing scale: the list belongs to the entry.
+    let field = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    field.append(&row);
+    field.append(&revealer);
+    field.upcast()
+}
+
+/// Run a path entry's completion again, for an answer that arrived after the keystroke that asked
+/// for it. The entry's own `changed` is the one path everything watching it already takes — the
+/// list, and in the connect dialog the check that enables Connect — so a late answer needs no
+/// second channel, and nothing has to hold a closure that would hold it back.
+pub(crate) fn look_again(entry: &gtk::Entry) {
+    entry.emit_by_name::<()>("changed", &[]);
+}
+
+/// `FOCUS_WITHIN` rather than `has_focus`, which is always false here: a GTK4 `GtkEntry` is a
+/// wrapper whose inner `GtkText` is the widget that actually takes the keyboard.
+pub(crate) fn typing_here(entry: &gtk::Entry) -> bool {
+    entry.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN)
+}
+
+/// The list shows itself in answer to typing, not over a dialog nobody has touched: it opens only
+/// while the entry has the keyboard and holds something to complete. An entry that is still empty
+/// keeps its folders behind the button, which is insensitive when there are none.
+fn show_completions(button: &gtk::ToggleButton, entry: &gtk::Entry, empty: bool) {
+    button.set_sensitive(!empty);
+    button.set_active(!empty && typing_here(entry) && !entry.text().trim().is_empty());
+}
+
+/// A refresh that is only known once the field holding it exists, which is the knot a completion
+/// answering later has to tie: the field is built from the completion, and the completion has to
+/// be able to say "look again".
+/// The path entry the two name dialogs share, completing against the vault's own listing.
+///
+/// `base` is the folder a typed path is relative to. Listings are asked for on a worker thread and
+/// cached per folder, so a vault on another machine completes without a round trip on the
+/// keystroke and a local one answers off the index; a folder that has not answered yet offers
+/// nothing until it does.
+fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::Widget {
+    let folders: Rc<RefCell<HashMap<String, Option<Vec<String>>>>> =
+        Rc::new(RefCell::new(HashMap::new()));
+
+    path_field(entry, "Folders in this vault", {
+        // Weak: the entry owns this closure through its own `changed` handler, so holding it
+        // strongly would be a cycle that outlives the dialog.
+        let asked = entry.downgrade();
+        let (vault, base, folders) = (vault.clone(), base.to_string(), folders.clone());
+        move |typed| {
+            let Ok((dir, _)) = split_typed(&base, typed) else {
+                return Vec::new();
+            };
+            let known = folders.borrow().get(&dir).cloned();
+            if let Some(known) = known {
+                return known.map_or_else(Vec::new, |f| completions(typed, &f));
+            }
+            // `None` while the listing is out, so it is asked for once however fast the typing is.
+            folders.borrow_mut().insert(dir.clone(), None);
+            let (vault, folders, asked) = (vault.clone(), folders.clone(), asked.clone());
+            glib::spawn_future_local(async move {
+                let listed = gio::spawn_blocking({
+                    let (vault, dir) = (vault.clone(), dir.clone());
+                    move || vault.list_dir(&dir)
+                })
+                .await;
+                let names = match listed {
+                    Ok(Ok(rows)) => folder_names(rows),
+                    // Offering nothing beats offering a wrong list, which is what the tree says
+                    // about a directory the index could not answer for either.
+                    answer => {
+                        tracing::debug!(dir, "no completions: {answer:?}");
+                        Vec::new()
+                    }
+                };
+                folders.borrow_mut().insert(dir, Some(names));
+                if let Some(entry) = asked.upgrade() {
+                    look_again(&entry);
+                }
+            });
+            Vec::new()
+        }
+    })
+}
+
+/// The folder names directly inside a listing. Hidden ones are left out because the tree hides
+/// them and a typed path refuses them anyway.
+fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
+    rows.into_iter()
+        .filter(|row| row.kind == FileKind::Dir)
+        .map(|row| basename(&row.rel_path).to_string())
+        .filter(|name| !name.starts_with('.'))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1221,6 +1421,37 @@ mod tests {
         );
         assert_eq!(typed_path("", "x.md"), Ok("x.md".to_string()));
         assert!(typed_path("", "../x.md").is_err());
+    }
+
+    #[test]
+    fn completions_offer_folders_and_keep_the_path_in_front_of_them() {
+        let folders: Vec<String> = ["Archive", "Attachments", "Notes", "notes-old"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // The last segment is what is being completed; a `/` says the next one is starting.
+        assert_eq!(completions("Arc", &folders), ["Archive/".to_string()]);
+        assert_eq!(completions("At", &folders), ["Attachments/".to_string()]);
+        // Case-insensitive, and every match is offered.
+        assert_eq!(
+            completions("NOT", &folders),
+            ["Notes/".to_string(), "notes-old/".to_string()]
+        );
+        // The path already typed is kept, so a click leaves a whole path in the entry.
+        assert_eq!(
+            completions("../Deep/Arc", &folders),
+            ["../Deep/Archive/".to_string()]
+        );
+        assert_eq!(completions("Deep/", &folders).len(), folders.len());
+        // Nothing typed offers every folder; a name nothing starts with offers none.
+        assert_eq!(completions("", &folders).len(), folders.len());
+        assert!(completions("zzz", &folders).is_empty());
+        // A folder whose name was typed in full still earns its trailing slash, beside anything
+        // else that carries on from it.
+        assert_eq!(
+            completions("Notes", &folders),
+            ["Notes/".to_string(), "notes-old/".to_string()]
+        );
     }
 
     #[test]
