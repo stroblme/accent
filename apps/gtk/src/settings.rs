@@ -66,6 +66,7 @@ fn page(
     let page = adw::PreferencesPage::new();
     page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
+    page.add(&git_group(&config, &save));
     if let Some(root) = &root {
         page.add(&vault_group(&config, root, &save));
     }
@@ -263,21 +264,6 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     });
     group.add(&minimap);
 
-    // The Git pane's own toggle writes the same value, so the two surfaces are one preference.
-    let git_tree = adw::SwitchRow::builder()
-        .title("Group Git Changes by Folder")
-        .subtitle("Show the Git pane's changed files as a tree instead of a flat list")
-        .active(config.borrow().git_tree)
-        .build();
-    git_tree.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().git_tree = r.is_active();
-            save();
-        }
-    });
-    group.add(&git_tree);
-
     group
 }
 
@@ -291,6 +277,29 @@ fn font_subtitle(font: Option<&str>) -> String {
 
 fn system_font() -> String {
     crate::editor::default_font()
+}
+
+// -------------------------------------------------------------------------------------- git
+
+fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Git").build();
+
+    // The Git pane's own toggle writes the same value, so the two surfaces are one preference.
+    let tree = adw::SwitchRow::builder()
+        .title("Group Changes by Folder")
+        .subtitle("Show the Git pane's changed files as a tree instead of a flat list")
+        .active(config.borrow().git_tree)
+        .build();
+    tree.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().git_tree = r.is_active();
+            save();
+        }
+    });
+    group.add(&tree);
+
+    group
 }
 
 // ------------------------------------------------------------------------------- this vault
