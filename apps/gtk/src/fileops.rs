@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// The response id the three name dialogs confirm with.
-const CONFIRM: &str = "confirm";
+pub(crate) const CONFIRM: &str = "confirm";
 /// The action group the context menu's items resolve through, inserted on the tree widget.
 const GROUP: &str = "fileops";
 /// How many linking notes the rename dialog lists before it starts counting instead.
@@ -991,8 +991,9 @@ fn already_exists(e: &anyhow::Error) -> bool {
 
 // --------------------------------------------------------------------------------- widgetry
 
-/// The shared shape of the three name dialogs: Cancel, one verb, no OK button (DESIGN.md).
-fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {
+/// The shared shape of the name dialogs: Cancel, one verb, no OK button (DESIGN.md). Also what
+/// the Git pane's Create Branch uses, which is why this and [`name_entry`] are crate-visible.
+pub(crate) fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {
     let dialog = adw::AlertDialog::new(Some(title), None);
     dialog.set_extra_child(Some(form));
     dialog.add_responses(&[("cancel", "Cancel"), (CONFIRM, verb)]);
@@ -1025,7 +1026,7 @@ fn name_preview(
     preview
 }
 
-fn name_entry(placeholder: &str, text: &str) -> gtk::Entry {
+pub(crate) fn name_entry(placeholder: &str, text: &str) -> gtk::Entry {
     gtk::Entry::builder()
         .placeholder_text(placeholder)
         .text(text)

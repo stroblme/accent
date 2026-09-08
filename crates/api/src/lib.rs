@@ -708,6 +708,33 @@ impl Vault {
         )
     }
 
+    pub fn git_checkout_commit(&self, repo: &Repo, oid: &str) -> Result<()> {
+        ask!(
+            self,
+            |_: &Local| git::checkout_commit(repo, oid).map_err(anyhow::Error::from),
+            "git_checkout_commit",
+            json!([repo, oid])
+        )
+    }
+
+    pub fn git_create_branch(&self, repo: &Repo, name: &str, checkout: bool) -> Result<()> {
+        ask!(
+            self,
+            |_: &Local| git::create_branch(repo, name, checkout).map_err(anyhow::Error::from),
+            "git_create_branch",
+            json!([repo, name, checkout])
+        )
+    }
+
+    pub fn git_delete_branch(&self, repo: &Repo, name: &str, force: bool) -> Result<()> {
+        ask!(
+            self,
+            |_: &Local| git::delete_branch(repo, name, force).map_err(anyhow::Error::from),
+            "git_delete_branch",
+            json!([repo, name, force])
+        )
+    }
+
     pub fn git_commit(&self, repo: &Repo, message: &str, all: bool) -> Result<String> {
         ask!(
             self,

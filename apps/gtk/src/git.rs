@@ -17,6 +17,7 @@ use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, S
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 
+use crate::fileops;
 use crate::highlight;
 
 /// The changes list gets the top half of the pane, the log the bottom.
@@ -28,6 +29,9 @@ const PAGE: usize = 200;
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;
 
+/// The action group the history's context menu resolves its items against.
+const MENU_GROUP: &str = "gitlog";
+
 /// How long the pane waits after being poked before asking git again. Long enough that a burst of
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
@@ -36,6 +40,9 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
 /// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
 const SYNC_ICON: &str = "mail-send-receive-symbolic";
+
+/// How far one level of the changes tree is indented, in px.
+const INDENT: i32 = 12;
 
 /// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
 /// default interface font. A commit message is a subject, a blank line and a body, so one line is
@@ -65,6 +72,10 @@ pub struct Hooks {
     /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
     /// landing and costs an index write: this fires twice per sync and must stay cheap.
     pub syncing: Box<dyn Fn(bool)>,
+    /// Whether the changes list starts grouped by folder — `git_tree` in the config.
+    pub tree: bool,
+    /// The in-pane toggle moved: write the preference the Preferences dialog also edits.
+    pub set_tree: Box<dyn Fn(bool)>,
 }
 
 /// Which list a row belongs to, which is what decides the letter it shows, the buttons it offers
@@ -87,11 +98,24 @@ enum Row {
         /// read-only list.
         all: Option<Section>,
     },
+    /// A folder in the tree view, standing for everything under it in one section.
+    Folder {
+        /// The whole path from the repository root, which is what identifies the row while it is
+        /// collapsed.
+        path: String,
+        /// What the row shows: the segments this row adds to the one above it. A chain of folders
+        /// with a single child each lands on one row, so this is a path rather than a name.
+        label: String,
+        section: Section,
+        depth: usize,
+    },
     Entry {
         entry: Entry,
         section: Section,
         /// The path as the rest of the app names it: vault-relative, or absolute outside it.
         key: String,
+        /// How far the row is indented. Always 0 in the flat view.
+        depth: usize,
     },
     Submodule(Submodule),
 }
@@ -111,6 +135,10 @@ enum LogItem {
         letter: char,
         path: String,
     },
+    /// The last row while git has history the store does not: activating it pages the next
+    /// [`PAGE`] in. A row rather than a button under the list, so it is reached by scrolling to
+    /// the end of the history it continues.
+    More,
 }
 
 /// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
@@ -139,10 +167,20 @@ pub struct Panel {
     root: gtk::Widget,
     /// "empty" (no repository) or "repo".
     stack: gtk::Stack,
+    /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
+    /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
+    /// (`fileops::context_menu` documents the symptom).
+    column: gtk::Box,
     names: gtk::StringList,
     chooser: gtk::DropDown,
-    branch_names: gtk::StringList,
-    branch: gtk::DropDown,
+    /// What the branch button says, which is the branch HEAD is on or where it is detached.
+    branch_label: gtk::Label,
+    branch_menu: gtk::Popover,
+    branch_list: gtk::ListBox,
+    /// The names the popover is showing and which of them HEAD is on. A refresh that says the
+    /// same thing leaves the rows alone: one fires on every save, and rebuilding them would take
+    /// a row out from under the pointer already on it.
+    branch_shown: RefCell<(Vec<String>, Option<usize>)>,
     counts: gtk::Label,
     sync: gtk::Button,
     message: gtk::TextView,
@@ -153,15 +191,19 @@ pub struct Panel {
     divider: gtk::Paned,
     changes: gio::ListStore,
     log: gio::ListStore,
-    more: gtk::Button,
+    /// The history list, so the bench can activate a row without a pointer.
+    log_view: gtk::ListView,
+    /// Whether git has history the store does not hold, which is what puts the Load More row at
+    /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
+    has_more: Cell<bool>,
     state: RefCell<State>,
     /// The debounce timer, replaced rather than stacked.
     pending: RefCell<Option<glib::SourceId>>,
     busy: Cell<bool>,
     /// Something asked for a refresh while one was in flight; run once more when it lands.
     again: Cell<bool>,
-    /// Set while a chooser's list is being filled, so the selection notify that follows is not
-    /// read as the user picking a repository or a branch.
+    /// Set while the repository chooser's list is being filled, so the selection notify that
+    /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
     /// filled: this is the transfer the status bar spins for.
@@ -169,6 +211,12 @@ pub struct Panel {
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh closes them all.
     expanded: RefCell<Option<String>>,
+    /// Whether the changes list is grouped by folder. A copy of the `git_tree` preference, which
+    /// the Changes header's toggle and the Preferences switch both write.
+    tree: Cell<bool>,
+    /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
+    /// schedules one and folding a folder must survive it.
+    collapsed: RefCell<HashSet<String>>,
 }
 
 impl Panel {
@@ -185,19 +233,46 @@ impl Panel {
             .list_factory(&name_factory(false))
             .build();
 
-        // The branch is a chooser built exactly like the repository one above it, and for the
-        // same reasons: the button ellipsizes so that a long branch name is not what decides how
-        // narrow the sidebar can be dragged, while the popup keeps the names whole. Flat and
-        // `heading`, because it stands where the branch label stood and reads as the branch first
-        // and as a control second. It claims the row's spare width without taking it, so Sync and
-        // Commit stay at the trailing edge.
-        let branch_names = gtk::StringList::new(&[]);
-        let branch = gtk::DropDown::builder()
-            .model(&branch_names)
+        // The branch is a menu button rather than a chooser: its popover is a list of the local
+        // branches, each row switching to that branch and carrying a trash button, with Create
+        // Branch… underneath. A `GtkDropDown` can only ever pick one of the rows it already has.
+        // Flat and `heading`, because it stands where the branch label stood and reads as the
+        // branch first and as a control second; the label ellipsizes so that a long branch name
+        // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
+        // width without taking it, so Sync and Commit stay at the trailing edge.
+        let branch_label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
+        let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        face.append(&branch_label);
+        face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+
+        let branch_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        branch_list.add_css_class("navigation-sidebar");
+        let create = gtk::Button::builder().label("Create Branch…").build();
+        create.add_css_class("flat");
+        let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // A repository with fifty branches is a list that scrolls, not a popover taller than the
+        // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
+        branch_box.append(
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .max_content_height(280)
+                .child(&branch_list)
+                .build(),
+        );
+        branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        branch_box.append(&create);
+        let branch_menu = gtk::Popover::builder().child(&branch_box).build();
+        let branch = gtk::MenuButton::builder()
             .hexpand(true)
             .halign(gtk::Align::Start)
-            .factory(&name_factory(true))
-            .list_factory(&name_factory(false))
+            .child(&face)
+            .popover(&branch_menu)
             .build();
         for class in ["flat", "heading"] {
             branch.add_css_class(class);
@@ -304,19 +379,11 @@ impl Panel {
         // gap between its line and the next one's and the graph comes out dashed. The rule in
         // `install_chrome_css` takes the margin off; the breathing room moves onto the text.
         log_view.add_css_class("git-log");
-        let more = gtk::Button::builder()
-            .label("Load More")
-            .visible(false)
-            .build();
-        more.add_css_class("flat");
-        let log_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        log_box.append(&scroller(&log_view));
-        log_box.append(&more);
 
         let divider = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
             .start_child(&scroller(&changes_view))
-            .end_child(&log_box)
+            .end_child(&scroller(&log_view))
             .resize_start_child(true)
             .resize_end_child(true)
             .shrink_start_child(false)
@@ -344,13 +411,18 @@ impl Panel {
         stack.set_visible_child_name("empty");
 
         let panel = Rc::new(Panel {
+            tree: Cell::new(hooks.tree),
+            collapsed: RefCell::new(HashSet::new()),
             hooks,
             root: stack.clone().upcast(),
             stack,
+            column,
             names,
             chooser,
-            branch_names,
-            branch,
+            branch_label,
+            branch_menu,
+            branch_list,
+            branch_shown: RefCell::new((Vec::new(), None)),
             counts,
             sync,
             message,
@@ -360,7 +432,8 @@ impl Panel {
             divider,
             changes,
             log,
-            more,
+            log_view: log_view.clone(),
+            has_more: Cell::new(false),
             state: RefCell::new(State::default()),
             pending: RefCell::new(None),
             busy: Cell::new(false),
@@ -371,7 +444,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check);
+        panel.wire_header(&check, &create);
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
@@ -393,6 +466,38 @@ impl Panel {
         !self.state.borrow().repos.is_empty()
     }
 
+    /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
+    /// calls these: the headless image has no pointer, and the Load More row is only worth
+    /// anything if activating the end of the list really pages the next chunk in.
+    pub fn log_rows(&self) -> u32 {
+        self.log.n_items()
+    }
+
+    pub fn activate_last_log_row(&self) {
+        if let Some(last) = self.log.n_items().checked_sub(1) {
+            self.log_view.emit_by_name::<()>("activate", &[&last]);
+        }
+    }
+
+    /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
+    /// [`Panel::set_tree`], which is how the grouping is proven without a pointer.
+    pub fn changes_rows(&self) -> u32 {
+        self.changes.n_items()
+    }
+
+    /// Whether the changes list is grouped by folder, and putting it either way. The preference
+    /// has two surfaces — this one is the Preferences switch, through `App::apply_config` — so
+    /// nothing here writes the config back; only a move really redraws.
+    pub fn tree(&self) -> bool {
+        self.tree.get()
+    }
+
+    pub fn set_tree(&self, on: bool) {
+        if self.tree.replace(on) != on {
+            self.rebuild_changes();
+        }
+    }
+
     /// Ask git again, once, in [`DEBOUNCE`]. Calling this ten times in a row is one query.
     pub fn schedule_refresh(self: &Rc<Self>) {
         if let Some(id) = self.pending.borrow_mut().take() {
@@ -408,10 +513,10 @@ impl Panel {
 
     // --- wiring -------------------------------------------------------------------------------
 
-    fn wire_header(self: &Rc<Self>, check: &gtk::Button) {
+    fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
         on_click(self, check, |panel| panel.refresh());
-        on_click(self, &self.more, |panel| panel.load_more());
+        on_click(self, create, |panel| panel.create_branch());
 
         let weak = Rc::downgrade(self);
         self.chooser.connect_selected_notify(move |chooser| {
@@ -424,19 +529,6 @@ impl Panel {
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
             panel.refresh();
-        });
-
-        let weak = Rc::downgrade(self);
-        self.branch.connect_selected_notify(move |chooser| {
-            let (Some(panel), Some(picked)) = (
-                weak.upgrade(),
-                chooser.selected_item().and_downcast::<gtk::StringObject>(),
-            ) else {
-                return;
-            };
-            if !panel.syncing.get() {
-                panel.checkout(picked.string().to_string());
-            }
         });
     }
 
@@ -504,9 +596,10 @@ impl Panel {
                 item.set_child(Some(&change_row(item, &weak)));
             }
         });
-        factory.connect_bind(|_, item| {
+        let weak = Rc::downgrade(self);
+        factory.connect_bind(move |_, item| {
             if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                bind_change(item);
+                bind_change(item, &weak);
             }
         });
         view.set_factory(Some(&factory));
@@ -524,9 +617,10 @@ impl Panel {
 
     fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
         let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
+        let weak = Rc::downgrade(self);
+        factory.connect_setup(move |_, item| {
             if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                item.set_child(Some(&log_row(item)));
+                item.set_child(Some(&log_row(item, &weak)));
             }
         });
         factory.connect_bind(|_, item| {
@@ -551,6 +645,7 @@ impl Panel {
                 LogItem::File {
                     oid, parent, path, ..
                 } => panel.compare(&path, &path, Sides::Commit { oid, parent }),
+                LogItem::More => panel.load_more(),
             }
         });
     }
@@ -616,16 +711,6 @@ impl Panel {
             })
             .collect();
 
-        let rows = match fetched.statuses.get(selected) {
-            Some(status) => rows_of(status, &fetched.submodules, &|path| {
-                vault_key(&self.hooks.vault.root(), &fetched.repos[selected], path)
-            }),
-            None => Vec::new(),
-        };
-        let items: Vec<glib::BoxedAnyObject> =
-            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
-        self.changes.splice(0, self.changes.n_items(), &items);
-
         let head = fetched
             .statuses
             .get(selected)
@@ -650,10 +735,7 @@ impl Panel {
         // its file list and flashes every row, so only a real difference is drawn. A page that
         // has not moved also leaves whatever Load More added below it alone.
         let moved = !same_head(&self.state.borrow().commits, &fetched.commits);
-        if moved {
-            self.more.set_visible(fetched.commits.len() >= PAGE);
-            self.fill_log(fetched.commits.clone(), 0);
-        }
+        let page = moved.then(|| fetched.commits.clone());
 
         {
             let mut state = self.state.borrow_mut();
@@ -669,25 +751,92 @@ impl Panel {
             state.submodules = fetched.submodules;
             state.selected = selected;
         }
+        // After the state is written: the changes list is drawn from it, so that the tree toggle
+        // and a folder's chevron redraw the same rows without a `git status` of their own.
+        self.rebuild_changes();
+        if let Some(page) = page {
+            self.has_more.set(page.len() >= PAGE);
+            self.fill_log(page, 0);
+        }
         self.sync_commit();
         (self.hooks.changed)();
     }
 
-    /// Put the branch chooser on `names` with `at` picked, without the selection notify that
-    /// follows being read as the user asking for a checkout.
-    fn set_branches(&self, names: &[String], at: Option<usize>) {
-        self.syncing.set(true);
-        let held: Vec<String> = (0..self.branch_names.n_items())
-            .filter_map(|i| self.branch_names.string(i).map(|s| s.to_string()))
-            .collect();
-        if held != names {
-            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-            self.branch_names
-                .splice(0, self.branch_names.n_items(), &refs);
+    /// Draw the changes list from what the last refresh learned, and nothing else: what the tree
+    /// toggle and a folder row both need, neither of them being a reason to ask git again.
+    fn rebuild_changes(&self) {
+        let rows = {
+            let state = self.state.borrow();
+            match (
+                state.statuses.get(state.selected),
+                state.repos.get(state.selected),
+            ) {
+                (Some(status), Some(repo)) => rows_of(
+                    status,
+                    &state.submodules,
+                    &|path| vault_key(&self.hooks.vault.root(), repo, path),
+                    self.tree.get(),
+                    &self.collapsed.borrow(),
+                ),
+                _ => Vec::new(),
+            }
+        };
+        let items: Vec<glib::BoxedAnyObject> =
+            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        self.changes.splice(0, self.changes.n_items(), &items);
+    }
+
+    /// Put the branch popover on `names`, `at` being the row HEAD is on.
+    fn set_branches(self: &Rc<Self>, names: &[String], at: Option<usize>) {
+        self.branch_label
+            .set_text(at.and_then(|i| names.get(i)).map_or("", String::as_str));
+        if *self.branch_shown.borrow() == (names.to_vec(), at) {
+            return;
         }
-        self.branch
-            .set_selected(at.map_or(gtk::INVALID_LIST_POSITION, |i| i as u32));
-        self.syncing.set(false);
+        self.branch_shown.replace((names.to_vec(), at));
+        while let Some(row) = self.branch_list.first_child() {
+            self.branch_list.remove(&row);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let row = self.branch_row(name, Some(i) != at);
+            self.branch_list.append(&row);
+        }
+    }
+
+    /// One row of the branch popover: the name, which switches to it, and — where git would let
+    /// it go — a trash button. The branch HEAD is on has none: git refuses to delete it, and a
+    /// control that cannot work is dead chrome (DESIGN.md, Principle 1).
+    fn branch_row(self: &Rc<Self>, name: &str, deletable: bool) -> gtk::Box {
+        let switch = gtk::Button::builder()
+            .child(&gtk::Label::builder().label(name).xalign(0.0).build())
+            .hexpand(true)
+            .build();
+        switch.add_css_class("flat");
+        let (weak, asked) = (Rc::downgrade(self), name.to_string());
+        switch.connect_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.branch_menu.popdown();
+                panel.checkout(asked.clone());
+            }
+        });
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.append(&switch);
+        if deletable {
+            let trash = icon_button("user-trash-symbolic", "Delete Branch");
+            // The hover rule the changed files' actions already follow, and the same class: a
+            // `GtkListBoxRow`'s node is `row`, which is what that CSS selects on.
+            trash.add_css_class("git-actions");
+            let (weak, asked) = (Rc::downgrade(self), name.to_string());
+            trash.connect_clicked(move |_| {
+                if let Some(panel) = weak.upgrade() {
+                    panel.branch_menu.popdown();
+                    panel.delete_branch(asked.clone(), false);
+                }
+            });
+            row.append(&trash);
+        }
+        row
     }
 
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
@@ -697,11 +846,16 @@ impl Panel {
         self.collapse();
         let rows = git::lanes(commits);
         let keep = keep.min(rows.len()) as u32;
-        let items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
+        let mut items: Vec<glib::BoxedAnyObject> = rows[keep as usize..]
             .iter()
             .cloned()
             .map(|row| glib::BoxedAnyObject::new(LogItem::Commit(row)))
             .collect();
+        // The splice reaches the end of the store, so this is also what takes the row away again
+        // once the last page has come in.
+        if self.has_more.get() {
+            items.push(glib::BoxedAnyObject::new(LogItem::More));
+        }
         self.log
             .splice(keep, self.log.n_items().saturating_sub(keep), &items);
     }
@@ -786,21 +940,28 @@ impl Panel {
                 None => return,
             }
         };
-        self.more.set_sensitive(false);
+        // Cleared for the whole hop: the row stays where it is, and activating it again while
+        // the page is in flight finds nothing left to ask for.
+        if !self.has_more.replace(false) {
+            return;
+        }
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let vault = panel.hooks.vault.clone();
             let page = gio::spawn_blocking(move || vault.git_log(&repo, skip, PAGE)).await;
-            panel.more.set_sensitive(true);
             let page = match page {
                 Ok(Ok(page)) => page,
-                Ok(Err(e)) => return tracing::debug!("git log: {e}"),
-                Err(_) => return tracing::warn!("the git worker panicked"),
+                // Whatever went wrong, the history behind the row is still there, so it stays.
+                Ok(Err(e)) => {
+                    tracing::debug!("git log: {e}");
+                    return panel.has_more.set(true);
+                }
+                Err(_) => {
+                    tracing::warn!("the git worker panicked");
+                    return panel.has_more.set(true);
+                }
             };
-            panel.more.set_visible(page.len() >= PAGE);
-            if page.is_empty() {
-                return;
-            }
+            panel.has_more.set(page.len() >= PAGE);
             let commits = {
                 let mut state = panel.state.borrow_mut();
                 state.commits.extend(page);
@@ -947,6 +1108,126 @@ impl Panel {
         });
     }
 
+    /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
+    /// because the base a reader means is the state they are looking at.
+    ///
+    /// The name is git's to validate — a bad ref name, one already taken and a worktree the
+    /// switch would clobber are all its refusals, and they come back through [`Panel::command`]'s
+    /// dialog, which also brings the refresh.
+    fn create_branch(self: &Rc<Self>) {
+        self.branch_menu.popdown();
+        let entry = fileops::name_entry("Branch name", "");
+        let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        form.append(&entry);
+        let dialog = fileops::name_dialog("Create Branch", "Create", &form);
+
+        let (panel, field) = (self.clone(), entry.clone());
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                let name = field.text().trim().to_string();
+                if response != fileops::CONFIRM || name.is_empty() {
+                    return;
+                }
+                panel.command("Create Branch", None, move |vault, repo| {
+                    vault
+                        .git_create_branch(repo, &name, true)
+                        .map(|()| format!("Switched to {name}"))
+                });
+            },
+        );
+        // After `choose` has presented the dialog: the entry is mapped only by then.
+        entry.grab_focus();
+    }
+
+    /// Delete a local branch.
+    ///
+    /// `git branch -d` first, so that whether the work would be lost is git's answer and not a
+    /// guess of ours at a default branch. Its one refusal worth escalating is "not fully merged",
+    /// which asks before running `-D`; every other refusal is reported as it comes.
+    fn delete_branch(self: &Rc<Self>, name: String, force: bool) {
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let asked = name.clone();
+            let done =
+                gio::spawn_blocking(move || vault.git_delete_branch(&repo, &asked, force)).await;
+            match done {
+                Ok(Ok(())) => (panel.hooks.toast)(&format!("Deleted {name}")),
+                Ok(Err(e)) => {
+                    let message = format!("{e:#}");
+                    match !force && git::unmerged(&message) {
+                        true => panel.confirm_delete(name),
+                        false => panel.failed("Delete Branch", &message),
+                    }
+                }
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            panel.refresh();
+        });
+    }
+
+    /// The one delete that loses commits, so it asks first (DESIGN.md, States).
+    fn confirm_delete(self: &Rc<Self>, name: String) {
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Delete {name}?")),
+            Some("Its commits are not merged into any other branch and will be lost."),
+        );
+        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let panel = self.clone();
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                if response == "delete" {
+                    panel.delete_branch(name, true);
+                }
+            },
+        );
+    }
+
+    /// Put HEAD on one commit, detached, so the repository can be read at that point.
+    ///
+    /// No confirmation, for the reason [`Panel::checkout`] gives: `git switch --detach` refuses
+    /// where it would clobber uncommitted work, and that refusal is the whole answer. The refresh
+    /// that follows puts `Detached at …` in the branch button and the status bar.
+    fn detach(self: &Rc<Self>, oid: String) {
+        let repo = {
+            let state = self.state.borrow();
+            match state.repos.get(state.selected) {
+                Some(repo) => repo.clone(),
+                None => return,
+            }
+        };
+        let panel = self.clone();
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let asked = oid.clone();
+            let done = gio::spawn_blocking(move || vault.git_checkout_commit(&repo, &asked)).await;
+            match done {
+                Ok(Ok(())) => (panel.hooks.toast)(&format!("Checked out {}", short(&oid))),
+                Ok(Err(e)) => (panel.hooks.toast)(&format!(
+                    "Could not check out {}: {}",
+                    short(&oid),
+                    reason(&format!("{e:#}"))
+                )),
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            panel.refresh();
+        });
+    }
+
     fn stage(self: &Rc<Self>, paths: Vec<String>) {
         let n = paths.len();
         self.write("Stage", paths, move |vault, repo, paths| {
@@ -1031,13 +1312,82 @@ impl Panel {
         );
     }
 
+    // --- the history's context menu -------------------------------------------------------------
+
+    /// What can be done with the commit under the pointer.
+    ///
+    /// The shape `fileops::context_menu` uses, and for the reasons documented there: the popover
+    /// hangs off a layout-managed box rather than off the list, the actions live on that same box
+    /// so an item can resolve them, and the unparent waits for an idle because `closed` is emitted
+    /// from inside the item's own click and an unparented popover has no path to the action group.
+    fn commit_menu(self: &Rc<Self>, oid: &str, anchor: gdk::Rectangle) {
+        self.column
+            .insert_action_group(MENU_GROUP, Some(&self.commit_actions()));
+
+        let menu = gio::Menu::new();
+        menu.append_item(&menu_item("Check Out Commit", "checkout-commit", oid));
+        // Its own section: reading an id out is not a thing that moves HEAD.
+        let copy = gio::Menu::new();
+        copy.append_item(&menu_item("Copy Commit ID", "copy-id", oid));
+        menu.append_section(None, &copy);
+
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        // The sidebar behind it is a list, so the menu needs a background of its own.
+        popover.add_css_class("git-menu");
+        popover.set_parent(&self.column);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&anchor));
+        popover.connect_closed(|p| {
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
+    }
+
+    /// The two actions the menu items name, each taking the commit's id as its parameter.
+    fn commit_actions(self: &Rc<Self>) -> gio::SimpleActionGroup {
+        let group = gio::SimpleActionGroup::new();
+        for (name, detach) in [("checkout-commit", true), ("copy-id", false)] {
+            let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+            let weak = Rc::downgrade(self);
+            action.connect_activate(move |_, target| {
+                let (Some(panel), Some(oid)) = (weak.upgrade(), target.and_then(|t| t.str()))
+                else {
+                    return;
+                };
+                match detach {
+                    true => panel.detach(oid.to_string()),
+                    // No toast for the clipboard alone would be truer to DESIGN.md, but nothing
+                    // else on screen says the id was taken: the row looks the same either way.
+                    false => {
+                        panel.hooks.window.clipboard().set_text(oid);
+                        (panel.hooks.toast)(&format!("Copied {}", short(oid)));
+                    }
+                }
+            });
+            group.add_action(&action);
+        }
+        group
+    }
+
     // --- rows ---------------------------------------------------------------------------------
 
     fn activate(self: &Rc<Self>, row: &Row) {
+        if let Row::Folder { path, section, .. } = row {
+            let key = folder_key(*section, path);
+            {
+                let mut collapsed = self.collapsed.borrow_mut();
+                if !collapsed.remove(&key) {
+                    collapsed.insert(key);
+                }
+            }
+            return self.rebuild_changes();
+        }
         let Row::Entry {
             entry,
             section,
             key,
+            ..
         } = row
         else {
             return;
@@ -1384,9 +1734,45 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             }
         }
     ));
+    // One preference with two surfaces: this and the switch in Preferences write the same
+    // `git_tree`. It rides the Changes header because that is where the list it reshapes begins,
+    // and the binder puts it back on the preference every time the row is reused — which is why
+    // the handler below has to recognise its own echo and do nothing.
+    let view = gtk::ToggleButton::builder()
+        .icon_name("view-list-symbolic")
+        .tooltip_text("Group changed files by folder")
+        .valign(gtk::Align::Center)
+        .build();
+    view.add_css_class("flat");
+    let weak = panel.clone();
+    view.connect_toggled(move |button| {
+        let Some(panel) = weak.upgrade() else {
+            return;
+        };
+        let on = button.is_active();
+        if panel.tree.replace(on) == on {
+            return;
+        }
+        (panel.hooks.set_tree)(on);
+        panel.rebuild_changes();
+    });
+
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     header.append(&title);
     header.append(&all);
+    header.append(&view);
+
+    // A folder of the tree view: the chevron says whether it is open, the label carries whatever
+    // segments this row adds to the one above it.
+    let chevron = gtk::Image::new();
+    let folder_name = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(pango::EllipsizeMode::Start)
+        .build();
+    let folder = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    folder.append(&chevron);
+    folder.append(&folder_name);
 
     let entry = file_line();
 
@@ -1427,6 +1813,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .vhomogeneous(false)
         .build();
     stack.add_named(&header, Some("header"));
+    stack.add_named(&folder, Some("folder"));
     stack.add_named(&entry, Some("entry"));
     stack
 }
@@ -1439,20 +1826,28 @@ enum Act {
     Discard,
 }
 
-fn bind_change(item: &gtk::ListItem) {
-    let (Some(stack), Some(row)) = (item.child().and_downcast::<gtk::Stack>(), row_of(item)) else {
+fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
+    let (Some(stack), Some(row), Some(panel)) = (
+        item.child().and_downcast::<gtk::Stack>(),
+        row_of(item),
+        panel.upgrade(),
+    ) else {
         return;
     };
-    let (Some(header), Some(entry)) = (
+    let (Some(header), Some(folder), Some(entry)) = (
         stack.child_by_name("header").and_downcast::<gtk::Box>(),
+        stack.child_by_name("folder").and_downcast::<gtk::Box>(),
         stack.child_by_name("entry").and_downcast::<gtk::Box>(),
     ) else {
         return;
     };
-    let (Some(title), Some(all)) = (
+    let (Some(title), Some(view)) = (
         header.first_child().and_downcast::<gtk::Label>(),
-        header.last_child().and_downcast::<gtk::Button>(),
+        header.last_child().and_downcast::<gtk::ToggleButton>(),
     ) else {
+        return;
+    };
+    let Some(all) = title.next_sibling().and_downcast::<gtk::Button>() else {
         return;
     };
     let (Some(letter), Some(actions)) = (
@@ -1480,17 +1875,53 @@ fn bind_change(item: &gtk::ListItem) {
                 Some(Section::Staged) => "Unstage All",
                 _ => "Stage All",
             });
+            // One toggle for the whole list, on the section it is most about. Setting it here is
+            // what the handler in `change_row` reads back as its own echo.
+            view.set_visible(section == Some(Section::Changes));
+            view.set_active(panel.tree.get());
+        }
+        Row::Folder {
+            label,
+            section,
+            depth,
+            path,
+        } => {
+            stack.set_visible_child_name("folder");
+            let (Some(chevron), Some(text)) = (
+                folder.first_child().and_downcast::<gtk::Image>(),
+                folder.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            let shut = panel
+                .collapsed
+                .borrow()
+                .contains(&folder_key(section, &path));
+            chevron.set_icon_name(Some(match shut {
+                true => "pan-end-symbolic",
+                false => "pan-down-symbolic",
+            }));
+            text.set_text(&label);
+            folder.set_margin_start(depth as i32 * INDENT);
+            stack.set_tooltip_text(Some(&path));
         }
         Row::Entry {
             entry: e,
             section,
             key,
+            depth,
         } => {
             stack.set_visible_child_name("entry");
+            entry.set_margin_start(depth as i32 * INDENT);
             letter.set_text(&status_letter(&e, section).to_string());
             let (directory, file) = split_name(&e.path);
             name.set_text(file);
-            dir.set_text(directory);
+            // Under a folder row the path is already on screen, and repeating it puts the
+            // directory on the row twice.
+            dir.set_text(match depth {
+                0 => directory,
+                _ => "",
+            });
             stack.set_tooltip_text(Some(&e.path));
             actions.set_visible(true);
             let Some((stage, unstage, discard)) = triple(&actions) else {
@@ -1509,6 +1940,7 @@ fn bind_change(item: &gtk::ListItem) {
         }
         Row::Submodule(sub) => {
             stack.set_visible_child_name("entry");
+            entry.set_margin_start(0);
             letter.set_text(&sub.state.to_string());
             let (directory, file) = split_name(&sub.path);
             name.set_text(file);
@@ -1528,7 +1960,7 @@ fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)>
 }
 
 /// One log row: the graph on the left, the summary and its author on the right.
-fn log_row(item: &gtk::ListItem) -> gtk::Stack {
+fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     let area = gtk::DrawingArea::new();
     // The draw reads the bound row straight off the list item, so a recycled row cannot draw the
     // graph of the commit that used to be in it.
@@ -1587,6 +2019,16 @@ fn log_row(item: &gtk::ListItem) -> gtk::Stack {
     file.set_margin_top(2);
     file.set_margin_bottom(2);
 
+    // Centred and quiet: it continues the history above it rather than competing with it.
+    let more = gtk::Label::builder()
+        .label("Load More")
+        .margin_top(6)
+        .margin_bottom(6)
+        .build();
+    for class in ["caption", "dim-label"] {
+        more.add_css_class(class);
+    }
+
     // Not homogeneous, for the reason `change_row` gives: a commit row is two lines tall and a
     // file row one, and every row taking the taller of the two would be a ladder.
     let stack = gtk::Stack::builder()
@@ -1595,6 +2037,37 @@ fn log_row(item: &gtk::ListItem) -> gtk::Stack {
         .build();
     stack.add_named(&commit, Some("commit"));
     stack.add_named(&file, Some("file"));
+    stack.add_named(&more, Some("more"));
+
+    // A secondary click on a commit opens its menu. The gesture holds the `GtkListItem` rather
+    // than the row's data, for the reason `change_row`'s buttons do: the data under a recycled
+    // row is replaced without the widgets being rebuilt.
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .build();
+    let weak = panel.clone();
+    click.connect_pressed(glib::clone!(
+        #[weak]
+        item,
+        move |gesture, _, x, y| {
+            let (Some(panel), Some(LogItem::Commit(row))) = (weak.upgrade(), log_of(&item)) else {
+                return;
+            };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            // Out of the row's coordinates and into the host box's, or the menu would point at
+            // wherever that row happened to be when the list was last scrolled.
+            let point = gtk::graphene::Point::new(x as f32, y as f32);
+            let Some(at) = item
+                .child()
+                .and_then(|child| child.compute_point(&panel.column, &point))
+            else {
+                return;
+            };
+            let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            panel.commit_menu(&row.commit.id, anchor);
+        }
+    ));
+    stack.add_controller(click);
     stack
 }
 
@@ -1630,6 +2103,11 @@ fn bind_log(item: &gtk::ListItem) {
             stack.set_tooltip_text(Some(&path));
             return;
         }
+        LogItem::More => {
+            stack.set_visible_child_name("more");
+            stack.set_tooltip_text(None);
+            return;
+        }
     };
 
     stack.set_visible_child_name("commit");
@@ -1662,7 +2140,7 @@ fn bind_log(item: &gtk::ListItem) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    stack.set_tooltip_text(Some(&row.commit.id));
+    stack.set_tooltip_text(Some(&commit_tooltip(&row.commit)));
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -1761,6 +2239,17 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
         }
     });
     factory
+}
+
+/// One context-menu item carrying its commit id as a `String` target rather than in a
+/// detailed-action string, which is the shape `fileops::item` settled on.
+fn menu_item(label: &str, action: &str, oid: &str) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(
+        Some(&format!("{MENU_GROUP}.{action}")),
+        Some(&oid.to_variant()),
+    );
+    item
 }
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
@@ -1924,11 +2413,33 @@ fn ago(now: i64, then: i64) -> String {
 
 /// A path split into the directory and the file name, both borrowed. A file at the top level has
 /// an empty directory rather than a `.`, because the row shows the string as it is.
+///
+/// git reports a wholly untracked directory as one entry ending in `/`. That slash belongs to the
+/// name — it is what tells the row apart from a file — so the split ignores it and the name keeps
+/// it; otherwise the name would come out empty and the whole row would read as its dimmed
+/// directory label.
 fn split_name(path: &str) -> (&str, &str) {
-    match path.rsplit_once('/') {
-        Some((dir, name)) => (dir, name),
+    let body = path.strip_suffix('/').unwrap_or(path);
+    match body.rsplit_once('/') {
+        Some((dir, _)) => (dir, &path[dir.len() + 1..]),
         None => ("", path),
     }
+}
+
+/// What hovering a commit says: where it sits, what it is called, and the whole message.
+///
+/// The decorations `git log` already fetched rather than a `git branch --contains` per hover, so
+/// a commit that is no branch tip simply has no first line.
+fn commit_tooltip(c: &Commit) -> String {
+    let head = match c.refs.is_empty() {
+        true => short(&c.id),
+        false => format!("{}\n{}", c.refs.join(", "), short(&c.id)),
+    };
+    let message = match c.body.is_empty() {
+        true => c.summary.clone(),
+        false => format!("{}\n\n{}", c.summary, c.body),
+    };
+    format!("{head}\n\n{message}")
 }
 
 /// A repository-relative path as the rest of the app names it: vault-relative where the file is
@@ -1988,8 +2499,12 @@ fn branch_parts(b: &Branch) -> Option<(String, String)> {
     if b.head.is_none() && b.oid.is_none() {
         return None;
     }
-    // A detached HEAD has no name, and "HEAD" is what git itself calls that state.
-    let name = b.head.clone().unwrap_or_else(|| "HEAD".to_string());
+    // A detached HEAD has no name, so it says where it is instead: this string reaches the branch
+    // button and the status bar alike, and both of them otherwise read as a branch called HEAD.
+    let name = b.head.clone().unwrap_or_else(|| match &b.oid {
+        Some(oid) => format!("Detached at {}", short(oid)),
+        None => "Detached".to_string(),
+    });
     let counts = [(b.ahead, '↑'), (b.behind, '↓')]
         .iter()
         .filter(|(count, _)| *count > 0)
@@ -2010,8 +2525,15 @@ fn branch_text(b: &Branch) -> Option<String> {
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
 ///
 /// `key` turns a repository-relative path into the key the rest of the app uses; the tests pass
-/// identity, and the pane passes [`vault_key`] bound to the selected repository.
-fn rows_of(status: &Status, subs: &[Submodule], key: &dyn Fn(&str) -> String) -> Vec<Row> {
+/// identity, and the pane passes [`vault_key`] bound to the selected repository. `tree` groups each
+/// section's files by folder, and `collapsed` holds the [`folder_key`]s whose contents are hidden.
+fn rows_of(
+    status: &Status,
+    subs: &[Submodule],
+    key: &dyn Fn(&str) -> String,
+    tree: bool,
+    collapsed: &HashSet<String>,
+) -> Vec<Row> {
     let mut rows = Vec::new();
     let sections = [
         ("Merge Conflicts", Section::Conflicts, None),
@@ -2028,11 +2550,15 @@ fn rows_of(status: &Status, subs: &[Submodule], key: &dyn Fn(&str) -> String) ->
             continue;
         }
         rows.push(Row::Header { title, all });
-        rows.extend(entries.into_iter().map(|entry| Row::Entry {
-            key: key(&entry.path),
-            entry: entry.clone(),
-            section,
-        }));
+        match tree {
+            true => rows.extend(grouped(&entries, section, collapsed, key)),
+            false => rows.extend(entries.into_iter().map(|entry| Row::Entry {
+                key: key(&entry.path),
+                entry: entry.clone(),
+                section,
+                depth: 0,
+            })),
+        }
     }
     if !subs.is_empty() {
         rows.push(Row::Header {
@@ -2042,6 +2568,98 @@ fn rows_of(status: &Status, subs: &[Submodule], key: &dyn Fn(&str) -> String) ->
         rows.extend(subs.iter().cloned().map(Row::Submodule));
     }
     rows
+}
+
+/// What identifies a folder row while it is collapsed. The section is part of it because the same
+/// folder can have a row under Staged and another under Changes, and folding one is not folding
+/// the other.
+fn folder_key(section: Section, dir: &str) -> String {
+    format!("{section:?}/{dir}")
+}
+
+/// One section's entries grouped by folder.
+///
+/// Folders come before files at each level and both sets are sorted, which is the order the Files
+/// pane's own listing has. A chain of folders with a single child each lands on one row —
+/// `src/deep` — as VS Code does it, because a column of rows with one child says nothing. Nothing
+/// under a collapsed folder is emitted at all: the list is rebuilt on every toggle.
+fn grouped(
+    entries: &[&Entry],
+    section: Section,
+    collapsed: &HashSet<String>,
+    key: &dyn Fn(&str) -> String,
+) -> Vec<Row> {
+    let mut rows = Vec::new();
+    group_level(&mut rows, entries, "", 0, section, collapsed, key);
+    rows
+}
+
+fn group_level(
+    rows: &mut Vec<Row>,
+    entries: &[&Entry],
+    prefix: &str,
+    depth: usize,
+    section: Section,
+    collapsed: &HashSet<String>,
+    key: &dyn Fn(&str) -> String,
+) {
+    let mut dirs: Vec<(String, Vec<&Entry>)> = Vec::new();
+    let mut files: Vec<&Entry> = Vec::new();
+    for &entry in entries {
+        match segment(&entry.path, prefix) {
+            Some(head) => match dirs.iter_mut().find(|(name, _)| name == head) {
+                Some((_, group)) => group.push(entry),
+                None => dirs.push((head.to_string(), vec![entry])),
+            },
+            None => files.push(entry),
+        }
+    }
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+
+    for (name, group) in dirs {
+        let mut label = name;
+        while let Some(only) = only_segment(&group, &format!("{prefix}{label}/")) {
+            label = format!("{label}/{only}");
+        }
+        let path = format!("{prefix}{label}");
+        rows.push(Row::Folder {
+            label,
+            section,
+            depth,
+            path: path.clone(),
+        });
+        if !collapsed.contains(&folder_key(section, &path)) {
+            let under = format!("{path}/");
+            group_level(rows, &group, &under, depth + 1, section, collapsed, key);
+        }
+    }
+    rows.extend(files.into_iter().map(|entry| Row::Entry {
+        key: key(&entry.path),
+        entry: entry.clone(),
+        section,
+        depth,
+    }));
+}
+
+/// The folder `path` lies in directly under `prefix`, or `None` where it names a file of that
+/// folder. git reports a wholly untracked directory as one entry ending in `/`, and that is a row
+/// in its own right rather than a folder with nothing inside it.
+fn segment<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    match path.get(prefix.len()..)?.split_once('/') {
+        Some((head, rest)) if !rest.is_empty() => Some(head),
+        _ => None,
+    }
+}
+
+/// The one folder every entry of `group` lies under, or `None` where they part ways or any of them
+/// is a file at this level. What decides whether a chain of folders is compressed onto one row.
+fn only_segment(group: &[&Entry], prefix: &str) -> Option<String> {
+    let mut heads = group.iter().map(|entry| segment(&entry.path, prefix));
+    let first = heads.next()??;
+    heads
+        .all(|head| head == Some(first))
+        .then(|| first.to_string())
 }
 
 /// The one letter a row shows: the side of porcelain's two that the section is about.
@@ -2107,6 +2725,10 @@ mod tests {
     fn split_name_leaves_a_top_level_file_without_a_directory() {
         assert_eq!(split_name("note.md"), ("", "note.md"));
         assert_eq!(split_name("a/b/note.md"), ("a/b", "note.md"));
+        // A wholly untracked directory is one entry with a trailing slash, and the slash is the
+        // only thing on the row that says so, so it stays with the name.
+        assert_eq!(split_name("newdir/"), ("", "newdir/"));
+        assert_eq!(split_name("a/b/c/"), ("a/b", "c/"));
     }
 
     #[test]
@@ -2143,7 +2765,7 @@ mod tests {
         };
         assert_eq!(branch_text(&both).as_deref(), Some("main ↑1 ↓2"));
         let detached = Branch { head: None, ..main };
-        assert_eq!(branch_text(&detached).as_deref(), Some("HEAD"));
+        assert_eq!(branch_text(&detached).as_deref(), Some("Detached at abc"));
         assert_eq!(branch_text(&Branch::default()), None, "nothing to say");
     }
 
@@ -2153,7 +2775,7 @@ mod tests {
             entries: vec![entry("a.md", 'M', '.'), entry("new.md", '?', '?')],
             ..Status::default()
         };
-        let rows = rows_of(&status, &[], &identity);
+        let rows = rows_of(&status, &[], &identity, false, &HashSet::new());
         let titles: Vec<&str> = rows
             .iter()
             .filter_map(|row| match row {
@@ -2169,7 +2791,7 @@ mod tests {
         assert_eq!(rows.len(), 4);
         assert!(matches!(
             &rows[1],
-            Row::Entry { entry, section: Section::Staged, key } if entry.path == "a.md" && key == "a.md"
+            Row::Entry { entry, section: Section::Staged, key, .. } if entry.path == "a.md" && key == "a.md"
         ));
     }
 
@@ -2187,7 +2809,7 @@ mod tests {
             state: ' ',
             describe: None,
         }];
-        let rows = rows_of(&status, &subs, &identity);
+        let rows = rows_of(&status, &subs, &identity, false, &HashSet::new());
         assert!(matches!(
             rows.first(),
             Some(Row::Header {
@@ -2198,6 +2820,90 @@ mod tests {
         assert!(matches!(rows.last(), Some(Row::Submodule(_))));
     }
 
+    /// The tree rows as `(depth, what the row shows)`, which is what the shape of the list is.
+    fn shape(rows: &[Row]) -> Vec<(usize, String)> {
+        rows.iter()
+            .map(|row| match row {
+                Row::Folder { label, depth, .. } => (*depth, label.clone()),
+                Row::Entry { entry, depth, .. } => (*depth, entry.path.clone()),
+                _ => (0, String::new()),
+            })
+            .collect()
+    }
+
+    fn entries(paths: &[&str]) -> Vec<Entry> {
+        paths.iter().map(|p| entry(p, '.', 'M')).collect()
+    }
+
+    #[test]
+    fn grouped_puts_folders_before_files_and_indents_what_is_under_them() {
+        let held = entries(&["a.md", "src/x.md", "src/deep/y.md", "b.md"]);
+        let refs: Vec<&Entry> = held.iter().collect();
+        let rows = grouped(&refs, Section::Changes, &HashSet::new(), &identity);
+        assert_eq!(
+            shape(&rows),
+            [
+                (0, "src".to_string()),
+                (1, "deep".to_string()),
+                (2, "src/deep/y.md".to_string()),
+                (1, "src/x.md".to_string()),
+                (0, "a.md".to_string()),
+                (0, "b.md".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn grouped_puts_a_chain_of_single_child_folders_on_one_row() {
+        let held = entries(&["src/deep/y.md", "src/deep/z.md"]);
+        let refs: Vec<&Entry> = held.iter().collect();
+        let rows = grouped(&refs, Section::Changes, &HashSet::new(), &identity);
+        assert_eq!(
+            shape(&rows),
+            [
+                (0, "src/deep".to_string()),
+                (1, "src/deep/y.md".to_string()),
+                (1, "src/deep/z.md".to_string()),
+            ]
+        );
+
+        // A wholly untracked directory is one entry ending in `/`, and it is a row of its own
+        // rather than a folder with nothing inside it.
+        let held = entries(&["newdir/"]);
+        let refs: Vec<&Entry> = held.iter().collect();
+        let rows = grouped(&refs, Section::Changes, &HashSet::new(), &identity);
+        assert_eq!(shape(&rows), [(0, "newdir/".to_string())]);
+    }
+
+    #[test]
+    fn a_collapsed_folder_drops_everything_under_it_and_only_in_its_own_section() {
+        let held = entries(&["src/x.md", "a.md"]);
+        let refs: Vec<&Entry> = held.iter().collect();
+        let collapsed = HashSet::from([folder_key(Section::Changes, "src")]);
+        assert_eq!(
+            shape(&grouped(&refs, Section::Changes, &collapsed, &identity)),
+            [(0, "src".to_string()), (0, "a.md".to_string())]
+        );
+        assert_eq!(
+            shape(&grouped(&refs, Section::Staged, &collapsed, &identity)).len(),
+            3,
+            "the same folder under another section is its own row"
+        );
+    }
+
+    #[test]
+    fn the_flat_view_is_the_list_git_gave_us() {
+        let status = Status {
+            entries: vec![entry("src/x.md", '.', 'M'), entry("a.md", '.', 'M')],
+            ..Status::default()
+        };
+        let rows = rows_of(&status, &[], &identity, false, &HashSet::new());
+        assert_eq!(
+            shape(&rows[1..]),
+            [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
+        );
+    }
+
     fn commit_at(id: &str) -> Commit {
         Commit {
             id: id.to_string(),
@@ -2206,7 +2912,27 @@ mod tests {
             author: "a".to_string(),
             time: 0,
             summary: "s".to_string(),
+            body: String::new(),
         }
+    }
+
+    #[test]
+    fn commit_tooltip_says_where_the_commit_is_and_what_it_says() {
+        let mut c = commit_at("abcdef1234567");
+        c.summary = "subject".to_string();
+        assert_eq!(commit_tooltip(&c), "abcdef1\n\nsubject");
+
+        c.body = "why it happened\nand a second line".to_string();
+        assert_eq!(
+            commit_tooltip(&c),
+            "abcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+        );
+
+        c.refs = vec!["HEAD -> main".to_string(), "origin/main".to_string()];
+        assert_eq!(
+            commit_tooltip(&c),
+            "HEAD -> main, origin/main\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+        );
     }
 
     #[test]
