@@ -24,19 +24,103 @@ const ZONE: &str = "accent-drop-zone";
 /// without swallowing the middle, which is the far commoner drop.
 const EDGE: f64 = 0.25;
 
-/// What `AdwTabView` keeps of its own chords. Four are taken away: `Ctrl+Tab` and
+/// What `AdwTabView` keeps of its own chords. Six are taken away: `Ctrl+Tab` and
 /// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
-/// they were last used rather than along the bar, and `Ctrl+Home` / `Ctrl+End` go back to
-/// GtkSourceView, whose document start and end they are on DESIGN.md's never-bind list. What is
-/// left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab, and `Alt+1`
-/// to `Alt+9` — is libadwaita's and stays there, being chords no action of ours wants.
+/// they were last used rather than along the bar, and both Home / End pairs go back to
+/// GtkSourceView, whose document start and end — with the selection and without — are on
+/// DESIGN.md's never-bind list. The widget's controller runs in the capture phase, so keeping
+/// `Ctrl+Shift+Home` here meant a note could not be selected to its top at all.
+///
+/// What is left — `Ctrl+PageUp` / `Ctrl+PageDown`, the Shift variants that move a tab along the
+/// bar, and `Alt+0` to `Alt+9` — is libadwaita's and stays there, being chords no action of ours
+/// wants. [`CHORDS`] is what writes them down.
 fn shortcuts() -> adw::TabViewShortcuts {
     adw::TabViewShortcuts::ALL_SHORTCUTS.difference(
         adw::TabViewShortcuts::CONTROL_TAB
             | adw::TabViewShortcuts::CONTROL_SHIFT_TAB
             | adw::TabViewShortcuts::CONTROL_HOME
-            | adw::TabViewShortcuts::CONTROL_END,
+            | adw::TabViewShortcuts::CONTROL_END
+            | adw::TabViewShortcuts::CONTROL_SHIFT_HOME
+            | adw::TabViewShortcuts::CONTROL_SHIFT_END,
     )
+}
+
+/// Every chord `AdwTabView` binds, with the flag that carries it and what it does, spelled the
+/// way `main::ACTIONS` spells its accelerators. Exhaustive over `ALL_SHORTCUTS` — a test says so
+/// — because a chord no table names is a chord the palette and the rebind dialog cannot see.
+const CHORDS: &[(adw::TabViewShortcuts, &str, &str)] = &[
+    (
+        adw::TabViewShortcuts::CONTROL_TAB,
+        "<Control>Tab",
+        "Next Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_TAB,
+        "<Control><Shift>Tab",
+        "Previous Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_PAGE_UP,
+        "<Control>Page_Up",
+        "Previous Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_PAGE_DOWN,
+        "<Control>Page_Down",
+        "Next Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_HOME,
+        "<Control>Home",
+        "First Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_END,
+        "<Control>End",
+        "Last Tab",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_PAGE_UP,
+        "<Control><Shift>Page_Up",
+        "Move Tab Back",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_PAGE_DOWN,
+        "<Control><Shift>Page_Down",
+        "Move Tab Forward",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_HOME,
+        "<Control><Shift>Home",
+        "Move Tab to Start",
+    ),
+    (
+        adw::TabViewShortcuts::CONTROL_SHIFT_END,
+        "<Control><Shift>End",
+        "Move Tab to End",
+    ),
+    // One flag, nine chords.
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>1", "Tab 1"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>2", "Tab 2"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>3", "Tab 3"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>4", "Tab 4"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>5", "Tab 5"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>6", "Tab 6"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>7", "Tab 7"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>8", "Tab 8"),
+    (adw::TabViewShortcuts::ALT_DIGITS, "<Alt>9", "Tab 9"),
+    (adw::TabViewShortcuts::ALT_ZERO, "<Alt>0", "Last Tab"),
+];
+
+/// The chords the tab bar still holds, each with the name of what it does there. The rebind
+/// dialog refuses them by that name, and a test keeps `ACTIONS` and the never-bind list off them.
+pub fn widget_chords() -> Vec<(&'static str, &'static str)> {
+    let kept = shortcuts();
+    CHORDS
+        .iter()
+        .filter(|(flag, _, _)| kept.contains(*flag))
+        .map(|(_, accel, what)| (*accel, *what))
+        .collect()
 }
 
 /// The order `Ctrl+Tab` walks and a close falls back to: `history` filtered down to the pages
@@ -778,5 +862,15 @@ mod tests {
         assert_eq!(arrange(Side::Right), (gtk::Orientation::Horizontal, false));
         assert_eq!(arrange(Side::Up), (gtk::Orientation::Vertical, true));
         assert_eq!(arrange(Side::Down), (gtk::Orientation::Vertical, false));
+    }
+
+    /// Nothing else stops a flag a future libadwaita adds from arriving unlisted, which would put
+    /// a chord back beyond the reach of both the rebind dialog and the never-bind test.
+    #[test]
+    fn the_chord_table_covers_every_shortcut_the_widget_has() {
+        let listed = CHORDS
+            .iter()
+            .fold(adw::TabViewShortcuts::NONE, |all, (flag, _, _)| all | *flag);
+        assert_eq!(listed, adw::TabViewShortcuts::ALL_SHORTCUTS);
     }
 }

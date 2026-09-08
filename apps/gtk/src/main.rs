@@ -4372,6 +4372,12 @@ impl App {
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.
             vaults: start::other_vaults(&config.recent_vaults, self.vault().map(|v| v.key())),
+            // The tab bar's own chords: no command runs them, so they are not rows, but a
+            // rebind that took one would be shadowed by a controller the dialog cannot see.
+            taken: panes::widget_chords()
+                .into_iter()
+                .map(|(accel, what)| (accel.to_string(), what.to_string()))
+                .collect(),
             // Weak, like the pick callback below: this closure outlives the call and a strong
             // handle here would keep the window alive through the dialog.
             on_rebind: Box::new({
@@ -7460,6 +7466,53 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    /// The chords DESIGN.md's never-bind list reserves, as they are spelled in an accelerator.
+    /// `Super`+anything and `Ctrl+Alt`+anything are patterns rather than chords, so they are not
+    /// here; nothing binds a modifier by itself.
+    const NEVER_BIND: &[&str] = &[
+        "<Alt>Tab",
+        "<Alt>F4",
+        "<Alt>F7",
+        "<Alt>F8",
+        "F1",
+        "<Control><Shift>u",
+        "<Control>space",
+        "<Control>z",
+        "<Control>y",
+        "<Control>a",
+        "<Control>x",
+        "<Control>c",
+        "<Control>v",
+        "<Alt>Up",
+        "<Alt>Down",
+        "<Control>Home",
+        "<Control>End",
+        "<Control><Shift>Home",
+        "<Control><Shift>End",
+    ];
+
+    /// `AdwTabView` binds its own chords in the capture phase, ahead of both our accelerators and
+    /// the focused view's class shortcuts, so a chord it keeps is a chord nothing else can have.
+    /// Neither half of that is visible in `ACTIONS`, which is why it takes a test: one direction
+    /// is two controllers fighting over one chord, the other is the tab bar quietly holding a
+    /// GtkSourceView built-in — how `Ctrl+Home` in a note left the note instead of going to its
+    /// start.
+    #[test]
+    fn the_tab_bar_keeps_no_chord_that_is_ours_or_forbidden() {
+        for (accel, what) in panes::widget_chords() {
+            for (name, _, accels) in ACTIONS {
+                assert!(
+                    !accels.contains(&accel),
+                    "{accel} is {name} and AdwTabView's {what}"
+                );
+            }
+            assert!(
+                !NEVER_BIND.contains(&accel),
+                "AdwTabView holds {accel} for {what}, which the never-bind list reserves"
+            );
+        }
     }
 
     #[test]
