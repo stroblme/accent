@@ -5,6 +5,11 @@
 //! primary caret stays GTK's, which is what keeps selection, IME, spellcheck and the scroll
 //! machinery working normally the rest of the time.
 //!
+//! It is also where this view's key semantics are corrected, because a `TextViewImpl` is the one
+//! place the single-caret and the multi-caret case both pass through: `Ctrl+Delete` takes a run of
+//! whitespace before it takes a word, and Up, Down, Home and End work on a line of the document
+//! rather than on a row of the screen.
+//!
 //! What it deliberately does not do:
 //!
 //! * carets only, no per-caret selection, and a selection made before the extra carets were added
@@ -13,27 +18,36 @@
 //!   drops the secondaries;
 //! * while secondaries exist the key controller runs ahead of the input method, so dead keys and
 //!   CJK preedit go to the primary caret only, once the secondaries are cleared;
-//! * secondary carets do not blink, they are painted;
+//! * while a column of carets exists this widget paints every caret, the primary one included,
+//!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
+//!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
 //! * the completion popup can open at several carets at once, since it follows the primary.
 //!
 //! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
 //! nothing to give it a text tag, and this widget is already the one drawing over the text.
 //!
-//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, and the arrow,
-//! Home and End motions, so a column of carets can be moved and edited as one. Everything else —
-//! Escape, any Ctrl or Alt combination, any other key — clears the carets and is then handled as
-//! usual, so undo, paste and every accelerator keep working on the primary caret. One undo step
-//! covers a whole multi-caret edit, because each replay runs inside a single `begin_user_action`.
+//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, the arrow, Home
+//! and End motions, and the four wordwise chords `Ctrl+Left`, `Ctrl+Right`, `Ctrl+Delete` and
+//! `Ctrl+Backspace`, so a column of carets can be moved and edited as one. Everything else —
+//! Escape, any Alt combination, any other Ctrl combination, any other key — clears the carets and
+//! is then handled as usual, so undo, paste and every accelerator keep working on the primary
+//! caret. One undo step covers a whole multi-caret edit, because each replay runs inside a single
+//! `begin_user_action`.
 
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
+use sourceview5::prelude::ViewExt as _;
 
 /// What a key means at every caret. Anything outside this list clears the carets instead.
 enum Edit {
     Insert(String),
+    /// Resolved per caret, because what Tab inserts depends on the column it is pressed in.
+    Tab,
     Backspace,
     Delete,
+    /// `Ctrl+Delete` forwards, `Ctrl+Backspace` backwards.
+    DeleteWord(bool),
     Move(Motion),
 }
 
@@ -41,17 +55,34 @@ enum Edit {
 enum Motion {
     Left,
     Right,
+    WordLeft,
+    WordRight,
     Up,
     Down,
     Home,
     End,
 }
 
-/// The edit `key` stands for, or `None` for a key this widget does not mirror.
-fn edit_for(key: gdk::Key) -> Option<Edit> {
+/// The edit `key` with `state` held stands for, or `None` for a key this widget does not mirror.
+///
+/// Ctrl has a table of its own — the four chords a column of carets is worth moving as one — and
+/// Alt has none, so every other combination still falls through to the primary caret alone.
+fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
+    if state.contains(gdk::ModifierType::ALT_MASK) {
+        return None;
+    }
+    if state.contains(gdk::ModifierType::CONTROL_MASK) {
+        return match key {
+            gdk::Key::Left | gdk::Key::KP_Left => Some(Edit::Move(Motion::WordLeft)),
+            gdk::Key::Right | gdk::Key::KP_Right => Some(Edit::Move(Motion::WordRight)),
+            gdk::Key::Delete | gdk::Key::KP_Delete => Some(Edit::DeleteWord(true)),
+            gdk::Key::BackSpace => Some(Edit::DeleteWord(false)),
+            _ => None,
+        };
+    }
     match key {
         gdk::Key::Return | gdk::Key::KP_Enter => Some(Edit::Insert("\n".to_string())),
-        gdk::Key::Tab | gdk::Key::KP_Tab => Some(Edit::Insert("\t".to_string())),
+        gdk::Key::Tab | gdk::Key::KP_Tab => Some(Edit::Tab),
         gdk::Key::BackSpace => Some(Edit::Backspace),
         gdk::Key::Delete | gdk::Key::KP_Delete => Some(Edit::Delete),
         gdk::Key::Left | gdk::Key::KP_Left => Some(Edit::Move(Motion::Left)),
@@ -60,8 +91,6 @@ fn edit_for(key: gdk::Key) -> Option<Edit> {
         gdk::Key::Down | gdk::Key::KP_Down => Some(Edit::Move(Motion::Down)),
         gdk::Key::Home | gdk::Key::KP_Home => Some(Edit::Move(Motion::Home)),
         gdk::Key::End | gdk::Key::KP_End => Some(Edit::Move(Motion::End)),
-        // ponytail: a literal tab above, and no `insert-spaces-instead-of-tabs`, because the
-        // editor does not turn that on. Ask the view when it ever does.
         _ => key
             .to_unicode()
             .filter(|c| !c.is_control())
@@ -69,28 +98,135 @@ fn edit_for(key: gdk::Key) -> Option<Edit> {
     }
 }
 
-/// Where a new caret lands on its line: the column it came from, or the end of a shorter line.
-fn clamp_offset(wanted: i32, line_length: i32) -> i32 {
-    wanted.min(line_length)
+/// Where a caret aiming at column `goal` lands on a line `len` characters long, and the goal it
+/// keeps. The goal outliving the landing is what brings the caret back to its own column after a
+/// trip across a shorter line.
+fn vertical_step(goal: Option<i32>, column: i32, len: i32) -> (i32, i32) {
+    let goal = goal.unwrap_or(column);
+    (goal.min(len), goal)
+}
+
+/// The column `prefix` ends at, a tab counting on to the next stop rather than as one character.
+fn visual_column(prefix: &str, width: usize) -> usize {
+    prefix.chars().fold(0, |column, c| match c {
+        '\t' => column + width - column % width,
+        _ => column + 1,
+    })
+}
+
+/// What Tab inserts at `column`: a literal tab, or the spaces that reach the next tab stop.
+fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
+    match spaces {
+        true => " ".repeat(width - column % width),
+        false => "\t".to_string(),
+    }
+}
+
+/// The run of spaces and tabs the caret is sitting in front of, or `None` where it is not on one
+/// and the word deletion GTK already does is the right answer.
+fn spaces_ahead(rest: &str) -> Option<usize> {
+    let run = rest.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+    (run > 0).then_some(run)
+}
+
+/// The same run behind the caret, for `Ctrl+Backspace`.
+fn spaces_behind(head: &str) -> Option<usize> {
+    let run = head
+        .chars()
+        .rev()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .count();
+    (run > 0).then_some(run)
+}
+
+/// The range a wordwise delete takes at `at` while it is on whitespace. Bounded by the line: a
+/// newline is a word boundary, not whitespace to swallow.
+fn space_range(
+    buffer: &gtk::TextBuffer,
+    at: &gtk::TextIter,
+    forward: bool,
+) -> Option<(gtk::TextIter, gtk::TextIter)> {
+    let mut other = *at;
+    if forward {
+        let end = line_end(buffer, at.line());
+        let run = spaces_ahead(&buffer.text(at, &end, true))?;
+        other.forward_chars(run as i32);
+        return Some((*at, other));
+    }
+    let mut start = *at;
+    start.set_line_offset(0);
+    let run = spaces_behind(&buffer.text(&start, at, true))?;
+    other.backward_chars(run as i32);
+    Some((other, *at))
+}
+
+/// What a wordwise delete takes at `at`: the whitespace run it is sitting on, or the word past it.
+fn word_range(
+    buffer: &gtk::TextBuffer,
+    at: gtk::TextIter,
+    forward: bool,
+) -> (gtk::TextIter, gtk::TextIter) {
+    if let Some(range) = space_range(buffer, &at, forward) {
+        return range;
+    }
+    // Visible, because `fold.rs` hides folded text and a hidden word is not one to delete into.
+    let mut other = at;
+    if forward {
+        other.forward_visible_word_end();
+        (at, other)
+    } else {
+        other.backward_visible_word_start();
+        (other, at)
+    }
+}
+
+/// The alpha a caret is painted at `elapsed` µs into a blink of period `period` µs: solid for the
+/// first two thirds, then down to nothing and back over the last third. Ramped rather than
+/// snapped, which is what GTK4 does with the primary caret this stands in for.
+fn blink_alpha(elapsed: i64, period: i64) -> f32 {
+    let phase = elapsed.rem_euclid(period) as f32 / period as f32;
+    match phase < 2.0 / 3.0 {
+        true => 1.0,
+        false => ((phase - 5.0 / 6.0).abs() * 6.0).clamp(0.0, 1.0),
+    }
 }
 
 /// How much of the text colour ghost text keeps. Enough to read, little enough that it is never
 /// mistaken for what the document says.
 const GHOST_ALPHA: f32 = 0.45;
 
+/// The class whose CSS (`main::install_chrome_css`) makes GTK's own caret transparent, so this
+/// widget can paint every caret on one phase.
+const CARETS_CLASS: &str = "accent-carets";
+
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
+    /// A secondary caret: the mark that rides the text, and the column vertical movement aims
+    /// for, which is what a caret keeps while it crosses a shorter line.
+    pub struct Caret {
+        pub mark: gtk::TextMark,
+        pub goal: Option<i32>,
+    }
+
     #[derive(Default)]
     pub struct View {
         /// One right-gravity mark per secondary caret, so they ride along with the text.
-        pub carets: RefCell<Vec<gtk::TextMark>>,
+        pub carets: RefCell<Vec<Caret>>,
         /// The suggestion painted after the caret, if one is showing.
         pub ghost: RefCell<Option<String>>,
         /// Set while a key is replayed, so the `mark-set` hook does not read our own edits as
         /// the user moving the primary caret and drop every caret mid-edit.
         pub busy: Cell<bool>,
+        /// The primary caret's goal column, the counterpart of [`Caret::goal`]. Dropped by any
+        /// other movement, any edit and any caret move this widget did not make.
+        pub goal: Cell<Option<i32>>,
+        /// The frame time the blink phase last restarted at, so every caret fades together and a
+        /// caret being typed at is solid.
+        pub blinked_at: Cell<i64>,
+        /// The tick callback that repaints the blink, while there is one to repaint.
+        pub blink: RefCell<Option<gtk::TickCallbackId>>,
     }
 
     #[glib::object_subclass]
@@ -115,7 +251,7 @@ mod imp {
                 obj,
                 #[upgrade_or]
                 glib::Propagation::Proceed,
-                move |_, key, _, state| obj.on_key(key, state)
+                move |_, key, _, state| obj.press(key, state)
             ));
             obj.add_controller(keys);
 
@@ -132,9 +268,17 @@ mod imp {
                         if !obj.imp().busy.get()
                             && (moved == Some("insert") || moved == Some("selection_bound"))
                         {
+                            obj.imp().goal.set(None);
                             obj.clear_carets();
                         }
                     }
+                ));
+                // An edit is not vertical movement, so the column the caret was aiming for goes
+                // with it, whoever made the edit.
+                obj.buffer().connect_changed(glib::clone!(
+                    #[weak]
+                    obj,
+                    move |_| obj.imp().goal.set(None)
                 ));
             });
         }
@@ -151,13 +295,27 @@ mod imp {
             let obj = self.obj();
             let buffer = obj.buffer();
             let colour = obj.color();
-            // This layer draws in buffer coordinates, which is what `iter_location` reports.
-            for mark in self.carets.borrow().iter() {
-                let at = obj.iter_location(&buffer.iter_at_mark(mark));
-                snapshot.append_color(
-                    &colour,
-                    &graphene::Rect::new(at.x() as f32, at.y() as f32, 1.0, at.height() as f32),
+            // Every caret on one phase, the primary one included: GTK's is transparent while the
+            // column exists, because its own blink cannot be read and two out of step is worse
+            // than one we draw. This layer draws in buffer coordinates, which is what
+            // `iter_location` reports.
+            let carets = self.carets.borrow();
+            if !carets.is_empty() {
+                let alpha = obj.blink_phase().map_or(1.0, |(e, p)| blink_alpha(e, p));
+                let tint = gdk::RGBA::new(
+                    colour.red(),
+                    colour.green(),
+                    colour.blue(),
+                    colour.alpha() * alpha,
                 );
+                let insert = buffer.get_insert();
+                for mark in carets.iter().map(|c| &c.mark).chain([&insert]) {
+                    let at = obj.iter_location(&buffer.iter_at_mark(mark));
+                    snapshot.append_color(
+                        &tint,
+                        &graphene::Rect::new(at.x() as f32, at.y() as f32, 1.0, at.height() as f32),
+                    );
+                }
             }
             // The suggestion sits after the caret in the text's own font, dimmed enough to read
             // as not-yet-written. It is only ever asked for at the end of a line, so there is
@@ -174,6 +332,49 @@ mod imp {
                 snapshot.translate(&graphene::Point::new(at.x() as f32, at.y() as f32));
                 snapshot.append_layout(&obj.create_pango_layout(Some(text)), &dim);
                 snapshot.restore();
+            }
+        }
+
+        /// `Ctrl+Delete` and `Ctrl+Backspace` take a run of whitespace on its own, and only the
+        /// next press takes the word past it. GTK's word boundaries step straight over the run to
+        /// the far side of the word, which is a whole indent lost to one keystroke.
+        fn delete_from_cursor(&self, type_: gtk::DeleteType, count: i32) {
+            let obj = self.obj();
+            let buffer = obj.buffer();
+            if type_ == gtk::DeleteType::WordEnds
+                && count.abs() == 1
+                && obj.is_editable()
+                && !buffer.has_selection()
+                && let Some((mut from, mut to)) = space_range(
+                    &buffer,
+                    &buffer.iter_at_mark(&buffer.get_insert()),
+                    count > 0,
+                )
+            {
+                buffer.begin_user_action();
+                buffer.delete(&mut from, &mut to);
+                buffer.end_user_action();
+                obj.scroll_mark_onscreen(&buffer.get_insert());
+                return;
+            }
+            self.parent_delete_from_cursor(type_, count);
+        }
+
+        /// Up and Down move by a line of the document and Home and End go to that line's ends: a
+        /// wrapped paragraph is one line to move through, not a screenful of rows. `Pages` and
+        /// everything else keep GTK's display-based behaviour, which is what they are for.
+        fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
+            match step {
+                gtk::MovementStep::DisplayLines => self.obj().move_by_lines(count, extend),
+                gtk::MovementStep::DisplayLineEnds => {
+                    self.goal.set(None);
+                    // GTK implements `ParagraphEnds` as the start and the end of the line.
+                    self.parent_move_cursor(gtk::MovementStep::ParagraphEnds, count, extend);
+                }
+                _ => {
+                    self.goal.set(None);
+                    self.parent_move_cursor(step, count, extend);
+                }
             }
         }
     }
@@ -227,15 +428,60 @@ impl View {
         let Some(mut target) = buffer.iter_at_line(line) else {
             return;
         };
-        target.set_line_offset(clamp_offset(from.line_offset(), line_length(&buffer, line)));
+        let (column, goal) = vertical_step(None, from.line_offset(), line_length(&buffer, line));
+        target.set_line_offset(column);
 
         // A caret already there would be a second one on the same character, which is one caret.
         if self.caret_offsets().contains(&target.offset()) {
             return;
         }
         let mark = buffer.create_mark(None, &target, false);
-        self.imp().carets.borrow_mut().push(mark);
+        self.imp().carets.borrow_mut().push(imp::Caret {
+            mark,
+            goal: Some(goal),
+        });
+        self.blink_on();
         self.queue_draw();
+    }
+
+    /// How long the blink has been running and the period it runs at, or `None` once it has
+    /// settled: blinking switched off, or GTK's blink timeout passed with the carets left solid.
+    fn blink_phase(&self) -> Option<(i64, i64)> {
+        let settings = self.settings();
+        let elapsed = self.frame_clock()?.frame_time() - self.imp().blinked_at.get();
+        (settings.is_gtk_cursor_blink()
+            && elapsed <= settings.gtk_cursor_blink_timeout() as i64 * 1_000_000)
+            .then(|| (elapsed, settings.gtk_cursor_blink_time() as i64 * 1_000))
+    }
+
+    /// Take the blink over and restart its phase, so a caret is solid the moment it is typed at
+    /// the way GTK's own is. The tick callback stops itself once the phase has settled.
+    fn blink_on(&self) {
+        let imp = self.imp();
+        self.add_css_class(CARETS_CLASS);
+        if let Some(clock) = self.frame_clock() {
+            imp.blinked_at.set(clock.frame_time());
+        }
+        if imp.blink.borrow().is_some() {
+            return;
+        }
+        let id = self.add_tick_callback(|obj, _| {
+            obj.queue_draw();
+            if obj.blink_phase().is_some() {
+                return glib::ControlFlow::Continue;
+            }
+            obj.imp().blink.take();
+            glib::ControlFlow::Break
+        });
+        *imp.blink.borrow_mut() = Some(id);
+    }
+
+    /// Hand the caret back to GTK: no column left to keep in step.
+    fn blink_off(&self) {
+        self.remove_css_class(CARETS_CLASS);
+        if let Some(id) = self.imp().blink.take() {
+            id.remove();
+        }
     }
 
     /// Whether a key press is going to be replayed at more than one caret. `typing.rs` asks
@@ -252,10 +498,11 @@ impl View {
             if carets.is_empty() {
                 return;
             }
-            for mark in carets.drain(..) {
-                buffer.delete_mark(&mark);
+            for caret in carets.drain(..) {
+                buffer.delete_mark(&caret.mark);
             }
         }
+        self.blink_off();
         self.queue_draw();
     }
 
@@ -263,14 +510,14 @@ impl View {
     fn outermost(&self, below: bool) -> gtk::TextIter {
         let buffer = self.buffer();
         let mut furthest = buffer.iter_at_mark(&buffer.get_insert());
-        for mark in self.imp().carets.borrow().iter() {
-            let caret = buffer.iter_at_mark(mark);
+        for caret in self.imp().carets.borrow().iter() {
+            let at = buffer.iter_at_mark(&caret.mark);
             let further = match below {
-                true => caret.line() > furthest.line(),
-                false => caret.line() < furthest.line(),
+                true => at.line() > furthest.line(),
+                false => at.line() < furthest.line(),
             };
             if further {
-                furthest = caret;
+                furthest = at;
             }
         }
         furthest
@@ -285,18 +532,85 @@ impl View {
                 .carets
                 .borrow()
                 .iter()
-                .map(|mark| buffer.iter_at_mark(mark).offset()),
+                .map(|caret| buffer.iter_at_mark(&caret.mark).offset()),
         );
         offsets
     }
 
-    fn on_key(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+    /// Every caret's line and column, the primary one first. Where the carets are is otherwise
+    /// only visible on screen, so this is what a headless check reads them from.
+    pub(crate) fn caret_positions(&self) -> Vec<(i32, i32)> {
+        let buffer = self.buffer();
+        let at = |mark: &gtk::TextMark| {
+            let iter = buffer.iter_at_mark(mark);
+            (iter.line(), iter.line_offset())
+        };
+        let mut positions = vec![at(&buffer.get_insert())];
+        positions.extend(
+            self.imp()
+                .carets
+                .borrow()
+                .iter()
+                .map(|caret| at(&caret.mark)),
+        );
+        positions
+    }
+
+    /// Up or Down by `count` lines of the document. The column the caret is aiming for outlives
+    /// the lines it crosses, so a trip over a short line and back lands where it started.
+    fn move_by_lines(&self, count: i32, extend: bool) {
+        let imp = self.imp();
+        self.reset_im_context();
+        let buffer = self.buffer();
+        let insert = buffer.get_insert();
+        let mut at = buffer.iter_at_mark(&insert);
+        let column = at.line_offset();
+        // Visible lines, because `fold.rs` hides folded text and a hidden line is not one to
+        // stop on.
+        let mut off_end = false;
+        for _ in 0..count.abs() {
+            let stepped = match count > 0 {
+                true => at.forward_visible_line(),
+                false => at.backward_visible_line(),
+            };
+            if !stepped {
+                off_end = true;
+                break;
+            }
+        }
+        let (landing, goal) =
+            vertical_step(imp.goal.get(), column, line_length(&buffer, at.line()));
+        match off_end {
+            // Past the last line the caret parks at the end of the buffer, which is what GTK
+            // does and what keeps Down at the bottom doing something.
+            true => {
+                at = match count > 0 {
+                    true => buffer.end_iter(),
+                    false => buffer.start_iter(),
+                }
+            }
+            false => at.set_line_offset(landing),
+        }
+        imp.goal.set(Some(goal));
+
+        // Ours, not the user's: the `mark-set` hook would read it as a click and drop both the
+        // goal we just set and every secondary caret.
+        imp.busy.set(true);
+        match extend {
+            true => buffer.move_mark(&insert, &at),
+            false => buffer.place_cursor(&at),
+        }
+        imp.busy.set(false);
+        self.scroll_mark_onscreen(&insert);
+    }
+
+    /// One key press, at every caret. `pub(crate)` so a headless check can drive the carets the
+    /// way the key controller does, which is the only way to see them without a screen.
+    pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         if self.imp().carets.borrow().is_empty() {
             return glib::Propagation::Proceed;
         }
-        let modified =
-            state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK);
-        let Some(edit) = edit_for(key).filter(|_| !modified && key != gdk::Key::Escape) else {
+        let Some(edit) = edit_for(key, state).filter(|_| key != gdk::Key::Escape) else {
             self.clear_carets();
             return glib::Propagation::Proceed;
         };
@@ -308,15 +622,37 @@ impl View {
     fn replay(&self, edit: &Edit) {
         let buffer = self.buffer();
         let insert = buffer.get_insert();
-        let mut marks = self.imp().carets.borrow().clone();
-        marks.push(insert.clone());
+        let imp = self.imp();
+        // Mark and goal column per caret, the primary appended so it is edited like any other.
+        // Copied out of the cells first: the edits below move marks, and a borrow held across
+        // them would meet the hooks that fire on the way.
+        let mut carets: Vec<(gtk::TextMark, Option<i32>)> = imp
+            .carets
+            .borrow()
+            .iter()
+            .map(|caret| (caret.mark.clone(), caret.goal))
+            .collect();
+        carets.push((insert.clone(), imp.goal.get()));
 
-        self.imp().busy.set(true);
+        imp.busy.set(true);
         buffer.begin_user_action();
-        for mark in &marks {
+        for (mark, goal) in &mut carets {
             let mut at = buffer.iter_at_mark(mark);
+            // Only vertical movement leaves a column behind to aim at; everything else drops it.
+            let mut aim = None;
             match edit {
                 Edit::Insert(text) => buffer.insert(&mut at, text),
+                // The view already knows what Tab means here — `editor.rs` sets both properties
+                // for code and leaves a note with its literal tab — so every caret answers the
+                // way the primary one does, each from the column it is actually in.
+                Edit::Tab => {
+                    let width = self.tab_width() as usize;
+                    let mut start = at;
+                    start.set_line_offset(0);
+                    let column = visual_column(&buffer.text(&start, &at, true), width);
+                    let text = tab_insert(column, width, self.is_insert_spaces_instead_of_tabs());
+                    buffer.insert(&mut at, &text);
+                }
                 Edit::Backspace => {
                     let mut from = at;
                     if from.backward_char() {
@@ -329,6 +665,12 @@ impl View {
                         buffer.delete(&mut at, &mut to);
                     }
                 }
+                // The same function the primary caret's `Ctrl+Delete` goes through, so the two
+                // cannot drift apart.
+                Edit::DeleteWord(forward) => {
+                    let (mut from, mut to) = word_range(&buffer, at, *forward);
+                    buffer.delete(&mut from, &mut to);
+                }
                 Edit::Move(motion) => {
                     match motion {
                         Motion::Left => {
@@ -337,6 +679,12 @@ impl View {
                         Motion::Right => {
                             at.forward_char();
                         }
+                        Motion::WordLeft => {
+                            at.backward_visible_word_start();
+                        }
+                        Motion::WordRight => {
+                            at.forward_visible_word_end();
+                        }
                         Motion::Up | Motion::Down => {
                             let step = if matches!(motion, Motion::Down) {
                                 1
@@ -344,18 +692,19 @@ impl View {
                                 -1
                             };
                             let line = at.line() + step;
-                            // The column is kept, not remembered: a caret that walks past a short
-                            // line settles at its end, the way one caret does in any editor.
                             if let Some(mut moved) = (0..buffer.line_count())
                                 .contains(&line)
                                 .then(|| buffer.iter_at_line(line))
                                 .flatten()
                             {
-                                moved.set_line_offset(clamp_offset(
+                                let (column, kept) = vertical_step(
+                                    *goal,
                                     at.line_offset(),
                                     line_length(&buffer, line),
-                                ));
+                                );
+                                moved.set_line_offset(column);
                                 at = moved;
+                                aim = Some(kept);
                             }
                         }
                         Motion::Home => at.set_line_offset(0),
@@ -363,17 +712,28 @@ impl View {
                     }
                     // `place_cursor` also carries the selection bound along, which `move_mark`
                     // would leave behind as a selection nobody asked for.
-                    match mark == &insert {
+                    match *mark == insert {
                         true => buffer.place_cursor(&at),
                         false => buffer.move_mark(mark, &at),
                     }
                 }
             }
+            *goal = aim;
         }
         buffer.end_user_action();
-        self.imp().busy.set(false);
+        // Back into the cells the goals came out of; the primary's is the one pushed last.
+        imp.goal.set(carets.pop().and_then(|(_, goal)| goal));
+        for (caret, (_, goal)) in imp.carets.borrow_mut().iter_mut().zip(&carets) {
+            caret.goal = *goal;
+        }
+        imp.busy.set(false);
 
         self.collapse();
+        // Solid again from here, and back to GTK's caret if the column has collapsed into one.
+        match self.has_carets() {
+            true => self.blink_on(),
+            false => self.blink_off(),
+        }
         self.scroll_mark_onscreen(&insert);
         self.queue_draw();
     }
@@ -382,10 +742,10 @@ impl View {
     fn collapse(&self) {
         let buffer = self.buffer();
         let mut seen = vec![buffer.iter_at_mark(&buffer.get_insert()).offset()];
-        self.imp().carets.borrow_mut().retain(|mark| {
-            let offset = buffer.iter_at_mark(mark).offset();
+        self.imp().carets.borrow_mut().retain(|caret| {
+            let offset = buffer.iter_at_mark(&caret.mark).offset();
             if seen.contains(&offset) {
-                buffer.delete_mark(mark);
+                buffer.delete_mark(&caret.mark);
                 return false;
             }
             seen.push(offset);
@@ -412,13 +772,56 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::clamp_offset;
+    use super::{
+        blink_alpha, spaces_ahead, spaces_behind, tab_insert, vertical_step, visual_column,
+    };
 
-    /// A caret moving into a shorter line stops at its end rather than off it.
+    /// A caret moving into a shorter line stops at its end rather than off it, and keeps aiming
+    /// at the column it came from, so the line after that brings it back.
     #[test]
-    fn a_new_caret_clamps_to_the_line_it_lands_on() {
-        assert_eq!(clamp_offset(9, 3), 3);
-        assert_eq!(clamp_offset(2, 3), 2);
-        assert_eq!(clamp_offset(0, 0), 0);
+    fn a_caret_crossing_a_short_line_keeps_aiming_at_its_column() {
+        assert_eq!(vertical_step(None, 9, 3), (3, 9));
+        assert_eq!(vertical_step(Some(9), 3, 10), (9, 9));
+        assert_eq!(vertical_step(None, 2, 3), (2, 2));
+        assert_eq!(vertical_step(None, 0, 0), (0, 0));
+    }
+
+    /// `Ctrl+Delete` on whitespace takes the run and stops; inside a word it is not the
+    /// whitespace case at all and GTK's own word deletion is left to it.
+    #[test]
+    fn a_wordwise_delete_takes_the_whitespace_run_first() {
+        assert_eq!(spaces_ahead("   a"), Some(3));
+        assert_eq!(spaces_ahead("\t \tx"), Some(3));
+        assert_eq!(spaces_ahead("a b"), None);
+        assert_eq!(spaces_ahead(""), None);
+        assert_eq!(spaces_behind("a   "), Some(3));
+        assert_eq!(spaces_behind("a b"), None);
+        assert_eq!(spaces_behind(""), None);
+    }
+
+    /// Tab reaches the next stop from wherever the caret happens to be, which is why each caret
+    /// in a column has to be asked separately.
+    #[test]
+    fn tab_lands_on_the_next_stop_at_whatever_column_the_caret_is_in() {
+        assert_eq!(visual_column("", 4), 0);
+        assert_eq!(visual_column("ab", 4), 2);
+        assert_eq!(visual_column("\ta", 4), 5);
+        assert_eq!(visual_column("ab\t", 4), 4);
+        assert_eq!(tab_insert(0, 4, true), "    ");
+        assert_eq!(tab_insert(3, 4, true), " ");
+        assert_eq!(tab_insert(4, 4, true), "    ");
+        assert_eq!(tab_insert(2, 4, false), "\t");
+    }
+
+    /// One phase for every caret: solid most of the way through, a ramp down to nothing and back,
+    /// and the same value again a period later.
+    #[test]
+    fn the_blink_is_solid_most_of_the_period_and_ramps_through_the_rest() {
+        assert_eq!(blink_alpha(0, 1200), 1.0);
+        assert_eq!(blink_alpha(600, 1200), 1.0);
+        assert!(blink_alpha(1000, 1200) < 0.01);
+        assert!((0.01..0.99).contains(&blink_alpha(900, 1200)));
+        assert_eq!(blink_alpha(1200, 1200), blink_alpha(0, 1200));
+        assert_eq!(blink_alpha(2400, 1200), 1.0);
     }
 }

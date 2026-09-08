@@ -35,6 +35,34 @@ const VIEW_DARK: &str = "#1d1d20";
 /// spelled out: every widget gets it from `--view-fg-color`, but a rendered page is pixels.
 const VIEW_DARK_TEXT: &str = "#ebebeb";
 
+/// The light half of the same pair, pre-composited. libadwaita's light `--view-fg-color` is
+/// `RGB(0 0 6 / 80%)`, and VTE stores a foreground as opaque RGB and drops the alpha, so handing it
+/// the translucent value would paint pure black — blacker than every other piece of text in the
+/// window. Over `VIEW_LIGHT` that is `0×0.8 + 255×0.2 = 0x33` and `6×0.8 + 255×0.2 = 0x38`.
+const VIEW_LIGHT_TEXT: &str = "#333338";
+
+/// The sixteen ANSI colours a terminal is handed, in the usual order: black, red, green, yellow,
+/// blue, magenta, cyan, white, then the bright eight.
+///
+/// Ayu, by Ivan Demchenko (MIT), transcribed from `mbadolato/iTerm2-Color-Schemes` (MIT). VTE's
+/// built-in default is arithmetic rather than designed — its blue is `#0000c0`, which on
+/// `VIEW_DARK` is a 1.41:1 contrast ratio and unreadable.
+const AYU_DARK_ANSI: [&str; 16] = [
+    "#11151c", "#ea6c73", "#7fd962", "#f9af4f", "#53bdfa", "#cda1fa", "#90e1c6", "#c7c7c7",
+    "#686868", "#f07178", "#aad94c", "#ffb454", "#59c2ff", "#d2a6ff", "#95e6cb", "#ffffff",
+];
+/// Ayu Light, same source.
+const AYU_LIGHT_ANSI: [&str; 16] = [
+    "#000000", "#ea6c6d", "#6cbf43", "#eca944", "#3199e1", "#9e75c7", "#46ba94", "#bababa",
+    "#686868", "#f07171", "#86b300", "#f2ae49", "#399ee6", "#a37acc", "#4cbf99", "#d1d1d1",
+];
+/// Solarized's own ANSI-16 mapping, on both of its bases: Schoonover defines one palette and lets
+/// the background decide which end of it reads as foreground.
+const SOLARIZED_ANSI: [&str; 16] = [
+    "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+];
+
 /// Surfaces that take the flat background: the window and everything painted on it.
 const FLAT: [&str; 5] = [
     "window",
@@ -105,6 +133,29 @@ pub fn view_bg(dark: bool) -> &'static str {
         (Theme::Solarized, false) => LIGHT_BASE,
         (_, true) => VIEW_DARK,
         (_, false) => VIEW_LIGHT,
+    }
+}
+
+/// The ink on that background, for the one widget that cannot read `--view-fg-color`: a
+/// `VteTerminal` is coloured by libvte's own widget rule (`color: @theme_text_color`), and that
+/// legacy named colour is what libadwaita's CSS variables are derived *from*, so redeclaring them
+/// the way Solarized does cannot flow back into it. Written as the mirror of `view_bg` on purpose:
+/// the pair can no longer disagree, which is what left the foreground behind on a theme change.
+pub fn view_fg(dark: bool) -> &'static str {
+    match (CHOICE.get(), dark) {
+        (Theme::Solarized, true) => DARK_TEXT,
+        (Theme::Solarized, false) => LIGHT_TEXT,
+        (_, true) => VIEW_DARK_TEXT,
+        (_, false) => VIEW_LIGHT_TEXT,
+    }
+}
+
+/// The sixteen ANSI colours for that theme.
+pub fn terminal_palette(dark: bool) -> &'static [&'static str; 16] {
+    match (CHOICE.get(), dark) {
+        (Theme::Solarized, _) => &SOLARIZED_ANSI,
+        (_, true) => &AYU_DARK_ANSI,
+        (_, false) => &AYU_LIGHT_ANSI,
     }
 }
 
@@ -195,6 +246,67 @@ mod tests {
         let dark = css(true);
         assert!(dark.contains("--window-bg-color: #002b36;"), "{dark}");
         assert!(dark.contains("--popover-bg-color: #073642;"), "{dark}");
+    }
+
+    /// The regression the terminal had: its background was a pure function of the theme and its
+    /// foreground was read off resolved CSS, which is blind to Solarized, so a theme change moved
+    /// one and not the other.
+    #[test]
+    fn terminal_foreground_follows_the_theme() {
+        CHOICE.set(Theme::Solarized);
+        assert_eq!(view_fg(true), DARK_TEXT);
+        assert_eq!(view_fg(false), LIGHT_TEXT);
+        CHOICE.set(Theme::System);
+        assert_eq!(view_fg(true), VIEW_DARK_TEXT);
+        assert_eq!(view_fg(false), VIEW_LIGHT_TEXT);
+    }
+
+    /// WCAG 2.1 relative luminance, for the one assertion that has to be a number.
+    fn contrast(a: &str, b: &str) -> f64 {
+        let luminance = |hex: &str| {
+            let channel = |v: f64| match v <= 0.03928 {
+                true => v / 12.92,
+                false => ((v + 0.055) / 1.055).powf(2.4),
+            };
+            let [r, g, b] = rgb(hex).map(|c| channel(f64::from(c) / 255.0));
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let (x, y) = (luminance(a), luminance(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The reported bug was dark-mode readability — VTE's own blue is `#0000c0`, which scores 1.41
+    /// here — so that is what the floor guards, and only there. Ayu Light and Solarized are
+    /// deliberately low-contrast designs that fail a 3.0 floor on their authors' own values (Ayu
+    /// Light's yellow is 2.03 on white, Solarized's green 2.97 on `base3`); they ship verbatim.
+    #[test]
+    fn the_dark_palette_is_readable_on_its_background() {
+        for (i, colour) in AYU_DARK_ANSI.iter().enumerate() {
+            // 0 and 8 are the background-adjacent and dim slots by convention.
+            if i == 0 || i == 8 {
+                continue;
+            }
+            let ratio = contrast(colour, VIEW_DARK);
+            assert!(
+                ratio >= 3.0,
+                "ANSI {i} {colour} is {ratio:.2}:1 on {VIEW_DARK}"
+            );
+        }
+        assert!(contrast("#0000c0", VIEW_DARK) < 3.0);
+    }
+
+    #[test]
+    fn every_palette_is_sixteen_well_formed_colours() {
+        for palette in [AYU_DARK_ANSI, AYU_LIGHT_ANSI, SOLARIZED_ANSI] {
+            for colour in palette {
+                assert_eq!(colour.len(), 7, "{colour}");
+                assert!(colour.starts_with('#'), "{colour}");
+                assert!(
+                    colour[1..].chars().all(|c| c.is_ascii_hexdigit()),
+                    "{colour}"
+                );
+            }
+        }
     }
 
     /// DESIGN.md's one-accent rule: nothing here may redefine the system accent.

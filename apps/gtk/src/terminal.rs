@@ -380,39 +380,31 @@ fn launchable(uri: &str) -> bool {
         )
 }
 
-/// Foreground from the theme composited over the background, background from the same value the
-/// preview is handed, and VTE's own palette for the sixteen ANSI colours: a terminal's red is the
-/// shell's to choose, not ours.
+/// Foreground, background and the sixteen ANSI colours, all from `theme.rs`.
+///
+/// The foreground used to be read off the widget's resolved CSS, which is how it stayed behind on a
+/// theme change: libvte styles its own widget with `color: @theme_text_color`, and that named colour
+/// is upstream of the CSS variables Solarized redeclares, so it never saw them. The palette used to
+/// be VTE's own, which is arithmetic rather than designed: its blue lands at 1.41:1 on our dark
+/// background, which is why a shell's output was hard to read. A GNOME app owes its terminal
+/// colours that work on the background it chose, so all three now come from one place.
 fn paint(view: &vte4::Terminal) {
-    let bg = gdk::RGBA::parse(crate::theme::view_bg(
-        adw::StyleManager::default().is_dark(),
-    ))
-    .ok();
-    let theme = view.color();
-    let fg = match &bg {
-        Some(bg) => {
-            let [r, g, b] = over(
-                [theme.red(), theme.green(), theme.blue(), theme.alpha()],
-                [bg.red(), bg.green(), bg.blue()],
-            );
-            gdk::RGBA::new(r, g, b, 1.0)
-        }
-        None => theme,
+    let dark = adw::StyleManager::default().is_dark();
+    let fg = gdk::RGBA::parse(crate::theme::view_fg(dark)).ok();
+    let bg = gdk::RGBA::parse(crate::theme::view_bg(dark)).ok();
+    // VTE asserts on a palette that is neither empty nor exactly 8, 16, 232 or 256 long, so a
+    // colour that failed to parse drops the whole palette back to VTE's default rather than
+    // shortening this one.
+    let parsed: Vec<gdk::RGBA> = crate::theme::terminal_palette(dark)
+        .iter()
+        .filter_map(|c| gdk::RGBA::parse(*c).ok())
+        .collect();
+    let palette: Vec<&gdk::RGBA> = match parsed.len() == 16 {
+        true => parsed.iter().collect(),
+        false => Vec::new(),
     };
-    view.set_colors(Some(&fg), bg.as_ref(), &[]);
+    view.set_colors(fg.as_ref(), bg.as_ref(), &palette);
     view.set_font(Some(&monospace()));
-}
-
-/// VTE stores a foreground as opaque RGB and drops the alpha, so a theme colour like libadwaita's
-/// light `view_fg_color` (80 % black) would paint pure black — blacker than every other piece of
-/// text in the window. Composited here instead.
-fn over(fg: [f32; 4], bg: [f32; 3]) -> [f32; 3] {
-    let a = fg[3];
-    [
-        fg[0] * a + bg[0] * (1.0 - a),
-        fg[1] * a + bg[1] * (1.0 - a),
-        fg[2] * a + bg[2] * (1.0 - a),
-    ]
 }
 
 fn monospace() -> pango::FontDescription {
@@ -458,31 +450,5 @@ mod tests {
         // Not a URL at all.
         assert!(!launchable("https:"));
         assert!(!launchable("example.org"));
-    }
-
-    fn close(got: [f32; 3], want: [f32; 3]) {
-        for (g, w) in got.iter().zip(want) {
-            assert!((g - w).abs() < 0.002, "{got:?} is not {want:?}");
-        }
-    }
-
-    #[test]
-    fn a_translucent_foreground_lands_where_the_rest_of_the_text_does() {
-        // libadwaita's light `view_fg_color` on `--view-bg-color`: the mid grey every other label
-        // in the window composites to, not the pure black VTE would have painted.
-        close(
-            over([0.0, 0.0, 0.024, 0.8], [1.0, 1.0, 1.0]),
-            [0.2, 0.2, 0.219],
-        );
-        // Dark is opaque either way, so this is a no-op there.
-        close(
-            over([1.0, 1.0, 1.0, 1.0], [0.11, 0.11, 0.125]),
-            [1.0, 1.0, 1.0],
-        );
-        // Fully transparent is the background and nothing else.
-        close(
-            over([1.0, 0.0, 0.0, 0.0], [0.11, 0.11, 0.125]),
-            [0.11, 0.11, 0.125],
-        );
     }
 }
