@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -202,7 +203,11 @@ pub struct Fold {
 }
 
 /// What attached to an opened document.
+///
+/// `default` on the struct, because this crosses the rpc wire: a client newer than the host's
+/// `accent-cli serve` must read what an older one sends rather than fail on a missing field.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Support {
     /// Characters that open the completion popup as they are typed.
     pub completion_triggers: Vec<char>,
@@ -210,6 +215,8 @@ pub struct Support {
     pub signature_triggers: Vec<char>,
     /// The language server accent looked for and did not find, so the UI can say so when asked.
     pub missing: Option<String>,
+    /// Something answers for ghost text, so the UI arms the inline path for this tab.
+    pub inline: bool,
 }
 
 // -------------------------------------------------------------------- tasks
@@ -266,8 +273,18 @@ pub(crate) trait Language: Send + Sync {
     fn saved(&self, _rel: &str) -> Result<()> {
         Ok(())
     }
+    /// The user left the document. A provider too expensive to tell about every save is told
+    /// here instead: merl rebuilds its whole index on a save, which is not a per-keystroke cost.
+    fn settle(&self, _rel: &str) -> Result<()> {
+        Ok(())
+    }
     fn close(&self, rel: &str);
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions>;
+    /// The rest of the line, from a model or an index of the vault: ghost text, painted where
+    /// the caret is rather than listed in the popup. `None` from anything that does not offer it.
+    fn inline_completion(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<String>> {
+        Box::pin(async { Ok(None) })
+    }
     /// Fill in what the item was too expensive to send: `rel` says which document's text the
     /// edits it comes back with are measured against.
     fn resolve(&self, rel: &str, item: Completion) -> Fut<'_, Completion>;
@@ -301,6 +318,9 @@ pub(crate) struct Languages {
     pub(crate) sessions: Mutex<HashMap<(String, PathBuf), Session>>,
     /// Open document → the provider holding it.
     pub(crate) docs: Mutex<HashMap<String, Arc<dyn Language>>>,
+    /// Whether a prose document gets a ghost-text session; the preference behind it is global,
+    /// so a vault reads it once and every document opened after that follows.
+    pub(crate) ghost: AtomicBool,
 }
 
 impl Languages {
@@ -311,7 +331,16 @@ impl Languages {
             events,
             sessions: Mutex::new(HashMap::new()),
             docs: Mutex::new(HashMap::new()),
+            ghost: AtomicBool::new(true),
         })
+    }
+
+    /// Turn ghost text on or off for documents opened from here on.
+    ///
+    /// ponytail: a session already running is left alone; it ends with the vault. Stopping one
+    /// means shutting a server down under documents that are still open.
+    pub(crate) fn set_ghost(&self, on: bool) {
+        self.ghost.store(on, Ordering::Relaxed);
     }
 
     /// The session under `key`, started with `start` if it is not there yet. Concurrent openers
@@ -335,6 +364,29 @@ impl Languages {
             sessions.entry(key).or_default().clone()
         };
         cell.get_or_try_init(|| start).await.cloned()
+    }
+
+    /// The vault's one ghost-text session, started on the first prose document that wants it.
+    ///
+    /// Keyed by the vault root rather than by `session_root`: merl indexes the whole vault, and
+    /// a multi-project vault would otherwise get one index per `.git` in it. The argv is exactly
+    /// these three words — merl-rt exits with a usage message on any other flag.
+    async fn ghost_session(self: &Arc<Self>) -> Option<Arc<dyn Language>> {
+        let root = self.root.clone();
+        let key = (GHOST.to_string(), root.clone());
+        let argv = vec![
+            GHOST.to_string(),
+            "--vault".to_string(),
+            root.to_string_lossy().into_owned(),
+        ];
+        let start = external::start(argv, root.clone(), root, self.events.clone());
+        match self.session(key, start).await {
+            Ok(session) => Some(session),
+            Err(e) => {
+                tracing::debug!("no ghost text: {e:#}");
+                None
+            }
+        }
     }
 
     /// Who answers for an open document.
@@ -411,19 +463,27 @@ impl Languages {
                 }
                 None => (None, language.clone(), None),
             };
+            let prose = words::PROSE.contains(&language.as_str());
+            // Ghost text rides beside the primary for prose: one merl for the whole vault,
+            // started when it is installed and wanted. A binary that is not there is a debug
+            // line and never a `missing`, because this is optional where a language server is
+            // expected: nothing about the tab stops working without it.
+            let ghost = match prose && me.ghost.load(Ordering::Relaxed) && in_path(GHOST) {
+                true => me.ghost_session().await,
+                false => None,
+            };
             // Prose gets its words layered under whatever the primary answers, and gets them
             // even with no primary at all.
-            let provider: Arc<dyn Language> =
-                match (primary, words::PROSE.contains(&language.as_str())) {
-                    (Some(primary), false) => primary,
-                    (primary, true) => Arc::new(words::Layered::new(primary)),
-                    (None, false) => {
-                        return Ok(Support {
-                            missing,
-                            ..Support::default()
-                        });
-                    }
-                };
+            let provider: Arc<dyn Language> = match (primary, prose) {
+                (Some(primary), false) => primary,
+                (primary, true) => Arc::new(words::Layered::new(primary, ghost)),
+                (None, false) => {
+                    return Ok(Support {
+                        missing,
+                        ..Support::default()
+                    });
+                }
+            };
             let mut support = provider.open(&rel, &language_id, text)?;
             support.missing = support.missing.or(missing);
             locked(&me.docs).insert(rel, provider);
@@ -441,6 +501,11 @@ impl Languages {
         Task::spawn(async move { provider?.saved(&rel) })
     }
 
+    pub(crate) fn settle_document(&self, rel: String) -> Task<()> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.settle(&rel) })
+    }
+
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
         let provider = locked(&self.docs).remove(&rel);
         Task::spawn(async move {
@@ -450,52 +515,12 @@ impl Languages {
             Ok(())
         })
     }
-
-    pub(crate) fn completion(
-        &self,
-        rel: String,
-        pos: Pos,
-        trigger: Option<char>,
-    ) -> Task<Completions> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.completion(&rel, pos, trigger).await })
-    }
-
-    pub(crate) fn resolve_completion(&self, rel: String, item: Completion) -> Task<Completion> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.resolve(&rel, item).await })
-    }
-
-    pub(crate) fn signature_help(&self, rel: String, pos: Pos) -> Task<Option<Signature>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.signature_help(&rel, pos).await })
-    }
-
-    pub(crate) fn hover(&self, rel: String, pos: Pos) -> Task<Option<Hover>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.hover(&rel, pos).await })
-    }
-
-    pub(crate) fn definition(&self, rel: String, pos: Pos) -> Task<Vec<Location>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.definition(&rel, pos).await })
-    }
-
-    pub(crate) fn symbols(&self, rel: String) -> Task<Vec<Symbol>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.symbols(&rel).await })
-    }
-
-    pub(crate) fn references(&self, rel: String, pos: Pos) -> Task<Vec<Location>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.references(&rel, pos).await })
-    }
-
-    pub(crate) fn folds(&self, rel: String) -> Task<Vec<Fold>> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.folds(&rel).await })
-    }
 }
+
+/// The ghost-text server: one process per vault, answering `textDocument/inlineCompletion` from
+/// an index of the vault's own notes. Not in `SERVERS`, because it answers beside a language's
+/// own provider rather than instead of one.
+const GHOST: &str = "merl-rt";
 
 /// What answers for a language.
 pub(crate) enum Server {
@@ -629,61 +654,64 @@ impl Vault {
         }
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
+    /// The user left the document. Cheap for every provider but the ghost one, which re-reads
+    /// the vault here rather than on every autosave.
+    pub fn settle(&self, rel: &str) -> Task<()> {
         match &self.backend {
-            Backend::Local(v) => v.completion(rel, pos, trigger),
-            Backend::Remote(r) => remote_task(r.clone(), "completion", json!([rel, pos, trigger])),
+            Backend::Local(v) => v.settle(rel),
+            Backend::Remote(r) => remote_task(r.clone(), "settle", json!([rel])),
         }
     }
+}
 
-    pub fn resolve_completion(&self, rel: &str, item: Completion) -> Task<Completion> {
-        match &self.backend {
-            Backend::Local(v) => v.resolve_completion(rel, item),
-            Backend::Remote(r) => remote_task(r.clone(), "resolve_completion", json!([rel, item])),
-        }
-    }
+/// The requests a document answers, written once for the two layers that carry them: [`Languages`]
+/// finds the provider that holds the document and spawns the request on the runtime, [`Vault`]
+/// asks it here or on the host that has the files. Each line reads `façade => trait method`.
+///
+/// The document's lifecycle — open, change, save, settle, close — is written out by hand above:
+/// those four differ from each other, while these nine differ only in their arguments.
+macro_rules! requests {
+    ($( $(#[$doc:meta])* $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) -> $ret:ty; )*) => {
+        impl Languages { $(
+            pub(crate) fn $name(&self, rel: String, $($arg: $ty),*) -> Task<$ret> {
+                let provider = self.provider(&rel);
+                Task::spawn(async move { provider?.$inner(&rel, $($arg),*).await })
+            }
+        )* }
 
-    pub fn signature_help(&self, rel: &str, pos: Pos) -> Task<Option<Signature>> {
-        match &self.backend {
-            Backend::Local(v) => v.signature_help(rel, pos),
-            Backend::Remote(r) => remote_task(r.clone(), "signature_help", json!([rel, pos])),
-        }
-    }
+        impl Vault { $(
+            $(#[$doc])*
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<$ret> {
+                match &self.backend {
+                    Backend::Local(v) => v.$name(rel, $($arg),*),
+                    Backend::Remote(r) => {
+                        remote_task(r.clone(), stringify!($name), json!([rel, $($arg),*]))
+                    }
+                }
+            }
+        )* }
 
-    pub fn hover(&self, rel: &str, pos: Pos) -> Task<Option<Hover>> {
-        match &self.backend {
-            Backend::Local(v) => v.hover(rel, pos),
-            Backend::Remote(r) => remote_task(r.clone(), "hover", json!([rel, pos])),
-        }
-    }
+        impl Local { $(
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<$ret> {
+                self.lang.$name(rel.to_string(), $($arg),*)
+            }
+        )* }
+    };
+}
 
-    pub fn definition(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
-        match &self.backend {
-            Backend::Local(v) => v.definition(rel, pos),
-            Backend::Remote(r) => remote_task(r.clone(), "definition", json!([rel, pos])),
-        }
-    }
-
-    pub fn symbols(&self, rel: &str) -> Task<Vec<Symbol>> {
-        match &self.backend {
-            Backend::Local(v) => v.symbols(rel),
-            Backend::Remote(r) => remote_task(r.clone(), "symbols", json!([rel])),
-        }
-    }
-
-    pub fn references(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
-        match &self.backend {
-            Backend::Local(v) => v.references(rel, pos),
-            Backend::Remote(r) => remote_task(r.clone(), "references", json!([rel, pos])),
-        }
-    }
-
-    pub fn folds(&self, rel: &str) -> Task<Vec<Fold>> {
-        match &self.backend {
-            Backend::Local(v) => v.folds(rel),
-            Backend::Remote(r) => remote_task(r.clone(), "folds", json!([rel])),
-        }
-    }
+requests! {
+    completion => completion(pos: Pos, trigger: Option<char>) -> Completions;
+    /// Fill in what the popup left out until a row was looked at.
+    resolve_completion => resolve(item: Completion) -> Completion;
+    signature_help => signature_help(pos: Pos) -> Option<Signature>;
+    hover => hover(pos: Pos) -> Option<Hover>;
+    definition => definition(pos: Pos) -> Vec<Location>;
+    symbols => symbols() -> Vec<Symbol>;
+    references => references(pos: Pos) -> Vec<Location>;
+    folds => folds() -> Vec<Fold>;
+    /// The rest of the line as ghost text, or nothing. Asked on every pause in the typing, so
+    /// dropping the task is the normal end of one.
+    inline_completion => inline_completion(pos: Pos) -> Option<String>;
 }
 
 /// One remote request as a task. The round trip cannot be cancelled the way a server request
@@ -719,36 +747,8 @@ impl Local {
         self.lang.close_document(rel.to_string())
     }
 
-    pub fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Task<Completions> {
-        self.lang.completion(rel.to_string(), pos, trigger)
-    }
-
-    pub fn resolve_completion(&self, rel: &str, item: Completion) -> Task<Completion> {
-        self.lang.resolve_completion(rel.to_string(), item)
-    }
-
-    pub fn signature_help(&self, rel: &str, pos: Pos) -> Task<Option<Signature>> {
-        self.lang.signature_help(rel.to_string(), pos)
-    }
-
-    pub fn hover(&self, rel: &str, pos: Pos) -> Task<Option<Hover>> {
-        self.lang.hover(rel.to_string(), pos)
-    }
-
-    pub fn definition(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
-        self.lang.definition(rel.to_string(), pos)
-    }
-
-    pub fn symbols(&self, rel: &str) -> Task<Vec<Symbol>> {
-        self.lang.symbols(rel.to_string())
-    }
-
-    pub fn references(&self, rel: &str, pos: Pos) -> Task<Vec<Location>> {
-        self.lang.references(rel.to_string(), pos)
-    }
-
-    pub fn folds(&self, rel: &str) -> Task<Vec<Fold>> {
-        self.lang.folds(rel.to_string())
+    pub fn settle(&self, rel: &str) -> Task<()> {
+        self.lang.settle_document(rel.to_string())
     }
 }
 

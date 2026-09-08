@@ -16,6 +16,9 @@
 //! * secondary carets do not blink, they are painted;
 //! * the completion popup can open at several carets at once, since it follows the primary.
 //!
+//! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
+//! nothing to give it a text tag, and this widget is already the one drawing over the text.
+//!
 //! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, and the arrow,
 //! Home and End motions, so a column of carets can be moved and edited as one. Everything else —
 //! Escape, any Ctrl or Alt combination, any other key — clears the carets and is then handled as
@@ -71,6 +74,10 @@ fn clamp_offset(wanted: i32, line_length: i32) -> i32 {
     wanted.min(line_length)
 }
 
+/// How much of the text colour ghost text keeps. Enough to read, little enough that it is never
+/// mistaken for what the document says.
+const GHOST_ALPHA: f32 = 0.45;
+
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
@@ -79,6 +86,8 @@ mod imp {
     pub struct View {
         /// One right-gravity mark per secondary caret, so they ride along with the text.
         pub carets: RefCell<Vec<gtk::TextMark>>,
+        /// The suggestion painted after the caret, if one is showing.
+        pub ghost: RefCell<Option<String>>,
         /// Set while a key is replayed, so the `mark-set` hook does not read our own edits as
         /// the user moving the primary caret and drop every caret mid-edit.
         pub busy: Cell<bool>,
@@ -150,6 +159,22 @@ mod imp {
                     &graphene::Rect::new(at.x() as f32, at.y() as f32, 1.0, at.height() as f32),
                 );
             }
+            // The suggestion sits after the caret in the text's own font, dimmed enough to read
+            // as not-yet-written. It is only ever asked for at the end of a line, so there is
+            // nothing to its right to draw over.
+            if let Some(text) = self.ghost.borrow().as_deref() {
+                let at = obj.iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
+                let dim = gdk::RGBA::new(
+                    colour.red(),
+                    colour.green(),
+                    colour.blue(),
+                    colour.alpha() * GHOST_ALPHA,
+                );
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(at.x() as f32, at.y() as f32));
+                snapshot.append_layout(&obj.create_pango_layout(Some(text)), &dim);
+                snapshot.restore();
+            }
         }
     }
 
@@ -171,6 +196,23 @@ impl Default for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Paint `text` after the caret, or nothing. The suggestion never enters the buffer, so it
+    /// costs no undo step, no save and no `changed`.
+    pub fn set_ghost(&self, text: Option<String>) {
+        let mut ghost = self.imp().ghost.borrow_mut();
+        if *ghost == text {
+            return;
+        }
+        *ghost = text;
+        drop(ghost);
+        self.queue_draw();
+    }
+
+    /// What is painted after the caret, if anything.
+    pub fn ghost(&self) -> Option<String> {
+        self.imp().ghost.borrow().clone()
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating

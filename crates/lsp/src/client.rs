@@ -219,6 +219,7 @@ impl Client {
                         },
                         "contextSupport": true
                     },
+                    "inlineCompletion": {},
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "signatureHelp": {
                         "signatureInformation": {
