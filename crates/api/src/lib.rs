@@ -95,6 +95,13 @@ pub enum Event {
         rel: String,
         items: Vec<Diagnostic>,
     },
+    /// A language provider started or finished a background job worth waiting for — the
+    /// ghost-text index rebuilding, and nothing else today. `what` is what to call it on screen.
+    /// Shown where the vault's own indexing is shown, and yielding to it: this one is optional.
+    Busy {
+        what: String,
+        busy: bool,
+    },
 }
 
 /// What a rename would do, so the UI can confirm before anything is written.

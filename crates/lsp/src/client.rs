@@ -389,7 +389,9 @@ fn route(inner: &Arc<Inner>, message: Value, notifier: &mpsc::UnboundedSender<No
         (None, Some(method)) => {
             let params = message.get("params").cloned().unwrap_or(Value::Null);
             match method {
-                "$/progress" | "telemetry/event" => tracing::debug!("{method}: {params}"),
+                // `$/progress` goes on to the caller, which is the only thing that knows
+                // whether this server's work is worth showing; a language server's is not.
+                "telemetry/event" => tracing::debug!("{method}: {params}"),
                 "window/logMessage" | "window/showMessage" => {
                     let text = params
                         .get("message")

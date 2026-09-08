@@ -379,7 +379,13 @@ impl Languages {
             "--vault".to_string(),
             root.to_string_lossy().into_owned(),
         ];
-        let start = external::start(argv, root.clone(), root, self.events.clone());
+        let start = external::start(
+            argv,
+            root.clone(),
+            root,
+            self.events.clone(),
+            Some("suggestions"),
+        );
         match self.session(key, start).await {
             Ok(session) => Some(session),
             Err(e) => {
@@ -454,7 +460,7 @@ impl Languages {
                     let (root, events) = (me.root.clone(), me.events.clone());
                     let session_root = session_root(&root, &Local::join(&root, &rel)?);
                     let key = (argv[0].clone(), session_root.clone());
-                    let start = external::start(argv, session_root, root, events);
+                    let start = external::start(argv, session_root, root, events, None);
                     (Some(me.session(key, start).await?), language_id, None)
                 }
                 Some(Server::Missing(name)) => {
