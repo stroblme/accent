@@ -383,11 +383,7 @@ impl Vault {
         }
     }
 
-    pub fn create_note(
-        &self,
-        rel: &str,
-        template: Option<&str>,
-    ) -> Result<(String, Option<usize>)> {
+    pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         ask!(
             self,
             |v: &Local| v.create_note(rel, template),
@@ -472,12 +468,21 @@ impl Vault {
         )
     }
 
-    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Option<usize>)>> {
+    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Vec<usize>)>> {
         ask!(
             self,
             |v: &Local| v.note_from_template(template),
             "note_from_template",
             json!([template])
+        )
+    }
+
+    pub fn render_template(&self, template: &str, title: &str) -> Result<(String, Vec<usize>)> {
+        ask!(
+            self,
+            |v: &Local| v.render_template(template, title),
+            "render_template",
+            json!([template, title])
         )
     }
 
@@ -1037,23 +1042,26 @@ impl Local {
         anyhow::bail!("no template {name}: looked at {}", tried.join(" and "))
     }
 
+    /// A template's text as a note called `title` would get it: the body with every placeholder
+    /// expanded, and the byte offsets of its `{{cursor}}` stops. What Insert Template puts at
+    /// the caret, and what [`create_note`](Self::create_note) writes.
+    pub fn render_template(&self, template: &str, title: &str) -> Result<(String, Vec<usize>)> {
+        // Through `parse` first: `accent-target:` is accent's directive, not the note's text.
+        Ok(template::render(
+            &template::parse(&self.read_template(template)?).body,
+            title,
+            chrono::Local::now().naive_local(),
+        ))
+    }
+
     /// Create a file, optionally from a template. Returns the path it was created at and where
     /// the caret belongs. The name is taken as it is given: `notes` is a file called `notes`, not
     /// a note called `notes.md`. Callers that mean markdown say so (`note_from_template` does).
-    pub fn create_note(
-        &self,
-        rel: &str,
-        template: Option<&str>,
-    ) -> Result<(String, Option<usize>)> {
+    pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
         let rel = rel.to_string();
         let (text, cursor) = match template {
-            // Through `parse` first: `accent-target:` is accent's directive, not the note's text.
-            Some(t) => template::render(
-                &template::parse(&self.read_template(t)?).body,
-                &stem(&rel),
-                chrono::Local::now().naive_local(),
-            ),
-            None => (String::new(), None),
+            Some(t) => self.render_template(t, &stem(&rel))?,
+            None => (String::new(), Vec::new()),
         };
         fs::create_note(&self.resolve(&rel)?, &text).with_context(|| format!("creating {rel}"))?;
         self.post(Msg::Update {
@@ -1291,12 +1299,12 @@ impl Local {
     /// Invoked twice on the same day, a dated target hands back the note it made the first time,
     /// byte for byte: that is what makes a daily note daily. `None` is a template that says
     /// nothing about where its notes go, which is the caller's cue that it needs a name.
-    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Option<usize>)>> {
+    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Vec<usize>)>> {
         let Some(rel) = self.template_target(template)? else {
             return Ok(None);
         };
         if self.resolve(&rel)?.exists() {
-            return Ok(Some((rel, None)));
+            return Ok(Some((rel, Vec::new())));
         }
         self.create_note(&rel, Some(template)).map(Some)
     }
@@ -2562,7 +2570,7 @@ mod tests {
         assert_eq!(rel, "Inbox/Weekly sync.md");
         let text = f.read(&rel);
         assert_eq!(text, "# Weekly sync\n\nbody\n");
-        assert_eq!(&text[cursor.unwrap()..], "body\n");
+        assert_eq!(&text[cursor[0]..], "body\n");
 
         // Once indexed, the same file is what the "new note from template" dialog offers.
         assert!(poll_until(
@@ -2583,7 +2591,7 @@ mod tests {
 
         let (rel, cursor) = f.vault.note_from_template("Daily.md").unwrap().unwrap();
         assert!(rel.starts_with("Daily/") && rel.ends_with(".md"), "{rel}");
-        assert!(cursor.is_some(), "a fresh note places the caret");
+        assert!(!cursor.is_empty(), "a fresh note places the caret");
         let text = f.read(&rel);
         assert!(
             !text.contains("accent-target"),
@@ -2592,7 +2600,10 @@ mod tests {
 
         let (again, cursor) = f.vault.note_from_template("Daily.md").unwrap().unwrap();
         assert_eq!(again, rel);
-        assert_eq!(cursor, None, "an existing note is opened, not rewritten");
+        assert!(
+            cursor.is_empty(),
+            "an existing note is opened, not rewritten"
+        );
         assert_eq!(f.read(&rel), text);
     }
 

@@ -448,6 +448,9 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         "conflict_diff" => any(vault.conflict_diff(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?)),
         "template_target" => any(vault.template_target(&arg::<String>(p, 0)?)),
         "note_from_template" => any(vault.note_from_template(&arg::<String>(p, 0)?)),
+        "render_template" => {
+            any(vault.render_template(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?))
+        }
         "templates" => any(vault.templates()),
 
         // ------------------------------------------------------------ index

@@ -2034,6 +2034,43 @@ impl Tab {
         self.set_highlight(true);
     }
 
+    /// Put the caret on a template's first `{{cursor}}` and make the rest Tab stops.
+    ///
+    /// GtkSourceView can only walk stops through text a snippet inserted, so with more than one
+    /// the note's text is put back through a snippet: the same bytes, not undoable and not dirty,
+    /// because nothing about the file changed. `byte` offsets, as the template renderer counts.
+    pub fn place_stops(&self, stops: &[usize]) {
+        let text = self.text();
+        match stops {
+            [] => {}
+            [only] => {
+                let at = text.get(..*only).map_or(0, |s| s.chars().count());
+                self.goto_range(at..at);
+            }
+            _ => {
+                let (mut start, mut end) = self.buffer.bounds();
+                self.loading.set(true);
+                self.buffer.begin_irreversible_action();
+                self.buffer.delete(&mut start, &mut end);
+                self.view
+                    .push_snippet(&snippet(&text, stops), Some(&mut self.buffer.start_iter()));
+                self.buffer.end_irreversible_action();
+                self.loading.set(false);
+                self.buffer.set_modified(false);
+                self.analyse();
+            }
+        }
+    }
+
+    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk.
+    pub fn insert_stops(&self, text: &str, stops: &[usize]) {
+        let mut at = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        match stops.is_empty() {
+            true => self.buffer.insert(&mut at, text),
+            false => self.view.push_snippet(&snippet(text, stops), Some(&mut at)),
+        }
+    }
+
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
     /// number is still being typed.
     pub fn show_line(&self, line: i32) {
@@ -2243,9 +2280,57 @@ impl Drop for Tab {
     }
 }
 
+/// `text` as a snippet whose stops are the byte offsets `stops`, in Tab order.
+fn snippet(text: &str, stops: &[usize]) -> sourceview5::Snippet {
+    let snippet = sourceview5::Snippet::new(None, None);
+    for (piece, focus) in chunks(text, stops) {
+        let chunk = sourceview5::SnippetChunk::new();
+        chunk.set_text(piece);
+        chunk.set_text_set(true);
+        chunk.set_focus_position(focus);
+        snippet.add_chunk(&chunk);
+    }
+    snippet
+}
+
+/// The text between the stops, then each stop as an empty chunk numbered from one; plain text
+/// carries -1, which is what GtkSourceView reads as "not a stop". A stop off a character
+/// boundary, which the renderer never produces, is skipped rather than trusted.
+fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
+    let mut out = Vec::new();
+    let mut byte = 0;
+    let mut focus = 0;
+    for &stop in stops {
+        let Some(piece) = text.get(byte..stop) else {
+            continue;
+        };
+        if !piece.is_empty() {
+            out.push((piece, -1));
+        }
+        focus += 1;
+        out.push(("", focus));
+        byte = stop;
+    }
+    if byte < text.len() {
+        out.push((&text[byte..], -1));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunks_split_the_text_at_its_stops_in_order() {
+        assert_eq!(
+            chunks("ab: \ncd: \n", &[4, 9]),
+            [("ab: ", -1), ("", 1), ("\ncd: ", -1), ("", 2), ("\n", -1)]
+        );
+        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1)]);
+        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1)]);
+        assert_eq!(chunks("ab", &[0, 0]), [("", 1), ("", 2), ("ab", -1)]);
+    }
 
     #[test]
     fn leading_indent_is_the_spaces_and_tabs_a_line_opens_with() {
