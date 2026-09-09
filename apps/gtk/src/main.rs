@@ -712,7 +712,7 @@ impl App {
                 self,
                 #[weak]
                 term,
-                move |out| {
+                move |out, _| {
                     term.set_zoom(stepped_zoom(term.zoom(), out));
                     app.refresh_zoom();
                 }

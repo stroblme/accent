@@ -169,8 +169,12 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
     total.trunc() as i32
 }
 
-/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true)` is one step out,
-/// `step(false)` one step in. One notch is one step, the same amount the chords move.
+/// Ctrl+scroll on `widget` steps whatever it is that zooms there: `step(true, at)` is one step
+/// out, `step(false, at)` one step in. One notch is one step, the same amount the chords move.
+///
+/// `at` is where the pointer is in the widget, for a zoom that keeps what is under it where it
+/// is — which is what a PDF page does and what a font size has no use for. A controller of its
+/// own tracks it, because a scroll event carries no widget coordinate.
 ///
 /// Each controller owns its own accumulator, because a smooth-scroll device sends one notch as
 /// several fractional deltas and two widgets sharing the remainder would zoom each other. Without
@@ -182,8 +186,22 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
 pub fn zoom_on_wheel(
     widget: &impl IsA<gtk::Widget>,
     phase: gtk::PropagationPhase,
-    step: impl Fn(bool) + 'static,
+    step: impl Fn(bool, Option<(f64, f64)>) + 'static,
 ) {
+    let at = Rc::new(Cell::new(None));
+    let motion = gtk::EventControllerMotion::new();
+    motion.connect_motion(glib::clone!(
+        #[strong]
+        at,
+        move |_, x, y| at.set(Some((x, y)))
+    ));
+    motion.connect_leave(glib::clone!(
+        #[strong]
+        at,
+        move |_| at.set(None)
+    ));
+    widget.add_controller(motion);
+
     let accum = Cell::new(0.0);
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(phase);
@@ -196,7 +214,7 @@ pub fn zoom_on_wheel(
         }
         let steps = wheel_steps(&accum, dy);
         for _ in 0..steps.abs() {
-            step(steps > 0);
+            step(steps > 0, at.get());
         }
         glib::Propagation::Stop
     });

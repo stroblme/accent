@@ -175,6 +175,40 @@ pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
     }
 }
 
+/// How strongly what the reader is doing to a PDF page is painted over it: a note's highlight,
+/// the text selection, a search match and the one being stepped to, the ghost of a stroke the
+/// Adjust tool is moving, and the hairline that tells white paper from a white window.
+///
+/// Here rather than in the widget that paints them, because this file is the one that says what
+/// a colour is (DESIGN.md, Colour) and an alpha is half of one.
+pub const HIGHLIGHT_ALPHA: f32 = 0.2;
+pub const SELECTION_ALPHA: f32 = 0.35;
+pub const MARK_ALPHA: f32 = 0.3;
+pub const CURRENT_MARK_ALPHA: f32 = 0.6;
+pub const GHOST_ALPHA: f32 = 0.6;
+pub const PAGE_EDGE_ALPHA: f32 = 0.15;
+
+/// How much of the page a highlighter lets through. It also multiplies rather than covers, so
+/// this is about how strong the colour is, not about whether the text survives.
+pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
+
+/// A colour written down as bytes, painted at `alpha`. The one place a byte becomes a channel.
+pub fn rgba(rgb: [u8; 3], alpha: f32) -> gdk::RGBA {
+    let channel = |v: u8| f32::from(v) / 255.0;
+    gdk::RGBA::new(channel(rgb[0]), channel(rgb[1]), channel(rgb[2]), alpha)
+}
+
+/// The same colour at another alpha, which is what every overlay above is.
+pub fn at(colour: gdk::RGBA, alpha: f32) -> gdk::RGBA {
+    gdk::RGBA::new(colour.red(), colour.green(), colour.blue(), alpha)
+}
+
+/// The system accent, for painting with. [`accent_rgb`] is the same colour on its way into a
+/// file.
+pub fn accent() -> gdk::RGBA {
+    adw::StyleManager::default().accent_color_rgba()
+}
+
 /// The system accent as bytes, for the two places a colour has to end up inside a file rather
 /// than on screen: a highlight's `/C` and an ink stroke's colour.
 ///
@@ -182,7 +216,7 @@ pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
 /// so the value is resolved here and handed over, and this stays the only file that says what a
 /// colour is.
 pub fn accent_rgb() -> [u8; 3] {
-    let c = adw::StyleManager::default().accent_color_rgba();
+    let c = accent();
     [byte(c.red()), byte(c.green()), byte(c.blue())]
 }
 
@@ -191,7 +225,7 @@ pub fn accent_rgb() -> [u8; 3] {
 /// CSV columns' rule (DESIGN.md, Colour), and black, the one literal, which is why this lives
 /// here.
 pub fn swatches() -> [Option<[u8; 3]>; 6] {
-    let c = adw::StyleManager::default().accent_color_rgba();
+    let c = accent();
     let hsv = gtk::rgb_to_hsv(c.red(), c.green(), c.blue());
     let hue = |column: usize| {
         let (h, s, v) = crate::highlight::rotate(hsv, column);

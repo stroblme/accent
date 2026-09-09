@@ -148,13 +148,8 @@ impl Ring {
                 option(
                     3 + i,
                     dot(14.0, move |_| match crate::theme::swatches()[i] {
-                        Some([r, g, b]) => gdk::RGBA::new(
-                            f32::from(r) / 255.0,
-                            f32::from(g) / 255.0,
-                            f32::from(b) / 255.0,
-                            1.0,
-                        ),
-                        None => adw::StyleManager::default().accent_color_rgba(),
+                        Some(rgb) => crate::theme::rgba(rgb, 1.0),
+                        None => crate::theme::accent(),
                     }),
                 )
             })

@@ -537,7 +537,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out| {
+                move |out, _| {
                     if let Some(image) = viewer.upgrade() {
                         app.zoom_image(&image, Some(out));
                     }
@@ -838,7 +838,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+                move |out, _| app.set_zoom(stepped_zoom(app.zoom.get(), out))
             ),
         );
 
