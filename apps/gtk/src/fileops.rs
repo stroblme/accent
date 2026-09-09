@@ -195,11 +195,14 @@ pub fn new_from_template(ops: &Rc<Ops>) {
     });
 }
 
+/// Put rendered template text into the open note, its `{{cursor}}` stops as byte offsets.
+type Insert = Box<dyn Fn(&str, &[usize])>;
+
 /// Put a template into the open note at the caret: `title` is that note's stem, which is what
 /// its `{{title}}` means here, and `insert` is handed the rendered text with its `{{cursor}}`
 /// stops. Every template is offered, target or not; a Meeting is something typed into the day's
 /// note, not a note of its own.
-pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Box<dyn Fn(&str, &[usize])>) {
+pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
     let templates = ops.vault.templates().unwrap_or_default();
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
