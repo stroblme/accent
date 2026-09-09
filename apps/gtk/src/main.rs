@@ -4635,6 +4635,15 @@ impl App {
                     None => Vec::new(),
                 }
             }),
+            // The start screen's own removal, so one list is written one way.
+            on_forget: Box::new({
+                let app = Rc::downgrade(self);
+                move |key: &str| {
+                    if let Some(app) = app.upgrade() {
+                        start::forget_vault(&app.config, Path::new(key));
+                    }
+                }
+            }),
         };
         drop(config);
         drop(used);
