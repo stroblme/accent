@@ -443,6 +443,13 @@ impl PdfTab {
         self.view.scroll_to(anchor);
     }
 
+    /// The reading view's geometry, for `ACCENT_BENCH_PDF` and nothing else: the headless image
+    /// has no pointer and no window manager, so the numbers a fit produced are the only way to
+    /// see that it fitted.
+    pub fn geometry(&self) -> String {
+        self.view.geometry()
+    }
+
     /// Put the selected text on the clipboard. Nothing selected is not an error: Ctrl+C on a
     /// page with no selection simply leaves the clipboard alone.
     pub fn copy_selection(&self) {
@@ -1161,7 +1168,9 @@ impl PdfTab {
         popover.popup();
     }
 
-    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own.
+    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;
+    /// the arrows are not — it binds a scroll step to `Ctrl+Up`/`Ctrl+Down` and leaves the bare
+    /// arrow keys to move the focus off the page — so they are wired here.
     fn wire_keys(self: &Rc<Self>) {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
@@ -1189,11 +1198,24 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
+                // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
+                // scroller's own step: only the bare key reads the document.
+                let bare = !state.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                );
                 match key {
                     gtk::gdk::Key::space if shift => tab.previous_page(),
                     gtk::gdk::Key::space => tab.next_page(),
                     gtk::gdk::Key::n => tab.next_page(),
                     gtk::gdk::Key::p => tab.previous_page(),
+                    // A page back and a page forth whatever the zoom: horizontal movement is
+                    // Shift and the wheel, and one key cannot mean two things.
+                    gtk::gdk::Key::Left if bare => tab.previous_page(),
+                    gtk::gdk::Key::Right if bare => tab.next_page(),
+                    gtk::gdk::Key::Up if bare => tab.view.scroll_step(false),
+                    gtk::gdk::Key::Down if bare => tab.view.scroll_step(true),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop

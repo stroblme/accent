@@ -6679,6 +6679,9 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// what the panes hold and whether their rows line up.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
+/// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
+/// and prints the layout either side of it. Point it at a document of several pages: a one-page
+/// PDF is wholly on screen whatever the scroll offset was.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6691,11 +6694,13 @@ fn install_bench_hooks(app: &Rc<App>) {
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
+    let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
         && compare.is_none()
+        && pdf.is_none()
         && !git
         && !keys
         && !chrome
@@ -6713,6 +6718,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = compare {
             return bench_compare(&app, &rel);
+        }
+        if let Some(rel) = pdf {
+            return bench_pdf(&app, &rel);
         }
         if shell_keys {
             return bench_shell_keys(&app);
@@ -7348,6 +7356,38 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
         "rows={rows} hunks={hunks} hidden={hidden} buttons={buttons} misaligned={}",
         compare.misaligned()
     )
+}
+
+/// Open a PDF, leave the reader halfway down its second page, and fit the page from there.
+///
+/// Fit Page is fired as the window action the status bar's menu and the palette both fire, so a
+/// route that never reaches the tab shows up here as a zoom that did not change.
+fn bench_pdf(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    // The pages are measured on the render thread, so nothing about the layout is known until it
+    // has reported back.
+    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+        let Some(pdf) = app.active_pdf() else {
+            println!("bench pdf no_tab");
+            return bench_quit(&app);
+        };
+        println!("bench pdf pages={} {}", pdf.page_count(), pdf.geometry());
+        let page = 1.min(pdf.page_count().saturating_sub(1));
+        pdf.scroll_to(pdfview::Anchor {
+            page,
+            u: 0.0,
+            v: 0.5,
+        });
+        println!("bench pdf mid_page {}", pdf.geometry());
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-fit-page", None);
+        println!(
+            "bench pdf fit_page {} label={:?}",
+            pdf.geometry(),
+            pdf.zoom_label()
+        );
+        bench_quit(&app);
+    });
 }
 
 fn bench_quit(app: &Rc<App>) {

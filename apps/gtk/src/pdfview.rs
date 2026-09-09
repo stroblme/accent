@@ -431,6 +431,22 @@ pub fn stepped(from: f64, out: bool) -> PdfZoom {
     PdfZoom::Scale(crate::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
 }
 
+/// Where a reading position resumes from, given the zoom it resumes into.
+///
+/// Under [`PdfZoom::FitPage`] one page is one screen, so the page lands at its top. Keeping the
+/// fraction of it the viewport happened to be left at is what made Fit Page look broken: the
+/// scale was right, but the same half of one page and half of the next stayed on screen.
+pub fn resume_at(zoom: PdfZoom, anchor: Anchor) -> Anchor {
+    match zoom {
+        PdfZoom::FitPage => Anchor {
+            u: 0.0,
+            v: 0.0,
+            ..anchor
+        },
+        _ => anchor,
+    }
+}
+
 /// A scale clamped to what is worth rendering: below the floor nothing is legible, above the
 /// ceiling one page is hundreds of megabytes of tiles.
 pub fn clamp_scale(scale: f32) -> f32 {
@@ -825,8 +841,31 @@ impl PdfView {
         anchor_at(&self.imp().layout.borrow(), x, y)
     }
 
-    /// Put the reader back where `anchor` says.
+    /// The layout as one line: what `ACCENT_BENCH_PDF` prints, and its only reader. Whether the
+    /// page being read is wholly on screen is what Fit Page has to mean, so that is the last
+    /// field rather than something the numbers have to be read for.
+    pub fn geometry(&self) -> String {
+        let layout = self.imp().layout.borrow();
+        let (_, y) = self.scroll_offset();
+        let vh = f64::from(self.height());
+        let page = self.current_page();
+        let rect = layout.pages.get(page).copied();
+        let whole = rect.is_some_and(|r| f64::from(r.y) >= y && f64::from(r.y + r.h) <= y + vh);
+        let (page_y, page_h) = rect.map_or((0.0, 0.0), |r| (r.y, r.h));
+        format!(
+            "zoom={:?} scale={:.4} vw={} vh={vh} content_h={:.1} top={y:.1} page={page} \
+             page_y={page_y:.1} page_h={page_h:.1} whole_page={whole}",
+            self.zoom(),
+            layout.scale,
+            self.width(),
+            layout.height,
+        )
+    }
+
+    /// Put the reader back where `anchor` says, or at the top of its page under
+    /// [`PdfZoom::FitPage`]. See [`resume_at`].
     pub fn scroll_to(&self, anchor: Anchor) {
+        let anchor = resume_at(self.imp().zoom.get(), anchor);
         let at = offset_of(&self.imp().layout.borrow(), anchor);
         let Some((x, y)) = at else {
             return;
@@ -850,6 +889,19 @@ impl PdfView {
         if let Some(vadj) = self.vadjustment() {
             vadj.set_value(f64::from(rect.y + v));
         }
+    }
+
+    /// Scroll one step up or down, which is what the arrow keys ask for.
+    ///
+    /// `GtkScrolledWindow` binds a step to `Ctrl+Up` and `Ctrl+Down` and the bare arrows to
+    /// nothing, so this is the same move under the key a reader reaches for. The adjustment
+    /// clamps its own value, so the two ends of the document need no case here.
+    pub fn scroll_step(&self, down: bool) {
+        let Some(vadj) = self.vadjustment() else {
+            return;
+        };
+        let step = vadj.step_increment();
+        vadj.set_value(vadj.value() + if down { step } else { -step });
     }
 
     /// Bring a rectangle of a page into view, for a search match.
@@ -1667,6 +1719,33 @@ mod tests {
         assert!((scale - (400.0 - GAP * 2.0) / 792.0).abs() < 1e-6);
         let width = fit_scale(&sizes, PdfZoom::FitWidth, 2000.0, 400.0);
         assert!(width > scale);
+    }
+
+    #[test]
+    fn fit_page_puts_a_whole_page_on_screen() {
+        let sizes = letter(3);
+        let (vw, vh) = (900.0, 700.0);
+        let fitted = layout(&sizes, fit_scale(&sizes, PdfZoom::FitPage, vw, vh), vw);
+        // The reader was halfway down page two when Fit Page was asked for.
+        let was = Anchor {
+            page: 1,
+            u: 0.0,
+            v: 0.5,
+        };
+        let page = fitted.pages[1];
+        let whole = |top: f64| {
+            top <= f64::from(page.y) && f64::from(page.y + page.h) <= top + f64::from(vh)
+        };
+        let (_, top) = offset_of(&fitted, resume_at(PdfZoom::FitPage, was)).expect("page two");
+        assert!(whole(top), "page two is not wholly on screen from {top}");
+        // Resuming where the reader was, which is what every other zoom does, leaves half of it
+        // above the viewport and half of page three below: that is what Fit Page looked like.
+        let (_, kept) = offset_of(&fitted, was).expect("page two");
+        assert!(
+            !whole(kept),
+            "nothing to fix: page two already fits from {kept}"
+        );
+        assert_eq!(resume_at(PdfZoom::FitWidth, was), was);
     }
 
     fn scale(zoom: PdfZoom) -> f64 {
