@@ -208,6 +208,17 @@ fn recent_row(
                 && let Some(list) = row.parent().and_downcast::<gtk::ListBox>()
             {
                 list.remove(&row);
+                // Nothing left to offer: the card and the rule above it are what "the vaults it
+                // has seen" is made of, and an empty boxed list under a bare separator says
+                // nothing. `recent_list` answers this at build time and cannot answer it again,
+                // so the row that empties the list takes the list with it — the separator being
+                // the sibling `present` appends before it.
+                if list.first_child().is_none() {
+                    if let Some(rule) = list.prev_sibling() {
+                        rule.set_visible(false);
+                    }
+                    list.set_visible(false);
+                }
             }
         }
     });
