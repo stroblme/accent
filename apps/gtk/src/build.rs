@@ -639,6 +639,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
     let reconciled = Rc::downgrade(app);
+    let exclude = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -675,6 +676,22 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 .filter_map(|rel| app.tab_for(rel))
                 .filter(|tab| !app.refresh_tab(tab))
                 .count()
+        }),
+        exclude: Box::new(move |dir| {
+            let Some(app) = exclude.upgrade() else { return };
+            {
+                let mut config = app.config.borrow_mut();
+                if config.search.exclude.iter().any(|e| e == dir) {
+                    return app.toast(&format!("{dir} is already left out of search"));
+                }
+                config.search.exclude.push(dir.to_string());
+            }
+            settings::save(&app.config.borrow());
+            // The one path that turns git's answer and this list into the set the tree dims and
+            // the index leaves out. Called whole rather than half-copied here; what it repeats on
+            // top of the exclusions is a branch readout and a `git show` per tab.
+            app.on_git_changed();
+            app.toast(&format!("Left {dir} out of search"));
         }),
         close: Box::new(move |rel| {
             let Some(app) = close.upgrade() else { return };

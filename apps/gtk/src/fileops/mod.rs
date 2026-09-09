@@ -70,6 +70,9 @@ pub struct Ops {
     /// takes the notes inside it. Only called once the file is really gone, so there is nothing
     /// left to write the buffer into and nothing to ask about.
     pub close: Box<dyn Fn(&str)>,
+    /// Add a directory to the vault's `[search] exclude` list, save it and refresh what search
+    /// leaves out. Offered on directory rows alone.
+    pub exclude: Box<dyn Fn(&str)>,
 }
 
 // --------------------------------------------------------------------------------- creating
