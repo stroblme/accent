@@ -580,31 +580,34 @@ impl Panel {
     }
 
     fn apply(self: &Rc<Self>, fetched: fetch::Fetched) {
-        if self.state.borrow().repos != fetched.repos {
+        // A refusal is not an answer: where git could not be asked, the pane keeps what it had
+        // rather than emptying itself. Only the fields the last refresh really learned move.
+        let repos = match fetched.repos {
+            Some(repos) => repos,
+            None => self.state.borrow().repos.clone(),
+        };
+        if self.state.borrow().repos != repos {
             self.syncing.set(true);
-            let names: Vec<&str> = fetched.repos.iter().map(|r| r.name.as_str()).collect();
+            let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
             self.names.splice(0, self.names.n_items(), &names);
-            let selected = clamp(self.state.borrow().selected, fetched.repos.len());
+            let selected = clamp(self.state.borrow().selected, repos.len());
             self.state.borrow_mut().selected = selected;
             self.chooser.set_selected(selected as u32);
             self.syncing.set(false);
         }
-        self.chooser.set_visible(fetched.repos.len() > 1);
-        self.stack
-            .set_visible_child_name(match fetched.repos.is_empty() {
-                true => "empty",
-                false => "repo",
-            });
+        self.chooser.set_visible(repos.len() > 1);
+        self.stack.set_visible_child_name(match repos.is_empty() {
+            true => "empty",
+            false => "repo",
+        });
 
-        let selected = clamp(self.state.borrow().selected, fetched.repos.len());
-        let heads: HashMap<PathBuf, String> = fetched
-            .repos
+        let selected = clamp(self.state.borrow().selected, repos.len());
+        let heads: HashMap<PathBuf, String> = repos
             .iter()
             .zip(&fetched.statuses)
             .filter_map(|(repo, status)| Some((repo.git_dir.clone(), status.branch.oid.clone()?)))
             .collect();
-        let ignored = fetched
-            .repos
+        let ignored = repos
             .iter()
             .zip(&fetched.statuses)
             .flat_map(|(repo, status)| {
@@ -621,7 +624,11 @@ impl Panel {
             .and_then(|s| branch_parts(&s.branch));
         self.counts
             .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
-        let (names, at) = branch_model(head.map(|(name, _)| name), &fetched.branches);
+        let branches = match fetched.branches {
+            Some(branches) => branches,
+            None => self.state.borrow().branches.clone(),
+        };
+        let (names, at) = branch_model(head.map(|(name, _)| name), &branches);
         self.set_branches(&names, at);
         // What a Sync would do, in words, beside the counts it already shows. A branch with no
         // upstream is not a dead end any more: syncing it publishes it (`git::sync`), so the
@@ -648,13 +655,15 @@ impl Panel {
             state.head_moved = state.heads != heads;
             state.heads = heads;
             state.ignored = ignored;
-            state.repos = fetched.repos;
+            state.repos = repos;
             state.statuses = fetched.statuses;
             if moved {
                 state.commits = fetched.commits;
             }
-            state.branches = fetched.branches;
-            state.submodules = fetched.submodules;
+            state.branches = branches;
+            if let Some(submodules) = fetched.submodules {
+                state.submodules = submodules;
+            }
             state.incoming = fetched.incoming;
             state.selected = selected;
         }

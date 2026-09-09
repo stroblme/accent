@@ -87,18 +87,25 @@ impl Panel {
 
 /// What one refresh reads. Every repository's status, because the ignored set spans them all, and
 /// the history and submodules of the selected one only.
+///
+/// The fields git may refuse to answer are `Option`, and `None` means "could not ask" rather than
+/// "there are none": the pane keeps what the last refresh learned instead of drawing an empty
+/// answer it was never given. A hiccup on a remote vault would otherwise take the branch list
+/// down to HEAD alone, or hide the pane outright.
 pub(super) struct Fetched {
-    pub(super) repos: Vec<Repo>,
+    pub(super) repos: Option<Vec<Repo>>,
     pub(super) statuses: Vec<Status>,
     pub(super) commits: Vec<Commit>,
-    pub(super) branches: Vec<String>,
-    pub(super) submodules: Vec<Submodule>,
+    pub(super) branches: Option<Vec<String>>,
+    pub(super) submodules: Option<Vec<Submodule>>,
     /// The commits a pull would bring in, which is what marks the history's rows. Asked for only
     /// where the branch says there are any, so an up-to-date repository pays nothing for it.
     pub(super) incoming: HashSet<String>,
 }
 
 pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
+    // `Vault::repos` cannot fail today; when it can, its `Err` belongs here as `None` and the
+    // pane keeps the repositories it had.
     let repos = vault.repos();
     let statuses: Vec<Status> = repos
         .iter()
@@ -116,13 +123,21 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
     let (commits, branches, submodules) = match repos.get(at) {
         Some(repo) => (
             vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
+                // An empty page reads as "the history has not moved" in `apply`, so a refused log
+                // leaves the rows that are on screen where they are.
                 tracing::debug!("git log: {e}");
                 Vec::new()
             }),
-            vault.git_branches(repo).unwrap_or_default(),
-            vault.git_submodules(repo).unwrap_or_default(),
+            vault
+                .git_branches(repo)
+                .inspect_err(|e| tracing::debug!("git for-each-ref: {e}"))
+                .ok(),
+            vault
+                .git_submodules(repo)
+                .inspect_err(|e| tracing::debug!("git submodule status: {e}"))
+                .ok(),
         ),
-        None => (Vec::new(), Vec::new(), Vec::new()),
+        None => (Vec::new(), Some(Vec::new()), Some(Vec::new())),
     };
     // `behind` is the count and this is the same set by oid, so one implies the other: nothing to
     // pull means no `rev-list` at all, which is what keeps a refresh on every save as cheap as it
@@ -140,7 +155,7 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
         None => HashSet::new(),
     };
     Fetched {
-        repos,
+        repos: Some(repos),
         statuses,
         commits,
         branches,
