@@ -114,10 +114,14 @@ impl App {
             return;
         };
         self.navigating.set(true);
-        while let Some(to) = match forward {
-            true => pane.nav.borrow_mut().forward(here.clone()),
-            false => pane.nav.borrow_mut().back(here.clone()),
-        } {
+        loop {
+            // Bound first, so the history is not borrowed while `go_to` selects a page and the
+            // selection handler writes to it.
+            let step = match forward {
+                true => pane.nav.borrow_mut().forward(here.clone()),
+                false => pane.nav.borrow_mut().back(here.clone()),
+            };
+            let Some(to) = step else { break };
             if self.go_to(&pane, &to) {
                 break;
             }
