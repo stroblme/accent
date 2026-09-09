@@ -260,6 +260,10 @@ mod imp {
         pub blinked_at: Cell<i64>,
         /// The tick callback that repaints the blink, while there is one to repaint.
         pub blink: RefCell<Option<gtk::TickCallbackId>>,
+        /// Whether Up and Down move by a line of the document rather than by a row of the
+        /// screen. What a column of carets asks for in code; in wrapped prose one Down would be
+        /// a whole paragraph, which can be several screens.
+        pub logical_lines: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -370,12 +374,15 @@ mod imp {
             self.parent_delete_from_cursor(type_, count);
         }
 
-        /// Up and Down move by a line of the document and Home and End go to that line's ends: a
-        /// wrapped paragraph is one line to move through, not a screenful of rows. `Pages` and
-        /// everything else keep GTK's display-based behaviour, which is what they are for.
+        /// Up and Down move by a line of the document where the view asked for it, and Home and
+        /// End go to that line's ends: a wrapped line of code is one line to move through, not a
+        /// screenful of rows. `Pages` and everything else keep GTK's display-based behaviour,
+        /// which is what they are for.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
             match step {
-                gtk::MovementStep::DisplayLines => self.obj().move_by_lines(count, extend),
+                gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
+                    self.obj().move_by_lines(count, extend)
+                }
                 gtk::MovementStep::DisplayLineEnds => {
                     self.goal.set(None);
                     // GTK implements `ParagraphEnds` as the start and the end of the line.
@@ -407,6 +414,14 @@ impl Default for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make Up and Down step a line of the document rather than a row of the screen. Set for the
+    /// code flavours, where a wrapped line is one statement and the column is what the key is
+    /// asked for; prose keeps GTK's own behaviour, where a paragraph is a line and stepping over
+    /// one would be several screens.
+    pub fn set_logical_lines(&self, on: bool) {
+        self.imp().logical_lines.set(on);
     }
 
     /// Paint `text` after the caret, or nothing. The suggestion never enters the buffer, so it

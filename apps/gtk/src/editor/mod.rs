@@ -255,7 +255,11 @@ fn build(
 
     // A subclass, so `Shift+Alt+Up`/`Down` can leave extra carets in the buffer. Everything else
     // in this file treats it as the plain view it is.
-    let view: sourceview5::View = multicaret::View::new().upcast();
+    let subclass = multicaret::View::new();
+    // Up and Down by a line of the document, which is what a column of carets in code asks for.
+    // In prose a line is a paragraph and one Down would be several screens, so it keeps GTK's.
+    subclass.set_logical_lines(!flavour.is_note());
+    let view: sourceview5::View = subclass.upcast();
     view.set_buffer(Some(&buffer));
     view.set_monospace(!flavour.is_note());
     view.add_css_class(match flavour {
