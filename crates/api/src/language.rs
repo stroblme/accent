@@ -226,13 +226,19 @@ pub struct Support {
 /// sends `$/cancelRequest` to a language server.
 ///
 /// A `JoinHandle` can be polled from any executor, so the GTK main loop awaits one directly.
-pub struct Task<T>(tokio::task::JoinHandle<Result<T>>);
+pub struct Task<T> {
+    handle: tokio::task::JoinHandle<Result<T>>,
+    /// What to do when the answer stops mattering, for a request that cannot be aborted where it
+    /// waits. A remote round trip runs on a blocking thread, where `abort` does nothing at all,
+    /// so it is cancelled by telling the server instead.
+    on_drop: Option<Box<dyn FnOnce() + Send>>,
+}
 
 impl<T> Future for Task<T> {
     type Output = Result<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.0).poll(cx) {
+        match Pin::new(&mut self.handle).poll(cx) {
             Poll::Ready(Ok(r)) => Poll::Ready(r),
             Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow::anyhow!("{e}"))),
             Poll::Pending => Poll::Pending,
@@ -242,18 +248,41 @@ impl<T> Future for Task<T> {
 
 impl<T> Drop for Task<T> {
     fn drop(&mut self) {
-        self.0.abort();
+        self.handle.abort();
+        if let Some(cancel) = self.on_drop.take() {
+            cancel();
+        }
+    }
+}
+
+impl<T> Task<T> {
+    /// What aborts the work this task is waiting on, for a server holding it on someone's behalf.
+    pub(crate) fn abort_handle(&self) -> tokio::task::AbortHandle {
+        self.handle.abort_handle()
+    }
+
+    /// Run `f` when this task is dropped, for a request whose cancellation is a message rather
+    /// than an abort.
+    pub(crate) fn cancelled_by(mut self, f: impl FnOnce() + Send + 'static) -> Task<T> {
+        self.on_drop = Some(Box::new(f));
+        self
     }
 }
 
 impl<T: Send + 'static> Task<T> {
     pub(crate) fn spawn(f: impl Future<Output = Result<T>> + Send + 'static) -> Task<T> {
-        Task(accent_lsp::runtime().spawn(f))
+        Task {
+            handle: accent_lsp::runtime().spawn(f),
+            on_drop: None,
+        }
     }
 
     /// For a call that blocks: a remote round trip over the ssh client.
     pub(crate) fn blocking(f: impl FnOnce() -> Result<T> + Send + 'static) -> Task<T> {
-        Task(accent_lsp::runtime().spawn_blocking(f))
+        Task {
+            handle: accent_lsp::runtime().spawn_blocking(f),
+            on_drop: None,
+        }
     }
 }
 
@@ -783,14 +812,22 @@ notifications! {
     settle => settle_document / settle();
 }
 
-/// One remote request as a task. The round trip cannot be cancelled the way a server request
-/// can, so dropping the task only stops the answer from being waited for.
+/// One remote request as a task.
+///
+/// The round trip runs on a blocking thread, where `abort` does nothing, so dropping the task
+/// sends the server a `cancel` for that request id instead: a completion the user has typed past
+/// is dropped where the language server is, rather than computed into a pipe nobody reads.
 fn remote_task<T: DeserializeOwned + Send + 'static>(
     r: Arc<Remote>,
     method: &'static str,
     params: Value,
 ) -> Task<T> {
-    Task::blocking(move || r.call(method, params).map_err(remote_err))
+    let asked: Arc<crate::remote::Asked> = Arc::default();
+    Task::blocking({
+        let (r, asked) = (r.clone(), asked.clone());
+        move || r.call_tracked(method, params, &asked).map_err(remote_err)
+    })
+    .cancelled_by(move || r.cancel(&asked))
 }
 
 /// The two lifecycle calls the macros do not write, where the vault is.
