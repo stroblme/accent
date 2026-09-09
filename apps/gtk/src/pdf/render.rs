@@ -155,7 +155,18 @@ fn highlight_quads(doc: &PdfDoc, glyphs: &mut Glyphs, links: &[PdfLink]) -> High
             .map(|(_, quads)| quads)
             .or_else(|| {
                 let text = link.alias.as_deref()?;
-                doc.search(page, text).ok()?.into_iter().next()
+                let hits = doc.search(page, text).ok()?;
+                // The link's own line number is still a hint at where on the page it was, even
+                // when its numbering no longer fits: the nearest hit to that line, rather than
+                // the first on the page, is what a second copy of the same phrase above it used
+                // to steal.
+                let Some(want) = pdf::line_top(found, link.selection[0]) else {
+                    return hits.into_iter().next();
+                };
+                let distance =
+                    |quads: &[pdf::Rect]| quads.first().map_or(f32::MAX, |q| (q.top - want).abs());
+                hits.into_iter()
+                    .min_by(|a, b| distance(a).total_cmp(&distance(b)))
             });
         let Some(quads) = quads.filter(|q| !q.is_empty()) else {
             continue;
