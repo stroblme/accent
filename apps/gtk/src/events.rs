@@ -191,7 +191,8 @@ impl App {
                     sidebar.mark_tags_dirty();
                 }
                 if let Some(git) = self.git.get() {
-                    git.schedule_refresh();
+                    // Nothing was discovered while the link was down, so this starts at the top.
+                    git.schedule_refresh(git::Depth::Discover);
                 }
                 self.refresh_corpus();
                 self.restore_session();
