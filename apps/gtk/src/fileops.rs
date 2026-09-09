@@ -38,9 +38,9 @@ pub struct Ops {
     pub vault: Arc<Vault>,
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
-    /// Open a note in a tab, putting the caret at a byte offset when one is asked for — which is
-    /// where a template's `{{cursor}}` lands.
-    pub open: Box<dyn Fn(&str, Option<usize>)>,
+    /// Open a note in a tab, putting the caret at the first of these byte offsets and making the
+    /// rest Tab stops — which is where a template's `{{cursor}}`s land.
+    pub open: Box<dyn Fn(&str, &[usize])>,
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
@@ -111,7 +111,7 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&why);
         }
         match ops.vault.create_note(&rel, template.map(String::as_str)) {
-            Ok((created, cursor)) => (ops.open)(&created, cursor),
+            Ok((created, stops)) => (ops.open)(&created, &stops),
             Err(e) if already_exists(&e) => (ops.toast)(&format!("{name} already exists")),
             Err(e) => (ops.toast)(&format!("Cannot create {name}: {e:#}")),
         }
@@ -187,10 +187,41 @@ pub fn new_from_template(ops: &Rc<Ops>) {
         };
         let name = basename(template);
         match ops.vault.note_from_template(template) {
-            Ok(Some((rel, cursor))) => (ops.open)(&rel, cursor),
+            Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
             // The file changed under the dialog; nothing was created, so nothing to undo.
             Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
             Err(e) => (ops.toast)(&format!("Cannot create a note from {name}: {e:#}")),
+        }
+    });
+}
+
+/// Put a template into the open note at the caret: `title` is that note's stem, which is what
+/// its `{{title}}` means here, and `insert` is handed the rendered text with its `{{cursor}}`
+/// stops. Every template is offered, target or not; a Meeting is something typed into the day's
+/// note, not a note of its own.
+pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Box<dyn Fn(&str, &[usize])>) {
+    let templates = ops.vault.templates().unwrap_or_default();
+    if templates.is_empty() {
+        let dir = ops.vault.config().templates_dir;
+        return (ops.toast)(&format!("No templates in {dir}"));
+    }
+    let labels: Vec<&str> = templates.iter().map(|t| basename(t)).collect();
+    let picker = gtk::DropDown::from_strings(&labels);
+    let form = form();
+    form.append(&labelled("Template", &picker));
+
+    let dialog = name_dialog("Insert Template", "Insert", &form);
+    let (ops, window, title) = (ops.clone(), ops.window.clone(), title.to_string());
+    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+        if response != CONFIRM {
+            return;
+        }
+        let Some(template) = templates.get(picker.selected() as usize) else {
+            return;
+        };
+        match ops.vault.render_template(template, &title) {
+            Ok((text, stops)) => insert(&text, &stops),
+            Err(e) => (ops.toast)(&format!("Cannot insert {}: {e:#}", basename(template))),
         }
     });
 }
@@ -877,7 +908,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
         });
         group.add_action(&action);
     };
-    add("open", Box::new(|ops, rel| (ops.open)(rel, None)));
+    add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));

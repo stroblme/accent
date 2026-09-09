@@ -251,6 +251,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
         "New from Template…",
         &["<Control><Shift>d"],
     ),
+    ("win.insert-template", "Insert Template…", &[]),
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
@@ -1892,6 +1893,26 @@ impl App {
     ///
     /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
     /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    /// Insert Template…: a template's text at the caret of the active note, whose stem is what
+    /// the template's `{{title}}` means.
+    fn insert_template(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to insert a template into");
+        };
+        let Some(ops) = self.need_ops("insert a template") else {
+            return;
+        };
+        let title = Path::new(&tab.rel())
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        fileops::insert_template(
+            ops,
+            &title,
+            Box::new(move |text, stops| tab.insert_stops(text, stops)),
+        );
+    }
+
     fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return self.toast("Open a note to put a sketch in");
@@ -2232,8 +2253,8 @@ impl App {
         }
     }
 
-    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a followed
-    /// link, or the `{{cursor}}` a template just placed in a note it created.
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
+    /// followed link.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
         self.on_tab(rel.to_string(), move |tab| {
             if let Some(chars) = char_range(&tab.text(), at.clone()) {
@@ -3996,6 +4017,7 @@ impl App {
                     fileops::new_from_template(ops);
                 }
             }
+            "insert-template" => self.insert_template(),
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
@@ -5679,11 +5701,12 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 app.toast(message);
             }
         }),
-        open: Box::new(move |rel, at| {
+        open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
             app.open_path(rel);
-            if let Some(at) = at {
-                app.select_when_open(rel, at..at);
+            if !stops.is_empty() {
+                let stops = stops.to_vec();
+                app.on_tab(rel.to_string(), move |tab| tab.place_stops(&stops));
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
