@@ -53,8 +53,13 @@ pub(super) fn install(tab: &Rc<Tab>) {
         move |_| {
             tab.popup_shown.set(false);
             // The popup was in the way of every answer while it was up, and nothing has been
-            // edited since, so there is no refresh coming: ask again here.
-            glib::spawn_future_local(async move { ghost::request(&tab).await });
+            // edited since, so there is no refresh coming: ask again here. Through a flush, or the
+            // answer is about the text the server was last given — which costs nothing when it
+            // already has this one.
+            glib::spawn_future_local(async move {
+                crate::lang::flush(tab.clone()).await;
+                ghost::request(&tab).await;
+            });
         }
     ));
 }
