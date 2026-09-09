@@ -1,6 +1,6 @@
 //! A PDF in a tab: the document, the thread that renders it, and the reading state around it.
 //!
-//! The widget in `pdfview.rs` knows nothing about pdfium; it asks for tiles and paints what it is
+//! The widget in `view.rs` knows nothing about pdfium; it asks for tiles and paints what it is
 //! given. This is the other half: one thread per open document, which owns the `PdfDoc` and
 //! answers those requests, plus the history, the search and the outline that make it a reader
 //! rather than a viewer.
@@ -8,7 +8,7 @@
 //! pdfium is serialised behind one process-wide lock (see `accent_core::pdf`), so one thread per
 //! document is not a limitation we could lift by adding more.
 
-use crate::pdfview::{self, Anchor, PdfView, PdfZoom, Reply, Span, TileKey, Want};
+use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, TileKey, Want};
 use crate::ring;
 use accent_api::PdfLink;
 use accent_core::pdf::{self, LinkTarget, PdfDoc};
