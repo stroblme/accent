@@ -311,7 +311,10 @@ impl Bar {
                 if let Some(selected) = self.tab().and_then(|tab| tab.selected_query()) {
                     self.query.set_text(&selected);
                 }
-                self.replace_row.set_visible(mode == Mode::Replace);
+                // Nothing behind a presented preview or PDF can be rewritten, so the row is
+                // not offered there: it used to appear and quietly do nothing.
+                self.replace_row
+                    .set_visible(mode == Mode::Replace && !self.presenting());
                 self.rows.set_visible_child_name("find");
                 self.bar.set_search_mode(true);
                 self.search(&self.query.text());
@@ -359,7 +362,9 @@ impl Bar {
     pub fn close(&self) {
         self.marked.set(false);
         self.bar.set_search_mode(false);
-        if let Some(tab) = self.tab() {
+        // The editor is behind the preview while one is presented, and focusing a hidden view is
+        // giving the keyboard to nothing the reader can see.
+        if let (false, Some(tab)) = (self.presenting(), self.tab()) {
             tab.view.grab_focus();
         }
     }
@@ -396,6 +401,11 @@ impl Bar {
     }
 
     fn replace(self: &Rc<Self>, all: bool) {
+        // A rendered preview and a PDF are read-only: Ctrl+H reaches neither, and the row that
+        // asks for one is hidden while either is presented.
+        if self.presenting() {
+            return;
+        }
         let Some(tab) = self.tab() else { return };
         let with = self.replace.text();
         self.busy.set(true);
