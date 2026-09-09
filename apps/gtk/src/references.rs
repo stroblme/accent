@@ -81,7 +81,7 @@ impl App {
         };
         // Said once per tab: a file whose server is not installed would otherwise toast on every
         // Ctrl+click, and the answer does not change while the tab is open.
-        if let Some(server) = tab.lang.support().and_then(|s| s.missing) {
+        if let Some(server) = tab.lang.support().and_then(|s| s.missing.clone()) {
             if tab.lang.claim_toast() {
                 let language = tab.language().unwrap_or_else(|| "this file".to_string());
                 self.toast(&format!(

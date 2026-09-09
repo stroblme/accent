@@ -595,7 +595,7 @@ impl App {
         let rows = lang::flatten(&tab.lang.symbols());
         if rows.is_empty() {
             let language = tab.language().unwrap_or_else(|| "this file".to_string());
-            let (title, body) = match tab.lang.support().and_then(|s| s.missing) {
+            let (title, body) = match tab.lang.support().and_then(|s| s.missing.clone()) {
                 Some(_) => (
                     "No Language Server",
                     format!("Symbols need a language server for {language}."),

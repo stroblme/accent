@@ -48,7 +48,9 @@ pub struct Hooks {
 #[derive(Default)]
 pub struct State {
     /// What the provider said it could do, once the document was open. `None` until then.
-    support: RefCell<Option<Support>>,
+    /// Shared rather than copied: every keystroke asks it whether the character just typed opens
+    /// a popup or a signature, and the answer carries two vectors and a string.
+    support: RefCell<Option<Rc<Support>>>,
     /// The document's symbols, most recent answer.
     symbols: RefCell<Vec<Symbol>>,
     /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
@@ -80,7 +82,7 @@ impl State {
     }
 
     /// What the provider can do; `None` while the document is still opening.
-    pub fn support(&self) -> Option<Support> {
+    pub fn support(&self) -> Option<Rc<Support>> {
         self.support.borrow().clone()
     }
 
@@ -150,7 +152,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
         match support {
             Ok(support) => {
                 tracing::debug!("opened {rel} as {id}: {support:?}");
-                *tab.lang.support.borrow_mut() = Some(support);
+                *tab.lang.support.borrow_mut() = Some(Rc::new(support));
                 restart(&tab, Duration::ZERO);
             }
             Err(e) => tracing::warn!("cannot open {rel} on the language layer: {e:#}"),
@@ -250,7 +252,7 @@ pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
         let support = vault.open_document(&rel, &id, text).await;
         let Some(tab) = weak.upgrade() else { return };
         if let Ok(support) = support {
-            *tab.lang.support.borrow_mut() = Some(support);
+            *tab.lang.support.borrow_mut() = Some(Rc::new(support));
             restart(&tab, Duration::ZERO);
         }
     });
