@@ -273,6 +273,7 @@ pub fn build_window(
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
         refresh: RefCell::new(None),
+        pdf_links: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),

@@ -492,14 +492,22 @@ impl App {
         if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
             return;
         }
-        glib::timeout_add_local_once(
+        // One timer, restarted: a burst of watcher events is one query per PDF, not one per event.
+        if let Some(id) = self.pdf_links.borrow_mut().take() {
+            id.remove();
+        }
+        let id = glib::timeout_add_local_once(
             std::time::Duration::from_millis(300),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move || app.sync_all_pdf_links()
+                move || {
+                    *app.pdf_links.borrow_mut() = None;
+                    app.sync_all_pdf_links();
+                }
             ),
         );
+        *self.pdf_links.borrow_mut() = Some(id);
     }
 
     /// The same for every open PDF, after something changed the notes.

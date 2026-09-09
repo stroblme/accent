@@ -260,6 +260,8 @@ struct App {
     tree_painted: Cell<i64>,
     /// The pending post-edit refresh: the preview's re-render and the status bar's word count.
     refresh: RefCell<Option<glib::SourceId>>,
+    /// The pending re-query of the note links every open PDF highlights.
+    pdf_links: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
