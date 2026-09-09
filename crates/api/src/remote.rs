@@ -218,12 +218,12 @@ impl Remote {
                     data: None,
                 });
             }
-            State::Disconnected(why) => return Err(RpcError::failed(why)),
+            State::Disconnected(why) => return Err(RpcError::disconnected(why)),
             State::Connected => {}
         }
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
-            None => Err(RpcError::failed("not connected")),
+            None => Err(RpcError::disconnected("not connected")),
         }
     }
 
