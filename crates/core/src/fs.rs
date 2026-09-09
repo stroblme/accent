@@ -179,9 +179,13 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     tmp.as_file().sync_all()?;
 
     if let Some(m) = &existing {
-        std::fs::set_permissions(tmp.path(), m.permissions())?;
-        // ponytail: chown only works as root or when we already own the file; EPERM is the
-        // normal case on a single-user vault and is ignored rather than failing the save.
+        // Neither is allowed to fail the save. exFAT, SMB and Android's FUSE `/sdcard` have no
+        // POSIX mode to set and answer `chmod` with EPERM or ENOTSUP; a note the user could open
+        // there must still be one they can save. chown likewise only works as root or when we
+        // already own the file, which on a single-user vault we do.
+        if let Err(e) = std::fs::set_permissions(tmp.path(), m.permissions()) {
+            tracing::debug!("{}: keeping the temp file's mode: {e}", canonical.display());
+        }
         let _ = std::os::unix::fs::chown(tmp.path(), Some(m.uid()), Some(m.gid()));
     }
 

@@ -1,0 +1,779 @@
+//! Full-text and regex search over the indexed bodies, and the pure text functions that cut
+//! and mark a snippet the way the FTS tokenizer folds it.
+
+use super::{Index, Match, SearchHit};
+use crate::search::Regex;
+use crate::walk::FileKind;
+use anyhow::Result;
+use rusqlite::params;
+use std::ops::Range;
+
+/// Bytes of a matched line [`Index::grep`] keeps before and after the match. A note can hold a
+/// single line megabytes long (an embedded data URI), and a sidebar row must not carry all of it.
+const CLIP_BEFORE: usize = 40;
+
+const CLIP_AFTER: usize = 200;
+
+/// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
+/// shared by every file the query reaches — and by the three passes the sidebar makes over them —
+/// so without this one file can be the whole answer.
+pub(super) const PER_FILE: usize = 5;
+
+impl Index {
+    /// Full-text search over the titles and bodies the index holds: every note, plus every other
+    /// file that decoded as text under [`MAX_INDEXED_BODY`]. Directories, PDFs, conflict copies
+    /// and binaries have no `notes` row and so can never be a hit.
+    ///
+    /// The query is **one phrase**, not a bag of words ([`fts_query`]): "Toggle Split View" finds
+    /// the notes that say those three words in that order, and the one that mentions each of them
+    /// somewhere is not a hit at all. That is what the sidebar's Word toggle already meant, and
+    /// what the user expects of a query typed as a sentence. Each hit carries the phrase's byte
+    /// range in the body, so the row opens the note on the match.
+    ///
+    /// Git-ignored files are left out unless `include_ignored` — but never a note, whatever
+    /// ignores it. The exclusion sits **inside** the ranking subquery, ahead of its `LIMIT`:
+    /// filtering the capped rows afterwards would answer "No Results" on a vault where the build
+    /// output happens to rank above the source it was built from.
+    ///
+    /// Ranking is "the note you named, then the notes that are about it": a title equal to the
+    /// query, ignoring case, comes first, and the rest go by `bm25` with the title weighted ten
+    /// times the body. bm25 is negative in SQLite, so ascending is best-first, and the weights
+    /// follow the `notes_fts` column order (body, title).
+    ///
+    /// Weight 10, re-derived on the corpus it now ranks — 21 360 documents, 3 653 notes and
+    /// 17 707 other text bodies. Sweeping 0/1/2/5/10/20/40 over 60 sampled notes and six
+    /// ordinary queries: an *exact* title query puts its note first 59 times in 60 at every
+    /// weight, including 0, because the equality clause above decides that and not bm25. What
+    /// the weight still buys is a *partial* title — the note's title with its first word
+    /// dropped — and there it saturates at 10: the note is in the top ten 5, 13, 16, 23, 26,
+    /// 26, 27 times as the weight rises, so 20 buys nothing and 40 buys one. The cost keeps
+    /// rising past it: 56 of the six top tens' 60 rows already come from a title word at 10,
+    /// and all 60 at 20. Not one non-markdown document enters a top ten at any weight, so the
+    /// 17 707 that joined the corpus do not bear on this at all.
+    ///
+    /// The snippet is cut here rather than by FTS5's `snippet()`, and the ranking runs in a
+    /// subquery so only the rows that survive it are quoted at all. Both are about the same
+    /// measurement: on the 3.6k-note `testvault/` a one-character query took 2.4 s and a
+    /// two-character one 0.5 s, and `snippet()` was every millisecond of it. It re-derives the
+    /// match positions from the term index, which for a prefix term means merging the doclist of
+    /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
+    /// same window over the body the index already stores costs a tenth of that.
+    pub fn search(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        let q = fts_query(query);
+        if q.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4),
+                    phrase_start(notes_fts.body, ?4)
+             FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
+             WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
+                 SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
+                  WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6)
+                  ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
+                  LIMIT ?3)
+             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
+        )?;
+        // What the query matched is one phrase, so that is what the window is cut around and what
+        // the snippet marks. It goes in folded, and with its whitespace squeezed, because that is
+        // how `snippet_window` reads the body it looks through.
+        let phrase = fold(&terms(query).join(" "));
+        let rows = st.query_map(
+            params![
+                q,
+                query.trim(),
+                limit as i64,
+                &phrase,
+                include_ignored,
+                FileKind::Markdown.as_i64(),
+            ],
+            |r| {
+                let window: String = r.get(2)?;
+                let start: Option<i64> = r.get(3)?;
+                Ok(SearchHit {
+                    rel_path: r.get(0)?,
+                    title: r.get(1)?,
+                    // The window holds the same first occurrence `phrase_start` found — it starts
+                    // [`SNIPPET_LEAD`] characters ahead of it — so the phrase's length is measured
+                    // over those few hundred characters rather than over the note a second time.
+                    // Folding can make it differ from the needle's, which is why it is measured.
+                    at: start.map(|s| {
+                        let s = s as usize;
+                        let len = folded_find(&window, &phrase).map_or(phrase.len(), |(_, n)| n);
+                        s..s + len
+                    }),
+                    snippet: mark_phrase(&window, &phrase),
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
+    /// how many of them a Replace All would rewrite, so a truncated list can still say so.
+    ///
+    /// The rows reach every indexed body; the count is **markdown only**, like
+    /// [`grep_paths`](Self::grep_paths), which is what the rewrite actually visits. Counting a
+    /// source file's hits would have the button promise edits it never makes.
+    ///
+    /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
+    /// are about this", regexes answer "where exactly does this text occur". The bodies are
+    /// already in the index, so nothing is read from disk, and the statement streams them one row
+    /// at a time rather than materialising the whole vault's text. `include_ignored` means the
+    /// same as it does there, and so does the note escape.
+    pub fn grep(
+        &self,
+        re: &Regex,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<(Vec<Match>, usize)> {
+        let mut st = self.conn.prepare_cached(GREP_SQL)?;
+        let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
+        let (mut out, mut total, mut listed_only) = (Vec::new(), 0usize, 0usize);
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(2)?;
+            // Tested before the other columns are fetched: most notes do not match, and their
+            // path and title would be allocated for nothing.
+            if !re.is_match(&body) {
+                continue;
+            }
+            let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
+            // A source file's hits are listed like any other and counted into nothing: the
+            // rewrite behind the count never opens one.
+            let notes = row.get::<_, i64>(3)? == FileKind::Markdown.as_i64();
+            let counter = match notes {
+                true => &mut total,
+                false => &mut listed_only,
+            };
+            Self::matches_in(
+                &rel_path,
+                title.as_deref(),
+                &body,
+                re,
+                limit,
+                &mut out,
+                counter,
+            );
+        }
+        Ok((out, total))
+    }
+
+    /// Every hit of `re` in one body, appended to `out` and counted in `total`.
+    ///
+    /// Lifted out of [`grep`](Self::grep) so the façade can run the same matching over files the
+    /// index holds no body for — one too large for [`MAX_INDEXED_BODY`], or one under a tree the
+    /// walk never entered — and hand the sidebar rows it cannot tell apart from a note's. It
+    /// touches neither the index nor the disk: the caller supplies the text and says where it
+    /// came from.
+    ///
+    /// `limit` caps `out` across all bodies rather than per body, and `total` keeps counting past
+    /// it, so a truncated list can still say how much a Replace All would touch. On top of it
+    /// [`PER_FILE`] caps what one body may contribute, and the rest are counted into
+    /// [`Match::more`] on its last listed row: a generated file with a hundred matches used to
+    /// fill the whole list and hide every other file, and with `All` on it took the room the
+    /// unindexed trees were about to ask for.
+    pub fn matches_in(
+        rel: &str,
+        title: Option<&str>,
+        body: &str,
+        re: &Regex,
+        limit: usize,
+        out: &mut Vec<Match>,
+        total: &mut usize,
+    ) {
+        // `find_iter` walks forward, so the line number follows it instead of being counted
+        // from the start of the note for every hit.
+        let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
+        let (first, mut listed) = (out.len(), 0usize);
+        for m in re.find_iter(body) {
+            *total += 1;
+            if out.len() >= limit || listed >= PER_FILE {
+                if let Some(last) = out[first..].last_mut() {
+                    last.more += 1;
+                }
+                continue;
+            }
+            listed += 1;
+            while cursor < m.start() {
+                if body.as_bytes()[cursor] == b'\n' {
+                    line += 1;
+                    line_start = cursor + 1;
+                }
+                cursor += 1;
+            }
+            let rest = &body[line_start..];
+            let line_text = rest
+                .split('\n')
+                .next()
+                .unwrap_or(rest)
+                .trim_end_matches('\r');
+            let start = m.start() - line_start;
+            let end = (m.end() - line_start).min(line_text.len());
+            let (line_text, range) = clip(line_text, start..end);
+            out.push(Match {
+                rel_path: rel.to_string(),
+                title: title.map(str::to_string),
+                line,
+                line_text,
+                range,
+                offset: m.start(),
+                more: 0,
+            });
+        }
+    }
+
+    /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
+    /// replace has to visit every file, not only the ones the sidebar had room to list.
+    ///
+    /// Markdown only, unlike [`grep`](Self::grep), which now reaches every indexed body: Replace
+    /// All is Replace in Notes, and rewriting a source file from a notes app is not what the
+    /// button offers.
+    pub fn grep_paths(&self, re: &Regex) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(GREP_NOTES_SQL)?;
+        let mut rows = st.query([FileKind::Markdown.as_i64()])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let body: String = row.get(2)?;
+            if re.is_match(&body) {
+                out.push(row.get(0)?);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Every indexed path, title and text, for the sidebar's regex scan. Ordered so a capped list
+/// and an uncapped one agree on which matches they drop.
+///
+/// `?1` drops the git-ignored exclusion, `?2` is [`FileKind::Markdown`] — the escape that keeps a
+/// note in the results whatever ignores it. The kind comes back as a column too, because the
+/// count [`grep`](Index::grep) returns beside the rows is markdown only.
+const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body, f.kind
+     FROM notes n JOIN files f ON f.id = n.file_id
+     WHERE ?1 OR f.git_ignored = 0 OR f.kind = ?2
+     ORDER BY f.rel_path";
+
+/// [`GREP_SQL`] narrowed to markdown (`?1` is [`FileKind::Markdown`]), for the one caller that
+/// rewrites what it finds.
+const GREP_NOTES_SQL: &str = "SELECT f.rel_path, f.title, n.body
+     FROM notes n JOIN files f ON f.id = n.file_id
+     WHERE f.kind = ?1
+     ORDER BY f.rel_path";
+
+/// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
+/// An elided end is marked with an ellipsis, so a clipped line does not read as the whole line.
+fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
+    let mut start = range.start.saturating_sub(CLIP_BEFORE);
+    while start > 0 && !line.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = range.end.saturating_add(CLIP_AFTER).min(line.len());
+    while end < line.len() && !line.is_char_boundary(end) {
+        end += 1;
+    }
+    let lead = match start {
+        0 => "",
+        _ => "…",
+    };
+    let tail = match end < line.len() {
+        true => "…",
+        false => "",
+    };
+    let text = format!("{lead}{}{tail}", &line[start..end]);
+    // `start` is never past the match, so the shift back onto the clipped text cannot underflow.
+    let at = |i: usize| i - start + lead.len();
+    (text, at(range.start)..at(range.end))
+}
+
+/// The query's words: the tokens [`fts_query`] runs into one phrase, and — joined by a single
+/// space — the needle the snippet is cut and marked around.
+fn terms(query: &str) -> Vec<&str> {
+    query.split_whitespace().collect()
+}
+
+/// How much of a note a snippet quotes, and how much of that comes before the term it found.
+const SNIPPET_CHARS: usize = 240;
+
+const SNIPPET_LEAD: usize = 40;
+
+/// U+00C0..U+017F (Latin-1 Supplement and Latin Extended-A) folded to their unaccented ASCII
+/// base, in code-point order; `_` means the character keeps itself, because nothing in ASCII
+/// stands for it (æ, ð, ø, ß, ł and the two multiplication signs). Generated from Unicode NFD by
+/// dropping the combining marks, which is what `remove_diacritics=2` does.
+const LATIN_BASE: &[u8; 192] = b"aaaaaa_ceeeeiiii_nooooo__uuuuy__aaaaaa_ceeeeiiii_nooooo__uuuuy_y\
+                                 aaaaaaccccccccdd__eeeeeeeeeegggggggghh__iiiiiiiii___jjkk_llllll_\
+                                 ___nnnnnn___oooooo__rrrrrrsssssssstttt__uuuuuuuuuuuuwwyyyzzzzzz_";
+
+/// Fold one character the way `notes_fts` matches it: lower case, and a Latin letter stripped of
+/// its diacritics. This is the single place that folding is decided; the window and the marking
+/// both go through it, and they have to agree or a hit is quoted with nothing highlighted in it.
+///
+/// ponytail: `unicode61 remove_diacritics 2` is a table inside SQLite that no SQL function
+/// exposes, so this is an approximation of it — the Latin ranges people actually type, and plain
+/// lower casing everywhere else. That is already more than the ASCII-only `lower()` it replaced.
+fn fold_char(c: char) -> char {
+    let c = c.to_lowercase().next().unwrap_or(c);
+    match u32::from(c).checked_sub(0xC0).map(|i| i as usize) {
+        Some(i) if i < LATIN_BASE.len() && LATIN_BASE[i] != b'_' => char::from(LATIN_BASE[i]),
+        _ => c,
+    }
+}
+
+fn fold(s: &str) -> String {
+    s.chars().map(fold_char).collect()
+}
+
+/// How many bytes of `hay` the folded `needle` matches at its start, or `None` if it does not.
+/// `needle` is folded already; folding `hay` lazily is what keeps the byte offsets those of the
+/// original text, which a fold that shortens `café` to `cafe` would otherwise lose.
+///
+/// A space in `needle` matches any run of whitespace, so a phrase still marks where the note wrote
+/// it across two lines — which is how FTS5 matched it in the first place, tokens being adjacent
+/// whatever separates them.
+fn folded_prefix(hay: &str, needle: &str) -> Option<usize> {
+    let mut hay = hay.chars().peekable();
+    let mut used = 0;
+    for w in needle.chars() {
+        if w == ' ' {
+            let before = used;
+            while hay.peek().is_some_and(|c| c.is_whitespace()) {
+                used += hay.next().expect("peeked").len_utf8();
+            }
+            if used == before {
+                return None;
+            }
+            continue;
+        }
+        let c = hay.next()?;
+        if fold_char(c) != w {
+            return None;
+        }
+        used += c.len_utf8();
+    }
+    Some(used)
+}
+
+/// Where the folded `needle` first occurs in `hay`, as the byte offset it starts at and the bytes
+/// it covers there. The length is `hay`'s rather than the needle's: folding and a run of
+/// whitespace both let the two differ.
+pub(super) fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
+    hay.char_indices()
+        .find_map(|(i, _)| folded_prefix(&hay[i..], needle).map(|n| (i, n)))
+}
+
+/// The stretch of `body` a hit should quote: [`SNIPPET_LEAD`] characters ahead of the first
+/// folded occurrence of `needle`, [`SNIPPET_CHARS`] in all, with `…` on whichever side was cut.
+///
+/// `needle` arrives folded. Finding the window here rather than with SQL's `instr(lower(body))`
+/// is what lets it fold the way the index does: SQLite's `lower` is ASCII, so a note found only
+/// through `cafe` ~ `café` used to fall back to quoting its first 240 characters — which is the
+/// other half of why nothing in it was ever marked.
+pub(super) fn snippet_window(body: &str, needle: &str) -> String {
+    // Characters, not bytes: the window is cut by character position on both ends.
+    let hit = match folded_find(body, needle) {
+        Some((at, _)) => body[..at].chars().count(),
+        None => 0,
+    };
+    let start = hit.saturating_sub(SNIPPET_LEAD);
+    let mut rest = body.chars().skip(start);
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(rest.by_ref().take(SNIPPET_CHARS));
+    if rest.next().is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Wrap every occurrence of the query phrase in the guillemets the UI turns into bold, the way
+/// FTS5's own `snippet()` did. The input is the window [`snippet_window`] already cut, so this is
+/// a pass over a row of text rather than over a note, and it folds the same way that cut did.
+///
+/// The phrase is marked as one run: the query matched those words in that order, and marking them
+/// separately would highlight text the query did not find.
+fn mark_phrase(window: &str, phrase: &str) -> String {
+    let mut out = String::with_capacity(window.len() + 8);
+    let mut rest = window;
+    while !rest.is_empty() {
+        // A zero-length match — an empty query — would mark nothing and never advance.
+        match folded_prefix(rest, phrase).filter(|n| *n > 0) {
+            Some(n) => {
+                out.push('«');
+                out.push_str(&rest[..n]);
+                out.push('»');
+                rest = &rest[n..];
+            }
+            None => {
+                let c = rest.chars().next().expect("rest is not empty");
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    out
+}
+
+/// Turn a user query into safe FTS5 syntax: one quoted phrase, its last token a prefix match.
+///
+/// `toggle split vie` becomes `"toggle split vie"*`, which matches the notes whose text runs those
+/// tokens in that order — not the notes that hold each of them somewhere, which is what a term per
+/// word (an implicit `AND`) used to find. The prefix keeps a query answering while it is typed.
+///
+/// ponytail: no operator support (`AND`, `NEAR`, `-`). Quoting everything means a stray `"` or
+/// `*` can never produce a syntax error; expose raw FTS later behind an explicit flag if wanted.
+fn fts_query(q: &str) -> String {
+    let toks = terms(q);
+    if toks.is_empty() {
+        return String::new();
+    }
+    format!("\"{}\"*", toks.join(" ").replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::Change;
+    use crate::index::testing::{fixture, open};
+    use std::fs;
+
+    #[test]
+    fn fts_search_finds_note_bodies() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("ferris", 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "sub/Beta.md");
+        assert!(hits[0].snippet.contains("ferris"), "{:?}", hits[0].snippet);
+
+        // Conflicts are stored but never searchable.
+        assert!(ix.search("conflicted", 10, false).unwrap().is_empty());
+        // Garbage in must not be a SQL/FTS syntax error.
+        assert!(
+            ix.search("\"unbalanced AND *", 10, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(ix.search("", 10, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snippet_marks_the_phrase_and_not_its_words_apart() {
+        let phrase = fold("Ferris the crab");
+        assert_eq!(
+            mark_phrase("a FERRIS THE CRAB here", &phrase),
+            "a «FERRIS THE CRAB» here"
+        );
+        // The words on their own are not what the query matched, so they are not marked.
+        assert_eq!(
+            mark_phrase("a crab, and Ferris too", &phrase),
+            "a crab, and Ferris too"
+        );
+        // A phrase the note wrapped across two lines is one match, the way FTS5 read it.
+        assert_eq!(
+            mark_phrase("a ferris\nthe  crab here", &phrase),
+            "a «ferris\nthe  crab» here"
+        );
+        assert_eq!(mark_phrase("as is", &fold("")), "as is");
+        // The index folds diacritics to find the note, so the marking folds them to show why.
+        assert_eq!(
+            mark_phrase("un café au coin", &fold("cafe au")),
+            "un «café au» coin"
+        );
+        assert_eq!(mark_phrase("ÄHNLICH", &fold("ahnlich")), "«ÄHNLICH»");
+    }
+
+    /// The `!BUG` the phrase query exists for: "Toggle Split View" used to be three terms joined
+    /// by an implicit `AND`, so every note holding all three words anywhere was a hit and the note
+    /// that says the sentence was not first.
+    #[test]
+    fn a_ranked_query_matches_the_whole_phrase() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("shortcuts.md"),
+            "# Shortcuts\nUse Toggle Split View to open a second pane.\n",
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("scattered.md"),
+            "# Notes\nToggle the sidebar. Split the day in two. A view of the lake.\n",
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("Toggle Split Vie", 10, false).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["shortcuts.md"],
+            "only the note that runs the words together matches: {hits:?}"
+        );
+        assert!(hits[0].snippet.contains("«Toggle Split Vie»"), "{hits:?}");
+
+        // The hit opens where the phrase is, not at the top of the note.
+        let body = fs::read_to_string(vault.path().join("shortcuts.md")).unwrap();
+        let at = hits[0].at.clone().expect("the body holds the phrase");
+        assert_eq!(&body[at], "Toggle Split Vie");
+
+        // A one-word query is what it always was.
+        assert_eq!(ix.search("split", 10, false).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn folding_is_lower_case_without_the_latin_diacritics() {
+        assert_eq!(fold("Café ÎLE Straße łódź"), "cafe ile straße łodz");
+        // One character in, one out: the window is cut by character position, not by byte.
+        assert_eq!(fold("Ünïcode").chars().count(), "Ünïcode".chars().count());
+    }
+
+    /// A window cut out of the middle of a note says so at the end it cut; one that starts where
+    /// the note does must not claim otherwise.
+    #[test]
+    fn a_snippet_says_which_ends_it_cut() {
+        assert_eq!(snippet_window("a café here", "cafe"), "a café here");
+
+        let long: String = "wide ".repeat(200) + "café";
+        let tail = snippet_window(&long, "cafe");
+        assert!(tail.starts_with('…') && !tail.ends_with('…'), "{tail}");
+        assert!(tail.contains("café"), "{tail}");
+
+        // A term the note does not hold quotes the note's start, so only its end was cut.
+        let head = snippet_window(&long, "zzz");
+        assert!(!head.starts_with('…') && head.ends_with('…'), "{head}");
+    }
+
+    /// The whole of the diacritic path, through SQLite: the tokenizer finds the note through the
+    /// fold, so the window has to be cut around the word that was found and the word marked.
+    #[test]
+    fn a_hit_found_by_folding_is_quoted_around_the_word_it_found() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("Paris.md"),
+            format!("# Paris\n{}\nun café au coin\n", "filler prose ".repeat(60)),
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("cafe", 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "the fold has to find it: {hits:?}");
+        assert!(
+            hits[0].snippet.contains("«café»"),
+            "quoted but not marked: {:?}",
+            hits[0].snippet
+        );
+        assert!(
+            hits[0].snippet.starts_with('…'),
+            "a window cut out of the middle says so: {:?}",
+            hits[0].snippet
+        );
+    }
+
+    #[test]
+    fn grep_lists_one_row_per_match_with_its_line() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        fs::write(
+            vault.path().join("a.md"),
+            "# Alpha\nferris and ferris\nlater ferris\n",
+        )
+        .unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
+        let (hits, total) = ix.grep(&re, 10, false).unwrap();
+        assert_eq!(total, 4, "three in a.md, one in sub/Beta.md: {hits:?}");
+        assert_eq!(hits.len(), 4);
+        assert_eq!(hits[0].rel_path, "a.md");
+        assert_eq!((hits[0].line, hits[1].line, hits[2].line), (2, 2, 3));
+        assert_eq!(&hits[0].line_text[hits[0].range.clone()], "ferris");
+        assert_eq!(&hits[1].line_text[hits[1].range.clone()], "ferris");
+        // The offset addresses the note, not the line, so opening it can place the caret.
+        let body = fs::read_to_string(vault.path().join("a.md")).unwrap();
+        assert_eq!(&body[hits[2].offset..hits[2].offset + 6], "ferris");
+
+        // The cap truncates the list but not the count a Replace All is measured against.
+        let (few, total) = ix.grep(&re, 2, false).unwrap();
+        assert_eq!((few.len(), total), (2, 4));
+        assert_eq!(ix.grep_paths(&re).unwrap(), ["a.md", "sub/Beta.md"]);
+    }
+
+    /// One file with a hundred matches used to be the whole list. It now gets [`PER_FILE`] rows
+    /// and says how many it left out, so every other file still has room — including the ones the
+    /// unindexed pass adds after this one.
+    #[test]
+    fn one_file_cannot_fill_the_list_on_its_own() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        fs::write(
+            vault.path().join("generated.md"),
+            "ferris\n".repeat(100).as_str(),
+        )
+        .unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let re = crate::search::pattern("ferris", crate::search::Options::default()).unwrap();
+        let (hits, total) = ix.grep(&re, 100, false).unwrap();
+        let listed = |rel: &str| hits.iter().filter(|m| m.rel_path == rel).count();
+        assert_eq!(listed("generated.md"), PER_FILE);
+        assert_eq!(
+            listed("sub/Beta.md"),
+            1,
+            "the other file still fits: {hits:?}"
+        );
+        assert_eq!(total, 101, "the count a Replace All is measured against");
+        // The rows the cap left out are named on the file's last row, not dropped in silence.
+        let tail: Vec<usize> = hits
+            .iter()
+            .filter(|m| m.rel_path == "generated.md")
+            .map(|m| m.more)
+            .collect();
+        assert_eq!(tail, [0, 0, 0, 0, 95]);
+
+        // The list's own cap still holds, and it is shared: a file that fills it leaves the tail
+        // count on whatever row it reached.
+        let (few, _) = ix.grep(&re, 3, false).unwrap();
+        assert_eq!(few.len(), 3);
+        assert_eq!(few[2].more, 97);
+    }
+
+    #[test]
+    fn clip_keeps_the_match_visible_in_a_long_line() {
+        let line = format!("{}MATCH{}", "ä".repeat(500), "b".repeat(500));
+        let at = line.find("MATCH").unwrap();
+        let (text, range) = clip(&line, at..at + 5);
+        assert_eq!(&text[range], "MATCH");
+        assert!(text.starts_with('…') && text.ends_with('…'), "{text}");
+        assert!(text.len() < 300, "{}", text.len());
+
+        // A short line is passed through untouched.
+        let (text, range) = clip("a MATCH b", 2..7);
+        assert_eq!((text.as_str(), &text[range]), ("a MATCH b", "MATCH"));
+    }
+
+    /// Two notes for the ranking tests: the query is `target.md`'s title, and also a phrase
+    /// `spam.md` repeats. Ranking on the body alone sorts these the wrong way round.
+    fn ranking_vault() -> (tempfile::TempDir, tempfile::TempDir) {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("target.md"),
+            "# Quantum Coherence Ledger\nA short paragraph on where the numbers come from.\n",
+        )
+        .unwrap();
+        // A long note that says the words a handful of times, which is what beat the note the
+        // user was looking for before the title was indexed.
+        fs::write(
+            vault.path().join("spam.md"),
+            format!(
+                "# Meeting Notes\n{}",
+                "quantum coherence ledger, plus a sentence of unrelated meeting prose. ".repeat(5)
+            ),
+        )
+        .unwrap();
+        (vault, tempfile::tempdir().unwrap())
+    }
+
+    #[test]
+    fn exact_title_outranks_a_body_that_repeats_the_words() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+
+        // Case and stray whitespace must not lose the exact-title match.
+        let hits = ix.search("  quantum COHERENCE ledger ", 10, false).unwrap();
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+    }
+
+    #[test]
+    fn partial_title_match_outranks_a_body_match() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // Not the whole title, so only the bm25 title weight can decide this one.
+        let hits = ix.search("coherence ledger", 10, false).unwrap();
+        assert_eq!(hits.len(), 2, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+    }
+
+    /// The delete half of the FTS triggers, which is the half that fails silently: a stale title
+    /// row would keep answering searches for a name the note no longer has.
+    #[test]
+    fn retitling_a_note_leaves_no_stale_title_in_the_index() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        fs::write(
+            vault.path().join("target.md"),
+            "# Photon Budget\nA short paragraph on where the numbers come from.\n",
+        )
+        .unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "target.md").unwrap(),
+            Change::Updated(FileKind::Markdown)
+        );
+
+        assert_eq!(
+            ix.search("Photon Budget", 10, false).unwrap()[0].rel_path,
+            "target.md"
+        );
+        let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
+        assert_eq!(
+            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["spam.md"],
+            "the old title is still in the index"
+        );
+        ix.conn
+            .execute(
+                "INSERT INTO notes_fts(notes_fts) VALUES('integrity-check')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn snippet_comes_from_the_body_not_the_title() {
+        let vault = tempfile::tempdir().unwrap();
+        // No H1 and no frontmatter, so the title is the file stem and lives only in the title
+        // column: a hit on it can only quote the body.
+        fs::write(
+            vault.path().join("Kryptonite Ledger.md"),
+            "plain prose about a lattice, never naming the file\n",
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("kryptonite", 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "the title must be searchable: {hits:?}");
+        assert!(
+            hits[0].snippet.starts_with("plain prose"),
+            "{:?}",
+            hits[0].snippet
+        );
+        assert!(
+            !hits[0].snippet.contains("Kryptonite"),
+            "the snippet must quote the body, not the title: {:?}",
+            hits[0].snippet
+        );
+        // And a hit the body does not hold names no place to open at, so it opens at the top.
+        assert_eq!(hits[0].at, None);
+    }
+}

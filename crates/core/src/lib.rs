@@ -8,6 +8,7 @@ pub mod fs;
 pub mod git;
 pub mod index;
 pub mod markdown;
+pub mod path;
 #[cfg(feature = "pdf")]
 pub mod pdf;
 pub mod search;
