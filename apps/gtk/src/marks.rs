@@ -33,57 +33,41 @@ pub enum Mark {
 
 /// One slot per line of the new text, `None` where nothing changed.
 ///
-/// `diff::lines` is a flat list: a change comes out as a run of deletions followed by a run of
-/// insertions. Pairing those runs is what tells a rewritten line from a brand new one — the first
-/// `min(deleted, inserted)` lines of the pair are modifications and the rest are additions, which
-/// is the same pairing `diff.rs::align` does to lay the two panes side by side. A deletion run
-/// with no insertions after it leaves no line to colour, so it marks the line that closed over it.
+/// The rows [`accent_core::diff::align`] lays the two panes out with are the same pairing a gutter
+/// needs: a row with a line on both sides is a rewrite, a row with only a new line is an addition,
+/// and a row with only an old one is a removal that left no line to colour, so it marks the line
+/// that closed over it. What the diff view draws in a column, the gutter draws in three pixels.
+///
+/// `lines` needs no word-level refinement for this; [`accent_core::diff::line_ops`] is the cheap
+/// way to get it.
 pub fn marks(lines: &[DiffLine], line_count: usize) -> Vec<Option<Mark>> {
+    let rows = accent_core::diff::align(lines);
     let mut marks = vec![None; line_count];
     let mut set = |line: usize, mark: Mark| {
         if let Some(slot) = marks.get_mut(line) {
             *slot = Some(mark);
         }
     };
-
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].op == Op::Equal {
-            i += 1;
-            continue;
-        }
-        // One run of deletions, then one run of insertions: that pair is a single change.
-        let start = i;
-        while i < lines.len() && lines[i].op == Op::Delete {
-            i += 1;
-        }
-        let deleted = i - start;
-        let inserted_at = i;
-        while i < lines.len() && lines[i].op == Op::Insert {
-            i += 1;
-        }
-        let inserted = i - inserted_at;
-
-        for n in 0..inserted {
-            // `new_line` is 1-based and only an insertion carries one.
-            let Some(line) = lines[inserted_at + n].new_line else {
-                continue;
-            };
-            set(
-                line - 1,
-                match n < deleted {
-                    true => Mark::Modified,
-                    false => Mark::Added,
+    for (i, row) in rows.iter().enumerate() {
+        // `new_line` is 1-based, and every row with a new side carries one.
+        match row.new.map(|n| &lines[n]) {
+            Some(line) if line.op == Op::Equal => {}
+            Some(line) => set(
+                line.new_line.unwrap_or(1) - 1,
+                match row.old {
+                    Some(_) => Mark::Modified,
+                    None => Mark::Added,
                 },
-            );
-        }
-        if deleted > inserted {
-            // The surplus removals left no line behind. Mark where they were: the line that now
-            // follows them, or the end of the buffer if they ran off it.
-            match lines[i..].iter().find_map(|l| l.new_line) {
+            ),
+            // Mark where the removal was: the line that now follows it, or the end of the buffer
+            // if it ran off it.
+            None => match rows[i + 1..]
+                .iter()
+                .find_map(|r| r.new.and_then(|n| lines[n].new_line))
+            {
                 Some(line) => set(line - 1, Mark::DeletedAbove),
                 None => set(line_count.saturating_sub(1), Mark::DeletedBelow),
-            }
+            },
         }
     }
     marks
@@ -200,8 +184,13 @@ mod tests {
     use super::*;
 
     fn marks_of(old: &str, new: &str) -> Vec<Option<Mark>> {
-        let lines = accent_core::diff::lines(old, new);
-        marks(&lines, new.lines().count())
+        let plain = accent_core::diff::line_ops(old, new);
+        // The refined diff is the same rows, so the gutter reads the same either way — which is
+        // what lets the editor pay for the cheap one.
+        let refined = accent_core::diff::lines(old, new);
+        let count = new.lines().count();
+        assert_eq!(marks(&plain, count), marks(&refined, count));
+        marks(&plain, count)
     }
 
     #[test]
