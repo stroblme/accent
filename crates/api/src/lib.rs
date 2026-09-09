@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub mod language;
+mod paths;
 pub mod remote;
 pub mod rpc;
 pub mod ssh;
@@ -27,10 +28,12 @@ mod worker;
 #[cfg(test)]
 mod tests;
 
+pub use paths::conflict_original_rel;
+use paths::{accent_conflict_name, conflict_pairs, outside, stem_key, with_md};
 use worker::Msg;
 
 use accent_core::index::Index;
-use accent_core::path::{basename, parent_dir, stem};
+use accent_core::path::{basename, stem};
 use accent_core::walk;
 use accent_core::{diff, markdown, template};
 // The module too: a tab matches on `fs::Read`, and the façade hands one back.
@@ -1581,71 +1584,6 @@ impl Local {
         ));
         repos
     }
-}
-
-// -------------------------------------------------------------------- paths
-
-/// What a wikilink resolves a path by, so "did the name change" is asked the way links are.
-fn stem_key(rel: &str) -> String {
-    markdown::link_key(&stem(rel))
-}
-
-/// A template's target is markdown whatever its date pattern spells.
-fn with_md(rel: &str) -> String {
-    match rel.rsplit_once('.') {
-        Some((_, ext))
-            if ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown") =>
-        {
-            rel.to_string()
-        }
-        _ => format!("{rel}.md"),
-    }
-}
-
-/// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.
-/// A copy of a note that has since been deleted is nothing the resolve UI can act on.
-fn conflict_pairs(index: &Index) -> Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    for copy in index.conflicts()? {
-        let Some(original) = conflict_original_rel(&copy) else {
-            continue;
-        };
-        if index.get_file(&original)?.is_some() {
-            out.push((original, copy));
-        }
-    }
-    Ok(out)
-}
-
-/// `Dir/Note.sync-conflict-….md` -> `Dir/Note.md`, or `None` when `copy` is not one.
-pub fn conflict_original_rel(copy: &str) -> Option<String> {
-    let (dir, name) = (parent_dir(copy), basename(copy));
-    let original = fs::conflict_original(name)?;
-    Some(if dir.is_empty() {
-        original
-    } else {
-        format!("{dir}/{original}")
-    })
-}
-
-/// What [`Vault::adopt_conflict`] calls the version it replaces: Syncthing's own naming, with
-/// `accent` where the device id would be, so the vault treats it as the conflict copy it is.
-fn accent_conflict_name(name: &str, now: chrono::NaiveDateTime) -> String {
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
-        _ => (name, String::new()),
-    };
-    format!(
-        "{stem}.sync-conflict-{}-accent{ext}",
-        now.format("%Y%m%d-%H%M%S")
-    )
-}
-
-fn outside(rel: &str) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("{rel} is outside the vault"),
-    )
 }
 
 #[cfg(test)]
