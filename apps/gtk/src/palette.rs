@@ -87,6 +87,9 @@ pub struct Sources {
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
+    /// Drop a vault from the recent list, by the key its row carries. Forgets a list entry and
+    /// deletes nothing, which is why the row's button asks nothing first.
+    pub on_forget: Box<dyn Fn(&str)>,
 }
 
 /// Something [`cache`] fills in at most once and hands out by handle for the life of the dialog.
@@ -283,6 +286,24 @@ fn accel_button(
     button
 }
 
+/// Forgetting a recent vault, the same removal the start screen's rows have. Always visible, not
+/// a hover affordance: a button that only appears under the pointer is not there at all for the
+/// keyboard or for a touchscreen. No confirmation either — it drops a list entry and deletes
+/// nothing on disk.
+fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Remove from Recents")
+        .valign(gtk::Align::Center)
+        .css_classes(["flat"])
+        .build();
+    button.connect_clicked({
+        let (forget, key) = (forget.clone(), key.to_string());
+        move |_| forget(&key)
+    });
+    button
+}
+
 /// Row template: name, dimmed directory, and the slot the accelerator button goes in. The
 /// directory label expands, so the accelerator sits at the far end even when there is no
 /// directory to show.
@@ -295,6 +316,7 @@ fn accel_button(
 /// commands, so nothing worth saving is allocated here.
 fn row_factory(
     rebind: Rc<dyn Fn(&str)>,
+    forget: Rc<dyn Fn(&str)>,
     conflicts: Rc<RefCell<HashSet<String>>>,
 ) -> gtk::SignalListItemFactory {
     let factory = gtk::SignalListItemFactory::new();
@@ -369,6 +391,7 @@ fn row_factory(
                 let (title, subtitle) = start::labels(Path::new(key), Some(home.as_path()));
                 name.set_text(&title);
                 dir.set_text(&subtitle);
+                slot.append(&forget_button(key, &forget));
             }
         }
     });
@@ -478,12 +501,15 @@ pub fn present(
         vaults,
         taken,
         on_rebind,
+        on_forget,
     } = sources;
     let recent = Rc::new(recent);
     let mru = Rc::new(mru);
-    // Ranked against itself, so a typed query still breaks ties by how recently a vault was open.
-    let vault_places = Rc::new(places(&vaults, &vaults));
-    let vaults = Rc::new(vaults);
+    // Behind a cell because the trash button on a row rewrites the list without closing the
+    // dialog. Ranked against itself, so a typed query still breaks ties by how recently a vault
+    // was open.
+    let vault_places = Rc::new(RefCell::new(places(&vaults, &vaults)));
+    let vaults = Rc::new(RefCell::new(vaults));
     // Behind a cell because a rebind rewrites one row's accelerators without closing the dialog.
     let commands: Rc<RefCell<Vec<Rc<Item>>>> =
         Rc::new(RefCell::new(commands.into_iter().map(Rc::new).collect()));
@@ -632,6 +658,7 @@ pub fn present(
                     // never filtered out: one surface reaches every way of changing vault, and the
                     // picker is never the empty status page even in a window on the only vault known.
                     Mode::Vaults => {
+                        let vaults = vaults.borrow();
                         let mut hits: Vec<Rc<Item>> = if empty_query {
                             vaults
                                 .iter()
@@ -641,7 +668,7 @@ pub fn present(
                         } else {
                             let mut m = matcher.borrow_mut();
                             m.config = Config::DEFAULT.match_paths();
-                            rank(&vaults, &vault_places, query, &mut m)
+                            rank(&vaults, &vault_places.borrow(), query, &mut m)
                                 .into_iter()
                                 .map(|i| Rc::new(Item::Vault(vaults[i].clone())))
                                 .collect()
@@ -734,7 +761,29 @@ pub fn present(
             });
         }
     });
-    list.set_factory(Some(&row_factory(rebind, clashes.clone())));
+    // Forgetting a vault redraws the list in place: the entry goes, the rows below it move up and
+    // the highlight stays where it was, the same way a rebind redraws its row. With the last vault
+    // gone the two openers are what is left, which is the list's empty state — see `Mode::Vaults`
+    // above, where they are appended on every refresh and never filtered out.
+    let forget: Rc<dyn Fn(&str)> = Rc::new({
+        let (vaults, vault_places, refresh) =
+            (vaults.clone(), vault_places.clone(), refresh.clone());
+        let (entry, selection) = (entry.clone(), selection.clone());
+        move |key: &str| {
+            on_forget(key);
+            {
+                let mut vaults = vaults.borrow_mut();
+                vaults.retain(|vault| vault != key);
+                *vault_places.borrow_mut() = places(&vaults, &vaults);
+            }
+            let selected = selection.selected();
+            refresh(&entry.text());
+            if selected < selection.n_items() {
+                selection.set_selected(selected);
+            }
+        }
+    });
+    list.set_factory(Some(&row_factory(rebind, forget, clashes.clone())));
 
     refresh("");
 

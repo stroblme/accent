@@ -196,13 +196,7 @@ fn recent_row(
     forget.connect_clicked({
         let (path, config) = (path.clone(), config.clone());
         move |button| {
-            {
-                let mut cfg = config.borrow_mut();
-                cfg.recent_vaults.retain(|p| p != &path);
-                if let Err(e) = cfg.save() {
-                    tracing::warn!("saving config: {e:#}");
-                }
-            }
+            forget_vault(&config, &path);
             // Looked up rather than captured, so the row does not hold a reference to itself.
             if let Some(row) = button.ancestor(adw::ActionRow::static_type())
                 && let Some(list) = row.parent().and_downcast::<gtk::ListBox>()
@@ -224,6 +218,17 @@ fn recent_row(
     });
     row.add_suffix(&forget);
     row
+}
+
+/// Drop `path` from the recent vaults and write the config back. Nothing on disk is touched: the
+/// list is the only thing that remembers a vault. Shared with the Open Recent picker, which offers
+/// the same removal from its own rows.
+pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
+    let mut cfg = config.borrow_mut();
+    cfg.recent_vaults.retain(|p| p != path);
+    if let Err(e) = cfg.save() {
+        tracing::warn!("saving config: {e:#}");
+    }
 }
 
 /// What a recent row says about a vault: it is named by its folder and placed by its path, on
