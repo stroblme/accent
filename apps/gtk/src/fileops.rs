@@ -687,10 +687,16 @@ fn listed(names: &[String]) -> String {
 
 // ------------------------------------------------------------- clipboard and the file manager
 
+/// Copy the file's own name, the extension included: `notes.md`, not `notes`. A folder's name is
+/// copied the same way, being the same last segment of the path.
+pub fn copy_name(ops: &Rc<Ops>, rel: &str) {
+    ops.window.clipboard().set_text(basename(rel));
+}
+
 /// Copy the vault-relative path, which is what a wikilink and every accent path notation use.
 ///
-/// No toast: the clipboard is the feedback, and DESIGN.md keeps toasts for what the user cannot
-/// otherwise see.
+/// No toast, here or in either of its neighbours: the clipboard is the feedback, and DESIGN.md
+/// keeps toasts for what the user cannot otherwise see.
 pub fn copy_relative_path(ops: &Rc<Ops>, rel: &str) {
     ops.window.clipboard().set_text(rel);
 }
@@ -795,9 +801,11 @@ pub fn context_menu(
     // Rename is the move as well as the name: a path typed into it carries the file, which is
     // what replaced Move to… when the tree learned to take a drop.
     menu.append_item(&item("Rename", "rename", rel));
-    // Reading the path out and leaving the app are neither edits nor deletions, so they get a
-    // section of their own between the two.
+    // Reading the name or the path out and leaving the app are neither edits nor deletions, so
+    // they get a section of their own between the two. The name first: it is the shortest of the
+    // three answers to "what is this file called", and the one a note's own prose wants.
     let elsewhere = gio::Menu::new();
+    elsewhere.append_item(&item("Copy Name", "copy-name", rel));
     elsewhere.append_item(&item("Copy Relative Path", "copy-rel", rel));
     elsewhere.append_item(&item("Copy Absolute Path", "copy-abs", rel));
     elsewhere.append_item(&item("Show in Files", "show", rel));
@@ -873,6 +881,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(rename));
+    add("copy-name", Box::new(copy_name));
     add("copy-rel", Box::new(copy_relative_path));
     add("copy-abs", Box::new(copy_absolute_path));
     add("show", Box::new(show_in_files));
