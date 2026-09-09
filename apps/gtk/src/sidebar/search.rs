@@ -7,6 +7,7 @@
 //! and an answer arriving under a newer number is dropped rather than painted.
 
 use super::OnOpen;
+use crate::dialogs::alert;
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
 use accent_core::path::{basename, parent_dir};
@@ -25,6 +26,11 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
 const PULSE: Duration = Duration::from_millis(80);
+/// How many notes Replace All rewrites without asking first. A rewrite cannot be undone and
+/// reaches notes nobody has open, which is the choice DESIGN.md's States section keeps an
+/// `AdwAlertDialog` for; the one note whose every match the pane is already showing struck
+/// through is the case where the preview *is* the confirmation.
+const CONFIRM_ABOVE: usize = 1;
 /// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
 /// Nothing else in the window starts a search, so a query the user did not ask for — the requery
 /// a changed file triggers under a finished search — is over inside this and never draws one.
@@ -211,6 +217,8 @@ struct Search {
     /// A Replace All is rewriting the vault. It writes the very files a query would read, so the
     /// pane asks nothing else until it is over.
     replacing: Cell<bool>,
+    /// What the button last promised to rewrite, which is what the confirmation says out loud.
+    total: Cell<usize>,
 }
 
 impl Search {
@@ -374,6 +382,7 @@ impl Search {
     /// is what Replace All opens. A vault of source files would otherwise be promised edits that
     /// never happen.
     fn set_total(&self, total: usize) {
+        self.total.set(total);
         self.apply.set_label(&format!("Replace All ({total})"));
         self.apply.set_sensitive(total > 0);
     }
@@ -385,9 +394,42 @@ impl Search {
     /// pane marks itself busy for the duration instead — the bar pulses, Replace All goes
     /// insensitive, and a query typed meanwhile waits for the writes rather than racing them.
     fn replace_all(self: &Rc<Self>) {
-        let key = self.key();
         // Compiled and thrown away: the vault is asked in the same terms the box holds, and this
-        // is only here to refuse a pattern that does not compile before anything is rewritten.
+        // is only here to refuse a pattern that does not compile before anything is asked.
+        let (Ok(_), Some(_)) = (compile_regex(&self.key()), self.replacement()) else {
+            return;
+        };
+        if self.busy() {
+            return;
+        }
+        let total = self.total.get();
+        if total > CONFIRM_ABOVE {
+            let dialog = alert(
+                &format!("Replace in {total} Notes?"),
+                "Every match in these notes is rewritten where it stands. This cannot be undone.",
+                &[
+                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                    (
+                        "replace",
+                        "Replace All",
+                        adw::ResponseAppearance::Destructive,
+                    ),
+                ],
+                "cancel",
+            );
+            let search = self.clone();
+            return dialog.choose(Some(&self.apply), gio::Cancellable::NONE, move |response| {
+                if response == "replace" {
+                    search.run_replace_all();
+                }
+            });
+        }
+        self.run_replace_all();
+    }
+
+    /// The rewrite itself, once it has been asked for and, past [`CONFIRM_ABOVE`], agreed to.
+    fn run_replace_all(self: &Rc<Self>) {
+        let key = self.key();
         let (Ok(_), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
             return;
         };
@@ -707,6 +749,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         generation: Cell::new(0),
         running: Cell::new(0),
         replacing: Cell::new(false),
+        total: Cell::new(0),
     });
 
     // A toggle is a click rather than a burst, so only what is typed is debounced.
