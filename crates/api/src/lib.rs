@@ -24,6 +24,7 @@ pub mod rpc;
 pub mod ssh;
 
 use accent_core::index::{Change, Index};
+use accent_core::path::{basename, parent_dir, stem};
 use accent_core::walk;
 use accent_core::watch::{VaultEvent, Watcher};
 use accent_core::{diff, markdown, template};
@@ -1940,27 +1941,6 @@ impl Worker {
 
 // -------------------------------------------------------------------- paths
 
-/// Directory part of a vault-relative path; "" is the vault root.
-fn parent_dir(rel: &str) -> &str {
-    split_parent(rel).0
-}
-
-fn split_parent(rel: &str) -> (&str, &str) {
-    match rel.rsplit_once('/') {
-        Some((dir, name)) => (dir, name),
-        None => ("", rel),
-    }
-}
-
-fn basename(rel: &str) -> &str {
-    split_parent(rel).1
-}
-
-/// The note title a template sees: the file name without its extension.
-fn stem(rel: &str) -> String {
-    markdown::strip_ext(basename(rel))
-}
-
 /// What a wikilink resolves a path by, so "did the name change" is asked the way links are.
 fn stem_key(rel: &str) -> String {
     markdown::link_key(&stem(rel))
@@ -1995,7 +1975,7 @@ fn conflict_pairs(index: &Index) -> Result<Vec<(String, String)>> {
 
 /// `Dir/Note.sync-conflict-….md` -> `Dir/Note.md`, or `None` when `copy` is not one.
 pub fn conflict_original_rel(copy: &str) -> Option<String> {
-    let (dir, name) = split_parent(copy);
+    let (dir, name) = (parent_dir(copy), basename(copy));
     let original = fs::conflict_original(name)?;
     Some(if dir.is_empty() {
         original
