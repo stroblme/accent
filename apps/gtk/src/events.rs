@@ -172,10 +172,25 @@ impl App {
                 self.statusbar.set_progress(Some(&format!("{what}…")));
                 self.connect.show(fraction);
             }
+            // The vault answers from here on. Everything asked while it did not was told so
+            // rather than made to wait, so all of it is asked again — and the tabs the session
+            // was holding are opened now that there is something to open them from.
             Event::Connected => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
                 self.hide_connection_banner();
+                if let Some(tree) = self.tree.get() {
+                    tree.refresh();
+                }
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.mark_tags_dirty();
+                }
+                if let Some(git) = self.git.get() {
+                    git.schedule_refresh();
+                }
+                self.refresh_corpus();
+                self.restore_session();
+                self.sync_active();
             }
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);
