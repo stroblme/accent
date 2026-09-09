@@ -1,0 +1,1230 @@
+//! The Git pane: what changed, what is staged, and where the history went.
+//!
+//! Everything here comes from `accent_api::git`, which drives the user's own `git` binary. A
+//! `git status` on a cold cache takes long enough to drop frames, so every call runs on
+//! `gio::spawn_blocking` and only its answer reaches the main thread. Refreshes are debounced and
+//! coalesced: a save, a watcher event and a `.git` write in the same moment cost one `git status`.
+//!
+//! One [`Panel`], spread over this directory: the struct, the refresh that feeds it and the
+//! window-facing queries live here, and each sibling adds the `impl Panel` block for one part of
+//! the pane — [`changes`] the changed-files list, [`log`] the history, [`actions`] the commands
+//! that write, [`compare`] the diffs a row opens, [`fetch`] the worker's half.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::rc::{Rc, Weak};
+use std::sync::Arc;
+use std::time::Duration;
+
+use accent_api::Vault;
+use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
+use adw::prelude::*;
+use gtk::{gdk, gio, glib, pango};
+
+use crate::diff::{Compare, DiffTab, Side};
+
+use crate::fileops;
+use crate::highlight;
+
+mod actions;
+mod changes;
+mod compare;
+mod fetch;
+mod log;
+
+use compare::Watch;
+use log::same_head;
+
+/// The changes list gets the top half of the pane, the log the bottom.
+pub const GIT_SHARE: (i32, i32) = (1, 2);
+
+/// One page of history: what a refresh reads, and what Load More adds.
+const PAGE: usize = 200;
+
+/// How long the pane waits after being poked before asking git again. Long enough that a burst of
+/// watcher events is one query, short enough that a save shows up while the hand is still there.
+const DEBOUNCE: Duration = Duration::from_millis(500);
+
+/// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
+/// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
+/// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
+const SYNC_ICON: &str = "mail-send-receive-symbolic";
+
+/// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
+/// default interface font. A commit message is a subject, a blank line and a body, so one line is
+/// the wrong resting size and unbounded growth would push the changes and the history off the pane.
+const MESSAGE_MAX_HEIGHT: i32 = 160;
+
+/// What the pane needs from the window, as closures rather than a handle: this module knows
+/// nothing about tabs or the vault tree. Every one of them holds the window weakly, or the pane
+/// would keep a closed window alive for the life of the process.
+// Boxed closures are the whole point of this struct; a type alias per field would only hide the
+// signature the caller has to write.
+#[allow(clippy::type_complexity)]
+pub struct Hooks {
+    pub vault: Arc<Vault>,
+    /// Where the dialogs are presented.
+    pub window: adw::ApplicationWindow,
+    pub toast: Box<dyn Fn(&str)>,
+    /// Open a file in a tab, by vault key.
+    pub open: Box<dyn Fn(&str)>,
+    /// Open a comparison of two texts that are not files: key, the file name behind it, the tab
+    /// title, then (title, text) for each side. Hands the tab back so a refresh can reach it.
+    pub open_diff: Box<dyn Fn(&str, &str, &str, (&str, &str), (&str, &str)) -> Option<Rc<DiffTab>>>,
+    /// Compare a file's working tree with the index, inside the file's own tab: key, the index
+    /// side's title and text, and what to call once the comparison exists so a refresh can reach
+    /// it.
+    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
+    /// Move a vault file to the trash. Vault keys only, which is what leaves an untracked file
+    /// outside the vault without a Discard button.
+    pub trash: Box<dyn Fn(&str)>,
+    /// A refresh landed and the pane's answers changed.
+    pub changed: Box<dyn Fn()>,
+    /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
+    /// landing and costs an index write: this fires twice per sync and must stay cheap.
+    pub syncing: Box<dyn Fn(bool)>,
+    /// Whether the changes list starts grouped by folder — `git_tree` in the config.
+    pub tree: bool,
+    /// The in-pane toggle moved: write the preference the Preferences dialog also edits.
+    pub set_tree: Box<dyn Fn(bool)>,
+}
+
+/// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
+/// it is replaced at the same moment and a reader wants a consistent set.
+#[derive(Default)]
+struct State {
+    repos: Vec<Repo>,
+    /// Index into `repos`; the pane talks about one repository at a time.
+    selected: usize,
+    /// One per repository, index-aligned with `repos`.
+    statuses: Vec<Status>,
+    /// The selected repository's history, as far as it has been paged in.
+    commits: Vec<Commit>,
+    /// The selected repository's local branches, which is what the branch chooser lists.
+    branches: Vec<String>,
+    /// The oids the selected repository's upstream has and HEAD does not: the rows the history
+    /// draws as not pulled yet. Empty unless a fetch has found something.
+    incoming: HashSet<String>,
+    submodules: Vec<Submodule>,
+    /// Ignored paths across every repository, vault-relative, directories keeping their slash.
+    ignored: HashSet<String>,
+    /// git dir → the branch oid the last refresh saw.
+    heads: HashMap<PathBuf, String>,
+    head_moved: bool,
+}
+
+pub struct Panel {
+    hooks: Hooks,
+    root: gtk::Widget,
+    /// "empty" (no repository) or "repo".
+    stack: gtk::Stack,
+    /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
+    /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
+    /// (`fileops::context_menu` documents the symptom).
+    column: gtk::Box,
+    names: gtk::StringList,
+    chooser: gtk::DropDown,
+    /// What the branch button says, which is the branch HEAD is on or where it is detached.
+    branch_label: gtk::Label,
+    branch_menu: gtk::Popover,
+    branch_list: gtk::ListBox,
+    /// The names the popover is showing and which of them HEAD is on. A refresh that says the
+    /// same thing leaves the rows alone: one fires on every save, and rebuilding them would take
+    /// a row out from under the pointer already on it.
+    branch_shown: RefCell<(Vec<String>, Option<usize>)>,
+    counts: gtk::Label,
+    sync: gtk::Button,
+    message: gtk::TextView,
+    placeholder: gtk::Label,
+    commit: gtk::Button,
+    /// The message box and its button, hidden together when there is nothing to commit.
+    commit_box: gtk::Box,
+    divider: gtk::Paned,
+    changes: gio::ListStore,
+    log: gio::ListStore,
+    /// The history list, so the bench can activate a row without a pointer.
+    log_view: gtk::ListView,
+    /// Whether git has history the store does not hold, which is what puts the Load More row at
+    /// the end of the log. Also the re-entrancy guard: it is cleared while a page is in flight.
+    has_more: Cell<bool>,
+    state: RefCell<State>,
+    /// The debounce timer, replaced rather than stacked.
+    pending: RefCell<Option<glib::SourceId>>,
+    busy: Cell<bool>,
+    /// Something asked for a refresh while one was in flight; run once more when it lands.
+    again: Cell<bool>,
+    /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
+    /// snapshot. Weak, so a closed one falls out on the next pass.
+    watches: RefCell<Vec<Watch>>,
+    /// Set while the repository chooser's list is being filled, so the selection notify that
+    /// follows is not read as the user picking a repository.
+    syncing: Cell<bool>,
+    /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
+    /// filled: this is the transfer the status bar spins for.
+    sync_busy: Cell<bool>,
+    /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
+    /// than stacked.
+    fetch_busy: Cell<bool>,
+    /// Whether the vault's repositories have been fetched since the window opened them. The first
+    /// fetch waits for the first refresh, because until then there is no repository to fetch.
+    fetched_once: Cell<bool>,
+    /// A timer tick was skipped because the window did not have the focus. Run as soon as it
+    /// does, so coming back to a window that has been aside for an hour is not another wait.
+    missed_fetch: Cell<bool>,
+    /// The commit whose file list is open, if any. One at a time: a second expansion closes the
+    /// first, and a refresh closes them all.
+    expanded: RefCell<Option<String>>,
+    /// Whether the changes list is grouped by folder. A copy of the `git_tree` preference, which
+    /// the Changes header's toggle and the Preferences switch both write.
+    tree: Cell<bool>,
+    /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
+    /// schedules one and folding a folder must survive it.
+    collapsed: RefCell<HashSet<String>>,
+}
+
+impl Panel {
+    pub fn new(hooks: Hooks) -> Rc<Panel> {
+        let names = gtk::StringList::new(&[]);
+        let chooser = gtk::DropDown::builder()
+            .model(&names)
+            .visible(false)
+            // A repository is named after its directory, and the button's default label asks for
+            // the whole name however long it is: measured at 345 px for a 43-character one, which
+            // is the sidebar's real floor whenever a vault has more than one repository. The
+            // button ellipsizes; the popup list keeps the names whole, having room for them.
+            .factory(&name_factory(true))
+            .list_factory(&name_factory(false))
+            .build();
+
+        // The branch is a menu button rather than a chooser: its popover is a list of the local
+        // branches, each row switching to that branch and carrying a trash button, with Create
+        // Branch… underneath. A `GtkDropDown` can only ever pick one of the rows it already has.
+        // Flat and `heading`, because it stands where the branch label stood and reads as the
+        // branch first and as a control second; the label ellipsizes so that a long branch name
+        // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
+        // width without taking it, so Sync and Commit stay at the trailing edge.
+        let branch_label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
+        let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        face.append(&branch_label);
+        face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+
+        let branch_list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        branch_list.add_css_class("navigation-sidebar");
+        let create = gtk::Button::builder().label("Create Branch…").build();
+        create.add_css_class("flat");
+        let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // A repository with fifty branches is a list that scrolls, not a popover taller than the
+        // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
+        branch_box.append(
+            &gtk::ScrolledWindow::builder()
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .propagate_natural_height(true)
+                .max_content_height(280)
+                .child(&branch_list)
+                .build(),
+        );
+        branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        branch_box.append(&create);
+        let branch_menu = gtk::Popover::builder().child(&branch_box).build();
+        let branch = gtk::MenuButton::builder()
+            .hexpand(true)
+            .halign(gtk::Align::Start)
+            .child(&face)
+            .popover(&branch_menu)
+            .build();
+        for class in ["flat", "heading"] {
+            branch.add_css_class(class);
+        }
+        let counts = gtk::Label::new(None);
+        counts.add_css_class("dim-label");
+        counts.add_css_class("numeric");
+        // One button, both halves, and the counts inside it, which is the pane's whole answer to
+        // "is there anything to pull": a background fetch keeps them current, so `↓2` inside the
+        // Sync button is what says a pull would bring something. Three buttons was also what
+        // stopped the sidebar shrinking — the branch row measured 186 px of minimum width with
+        // them and 105 with one.
+        let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        arrows.append(&counts);
+        arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
+        let sync = gtk::Button::builder()
+            .child(&arrows)
+            .valign(gtk::Align::Center)
+            .build();
+        sync.add_css_class("flat");
+        // The "No Repository" page's own button: `git init` in a vault with no repository writes
+        // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
+        let check = gtk::Button::builder()
+            .label("Check Again")
+            .halign(gtk::Align::Center)
+            .build();
+        check.add_css_class("pill");
+
+        let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        branch_row.append(&branch);
+        branch_row.append(&sync);
+
+        // The message box is a card so it reads as somewhere to type rather than as a label, and
+        // it grows with what is in it: one line while the message is a subject, taller as a body
+        // is written, and scrolling once it reaches [`MESSAGE_MAX_HEIGHT`], because past that it
+        // would push the changes and the history off the pane. The scroller does the growing on
+        // its own — `propagate-natural-height` asks the view how tall it wants to be and
+        // `max-content-height` is the cap — so nothing here measures text.
+        //
+        // The margins are the 9 px Adwaita gives `entry` either side of its text, so the box has
+        // the same inset as the search field rather than a tighter one of its own.
+        let message = gtk::TextView::builder()
+            .wrap_mode(gtk::WrapMode::WordChar)
+            .accepts_tab(false)
+            .left_margin(9)
+            .right_margin(9)
+            .top_margin(9)
+            .bottom_margin(9)
+            .build();
+        message.add_css_class("card");
+        let message_scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(MESSAGE_MAX_HEIGHT)
+            .child(&message)
+            .build();
+        // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
+        // clicked through to, which would otherwise put the caret nowhere.
+        let placeholder = gtk::Label::builder()
+            .label("Commit message")
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(9)
+            .margin_top(9)
+            .can_target(false)
+            .build();
+        placeholder.add_css_class("dim-label");
+        let overlay = gtk::Overlay::builder().child(&message_scroller).build();
+        overlay.add_overlay(&placeholder);
+
+        let commit = gtk::Button::builder()
+            .label("Commit")
+            .halign(gtk::Align::End)
+            .sensitive(false)
+            .build();
+        commit.add_css_class("suggested-action");
+        // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
+        // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
+        // changes and the history, and a message box that now grows needs that room. Trailing
+        // edge, which is where GNOME puts the affirmative action. It is hidden and shown with the
+        // box below it, so a clean tree still shows neither.
+        branch_row.append(&commit);
+        // Nothing but the message box now, kept as its own container so the whole thing is hidden
+        // and shown in one call.
+        let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        commit_box.append(&overlay);
+
+        let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let changes_view = gtk::ListView::new(
+            Some(gtk::NoSelection::new(Some(changes.clone()))),
+            None::<gtk::SignalListItemFactory>,
+        );
+        changes_view.add_css_class("navigation-sidebar");
+        // One click opens the diff, which is the rule the tree already follows: see
+        // `set_single_click_activate` in `tree.rs`.
+        changes_view.set_single_click_activate(true);
+
+        let log = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let log_view = gtk::ListView::new(
+            Some(gtk::NoSelection::new(Some(log.clone()))),
+            None::<gtk::SignalListItemFactory>,
+        );
+        log_view.add_css_class("navigation-sidebar");
+        // The lane a commit sits in is drawn per row, so the row's own vertical margin leaves a
+        // gap between its line and the next one's and the graph comes out dashed. The rule in
+        // `install_chrome_css` takes the margin off; the breathing room moves onto the text.
+        log_view.add_css_class("git-log");
+
+        let divider = gtk::Paned::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .start_child(&scroller(&changes_view))
+            .end_child(&scroller(&log_view))
+            .resize_start_child(true)
+            .resize_end_child(true)
+            .shrink_start_child(false)
+            .shrink_end_child(false)
+            .vexpand(true)
+            .build();
+        place_once(&divider);
+
+        let column = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .build();
+        column.append(&chooser);
+        column.append(&branch_row);
+        column.append(&commit_box);
+        column.append(&divider);
+
+        let stack = gtk::Stack::builder().vexpand(true).build();
+        stack.add_named(&empty_page(&check), Some("empty"));
+        stack.add_named(&column, Some("repo"));
+        stack.set_visible_child_name("empty");
+
+        let panel = Rc::new(Panel {
+            tree: Cell::new(hooks.tree),
+            collapsed: RefCell::new(HashSet::new()),
+            hooks,
+            root: stack.clone().upcast(),
+            stack,
+            column,
+            names,
+            chooser,
+            branch_label,
+            branch_menu,
+            branch_list,
+            branch_shown: RefCell::new((Vec::new(), None)),
+            counts,
+            sync,
+            message,
+            placeholder,
+            commit,
+            commit_box,
+            divider,
+            changes,
+            log,
+            log_view: log_view.clone(),
+            has_more: Cell::new(false),
+            state: RefCell::new(State::default()),
+            pending: RefCell::new(None),
+            busy: Cell::new(false),
+            again: Cell::new(false),
+            watches: RefCell::new(Vec::new()),
+            syncing: Cell::new(false),
+            sync_busy: Cell::new(false),
+            fetch_busy: Cell::new(false),
+            fetched_once: Cell::new(false),
+            missed_fetch: Cell::new(false),
+            expanded: RefCell::new(None),
+        });
+        // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
+        // all live in its own widget tree, and a strong capture there is a cycle.
+        panel.wire_header(&check, &create);
+        panel.wire_autofetch();
+        panel.wire_commit();
+        panel.wire_changes(&changes_view);
+        panel.wire_log(&log_view);
+        panel
+    }
+
+    /// The pane itself, for the sidebar's stack.
+    pub fn widget(&self) -> &gtk::Widget {
+        &self.root
+    }
+
+    /// The divider between the changes and the log, so a double-click on it can be reset.
+    pub fn divider(&self) -> &gtk::Paned {
+        &self.divider
+    }
+
+    /// Whether the vault touches any repository at all. The pane hides itself when it does not.
+    pub fn has_repos(&self) -> bool {
+        !self.state.borrow().repos.is_empty()
+    }
+
+    /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
+    /// calls these: the headless image has no pointer, and the Load More row is only worth
+    /// anything if activating the end of the list really pages the next chunk in.
+    pub fn log_rows(&self) -> u32 {
+        self.log.n_items()
+    }
+
+    pub fn activate_last_log_row(&self) {
+        if let Some(last) = self.log.n_items().checked_sub(1) {
+            self.log_view.emit_by_name::<()>("activate", &[&last]);
+        }
+    }
+
+    /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
+    /// [`Panel::set_tree`], which is how the grouping is proven without a pointer.
+    pub fn changes_rows(&self) -> u32 {
+        self.changes.n_items()
+    }
+
+    /// Whether the changes list is grouped by folder, and putting it either way. The preference
+    /// has two surfaces — this one is the Preferences switch, through `App::apply_config` — so
+    /// nothing here writes the config back; only a move really redraws.
+    pub fn tree(&self) -> bool {
+        self.tree.get()
+    }
+
+    pub fn set_tree(&self, on: bool) {
+        if self.tree.replace(on) != on {
+            self.rebuild_changes();
+        }
+    }
+
+    /// Ask git again, once, in [`DEBOUNCE`]. Calling this ten times in a row is one query.
+    pub fn schedule_refresh(self: &Rc<Self>) {
+        if let Some(id) = self.pending.borrow_mut().take() {
+            id.remove();
+        }
+        let panel = self.clone();
+        let id = glib::timeout_add_local_once(DEBOUNCE, move || {
+            panel.pending.replace(None);
+            panel.refresh();
+        });
+        self.pending.replace(Some(id));
+    }
+
+    fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
+        on_click(self, &self.sync, |panel| panel.sync(None));
+        on_click(self, check, |panel| panel.refresh());
+        on_click(self, create, |panel| panel.create_branch());
+
+        let weak = Rc::downgrade(self);
+        self.chooser.connect_selected_notify(move |chooser| {
+            let Some(panel) = weak.upgrade() else {
+                return;
+            };
+            // Splicing the name list moves the selection, and that notify is not the user.
+            if panel.syncing.get() {
+                return;
+            }
+            panel.state.borrow_mut().selected = chooser.selected() as usize;
+            panel.refresh();
+        });
+    }
+
+    fn wire_commit(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.message.buffer().connect_changed(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.sync_commit();
+            }
+        });
+        on_click(self, &self.commit, |panel| panel.do_commit());
+
+        // Ctrl+Return commits from inside the box, which is where the hands already are. This
+        // controller only gets the chord while no window accelerator claims it; while one does,
+        // `commit_if_focused` below is how the window hands it over.
+        let keys = gtk::EventControllerKey::new();
+        let weak = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let commit = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
+                && state.contains(gdk::ModifierType::CONTROL_MASK);
+            match (commit, weak.upgrade()) {
+                (true, Some(panel)) => {
+                    panel.do_commit();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        });
+        self.message.add_controller(keys);
+    }
+
+    /// Commit, if the message box is where the keyboard is. GTK dispatches a window accelerator
+    /// ahead of every controller on the focused widget, so the box cannot take `Ctrl+Return` back
+    /// from `win.newline-below` by itself: the window's handler offers it here first.
+    pub fn commit_if_focused(self: &Rc<Self>) -> bool {
+        let mine = self.message.has_focus();
+        if mine {
+            self.do_commit();
+        }
+        mine
+    }
+
+    /// Put the keyboard in the commit box, which is what `Ctrl+Shift+G` is for once the pane is
+    /// up. From an idle: the chord shows the pane in the same frame, and a widget that is not on
+    /// screen yet cannot take focus.
+    pub fn focus_commit(&self) {
+        if self.stack.visible_child_name().as_deref() != Some("repo") {
+            return;
+        }
+        let message = self.message.clone();
+        glib::idle_add_local_once(move || {
+            // Mapped, not merely visible: a box hidden because there is nothing to commit leaves
+            // its children visible in their own right, and focus would go nowhere.
+            if message.is_mapped() {
+                message.grab_focus();
+            }
+        });
+    }
+
+    /// Ask git everything the pane shows, off the main thread, and put the answers on screen.
+    fn refresh(self: &Rc<Self>) {
+        if self.busy.get() {
+            self.again.set(true);
+            return;
+        }
+        self.busy.set(true);
+        let vault = self.hooks.vault.clone();
+        let selected = self.state.borrow().selected;
+        let panel = self.clone();
+        glib::spawn_future_local(async move {
+            let fetched = gio::spawn_blocking(move || fetch::fetch(&vault, selected)).await;
+            panel.busy.set(false);
+            match fetched {
+                Ok(fetched) => panel.apply(fetched),
+                Err(_) => tracing::warn!("the git worker panicked"),
+            }
+            if panel.again.replace(false) {
+                panel.refresh();
+            }
+        });
+    }
+
+    fn apply(self: &Rc<Self>, fetched: fetch::Fetched) {
+        if self.state.borrow().repos != fetched.repos {
+            self.syncing.set(true);
+            let names: Vec<&str> = fetched.repos.iter().map(|r| r.name.as_str()).collect();
+            self.names.splice(0, self.names.n_items(), &names);
+            let selected = clamp(self.state.borrow().selected, fetched.repos.len());
+            self.state.borrow_mut().selected = selected;
+            self.chooser.set_selected(selected as u32);
+            self.syncing.set(false);
+        }
+        self.chooser.set_visible(fetched.repos.len() > 1);
+        self.stack
+            .set_visible_child_name(match fetched.repos.is_empty() {
+                true => "empty",
+                false => "repo",
+            });
+
+        let selected = clamp(self.state.borrow().selected, fetched.repos.len());
+        let heads: HashMap<PathBuf, String> = fetched
+            .repos
+            .iter()
+            .zip(&fetched.statuses)
+            .filter_map(|(repo, status)| Some((repo.git_dir.clone(), status.branch.oid.clone()?)))
+            .collect();
+        let ignored = fetched
+            .repos
+            .iter()
+            .zip(&fetched.statuses)
+            .flat_map(|(repo, status)| {
+                status
+                    .ignored
+                    .iter()
+                    .map(|path| ignored_key(&self.hooks.vault.root(), repo, path))
+            })
+            .collect();
+
+        let head = fetched
+            .statuses
+            .get(selected)
+            .and_then(|s| branch_parts(&s.branch));
+        self.counts
+            .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
+        let (names, at) = branch_model(head.map(|(name, _)| name), &fetched.branches);
+        self.set_branches(&names, at);
+        // What a Sync would do, in words, beside the counts it already shows. A branch with no
+        // upstream is not a dead end any more: syncing it publishes it (`git::sync`), so the
+        // button stays live and says which of the two it will be.
+        let branch = fetched.statuses.get(selected).map(|s| &s.branch);
+        self.sync.set_sensitive(branch.is_some());
+        self.sync
+            .set_tooltip_text(branch.map(sync_hint).as_deref().or(Some("Sync")));
+        // Most refreshes read back the history that is already on screen — a save, a watcher
+        // event and a `.git` write each schedule one — and splicing then costs an expanded commit
+        // its file list and flashes every row, so only a real difference is drawn. A page that
+        // has not moved also leaves whatever Load More added below it alone.
+        // The incoming set is part of what a row draws, and pulling a fast-forward leaves the
+        // commit list from `--all` exactly as it was — same oids, same order — so without this
+        // the marks would survive the pull that cleared them.
+        let moved = {
+            let state = self.state.borrow();
+            !same_head(&state.commits, &fetched.commits) || state.incoming != fetched.incoming
+        };
+        let page = moved.then(|| fetched.commits.clone());
+
+        {
+            let mut state = self.state.borrow_mut();
+            state.head_moved = state.heads != heads;
+            state.heads = heads;
+            state.ignored = ignored;
+            state.repos = fetched.repos;
+            state.statuses = fetched.statuses;
+            if moved {
+                state.commits = fetched.commits;
+            }
+            state.branches = fetched.branches;
+            state.submodules = fetched.submodules;
+            state.incoming = fetched.incoming;
+            state.selected = selected;
+        }
+        // git has answered for the first time since the window opened this vault, so there is a
+        // repository to fetch at last. Everything after this is the timer's.
+        if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
+            self.autofetch();
+        }
+        // After the state is written: the changes list is drawn from it, so that the tree toggle
+        // and a folder's chevron redraw the same rows without a `git status` of their own.
+        self.rebuild_changes();
+        if let Some(page) = page {
+            self.has_more.set(page.len() >= PAGE);
+            self.fill_log(page, 0);
+        }
+        self.sync_commit();
+        (self.hooks.changed)();
+        self.reload_diffs();
+    }
+
+    /// Put the branch popover on `names`, `at` being the row HEAD is on.
+    fn set_branches(self: &Rc<Self>, names: &[String], at: Option<usize>) {
+        self.branch_label
+            .set_text(at.and_then(|i| names.get(i)).map_or("", String::as_str));
+        if *self.branch_shown.borrow() == (names.to_vec(), at) {
+            return;
+        }
+        self.branch_shown.replace((names.to_vec(), at));
+        while let Some(row) = self.branch_list.first_child() {
+            self.branch_list.remove(&row);
+        }
+        for (i, name) in names.iter().enumerate() {
+            let row = self.branch_row(name, Some(i) != at);
+            self.branch_list.append(&row);
+        }
+    }
+
+    /// One row of the branch popover: the name, which switches to it, and — where git would let
+    /// it go — a trash button. The branch HEAD is on has none: git refuses to delete it, and a
+    /// control that cannot work is dead chrome (DESIGN.md, Principle 1).
+    fn branch_row(self: &Rc<Self>, name: &str, deletable: bool) -> gtk::Box {
+        let switch = gtk::Button::builder()
+            .child(&gtk::Label::builder().label(name).xalign(0.0).build())
+            .hexpand(true)
+            .build();
+        switch.add_css_class("flat");
+        let (weak, asked) = (Rc::downgrade(self), name.to_string());
+        switch.connect_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.branch_menu.popdown();
+                panel.checkout(asked.clone());
+            }
+        });
+
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        row.append(&switch);
+        if deletable {
+            let trash = icon_button("user-trash-symbolic", "Delete Branch");
+            // The hover rule the changed files' actions already follow, and the same class: a
+            // `GtkListBoxRow`'s node is `row`, which is what that CSS selects on.
+            trash.add_css_class("git-actions");
+            let (weak, asked) = (Rc::downgrade(self), name.to_string());
+            trash.connect_clicked(move |_| {
+                if let Some(panel) = weak.upgrade() {
+                    panel.branch_menu.popdown();
+                    panel.delete_branch(asked.clone(), false);
+                }
+            });
+            row.append(&trash);
+        }
+        row
+    }
+
+    fn message_text(&self) -> String {
+        let buffer = self.message.buffer();
+        let (start, end) = buffer.bounds();
+        buffer.text(&start, &end, false).to_string()
+    }
+
+    /// What the selected repository has to commit: whether anything is in the index, and whether
+    /// there is anything at all — index or worktree — for a `git commit -a` to take.
+    fn to_commit(&self) -> (bool, bool) {
+        let state = self.state.borrow();
+        let Some(status) = state.statuses.get(state.selected) else {
+            return (false, false);
+        };
+        let staged = status.staged().next().is_some();
+        (staged, staged || status.changes().next().is_some())
+    }
+
+    /// The placeholder, the Commit button and whether the box is there at all.
+    fn sync_commit(&self) {
+        let message = self.message_text();
+        self.placeholder.set_visible(message.is_empty());
+        let anything = self.to_commit().1;
+        self.commit
+            .set_sensitive(anything && !message.trim().is_empty());
+        // A clean tree has nothing to say, so the box goes — but never out from under a message
+        // being written: a refresh fires on every save, and one of those would take it away
+        // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
+        // rather than by being in the same container.
+        let show = anything || !message.is_empty() || self.message.has_focus();
+        self.commit_box.set_visible(show);
+        self.commit.set_visible(show);
+    }
+}
+
+/// What the rest of the window asks the pane, all of it answered from the last refresh: the
+/// tree's dimmed rows, the status bar's branch and the editor's change marks. This pane is the
+/// one place in the window that has already asked git.
+impl Panel {
+    /// Everything git ignores, across every repository the vault touches: vault-relative, with a
+    /// wholly ignored directory keeping its trailing slash as git reports it.
+    pub fn ignored(&self) -> HashSet<String> {
+        self.state.borrow().ignored.clone()
+    }
+
+    /// The repository `key` lives in and its path inside it. The longest root wins, so a file in
+    /// a nested repository is that repository's and not the vault's.
+    pub fn repo_of(&self, key: &str) -> Option<(Repo, String)> {
+        let state = self.state.borrow();
+        let root = self.hooks.vault.root();
+        let repo = state.repos.get(index_of(&state, &root, key)?)?;
+        let rel = absolute(&root, key)
+            .strip_prefix(&repo.root)
+            .ok()?
+            .to_string_lossy()
+            .into_owned();
+        Some((repo.clone(), rel))
+    }
+
+    /// The branch line for the repository `key` lives in, or for the selected one when `key` is
+    /// `None`. What the status bar shows.
+    pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
+        let state = self.state.borrow();
+        let index = key
+            .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
+            .unwrap_or(state.selected);
+        branch_line(state.statuses.get(index)?)
+    }
+
+    /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
+    /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
+    pub fn sync_hint(&self) -> Option<String> {
+        self.sync.tooltip_text().map(|t| t.to_string())
+    }
+
+    /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
+    /// Anything drawn against HEAD is stale when this is true.
+    pub fn head_changed(&self) -> bool {
+        self.state.borrow().head_moved
+    }
+
+    /// The text of `key` as HEAD has it, or `None` when HEAD has no such file, git refused, or
+    /// the file belongs to no repository.
+    pub fn head_text(&self, key: &str, done: impl FnOnce(Option<String>) + 'static) {
+        let Some((repo, rel)) = self.repo_of(key) else {
+            return done(None);
+        };
+        let vault = self.hooks.vault.clone();
+        glib::spawn_future_local(async move {
+            let blob = gio::spawn_blocking(move || vault.git_show(&repo, "HEAD", &rel)).await;
+            done(match blob {
+                Ok(Ok(Some(Blob::Text(text)))) => Some(text),
+                _ => None,
+            });
+        });
+    }
+}
+
+/// An object name as git abbreviates it in the log.
+fn short(oid: &str) -> String {
+    oid.chars().take(7).collect()
+}
+
+/// The line one changed file is shown on — status letter, name, directory — in the changes list
+/// and under an expanded history row alike. Whatever comes after the directory, the changes list's
+/// action buttons, is appended by the caller, and the binders find all four by sibling order.
+fn file_line() -> gtk::Box {
+    let letter = gtk::Label::builder().width_chars(1).build();
+    for class in ["dim-label", "numeric", "monospace"] {
+        letter.add_css_class(class);
+    }
+    let name = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    // Ellipsized at the start: what tells two `notes/…/index.md` apart is the end of the path.
+    let dir = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(pango::EllipsizeMode::Start)
+        .build();
+    dir.add_css_class("dim-label");
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    for child in [
+        letter.upcast_ref::<gtk::Widget>(),
+        name.upcast_ref(),
+        dir.upcast_ref(),
+    ] {
+        row.append(child);
+    }
+    row
+}
+
+/// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
+/// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
+/// monitor is watching yet, so nothing would ever tell the pane to look again.
+fn empty_page(check: &gtk::Button) -> adw::StatusPage {
+    let page = adw::StatusPage::builder()
+        .icon_name(SYNC_ICON)
+        .title("No Repository")
+        .description("Run git init in the terminal to start one.")
+        .child(check)
+        .vexpand(true)
+        .build();
+    // Without this the icon alone takes 128 px of a 200 px column (DESIGN.md, States).
+    page.add_css_class("compact");
+    page
+}
+
+/// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
+/// and whole where it does not.
+fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let label = gtk::Label::builder().xalign(0.0).build();
+        if ellipsize {
+            label.set_ellipsize(pango::EllipsizeMode::End);
+        }
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            item.set_child(Some(&label));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        if let (Some(label), Some(name)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<gtk::StringObject>(),
+        ) {
+            label.set_text(&name.string());
+        }
+    });
+    factory
+}
+
+fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .icon_name(icon)
+        .tooltip_text(tooltip)
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    button
+}
+
+fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(child)
+        .build()
+}
+
+/// The paned's default split, set once. `map` runs before the first allocation, so the height is
+/// only known an idle later; after that the position is the user's.
+fn place_once(divider: &gtk::Paned) {
+    let placed = Cell::new(false);
+    divider.connect_map(move |divider| {
+        if placed.replace(true) {
+            return;
+        }
+        let divider = divider.clone();
+        glib::idle_add_local_once(move || {
+            if divider.height() > 0 {
+                divider.set_position(divider.height() * GIT_SHARE.0 / GIT_SHARE.1);
+            }
+        });
+    });
+}
+
+/// Connect a button with only a weak hold on the panel: every one of these lives in the panel's
+/// own widget tree, so a strong capture is a cycle that outlives the window.
+fn on_click(panel: &Rc<Panel>, button: &gtk::Button, f: impl Fn(&Rc<Panel>) + 'static) {
+    let weak = Rc::downgrade(panel);
+    button.connect_clicked(move |_| {
+        if let Some(panel) = weak.upgrade() {
+            f(&panel);
+        }
+    });
+}
+
+fn clamp(selected: usize, len: usize) -> usize {
+    selected.min(len.saturating_sub(1))
+}
+
+fn absolute(vault_root: &Path, key: &str) -> PathBuf {
+    match Path::new(key).is_absolute() {
+        true => PathBuf::from(key),
+        false => vault_root.join(key),
+    }
+}
+
+/// The index of the repository `key` belongs to, the longest root winning so a file in a nested
+/// repository is that repository's and not the vault's.
+fn index_of(state: &State, vault_root: &Path, key: &str) -> Option<usize> {
+    let full = absolute(vault_root, key);
+    state
+        .repos
+        .iter()
+        .enumerate()
+        .filter(|(_, repo)| full.starts_with(&repo.root))
+        .max_by_key(|(_, repo)| repo.root.as_os_str().len())
+        .map(|(index, _)| index)
+}
+
+/// One ignored path as the tree names it. git reports a wholly ignored directory as one entry
+/// with a trailing slash, and that slash is the whole difference between a folder and a file, so
+/// it is put back after the join.
+fn ignored_key(vault_root: &Path, repo: &Repo, path: &str) -> String {
+    let key = vault_key(vault_root, repo, path.trim_end_matches('/'));
+    match path.ends_with('/') {
+        true => key + "/",
+        false => key,
+    }
+}
+
+/// A path split into the directory and the file name, both borrowed. A file at the top level has
+/// an empty directory rather than a `.`, because the row shows the string as it is.
+///
+/// git reports a wholly untracked directory as one entry ending in `/`. That slash belongs to the
+/// name — it is what tells the row apart from a file — so the split ignores it and the name keeps
+/// it; otherwise the name would come out empty and the whole row would read as its dimmed
+/// directory label.
+fn split_name(path: &str) -> (&str, &str) {
+    let body = path.strip_suffix('/').unwrap_or(path);
+    match body.rsplit_once('/') {
+        Some((dir, _)) => (dir, &path[dir.len() + 1..]),
+        None => ("", path),
+    }
+}
+
+/// A repository-relative path as the rest of the app names it: vault-relative where the file is
+/// in the vault, absolute where the repository reaches outside it.
+fn vault_key(vault_root: &Path, repo: &Repo, repo_rel: &str) -> String {
+    let full = repo.root.join(repo_rel);
+    match full.strip_prefix(vault_root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => full.to_string_lossy().into_owned(),
+    }
+}
+
+/// The branch chooser's rows and which of them HEAD is on: the local branches, led by whatever
+/// HEAD is on when that is not one of them — a detached HEAD, or a branch with no commit yet, so
+/// that the chooser always says where the repository actually is. `None` is a repository git told
+/// us nothing about, which shows an empty chooser as it used to show an empty label.
+fn branch_model(head: Option<String>, branches: &[String]) -> (Vec<String>, Option<usize>) {
+    let Some(head) = head else {
+        return (Vec::new(), None);
+    };
+    match branches.iter().position(|b| *b == head) {
+        Some(at) => (branches.to_vec(), Some(at)),
+        None => (
+            std::iter::once(head)
+                .chain(branches.iter().cloned())
+                .collect(),
+            Some(0),
+        ),
+    }
+}
+
+/// The branch name and its ahead/behind counts, the two labels of the branch row. `None` when git
+/// told us nothing at all, which is what a failed `status` leaves behind.
+fn branch_parts(b: &Branch) -> Option<(String, String)> {
+    if b.head.is_none() && b.oid.is_none() {
+        return None;
+    }
+    // A detached HEAD has no name, so it says where it is instead: this string reaches the branch
+    // button and the status bar alike, and both of them otherwise read as a branch called HEAD.
+    let name = b.head.clone().unwrap_or_else(|| match &b.oid {
+        Some(oid) => format!("Detached at {}", short(oid)),
+        None => "Detached".to_string(),
+    });
+    let counts = [(b.ahead, '↑'), (b.behind, '↓')]
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, arrow)| format!("{arrow}{count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((name, counts))
+}
+
+/// The branch row on one line, for anywhere with room for one string.
+fn branch_text(b: &Branch) -> Option<String> {
+    branch_parts(b).map(|(name, counts)| match counts.is_empty() {
+        true => name,
+        false => format!("{name} {counts}"),
+    })
+}
+
+/// The whole branch readout the status bar shows: the branch, its ahead and behind counts, and
+/// the dot in front when the repository has work that is not committed.
+///
+/// The dot leads and is the very character a dirty tab wears, so one symbol means "there is
+/// something here that is not written down" wherever it appears. What it counts is every record
+/// `git status` produced, untracked files included ([`Status::dirty`]), so it and the Git pane's
+/// changes list are the same answer.
+fn branch_line(status: &Status) -> Option<String> {
+    let text = branch_text(&status.branch)?;
+    Some(match status.dirty() {
+        true => format!("• {text}"),
+        false => text,
+    })
+}
+
+/// What a Sync will do, for the Sync button's tooltip.
+///
+/// Words beside the arrows the button already shows, because `↓2 ↑1` is a readout and a tooltip
+/// is where it is spelled out. A branch with no upstream reads as Publish: that is what syncing
+/// one does now, and the tooltip is the only place that can say so before it happens.
+fn sync_hint(b: &Branch) -> String {
+    let Some(upstream) = &b.upstream else {
+        return "Publish this branch to its remote and track it".to_string();
+    };
+    let moving: Vec<String> = [(b.behind, "to pull"), (b.ahead, "to push")]
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, what)| format!("{count} {what}"))
+        .collect();
+    match moving.is_empty() {
+        true => format!("Sync with {upstream}"),
+        false => format!("Sync with {upstream}: {}", moving.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, x: char, y: char) -> Entry {
+        Entry {
+            path: path.to_string(),
+            orig: None,
+            x,
+            y,
+            unmerged: false,
+            submodule: false,
+        }
+    }
+
+    fn repo(root: &str) -> Repo {
+        Repo {
+            root: PathBuf::from(root),
+            git_dir: PathBuf::from(root).join(".git"),
+            name: "r".to_string(),
+        }
+    }
+
+    fn on_main(upstream: Option<&str>, ahead: u32, behind: u32) -> Branch {
+        Branch {
+            oid: Some("0123456789abcdef".to_string()),
+            head: Some("main".to_string()),
+            upstream: upstream.map(str::to_string),
+            ahead,
+            behind,
+        }
+    }
+
+    #[test]
+    fn the_branch_readout_wears_the_dot_when_anything_is_uncommitted() {
+        let clean = Status {
+            branch: on_main(Some("origin/main"), 1, 2),
+            entries: Vec::new(),
+            ignored: vec!["build/".to_string()],
+        };
+        assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
+
+        // Untracked on its own is enough: the dot counts what the changes list shows.
+        let dirty = Status {
+            entries: vec![entry("new.md", '?', '?')],
+            ..clean.clone()
+        };
+        assert_eq!(branch_line(&dirty).as_deref(), Some("• main ↑1 ↓2"));
+        assert_eq!(branch_line(&Status::default()), None, "git said nothing");
+    }
+
+    #[test]
+    fn the_sync_tooltip_says_which_way_the_work_would_move() {
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 0, 0)),
+            "Sync with origin/main"
+        );
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 1, 2)),
+            "Sync with origin/main: 2 to pull, 1 to push"
+        );
+        assert!(sync_hint(&on_main(None, 0, 0)).starts_with("Publish"));
+    }
+
+    #[test]
+    fn split_name_leaves_a_top_level_file_without_a_directory() {
+        assert_eq!(split_name("note.md"), ("", "note.md"));
+        assert_eq!(split_name("a/b/note.md"), ("a/b", "note.md"));
+        // A wholly untracked directory is one entry with a trailing slash, and the slash is the
+        // only thing on the row that says so, so it stays with the name.
+        assert_eq!(split_name("newdir/"), ("", "newdir/"));
+        assert_eq!(split_name("a/b/c/"), ("a/b", "c/"));
+    }
+
+    #[test]
+    fn vault_key_is_relative_inside_the_vault_and_absolute_outside() {
+        let vault = Path::new("/v");
+        assert_eq!(vault_key(vault, &repo("/v"), "a.md"), "a.md");
+        assert_eq!(vault_key(vault, &repo("/v/sub"), "a.md"), "sub/a.md");
+        assert_eq!(vault_key(vault, &repo("/other"), "a.md"), "/other/a.md");
+    }
+
+    #[test]
+    fn ignored_key_keeps_the_slash_that_makes_it_a_directory() {
+        let vault = Path::new("/v");
+        assert_eq!(ignored_key(vault, &repo("/v"), "build/"), "build/");
+        assert_eq!(ignored_key(vault, &repo("/v"), "a.log"), "a.log");
+    }
+
+    #[test]
+    fn branch_text_names_the_branch_and_only_the_counts_that_are_there() {
+        let main = Branch {
+            oid: Some("abc".into()),
+            head: Some("main".into()),
+            ..Branch::default()
+        };
+        assert_eq!(branch_text(&main).as_deref(), Some("main"));
+        let ahead = Branch {
+            ahead: 1,
+            ..main.clone()
+        };
+        assert_eq!(branch_text(&ahead).as_deref(), Some("main ↑1"));
+        let both = Branch {
+            behind: 2,
+            ..ahead.clone()
+        };
+        assert_eq!(branch_text(&both).as_deref(), Some("main ↑1 ↓2"));
+        let detached = Branch { head: None, ..main };
+        assert_eq!(branch_text(&detached).as_deref(), Some("Detached at abc"));
+        assert_eq!(branch_text(&Branch::default()), None, "nothing to say");
+    }
+
+    #[test]
+    fn branch_model_always_shows_what_head_is_actually_on() {
+        let locals = ["main".to_string(), "side".to_string()];
+        assert_eq!(
+            branch_model(Some("side".into()), &locals),
+            (locals.to_vec(), Some(1))
+        );
+        assert_eq!(
+            branch_model(Some("HEAD".into()), &locals),
+            (
+                ["HEAD", "main", "side"].map(str::to_string).to_vec(),
+                Some(0)
+            ),
+            "a detached HEAD leads the list it is not in"
+        );
+        assert_eq!(
+            branch_model(Some("main".into()), &[]),
+            (vec!["main".to_string()], Some(0)),
+            "a repository with no commits has a head and no branches"
+        );
+        assert_eq!(branch_model(None, &locals), (Vec::new(), None));
+    }
+}
