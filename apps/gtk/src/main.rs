@@ -1557,9 +1557,32 @@ impl App {
         self.doc_of(pane)?.pdf().cloned()
     }
 
-    /// Point a pane's find bar at whatever it is showing now.
+    /// Point a pane's find bar at whatever it is showing now, and put it away where that is a
+    /// shell: there is no buffer to point at, so the bar would sit over a terminal holding a
+    /// query nothing answers. It comes back the way any other tab gets it, with the chord.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane));
+        if self.shows_shell(pane) {
+            pane.find.close();
+        }
+    }
+
+    /// Whether what `pane` is showing is a shell, which is the one document neither find nor go
+    /// to line can address: vte keeps its own scrollback and counts no lines of ours.
+    fn shows_shell(&self, pane: &Pane) -> bool {
+        self.doc_of(pane)
+            .is_some_and(|doc| doc.terminal().is_some())
+    }
+
+    /// `Ctrl+F` and its two neighbours. The bar belongs to the pane, so the chord opens the one in
+    /// the pane the reader is in and leaves the other pane's query and open state alone — and
+    /// over a shell it opens nothing at all, there being nothing of ours to search there.
+    fn open_find(&self, mode: find::Mode) {
+        let pane = self.pane();
+        if self.shows_shell(&pane) {
+            return;
+        }
+        pane.find.open(mode);
     }
 
     fn doc_for_page(&self, page: &adw::TabPage) -> Option<Doc> {
@@ -2523,8 +2546,12 @@ impl App {
             self.refresh_references();
             // The bar speaks for the tab in front, so with none it says nothing: the last
             // document's "Markdown · 2 words" used to stay under an empty document column,
-            // because this path returned before either readout was asked again.
+            // because this path returned before either readout was asked again. The Outline
+            // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
+            // strip in the sidebar, and `sync_outline` already says "No Outline" for no
+            // document at all.
             self.sync_status();
+            self.sync_outline();
             self.refresh_zoom();
             return;
         };
@@ -3773,11 +3800,9 @@ impl App {
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
-            // The bar belongs to the pane, so the chord opens the one in the pane the reader is
-            // in and leaves the other pane's query and open state alone.
-            "find" => self.pane().find.open(find::Mode::Find),
-            "replace" => self.pane().find.open(find::Mode::Replace),
-            "goto-line" => self.pane().find.open(find::Mode::Goto),
+            "find" => self.open_find(find::Mode::Find),
+            "replace" => self.open_find(find::Mode::Replace),
+            "goto-line" => self.open_find(find::Mode::Goto),
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
             "duplicate-line" => {
