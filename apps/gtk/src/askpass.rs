@@ -33,8 +33,10 @@ const CONFIRM: &str = "confirm";
 const YES: &str = "yes";
 const NO: &str = "no";
 /// What the compositor calls the window. The heading says what is being asked; the title says who
-/// is asking, which is the question a dialog arriving out of nowhere actually raises.
-const TITLE: &str = "accent";
+/// is asking, which is the question a dialog arriving out of nowhere actually raises. Spelled as
+/// the desktop file and the metainfo spell it, and as the vault-less window title does: the
+/// lower-case `accent` is prose about the project, not the name a switcher shows.
+const TITLE: &str = "Accent";
 
 /// Answer ssh's question, if this process was spawned to answer one.
 ///
