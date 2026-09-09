@@ -16,10 +16,10 @@ impl Panel {
     /// fetching all of them would put one network round trip per repository on a timer, for rows
     /// nobody is looking at; this is the one the pane and the status bar are speaking for.
     ///
-    /// A failure is logged and nothing else — no toast, no dialog, no badge. A fetch nobody asked
-    /// for that fails every five minutes because the laptop is on a train would otherwise be a
-    /// notification every five minutes, and the honest consequence of a failed fetch is already
-    /// on screen: the counts stay as stale as they were.
+    /// A failure interrupts nobody — no toast, no dialog, no badge. A fetch nobody asked for that
+    /// fails every five minutes because the laptop is on a train would otherwise be a notification
+    /// every five minutes. It is not silent either: [`Panel::sync_state`] puts it on the Sync
+    /// button's tooltip, beside the counts a failed fetch is the reason for.
     pub(super) fn autofetch(self: &Rc<Self>) {
         if self.fetch_busy.get() {
             return;
@@ -36,6 +36,10 @@ impl Panel {
         glib::spawn_future_local(async move {
             let fetched = gio::spawn_blocking(move || vault.git_fetch(&repo)).await;
             panel.fetch_busy.set(false);
+            let failed = !matches!(fetched, Ok(Ok(_)));
+            if panel.fetch_failed.replace(failed) != failed {
+                panel.sync_state();
+            }
             match fetched {
                 // A fetch that brought nothing prints nothing, so this is quiet in the common case.
                 Ok(Ok(transcript)) => {

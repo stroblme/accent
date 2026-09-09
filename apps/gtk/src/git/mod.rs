@@ -166,6 +166,11 @@ pub struct Panel {
     /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
     /// than stacked.
     fetch_busy: Cell<bool>,
+    /// Whether the last background fetch did not go through. Not a toast: a fetch nobody asked
+    /// for that fails every five minutes because the laptop is on a train would be a notification
+    /// every five minutes. The Sync button's tooltip carries it instead, which is where a reader
+    /// goes to ask why the counts beside it have not moved.
+    fetch_failed: Cell<bool>,
     /// Whether the vault's repositories have been fetched since the window opened them. The first
     /// fetch waits for the first refresh, because until then there is no repository to fetch.
     fetched_once: Cell<bool>,
@@ -407,6 +412,7 @@ impl Panel {
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
             fetch_busy: Cell::new(false),
+            fetch_failed: Cell::new(false),
             fetched_once: Cell::new(false),
             missed_fetch: Cell::new(false),
             expanded: RefCell::new(None),
@@ -630,13 +636,6 @@ impl Panel {
         };
         let (names, at) = branch_model(head.map(|(name, _)| name), &branches);
         self.set_branches(&names, at);
-        // What a Sync would do, in words, beside the counts it already shows. A branch with no
-        // upstream is not a dead end any more: syncing it publishes it (`git::sync`), so the
-        // button stays live and says which of the two it will be.
-        let branch = fetched.statuses.get(selected).map(|s| &s.branch);
-        self.sync.set_sensitive(branch.is_some());
-        self.sync
-            .set_tooltip_text(branch.map(sync_hint).as_deref().or(Some("Sync")));
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -667,6 +666,7 @@ impl Panel {
             state.incoming = fetched.incoming;
             state.selected = selected;
         }
+        self.sync_state();
         // git has answered for the first time since the window opened this vault, so there is a
         // repository to fetch at last. Everything after this is the timer's.
         if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
@@ -682,6 +682,25 @@ impl Panel {
         self.sync_commit();
         (self.hooks.changed)();
         self.reload_diffs();
+    }
+
+    /// What the Sync button says it will do, and whether it can. Both read from the last refresh,
+    /// so a background fetch that failed can put its own line on the tooltip without one.
+    ///
+    /// A branch with no upstream is not a dead end: syncing it publishes it (`git::sync`), so the
+    /// button stays live and the tooltip says which of the two it will be.
+    pub(super) fn sync_state(&self) {
+        let state = self.state.borrow();
+        let branch = state.statuses.get(state.selected).map(|s| &s.branch);
+        self.sync.set_sensitive(branch.is_some());
+        let hint = branch.map(sync_hint).unwrap_or_else(|| "Sync".to_string());
+        // Quiet, and only here: the button still works and a sync is still what it does. What a
+        // failed background fetch costs is the counts beside it, and this is the one surface that
+        // can say so without interrupting anyone.
+        self.sync.set_tooltip_text(Some(&match self.fetch_failed.get() {
+            true => format!("{hint}\n\nThe last background fetch did not go through, so the counts may be out of date."),
+            false => hint,
+        }));
     }
 
     /// Put the branch popover on `names`, `at` being the row HEAD is on.
