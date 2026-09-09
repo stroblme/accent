@@ -590,6 +590,11 @@ impl Panel {
     }
 
     fn apply(self: &Rc<Self>, fetched: fetch::Fetched) {
+        // The chooser moved while git was answering, so this is the old repository's answer.
+        // Dropping it is safe: changing the selection scheduled a refresh of its own.
+        if self.state.borrow().selected != fetched.selected {
+            return;
+        }
         // A refusal is not an answer: where git could not be asked, the pane keeps what it had
         // rather than emptying itself. Only the fields the last refresh really learned move.
         let repos = match fetched.repos {

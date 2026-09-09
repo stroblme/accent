@@ -97,6 +97,10 @@ impl Panel {
 /// answer it was never given. A hiccup on a remote vault would otherwise take the branch list
 /// down to HEAD alone, or hide the pane outright.
 pub(super) struct Fetched {
+    /// Which repository this was asked about. A chooser moved while the read was in flight makes
+    /// the answer somebody else's: `apply` drops it rather than storing one repository's history
+    /// under another's index, and the refresh the chooser scheduled is the one that lands.
+    pub(super) selected: usize,
     pub(super) repos: Option<Vec<Repo>>,
     pub(super) statuses: Vec<Status>,
     pub(super) commits: Vec<Commit>,
@@ -159,6 +163,7 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
         None => HashSet::new(),
     };
     Fetched {
+        selected,
         repos: Some(repos),
         statuses,
         commits,
