@@ -62,34 +62,49 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     (!prefix.contains(char::is_whitespace)).then_some((Trigger::Tag, start, prefix))
 }
 
-/// Notes matching what has been typed: prefix on the name or on the whole path, shortest path
-/// first because that is the one the user most likely means.
-pub(crate) fn note_candidates(paths: &[String], prefix: &str) -> Vec<String> {
-    let prefix = prefix.to_lowercase();
-    let mut hits: Vec<String> = paths
+/// Notes matching what has been typed, and whether there were more than fit.
+///
+/// The query is looked for *anywhere* in the path, not only at its start: `[[work]]` has to offer
+/// `Projects/Rework.md`, the way a link picker does everywhere else. What starts with the query
+/// still comes first — that is the note the reader most likely means — and after that the
+/// shortest path wins, so a note at the root beats one buried under three directories.
+///
+/// The `more` half is what makes the popup ask again as the word grows. It used to say the list
+/// was complete while handing back twenty of several hundred paths, so the popup narrowed those
+/// twenty client-side and everything else stayed unreachable however much was typed.
+pub(crate) fn note_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
+    let query = query.to_lowercase();
+    let mut hits: Vec<(bool, usize, &String)> = paths
         .iter()
-        .filter(|rel| {
-            markdown::strip_ext(basename(rel))
-                .to_lowercase()
-                .starts_with(&prefix)
-                || rel.to_lowercase().starts_with(&prefix)
+        .filter_map(|rel| {
+            let low = rel.to_lowercase();
+            let name = markdown::strip_ext(basename(&low)).to_string();
+            let opens = name.starts_with(&query) || low.starts_with(&query);
+            (opens || low.contains(&query)).then_some((!opens, rel.len(), rel))
         })
-        .cloned()
         .collect();
-    // Stable, so paths of equal length keep the index's alphabetical order.
-    hits.sort_by_key(String::len);
+    // Stable, so paths of equal rank and length keep the index's alphabetical order.
+    hits.sort_by_key(|(later, len, _)| (*later, *len));
+    let more = hits.len() > COMPLETIONS;
     hits.truncate(COMPLETIONS);
-    hits
+    (
+        hits.into_iter().map(|(_, _, rel)| rel.clone()).collect(),
+        more,
+    )
 }
 
 /// Tags matching what has been typed, in the order the index hands them over: most used first.
-pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> Vec<String> {
+/// Prefix only, because a tag is one word and typing more of it is how it is narrowed.
+pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> (Vec<String>, bool) {
     let prefix = prefix.to_lowercase();
-    tags.iter()
+    let hits: Vec<String> = tags
+        .iter()
         .filter(|(name, _)| name.to_lowercase().starts_with(&prefix))
         .map(|(name, _)| name.clone())
-        .take(COMPLETIONS)
-        .collect()
+        .take(COMPLETIONS + 1)
+        .collect();
+    let more = hits.len() > COMPLETIONS;
+    (hits.into_iter().take(COMPLETIONS).collect(), more)
 }
 
 /// The headings as a tree: a heading is a child of the nearest one above it with a smaller
@@ -231,15 +246,15 @@ impl Notes {
             .collect())
     }
 
-    fn completion(&self, rel: &str, pos: Pos) -> Result<Vec<Completion>> {
+    fn completion(&self, rel: &str, pos: Pos) -> Result<Completions> {
         let text = self.text_of(rel)?;
         let Some(caret) = byte_of(&text, pos) else {
-            return Ok(Vec::new());
+            return Ok(Completions::default());
         };
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let head = &text[line_start..caret];
         let Some((trigger, start, prefix)) = context(head) else {
-            return Ok(Vec::new());
+            return Ok(Completions::default());
         };
         let at = |byte: usize| Pos {
             line: pos.line,
@@ -268,7 +283,8 @@ impl Notes {
                 for rel in &paths {
                     *stems.entry(stem(rel)).or_default() += 1;
                 }
-                Ok(note_candidates(&paths, prefix)
+                let (hits, more) = note_candidates(&paths, prefix);
+                let items = hits
                     .into_iter()
                     .map(|hit| {
                         let label = stem(&hit);
@@ -285,20 +301,28 @@ impl Notes {
                             ..empty_item()
                         }
                     })
-                    .collect())
+                    .collect();
+                Ok(Completions {
+                    items,
+                    incomplete: more,
+                })
             }
             Trigger::Tag => {
                 let tags = locked(&self.index).tags()?;
-                Ok(tag_candidates(&tags, prefix)
-                    .into_iter()
-                    .map(|name| Completion {
-                        insert: format!("#{name}"),
-                        label: format!("#{name}"),
-                        kind: Kind::Tag,
-                        replace,
-                        ..empty_item()
-                    })
-                    .collect())
+                let (hits, more) = tag_candidates(&tags, prefix);
+                Ok(Completions {
+                    items: hits
+                        .into_iter()
+                        .map(|name| Completion {
+                            insert: format!("#{name}"),
+                            label: format!("#{name}"),
+                            kind: Kind::Tag,
+                            replace,
+                            ..empty_item()
+                        })
+                        .collect(),
+                    incomplete: more,
+                })
             }
         }
     }
@@ -458,12 +482,7 @@ impl Language for Notes {
 
     fn completion(&self, rel: &str, pos: Pos, _trigger: Option<char>) -> Fut<'_, Completions> {
         let rel = rel.to_string();
-        Box::pin(async move {
-            Ok(Completions {
-                items: or_empty("completion", Notes::completion(self, &rel, pos)),
-                incomplete: false,
-            })
-        })
+        Box::pin(async move { Ok(or_empty("completion", Notes::completion(self, &rel, pos))) })
     }
 
     fn resolve(&self, _rel: &str, item: Completion) -> Fut<'_, Completion> {
@@ -623,15 +642,39 @@ mod tests {
             .into();
 
         assert_eq!(
-            note_candidates(&paths, "alp"),
+            note_candidates(&paths, "alp").0,
             ["Alpha.md", "sub/Alphabet.md"]
         );
-        assert_eq!(note_candidates(&paths, "sub/"), ["sub/Alphabet.md"]);
-        assert!(note_candidates(&paths, "zzz").is_empty());
+        assert_eq!(note_candidates(&paths, "sub/").0, ["sub/Alphabet.md"]);
+        assert!(note_candidates(&paths, "zzz").0.is_empty());
 
         // The index counts them, so the order it hands them over in is the one to keep.
         let tags = [("alpha".to_string(), 2), ("alphabet".to_string(), 1)];
-        assert_eq!(tag_candidates(&tags, "alp"), ["alpha", "alphabet"]);
-        assert!(tag_candidates(&tags, "b").is_empty());
+        assert_eq!(tag_candidates(&tags, "alp").0, ["alpha", "alphabet"]);
+        assert!(tag_candidates(&tags, "b").0.is_empty());
+    }
+
+    /// The two halves of "[[...]] gets no suggestions": a query in the middle of a name has to
+    /// match, and a list that was cut has to say so or the popup never asks again.
+    #[test]
+    fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
+        let paths: Vec<String> = ["Rework.md", "Projects/Groundwork.md", "Beta.md"]
+            .map(String::from)
+            .into();
+
+        let (hits, more) = note_candidates(&paths, "work");
+        assert_eq!(
+            hits,
+            ["Rework.md", "Projects/Groundwork.md"],
+            "what starts with the query first, then the shortest path"
+        );
+        assert!(!more, "everything that matched fits");
+
+        let many: Vec<String> = (0..COMPLETIONS + 5)
+            .map(|n| format!("Note{n}.md"))
+            .collect();
+        let (hits, more) = note_candidates(&many, "note");
+        assert_eq!(hits.len(), COMPLETIONS);
+        assert!(more, "the popup has to ask again as the word grows");
     }
 }
