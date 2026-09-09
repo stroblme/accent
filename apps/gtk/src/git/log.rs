@@ -75,7 +75,11 @@ impl Panel {
     /// Put `commits` on the graph. `keep` is how many leading rows the store already holds
     /// unchanged: [`git::lanes`] is one forward pass, so a Load More can only append, and
     /// appending leaves the reader where they were instead of scrolling back to the top.
-    pub(super) fn fill_log(&self, commits: Vec<Commit>, keep: usize) {
+    pub(super) fn fill_log(self: &Rc<Self>, commits: Vec<Commit>, keep: usize) {
+        // Which commit was open, so it can be opened again below. A refresh lands on every
+        // commit, pull and checkout, and the file list closing under each of them was the one
+        // thing about the history that did not survive one.
+        let was = self.expanded.borrow().clone();
         self.collapse();
         let rows = git::lanes(commits);
         let keep = keep.min(rows.len()) as u32;
@@ -91,21 +95,21 @@ impl Panel {
         }
         self.log
             .splice(keep, self.log.n_items().saturating_sub(keep), &items);
+        // After the splice, and only where the commit is still in the page: `toggle` asks git
+        // for the file list again and splices it back under the row it now has.
+        if let Some(commit) = was.and_then(|oid| rows.iter().find(|r| r.commit.id == oid)) {
+            self.toggle(&commit.commit.clone());
+        }
     }
 
-    /// Take away whatever file list is open. The file rows of one commit are contiguous, and only
-    /// one commit is ever expanded, so this is a single splice.
+    /// Take away whatever file list is open.
+    ///
+    /// The file rows of one commit are contiguous and only one commit is ever expanded, so where
+    /// they are is remembered rather than looked for: a scan would read every row in the store,
+    /// and a `LogItem` is several `String`s.
     fn collapse(&self) {
         self.expanded.replace(None);
-        let mut start = None;
-        let mut n = 0;
-        for i in 0..self.log.n_items() {
-            if matches!(boxed(self.log.item(i)), Some(LogItem::File { .. })) {
-                start.get_or_insert(i);
-                n += 1;
-            }
-        }
-        if let Some(start) = start {
+        if let Some((start, n)) = self.expanded_at.take() {
             self.log.splice(start, n, &[] as &[glib::BoxedAnyObject]);
         }
     }
@@ -154,6 +158,7 @@ impl Panel {
                     })
                 })
                 .collect();
+            panel.expanded_at.set(Some((at + 1, rows.len() as u32)));
             panel.log.splice(at + 1, 0, &rows);
         });
     }
@@ -161,7 +166,10 @@ impl Panel {
     /// Where a commit sits in the log store, or `None` if it has since been spliced away.
     fn row_of_commit(&self, oid: &str) -> Option<u32> {
         (0..self.log.n_items()).find(|i| {
-            matches!(boxed(self.log.item(*i)), Some(LogItem::Commit(row)) if row.commit.id == oid)
+            peek(
+                self.log.item(*i),
+                |item: &LogItem| matches!(item, LogItem::Commit(row) if row.commit.id == oid),
+            ) == Some(true)
         })
     }
 
@@ -267,8 +275,9 @@ impl Panel {
         let incoming = &self.state.borrow().incoming;
         (0..self.log.n_items())
             .filter(|i| {
-                matches!(boxed(self.log.item(*i)),
-                    Some(LogItem::Commit(row)) if incoming.contains(&row.commit.id))
+                peek(self.log.item(*i), |item: &LogItem| {
+                    matches!(item, LogItem::Commit(row) if incoming.contains(&row.commit.id))
+                }) == Some(true)
             })
             .count()
     }

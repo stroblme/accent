@@ -198,8 +198,12 @@ pub struct Panel {
     /// does, so coming back to a window that has been aside for an hour is not another wait.
     missed_fetch: Cell<bool>,
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
-    /// first, and a refresh closes them all.
+    /// first, and a refresh re-opens whichever it was.
+    ///
+    /// [`Panel::expanded_at`] is where its file rows are — first row and count — so closing them
+    /// again is a splice rather than a scan of the whole store.
     expanded: RefCell<Option<String>>,
+    expanded_at: Cell<Option<(u32, u32)>>,
     /// Whether the changes list is grouped by folder. A copy of the `git_tree` preference, which
     /// the Changes header's toggle and the Preferences switch both write.
     tree: Cell<bool>,
@@ -437,6 +441,7 @@ impl Panel {
             fetched_once: Cell::new(false),
             missed_fetch: Cell::new(false),
             expanded: RefCell::new(None),
+            expanded_at: Cell::new(None),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
@@ -1048,6 +1053,16 @@ fn on_click(panel: &Rc<Panel>, button: &gtk::Button, f: impl Fn(&Rc<Panel>) + 's
             f(&panel);
         }
     });
+}
+
+/// Read a list row where the answer is smaller than the row.
+///
+/// [`boxed`] is the one to reach for, but a scan over the whole store — which commit is at which
+/// row — would clone a `LogItem`'s several `String`s per row to answer a `bool`.
+fn peek<T: 'static, R>(object: Option<glib::Object>, read: impl FnOnce(&T) -> R) -> Option<R> {
+    Some(read(
+        &object?.downcast::<glib::BoxedAnyObject>().ok()?.borrow(),
+    ))
 }
 
 /// What a list row carries. Every store in this pane holds [`glib::BoxedAnyObject`]s, and every
