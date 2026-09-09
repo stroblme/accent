@@ -34,6 +34,7 @@ mod open;
 mod palette;
 mod paned;
 mod panes;
+mod pathfield;
 mod pdf;
 mod preview;
 mod references;
