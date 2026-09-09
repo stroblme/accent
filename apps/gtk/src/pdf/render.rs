@@ -292,11 +292,11 @@ fn render_loop(
                 } => {
                     let before = doc.annotation_count(page).unwrap_or(0);
                     match doc.add_ink(page, &points, style) {
-                        Ok(()) => {
+                        Ok(area) => {
                             ink.note(page, before);
                             ink.added(page);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page));
+                            send(&view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
@@ -304,11 +304,11 @@ fn render_loop(
                 Request::Shape { page, shape, style } => {
                     let before = doc.annotation_count(page).unwrap_or(0);
                     match doc.add_shape(page, shape, style) {
-                        Ok(()) => {
+                        Ok(area) => {
                             ink.note(page, before);
                             ink.added(page);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page));
+                            send(&view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
@@ -328,10 +328,10 @@ fn render_loop(
                     let before = doc.annotation_count(page).unwrap_or(0);
                     ink.note(page, before);
                     match doc.transform_ink(page, index, matrix) {
-                        Ok(()) => {
+                        Ok(area) => {
                             ink.moved(page, index, pdf::invert(matrix));
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page));
+                            send(&view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("moving a stroke on page {page}: {e:#}"),
                     }
@@ -342,13 +342,16 @@ fn render_loop(
                     if let Some((index, _)) = found {
                         let before = doc.annotation_count(page).unwrap_or(0);
                         ink.note(page, before);
-                        if let Err(e) = doc.delete_annotation(page, *index) {
-                            tracing::warn!("erasing on page {page}: {e:#}");
-                            continue;
-                        }
+                        let area = match doc.delete_annotation(page, *index) {
+                            Ok(area) => area,
+                            Err(e) => {
+                                tracing::warn!("erasing on page {page}: {e:#}");
+                                continue;
+                            }
+                        };
                         ink.erased(page, *index);
                         ink.dirty = true;
-                        send(&view, Reply::PageChanged(page));
+                        send(&view, Reply::PageChanged(page, area));
                     }
                 }
                 Request::Undo => {
@@ -359,19 +362,21 @@ fn render_loop(
                         };
                         let page = step.page();
                         let done = match step {
-                            Step::Stroke { .. } => doc.delete_annotation(page, index).map(|()| {
-                                ink.erased(page, index);
-                            }),
+                            Step::Stroke { .. } => {
+                                doc.delete_annotation(page, index).inspect(|_| {
+                                    ink.erased(page, index);
+                                })
+                            }
                             Step::Moved { inverse, .. } => {
-                                doc.transform_ink(page, index, inverse).map(|()| {
+                                doc.transform_ink(page, index, inverse).inspect(|_| {
                                     ink.requeued(page, index);
                                 })
                             }
                         };
                         match done {
-                            Ok(()) => {
+                            Ok(area) => {
                                 ink.dirty = true;
-                                send(&view, Reply::PageChanged(page));
+                                send(&view, Reply::PageChanged(page, area));
                             }
                             Err(e) => tracing::warn!("undoing on page {page}: {e:#}"),
                         }
@@ -416,7 +421,18 @@ fn render_loop(
                 }
                 Request::Export { links, color } => {
                     let quads = highlight_quads(&doc, &links);
-                    let pages: Vec<usize> = quads.keys().copied().collect();
+                    // What each page gains, so only those tiles are rendered again.
+                    let pages: Vec<(usize, pdf::Rect)> = quads
+                        .iter()
+                        .filter_map(|(page, found)| {
+                            let area = found
+                                .iter()
+                                .flat_map(|(quads, _)| quads)
+                                .copied()
+                                .reduce(pdf::Rect::union)?;
+                            Some((*page, area))
+                        })
+                        .collect();
                     let highlights: Vec<pdf::Highlight> = quads
                         .into_iter()
                         .flat_map(|(page, found)| {
@@ -439,8 +455,8 @@ fn render_loop(
                                 let written = accent_core::fs::write_bytes(&path, &bytes, etag)?;
                                 etag = Some(written);
                                 send(&view, Reply::Saved(written));
-                                for page in pages {
-                                    send(&view, Reply::PageChanged(page));
+                                for (page, area) in pages {
+                                    send(&view, Reply::PageChanged(page, area));
                                 }
                                 Ok(added)
                             }

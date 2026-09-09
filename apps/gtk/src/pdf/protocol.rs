@@ -44,8 +44,10 @@ pub enum Reply {
         page: usize,
         inks: Vec<accent_core::pdf::InkShape>,
     },
-    /// This page's annotations changed, so what is cached of it is of the old page.
-    PageChanged(usize),
+    /// This much of this page's annotations changed, in page points, so what is cached of that
+    /// part of it is of the old page. A stroke is a few square inches of a page: re-rendering
+    /// only the tiles it touches is one tile of work per pen lift rather than a dozen.
+    PageChanged(usize, pdf::Rect),
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
     /// write from someone else's and does not reload over strokes drawn since.
     Saved(accent_core::fs::Etag),

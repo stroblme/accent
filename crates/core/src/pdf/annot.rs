@@ -105,10 +105,12 @@ impl PdfDoc {
     // bindings and pdfium-render keeps the annotation handle private. Every viewer renders the
     // appearance stream, so this draws correctly everywhere; what it costs is an editor that
     // wants to reshape the stroke, which would need `/InkList`. Raw bindings are the upgrade.
-    pub fn add_ink(&mut self, page: usize, points: &[(f32, f32)], style: InkStyle) -> Result<()> {
+    /// The box it covers on the page comes back, so a viewer can re-render that much and no
+    /// more.
+    pub fn add_ink(&mut self, page: usize, points: &[(f32, f32)], style: InkStyle) -> Result<Rect> {
         let thinned = thin(points, 1.5);
         let Some(&first) = thinned.first() else {
-            return Ok(());
+            return Ok(Rect::ZERO);
         };
         let mut segs = vec![Seg::Move(first)];
         match thinned.len() {
@@ -133,15 +135,15 @@ impl PdfDoc {
     // path object, so a real `/Square` would be stuck at pdfium's generated 1 pt border. Every
     // viewer renders the appearance stream; what it costs is another editor's shape palette
     // seeing a stroke.
-    pub fn add_shape(&mut self, page: usize, shape: Shape, style: InkStyle) -> Result<()> {
+    pub fn add_shape(&mut self, page: usize, shape: Shape, style: InkStyle) -> Result<Rect> {
         let _guard = lock();
         let mut p = self.page(page)?;
         self.put_ink(&mut p, &segments_of(shape), style)
     }
 
-    /// The tail every ink writer shares: the path, then the annotation around it. The caller
-    /// holds the lock, and `segs` starts with a `Move`.
-    fn put_ink(&self, p: &mut PdfPage<'_>, segs: &[Seg], style: InkStyle) -> Result<()> {
+    /// The tail every ink writer shares: the path, then the annotation around it, and the box
+    /// the two of them cover. The caller holds the lock, and `segs` starts with a `Move`.
+    fn put_ink(&self, p: &mut PdfPage<'_>, segs: &[Seg], style: InkStyle) -> Result<Rect> {
         let InkStyle {
             width,
             rgba,
@@ -210,7 +212,7 @@ impl PdfDoc {
             .add_object(path.into())
             .context("ink object")?;
         ink.set_is_printed(true).context("ink print flag")?;
-        Ok(())
+        Ok(bounds)
     }
 
     /// How many annotations of every kind a page carries.
@@ -219,11 +221,12 @@ impl PdfDoc {
         Ok(self.page(page)?.annotations().len())
     }
 
-    /// Remove one annotation by its index in the page's `/Annots`.
-    pub fn delete_annotation(&mut self, page: usize, index: usize) -> Result<()> {
+    /// Remove one annotation by its index in the page's `/Annots`, and say what box it left.
+    pub fn delete_annotation(&mut self, page: usize, index: usize) -> Result<Rect> {
         let _guard = lock();
         let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let height = p.height().value;
         // Through `annotations_mut` rather than `annotations`: the annotation has to carry the
         // document's lifetime for `delete_annotation` to take it, and the shared accessor hands
         // back one borrowed from `p` instead.
@@ -231,10 +234,14 @@ impl PdfDoc {
             .annotations_mut()
             .get(index as PdfPageAnnotationIndex)
             .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+        let gone = a
+            .bounds()
+            .map(|b| Rect::from_pdf(b, height))
+            .unwrap_or(Rect::ZERO);
         p.annotations_mut()
             .delete_annotation(a)
             .context("delete annotation")?;
-        Ok(())
+        Ok(gone)
     }
 
     /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
@@ -280,18 +287,24 @@ impl PdfDoc {
     // ponytail: deleted and re-created rather than transformed in place, because pdfium only
     // ever grows an appearance stream's `/BBox` when `/Rect` changes: shrinking a box scales
     // what was drawn into it instead of moving it.
-    pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<()> {
+    /// The box the move covers — where the stroke was and where it went — comes back.
+    pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<Rect> {
         let _guard = lock();
         let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
         let height = p.height().value;
-        let (segs, style) = {
+        let (segs, style, was) = {
             let a = p
                 .annotations()
                 .get(index as PdfPageAnnotationIndex)
                 .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
-            read_ink(&a, height)
-                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?
+            let was = a
+                .bounds()
+                .map(|b| Rect::from_pdf(b, height))
+                .unwrap_or(Rect::ZERO);
+            let (segs, style) = read_ink(&a, height)
+                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
+            (segs, style, was)
         };
         let a = p
             .annotations_mut()
@@ -300,7 +313,8 @@ impl PdfDoc {
         p.annotations_mut()
             .delete_annotation(a)
             .context("delete annotation")?;
-        self.put_ink(&mut p, &transformed(&segs, m), style)
+        let now = self.put_ink(&mut p, &transformed(&segs, m), style)?;
+        Ok(was.union(now))
     }
 }
 

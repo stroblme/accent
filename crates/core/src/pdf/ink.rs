@@ -73,7 +73,12 @@ pub fn thin(points: &[(f32, f32)], min: f32) -> Vec<(f32, f32)> {
 // motion event. Catmull-Rom is local, closed-form, and its output is the argument `bezier_to`
 // already takes.
 pub fn catmull_rom(points: &[(f32, f32)]) -> Vec<[(f32, f32); 3]> {
-    let at = |i: isize| points[(i.max(0) as usize).min(points.len() - 1)];
+    // No points is no curve. Said here rather than left to the caller: `len() - 1` below would
+    // wrap, and this is public.
+    let Some(last) = points.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    let at = |i: isize| points[(i.max(0) as usize).min(last)];
     (0..points.len().saturating_sub(1))
         .map(|i| {
             let i = i as isize;
