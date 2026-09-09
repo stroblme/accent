@@ -24,6 +24,9 @@ use std::time::Duration;
 /// first and sooner, after [`GHOST`]; the rest of the wait is served after it.
 const REFRESH: Duration = Duration::from_millis(300);
 
+/// How long a second flush waits for the one already in flight before looking again.
+const SETTLE: Duration = Duration::from_millis(2);
+
 /// How long after the last keystroke ghost text is asked for. Short, because it is painted at
 /// the caret, where a wait is read as the suggestion being gone; the answer itself costs a
 /// fraction of a millisecond.
@@ -50,8 +53,14 @@ pub struct State {
     symbols: RefCell<Vec<Symbol>>,
     /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
-    /// The buffer has changed since the server was last told.
-    dirty: Cell<bool>,
+    /// The buffer's own edit counter, and how far the server has been told. A bool could only
+    /// say "someone is going to send this", never "the text the server holds is that one", so a
+    /// request arriving while a flush was in flight read it as clean and asked the server about
+    /// characters it had not been given.
+    version: Cell<u64>,
+    sent: Cell<u64>,
+    /// A flush is in flight. The next caller waits it out rather than starting a second one.
+    flushing: Cell<bool>,
     /// The "no language server" toast has been said for this tab; it is not said again.
     toasted: Cell<bool>,
     /// The vault this document is open on. `None` for a tab outside every vault, which has
@@ -151,7 +160,7 @@ pub fn attach(tab: &Rc<Tab>, vault: Arc<Vault>, hooks: Hooks) {
 
 /// The buffer changed: the server's copy is stale and everything derived from it is too.
 pub fn changed(tab: &Rc<Tab>) {
-    tab.lang.dirty.set(true);
+    tab.lang.version.set(tab.lang.version.get().wrapping_add(1));
     // A signature that is up is about the call being typed, so it is asked again rather than
     // left saying what the last keystroke meant.
     if tab.lang.signature.is_shown() {
@@ -250,17 +259,50 @@ pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
 /// Send the pending edit and wait for the server to have it. Every positional request awaits
 /// this first: an answer about a text the server has not been given is an answer about the wrong
 /// characters.
+///
+/// Two callers meeting here — the completion, the hover, the signature and the ghost text all
+/// flush before they ask — wait for one round trip between them, and a change that fails leaves
+/// the version unsent so the next caller carries it again.
 pub async fn flush(tab: Rc<Tab>) {
-    let pending = match tab.lang.dirty.replace(false) {
-        false => None,
-        true => tab.lang.vault().map(|v| (v, tab.rel(), tab.text())),
-    };
-    let Some((vault, rel, text)) = pending else {
+    // A poll rather than a shared future: awaiting somebody else's in-flight work needs a
+    // primitive glib does not have, and the whole wait is one round trip long.
+    while tab.lang.flushing.get() {
+        glib::timeout_future(SETTLE).await;
+    }
+    let Some(vault) = tab.lang.vault() else {
         return;
     };
+    let wanted = tab.lang.version.get();
+    if tab.lang.sent.get() >= wanted {
+        return;
+    }
+    let (rel, text) = (tab.rel(), tab.text());
     tracing::debug!("changed {rel}, {} chars", text.chars().count());
-    if let Err(e) = vault.change_document(&rel, text).await {
-        tracing::debug!("changing {rel}: {e:#}");
+    let flushing = Flushing::new(tab.clone());
+    let sent = vault.change_document(&rel, text).await;
+    drop(flushing);
+    match sent {
+        Ok(()) => tab.lang.sent.set(tab.lang.sent.get().max(wanted)),
+        Err(e) => tracing::debug!("changing {rel}: {e:#}"),
+    }
+}
+
+/// Marks a flush as in flight for as long as it lives — a dropped future included, which is what
+/// the next keystroke does to the refresh a flush may be running inside. Without the drop the
+/// mark would outlive the request and every later flush would wait for a round trip that is no
+/// longer happening.
+struct Flushing(Rc<Tab>);
+
+impl Flushing {
+    fn new(tab: Rc<Tab>) -> Self {
+        tab.lang.flushing.set(true);
+        Flushing(tab)
+    }
+}
+
+impl Drop for Flushing {
+    fn drop(&mut self) {
+        self.0.lang.flushing.set(false);
     }
 }
 

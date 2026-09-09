@@ -105,7 +105,7 @@ impl App {
     /// vault a dropped ssh connection would report a conflict over a diff holding nothing but the
     /// user's own edits. Nothing is lost by waiting — a real change fires the watcher again, and
     /// the etag gate refuses any save that would clobber one in the meantime.
-    pub fn file_changed(&self, tab: &Rc<Tab>) {
+    pub fn file_changed(self: &Rc<Self>, tab: &Rc<Tab>) {
         let looked = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
             Some(vault) => vault.stat(&tab.rel()),
             None => match Etag::of(&tab.path()) {
@@ -139,18 +139,24 @@ impl App {
     /// Refresh a tab from what is on disk, unless its buffer holds edits nobody has saved: that
     /// buffer is the only copy of them, so the banner asks instead of the reload deciding.
     /// Returns whether the tab was refreshed.
-    pub fn refresh_tab(&self, tab: &Rc<Tab>) -> bool {
+    pub fn refresh_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> bool {
         if tab.modified.get() {
             tab.disk_changed.set(true);
             tab.show_alert(Alert::Compare);
             return false;
         }
-        if let Err(e) = tab.reload_keep_cursor() {
-            self.cannot("reload", e);
-        }
-        // A reload writes the buffer without an edit event, so the count and the dot are asked
-        // for here rather than waiting for the next keystroke.
-        self.sync_status();
+        // The read is off the main thread, so the status is asked for when the text lands rather
+        // than here: a reload writes the buffer without an edit event, and nothing else would ask.
+        tab.reload_keep_cursor(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_: &Rc<Tab>, read: std::io::Result<()>| {
+                if let Err(e) = read {
+                    app.cannot("reload", e);
+                }
+                app.sync_status();
+            }
+        ));
         true
     }
 

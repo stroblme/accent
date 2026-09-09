@@ -81,7 +81,7 @@ pub fn install(tab: &Rc<Tab>) {
         #[weak(rename_to = tab)]
         tab,
         move |_, _, text| {
-            let Some(last) = text.chars().next_back() else {
+            let Some(last) = text.chars().next_back().filter(|_| !tab.is_loading()) else {
                 return;
             };
             let asks = tab
@@ -93,25 +93,6 @@ pub fn install(tab: &Rc<Tab>) {
             }
         }
     ));
-
-    // Escape, ahead of everything else that would take it: while the popover is up it means
-    // "this call is not what I want to see", and nothing else in the view should also act on it.
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, _| match key == gdk::Key::Escape && tab.lang.signature.is_shown() {
-            true => {
-                tab.lang.signature.dismiss();
-                glib::Propagation::Stop
-            }
-            false => glib::Propagation::Proceed,
-        }
-    ));
-    tab.view.add_controller(keys);
 
     // The caret left the line the call is on: whatever is being typed now is not this call.
     tab.buffer.connect_cursor_position_notify(glib::clone!(
@@ -139,6 +120,16 @@ pub fn install(tab: &Rc<Tab>) {
         tab,
         move |_| tab.lang.signature.dismiss()
     ));
+}
+
+/// Escape while the popover is up means "this call is not what I want to see", and nothing else
+/// in the view should also act on it. `None` for every other key. `editor::keys` offers a press
+/// here first, ahead of the ghost text, which also wants Escape.
+pub fn on_key(tab: &Rc<Tab>, key: gdk::Key) -> Option<glib::Propagation> {
+    (key == gdk::Key::Escape && tab.lang.signature.is_shown()).then(|| {
+        tab.lang.signature.dismiss();
+        glib::Propagation::Stop
+    })
 }
 
 /// Ask what call the caret is inside, and show or hide the popover from the answer.
