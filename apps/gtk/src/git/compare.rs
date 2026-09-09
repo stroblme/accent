@@ -226,17 +226,42 @@ impl What {
             // machine: reading it through the vault is what makes the diff work there as well
             // as here. It is read even though the tab shows its own buffer, so that the same
             // hop answers "is this binary" for both.
-            Sides::Worktree => match vault.read_text(&self.key) {
-                Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
-                Ok(_) => Blob::Binary,
-                Err(e) => {
-                    tracing::debug!("reading {}: {e}", self.key);
-                    Blob::Text(String::new())
-                }
-            },
+            Sides::Worktree => self.worktree(vault),
             Sides::Commit { oid, .. } => side(vault.git_show(&self.repo, oid, &self.rel)),
         };
         (left, right)
+    }
+
+    /// The file on disk, as the working-tree side of a comparison.
+    ///
+    /// A repository above the vault root gives its files absolute keys ([`vault_key`]), and
+    /// `Vault::read_text` refuses those: it resolves through `Local::join`, which rejects a path
+    /// with a root component rather than escape the vault. Such a file is read directly instead,
+    /// which is right because a key is only absolute when the file is outside the vault — and
+    /// impossible on a remote vault, where "outside the vault" is on the other machine and the
+    /// diff has to say so rather than diff against nothing.
+    fn worktree(&self, vault: &Vault) -> Blob {
+        let outside = Path::new(&self.key).is_absolute();
+        // Outside the vault on a remote vault is on the other machine, and the path would name
+        // this one's file if it named anything: refusing is the only honest answer.
+        if outside && vault.is_remote() {
+            return Blob::Binary;
+        }
+        let read = match outside {
+            true => accent_core::fs::read_text(Path::new(&self.key)),
+            false => vault.read_text(&self.key),
+        };
+        match read {
+            Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+            Ok(_) => Blob::Binary,
+            // A file that is no longer there really is a deletion, and an empty right side is
+            // what draws one. This used to be every absolute key as well, which drew a file
+            // whose repository is above the vault root as wholly deleted.
+            Err(e) => {
+                tracing::debug!("reading {}: {e}", self.key);
+                Blob::Text(String::new())
+            }
+        }
     }
 }
 
