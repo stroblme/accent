@@ -392,17 +392,16 @@ fn reset_group(
             let Some(dialog) = dialog.upgrade() else {
                 return;
             };
-            let confirm = adw::AlertDialog::builder()
-                .heading("Restore Default Preferences?")
-                .body(
-                    "Theme, fonts, editor options, every vault's folders and any shortcuts you \
-                     changed go back to their defaults. Your recent vaults are kept.",
-                )
-                .close_response("cancel")
-                .build();
-            confirm.add_response("cancel", "Cancel");
-            confirm.add_response("restore", "Restore");
-            confirm.set_response_appearance("restore", adw::ResponseAppearance::Destructive);
+            let confirm = crate::dialogs::alert(
+                "Restore Default Preferences?",
+                "Theme, fonts, editor options, every vault's folders and any shortcuts you \
+                 changed go back to their defaults. Your recent vaults are kept.",
+                &[
+                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                    ("restore", "Restore", adw::ResponseAppearance::Destructive),
+                ],
+                "cancel",
+            );
             confirm.connect_response(Some("restore"), {
                 let (config, root, save, on_change) = (
                     config.clone(),

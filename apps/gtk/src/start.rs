@@ -367,12 +367,7 @@ pub(crate) fn connect_dialog(
     form.append(&path_row);
     form.append(&why);
 
-    let dialog = adw::AlertDialog::new(Some("Open Remote Vault"), None);
-    dialog.set_extra_child(Some(&form));
-    dialog.add_responses(&[("cancel", "Cancel"), (CONNECT, "Connect")]);
-    dialog.set_response_appearance(CONNECT, adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some(CONNECT));
-    dialog.set_close_response("cancel");
+    let dialog = crate::dialogs::name_dialog_with("Open Remote Vault", CONNECT, "Connect", &form);
     // Enter in either field activates the default response, which is this one, so an empty form
     // has to leave it unusable rather than merely dim.
     dialog.set_response_enabled(CONNECT, false);

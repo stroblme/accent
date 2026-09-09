@@ -10,6 +10,10 @@
 //! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
 //! it needs more input before it can act (Upload Files…, Download…).
 
+use crate::dialogs::{alert, form, labelled};
+// Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
+// this module, which is where they used to live.
+pub(crate) use crate::dialogs::{CONFIRM, name_dialog, name_entry};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -19,8 +23,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// The response id the three name dialogs confirm with.
-pub(crate) const CONFIRM: &str = "confirm";
 /// The action group the context menu's items resolve through, inserted on the tree widget.
 const GROUP: &str = "fileops";
 /// How many linking notes the rename dialog lists before it starts counting instead.
@@ -296,16 +298,18 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
 /// compares stems, so a rename that changes only the extension finds nothing to rewrite and would
 /// otherwise go through in silence.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
-    let dialog = adw::AlertDialog::new(
-        Some("No Longer a Note?"),
-        Some(&format!(
+    let dialog = alert(
+        "No Longer a Note?",
+        &format!(
             "{} stays in the vault and stays searchable, but links to it will no longer resolve.",
             basename(to)
-        )),
+        ),
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("rename", "Rename", adw::ResponseAppearance::Default),
+        ],
+        "cancel",
     );
-    dialog.add_responses(&[("cancel", "Cancel"), ("rename", "Rename")]);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
 
     let (ops, from, to, window) = (
         ops.clone(),
@@ -355,15 +359,16 @@ fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
 /// Rewriting other people's notes is a data-losing choice, so it is an `AlertDialog` and the
 /// notes it would touch are named rather than counted.
 fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
-    let dialog = adw::AlertDialog::new(Some("Update Links?"), Some(&link_body(&plan.rewrites)));
-    dialog.add_responses(&[
-        ("cancel", "Cancel"),
-        ("keep", "Rename Only"),
-        ("update", "Update Links"),
-    ]);
-    dialog.set_response_appearance("update", adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some("update"));
-    dialog.set_close_response("cancel");
+    let dialog = alert(
+        "Update Links?",
+        &link_body(&plan.rewrites),
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("keep", "Rename Only", adw::ResponseAppearance::Default),
+            ("update", "Update Links", adw::ResponseAppearance::Suggested),
+        ],
+        "update",
+    );
 
     let (ops, window) = (ops.clone(), ops.window.clone());
     dialog.choose(
@@ -497,20 +502,21 @@ pub fn trashed_with(trashed: &str, key: &str) -> bool {
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
 fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
-    let dialog = adw::AlertDialog::new(
-        Some("Delete Permanently?"),
-        Some(&format!(
+    let dialog = alert(
+        "Delete Permanently?",
+        &format!(
             "{name} cannot be moved to the trash{}. Deleting it cannot be undone.",
             match ops.vault.is_remote() {
                 true => " on the remote",
                 false => " on this system",
             }
-        )),
+        ),
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("delete", "Delete", adw::ResponseAppearance::Destructive),
+        ],
+        "cancel",
     );
-    dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
-    dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
 
     let (ops, name, rel, window) = (
         ops.clone(),
@@ -629,17 +635,18 @@ fn local_name(path: &Path) -> Option<String> {
 /// (DESIGN.md, States). Once for the batch rather than once per file: a chooser can return a
 /// dozen paths, and a dozen dialogs is an obstacle rather than a question.
 fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: &[String]) {
-    let dialog = adw::AlertDialog::new(
-        Some(match existing.len() {
+    let dialog = alert(
+        match existing.len() {
             1 => "Replace File?",
             _ => "Replace Files?",
-        }),
-        Some(&replace_body(existing)),
+        },
+        &replace_body(existing),
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            ("replace", "Replace", adw::ResponseAppearance::Destructive),
+        ],
+        "cancel",
     );
-    dialog.add_responses(&[("cancel", "Cancel"), ("replace", "Replace")]);
-    dialog.set_response_appearance("replace", adw::ResponseAppearance::Destructive);
-    dialog.set_default_response(Some("cancel"));
-    dialog.set_close_response("cancel");
 
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
@@ -1080,18 +1087,6 @@ fn already_exists(e: &anyhow::Error) -> bool {
 
 // --------------------------------------------------------------------------------- widgetry
 
-/// The shared shape of the name dialogs: Cancel, one verb, no OK button (DESIGN.md). Also what
-/// the Git pane's Create Branch uses, which is why this and [`name_entry`] are crate-visible.
-pub(crate) fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(Some(title), None);
-    dialog.set_extra_child(Some(form));
-    dialog.add_responses(&[("cancel", "Cancel"), (CONFIRM, verb)]);
-    dialog.set_response_appearance(CONFIRM, adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some(CONFIRM));
-    dialog.set_close_response("cancel");
-    dialog
-}
-
 /// The dim line under a name entry showing where the file will really land, vault-relative.
 ///
 /// Both dialogs resolve a typed path, so the line says what the entry cannot: which folder
@@ -1113,35 +1108,6 @@ fn name_preview(
     show(entry);
     entry.connect_changed(show);
     preview
-}
-
-pub(crate) fn name_entry(placeholder: &str, text: &str) -> gtk::Entry {
-    gtk::Entry::builder()
-        .placeholder_text(placeholder)
-        .text(text)
-        .activates_default(true)
-        .build()
-}
-
-/// 12 px between related widgets, per DESIGN.md's spacing scale.
-fn form() -> gtk::Box {
-    gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(12)
-        .build()
-}
-
-fn labelled(text: &str, child: &impl IsA<gtk::Widget>) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    row.append(
-        &gtk::Label::builder()
-            .label(text)
-            .xalign(0.0)
-            .hexpand(true)
-            .build(),
-    );
-    row.append(child);
-    row
 }
 
 /// Put the caret in the entry, optionally selecting only the first `stem` characters.

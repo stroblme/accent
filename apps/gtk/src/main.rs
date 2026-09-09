@@ -13,6 +13,7 @@ mod comment;
 mod completion;
 mod connect;
 mod diagnostics;
+mod dialogs;
 mod diff;
 mod doc;
 mod editor;
