@@ -541,12 +541,18 @@ impl PdfView {
     ///
     /// Deliberately not an eviction. What is on screen keeps being painted until its replacement
     /// arrives, so a stroke costs one re-render and no blank page in between.
-    pub fn refresh_page(&self, page: usize) {
+    pub fn refresh_page(&self, page: usize, area: accent_core::pdf::Rect) {
         let (scale_milli, dark) = self.stamp();
         self.cache()
             .borrow_mut()
             .forget_page_except(page as u32, scale_milli, dark);
-        self.imp().stale_pages.borrow_mut().insert(page as u32);
+        // Widened where a stroke is already on the page: a box that only just reaches a tile
+        // edge should still take that tile, and a point-sized change none at all is no change.
+        let area = area.grow(1.0);
+        let mut stale = self.imp().stale_pages.borrow_mut();
+        let all = stale.entry(page as u32).or_insert(area);
+        *all = all.union(area);
+        drop(stale);
         self.queue_draw();
     }
 
@@ -840,7 +846,7 @@ mod imp {
         pub style: RefCell<accent_core::config::DrawingConfig>,
         /// Pages whose content changed and whose visible tiles are therefore out of date. The
         /// next frame turns each into the set of tile keys below, and forgets the page here.
-        pub stale_pages: RefCell<HashSet<u32>>,
+        pub stale_pages: RefCell<HashMap<u32, accent_core::pdf::Rect>>,
         /// Tiles that are painted but out of date: asked for again every frame until the render
         /// that replaces them arrives, which is what makes an abandoned batch heal itself.
         pub stale_tiles: RefCell<HashSet<TileKey>>,
@@ -903,7 +909,7 @@ mod imp {
                 mode: Cell::new(super::Mode::default()),
                 drag_mode: Cell::new(super::Mode::default()),
                 style: RefCell::new(accent_core::config::DrawingConfig::default()),
-                stale_pages: RefCell::new(HashSet::new()),
+                stale_pages: RefCell::new(HashMap::new()),
                 stale_tiles: RefCell::new(HashSet::new()),
                 strokes: RefCell::new(Vec::new()),
                 inks: RefCell::new(HashMap::new()),
@@ -1249,7 +1255,9 @@ mod imp {
                                 ty: ty as u16,
                                 dark,
                             };
-                            if refreshing {
+                            if refreshing.is_some_and(|area| {
+                                touches(area, device_scale, tx as u16, ty as u16)
+                            }) {
                                 self.stale_tiles.borrow_mut().insert(key);
                             }
                             let tile = cache.borrow_mut().get(&key);
@@ -1450,6 +1458,28 @@ mod imp {
     }
 
     impl ScrollableImpl for PdfView {}
+}
+
+/// Whether the tile at `(tx, ty)` covers any of `area`, which is in page points, on a page
+/// rendered at `scale` device pixels per point.
+fn touches(area: accent_core::pdf::Rect, scale: f32, tx: u16, ty: u16) -> bool {
+    let (x, y) = ((i32::from(tx) * TILE) as f32, (i32::from(ty) * TILE) as f32);
+    let tile = accent_core::pdf::Rect {
+        left: x,
+        top: y,
+        right: x + TILE as f32,
+        bottom: y + TILE as f32,
+    };
+    let area = accent_core::pdf::Rect {
+        left: area.left * scale,
+        top: area.top * scale,
+        right: area.right * scale,
+        bottom: area.bottom * scale,
+    };
+    area.left < tile.right
+        && area.right > tile.left
+        && area.top < tile.bottom
+        && area.bottom > tile.top
 }
 
 /// The colour a page's paper is drawn in before its tiles arrive, matching what the renderer will

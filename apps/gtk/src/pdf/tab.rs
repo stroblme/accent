@@ -1052,10 +1052,10 @@ impl PdfTab {
                     f(self, result);
                 }
             }
-            Reply::PageChanged(page) => {
+            Reply::PageChanged(page, area) => {
                 // The reading view keeps painting what it has until the new render arrives; the
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
-                self.view.refresh_page(page);
+                self.view.refresh_page(page, area);
                 self.thumbs.queue_draw();
                 if self.mode() == pdfview::Mode::Adjust {
                     self.ask_inks();
