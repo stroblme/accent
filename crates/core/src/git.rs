@@ -81,6 +81,16 @@ impl Status {
             .iter()
             .filter(|e| !e.unmerged && (e.y != '.' || e.x == '?'))
     }
+
+    /// Whether the repository has work that is not committed — anything `git status` had
+    /// something to say about, untracked files included.
+    ///
+    /// Deliberately the whole of `entries` rather than a sum of the three lists above: it is the
+    /// same set the Git pane's changes list is drawn from, so a dot elsewhere in the window and
+    /// that list can never disagree. Ignored paths are their own field and do not count.
+    pub fn dirty(&self) -> bool {
+        !self.entries.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1063,6 +1073,15 @@ mod tests {
         assert_eq!(paths(st.staged()), ["b.md"]);
         assert_eq!(paths(st.changes()), ["a.md", "c d.md"]);
         assert_eq!(st.conflicts().count(), 0);
+        assert!(st.dirty());
+
+        // Untracked alone still counts: the dot and the changes list read the same set.
+        ok(dir, &["stash", "-q", "--include-untracked"]);
+        let clean = status(&open(dir)).unwrap();
+        assert!(!clean.dirty(), "an ignored tree is not uncommitted work");
+        assert_eq!(clean.ignored, ["build/"]);
+        write_file(dir, "new.md", "new\n");
+        assert!(status(&open(dir)).unwrap().dirty());
     }
 
     #[test]

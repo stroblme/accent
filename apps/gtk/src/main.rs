@@ -6967,6 +6967,13 @@ fn bench_git(app: &Rc<App>) {
             git.changes_rows()
         );
         println!("bench git_rows {}", git.log_rows());
+        // What the fetch on opening the vault bought: the branch readout the status bar shows —
+        // the dot in front of it means uncommitted work — and how many history rows are drawn as
+        // not pulled yet, which only a fetch can have found.
+        println!(
+            "bench git_branch {}",
+            git.branch_label(None).unwrap_or_default()
+        );
         println!("bench git_not_pulled {}", git.not_pulled_rows());
         println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
         git.activate_last_log_row();

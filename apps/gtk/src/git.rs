@@ -1713,7 +1713,7 @@ impl Panel {
         let index = key
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
-        branch_text(&state.statuses.get(index)?.branch)
+        branch_line(state.statuses.get(index)?)
     }
 
     /// How many history rows are drawn as not pulled yet. `ACCENT_BENCH_GIT` and nothing else:
@@ -2833,6 +2833,21 @@ fn branch_text(b: &Branch) -> Option<String> {
     })
 }
 
+/// The whole branch readout the status bar shows: the branch, its ahead and behind counts, and
+/// the dot in front when the repository has work that is not committed.
+///
+/// The dot leads and is the very character a dirty tab wears, so one symbol means "there is
+/// something here that is not written down" wherever it appears. What it counts is every record
+/// `git status` produced, untracked files included ([`Status::dirty`]), so it and the Git pane's
+/// changes list are the same answer.
+fn branch_line(status: &Status) -> Option<String> {
+    let text = branch_text(&status.branch)?;
+    Some(match status.dirty() {
+        true => format!("• {text}"),
+        false => text,
+    })
+}
+
 /// What a Sync will do, for the Sync button's tooltip.
 ///
 /// Words beside the arrows the button already shows, because `↓2 ↑1` is a readout and a tooltip
@@ -3046,6 +3061,24 @@ mod tests {
             ahead,
             behind,
         }
+    }
+
+    #[test]
+    fn the_branch_readout_wears_the_dot_when_anything_is_uncommitted() {
+        let clean = Status {
+            branch: on_main(Some("origin/main"), 1, 2),
+            entries: Vec::new(),
+            ignored: vec!["build/".to_string()],
+        };
+        assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
+
+        // Untracked on its own is enough: the dot counts what the changes list shows.
+        let dirty = Status {
+            entries: vec![entry("new.md", '?', '?')],
+            ..clean.clone()
+        };
+        assert_eq!(branch_line(&dirty).as_deref(), Some("• main ↑1 ↓2"));
+        assert_eq!(branch_line(&Status::default()), None, "git said nothing");
     }
 
     #[test]

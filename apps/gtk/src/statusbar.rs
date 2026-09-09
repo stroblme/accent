@@ -130,7 +130,10 @@ impl Bar {
         set(&self.progress, vault.as_deref().or(provider.as_deref()));
     }
 
-    /// The branch of the repository holding the active document, "main ↑1 ↓2".
+    /// The branch of the repository holding the active document, "• main ↑1 ↓2": the branch, how
+    /// far it has drifted from its upstream, and — behind the same dot a dirty tab wears — whether
+    /// it has anything uncommitted. Composed by [`crate::git::Panel::branch_label`], which is the
+    /// only thing that knows any of it.
     pub fn set_branch(&self, branch: Option<&str>) {
         set(&self.branch_label, branch);
         self.branch.set_visible(branch.is_some());
