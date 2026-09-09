@@ -485,6 +485,11 @@ fn move_target(
 /// The blank area below the last row is the other one, and a tree scrolled deep in a large vault
 /// has none, which is what this is for: it is always on screen. A label rather than a list row,
 /// because it stands for what the whole listing is of — there is nothing to open or expand.
+/// The row is as tall as the controls the other panes open with, so the three sit in one band:
+/// 6 px of margin and then 34 px of row, which is the Search pane's entry (`search.rs`, margin 6
+/// on a `GtkSearchEntry` whose Adwaita minimum is 34) and the Git pane's branch chooser (`git.rs`,
+/// the same margin on a `GtkDropDown` of the same minimum). A label alone measured 20 px, which
+/// put the vault name six pixels above both of them.
 fn root_row(label: &str) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)
@@ -492,13 +497,20 @@ fn root_row(label: &str) -> gtk::Box {
         .margin_end(12)
         .margin_top(6)
         .margin_bottom(6)
+        .height_request(34)
         .tooltip_text(label)
         .build();
-    row.append(&gtk::Image::from_icon_name(icon_name('d')));
+    row.append(
+        &gtk::Image::builder()
+            .icon_name(icon_name('d'))
+            .valign(gtk::Align::Center)
+            .build(),
+    );
     row.append(
         &gtk::Label::builder()
             .label(basename(label))
             .xalign(0.0)
+            .valign(gtk::Align::Center)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
             .css_classes(["heading"])
             .build(),
