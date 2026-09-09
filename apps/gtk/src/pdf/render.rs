@@ -143,8 +143,7 @@ impl Ink {
 /// with different line breaks moves the numbers but not the sentence. A link whose quads a real
 /// `/Highlight` already covers is left out: it has been exported, and the annotation is in the
 /// page's own pixels.
-fn highlight_quads(doc: &PdfDoc, links: &[PdfLink]) -> Highlights {
-    let mut glyphs: HashMap<usize, Vec<pdf::Glyph>> = HashMap::new();
+fn highlight_quads(doc: &PdfDoc, glyphs: &mut Glyphs, links: &[PdfLink]) -> Highlights {
     let mut existing: HashMap<usize, Vec<pdf::Highlight>> = HashMap::new();
     let mut out = Highlights::new();
     for (at, link) in links.iter().enumerate() {
@@ -170,6 +169,26 @@ fn highlight_quads(doc: &PdfDoc, links: &[PdfLink]) -> Highlights {
         out.entry(page).or_default().push((quads, at));
     }
     out
+}
+
+/// The glyphs of the pages this thread has read, kept until the document is re-read.
+///
+/// Extracting a page's text is most of a `Highlights` request, and that fires 300 ms after every
+/// note save; the same page is asked for again by a drag over it and again by an export. pdfium's
+/// own search keeps its own page text, so a query does not come through here.
+type Glyphs = HashMap<usize, Vec<pdf::Glyph>>;
+
+/// One page's glyphs, read once. `None` for a page whose text pdfium would not give us, which is
+/// left uncached so the next ask tries again.
+fn glyphs_of<'a>(doc: &PdfDoc, cache: &'a mut Glyphs, page: usize) -> Option<&'a Vec<pdf::Glyph>> {
+    // Not `entry`: a page pdfium would not read must not be remembered as an empty one, so the
+    // next ask tries again.
+    match cache.entry(page) {
+        std::collections::hash_map::Entry::Occupied(found) => Some(found.into_mut()),
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            Some(slot.insert(doc.page_text(page).ok()?))
+        }
+    }
 }
 
 /// Every page's size in points, which is all the widget needs to lay the document out.
@@ -203,6 +222,9 @@ fn render_loop(
     let mut etag = accent_core::fs::Etag::of(&path).ok();
     // What has been drawn here, so Undo reaches this session's strokes and no others.
     let mut ink = Ink::default();
+    // The pages whose text has already been read, for the highlights, the selections and the
+    // exports that all want the same glyphs.
+    let mut glyphs = Glyphs::new();
     // The channel closing is the tab going away, which is the only way this thread ends.
     while let Ok(first) = rx.recv() {
         let mut queue = vec![first];
@@ -240,8 +262,8 @@ fn render_loop(
                     }
                 }
                 Request::Text(page) => {
-                    if let Ok(glyphs) = doc.page_text(page) {
-                        send(&view, Reply::Text(page, glyphs));
+                    if let Some(found) = glyphs_of(&doc, &mut glyphs, page) {
+                        send(&view, Reply::Text(page, found.clone()));
                     }
                 }
                 Request::Outline => {
@@ -413,10 +435,11 @@ fn render_loop(
                     drop(ack);
                 }
                 Request::Highlights(links) => {
-                    send(&view, Reply::Highlights(highlight_quads(&doc, &links)));
+                    let quads = highlight_quads(&doc, &mut glyphs, &links);
+                    send(&view, Reply::Highlights(quads));
                 }
                 Request::Export { links, color } => {
-                    let quads = highlight_quads(&doc, &links);
+                    let quads = highlight_quads(&doc, &mut glyphs, &links);
                     // What each page gains, so only those tiles are rendered again.
                     let pages: Vec<(usize, pdf::Rect)> = quads
                         .iter()
@@ -472,6 +495,8 @@ fn render_loop(
                             // resolve one to an index and delete whatever now sits there. It
                             // also carries `dirty`, which the fresh document is not.
                             ink = Ink::default();
+                            // The text moved with the document, so what was read of it goes.
+                            glyphs.clear();
                             send(&view, Reply::Reloaded(page_sizes(&doc)));
                         }
                         Err(e) => tracing::debug!("reloading {}: {e:#}", path.display()),
