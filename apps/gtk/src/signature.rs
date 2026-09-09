@@ -174,22 +174,29 @@ fn show(tab: &Rc<Tab>, sig: &Signature) {
     code.set_markup(&markup(sig));
     content.append(&code);
     if let Some(doc) = sig.doc.as_deref().filter(|d| !d.is_empty()) {
-        content.append(
-            &gtk::Label::builder()
-                .label(doc)
-                .css_classes(["caption", "dim-label"])
-                .wrap(true)
-                .max_width_chars(WIDTH)
-                .xalign(0.0)
-                .build(),
-        );
+        // Dimmed the way the hover dims its own source line, rather than through `dim-label`:
+        // the two say the same thing beside the same code and should not say it in two greys.
+        let quiet = gtk::Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .max_width_chars(WIDTH)
+            .xalign(0.0)
+            .build();
+        quiet.set_markup(&format!(
+            "<span alpha=\"60%\">{}</span>",
+            glib::markup_escape_text(doc)
+        ));
+        content.append(&quiet);
     }
 
     // Never autohide and never targetable, for the reason the PDF link preview is neither: the
-    // caret is still in the text under it and a grab would be the end of typing.
+    // caret is still in the text under it and a grab would be the end of typing. No arrow either:
+    // the hover and the completion are assistants without one, and a third shape over the same
+    // text reads as a different kind of thing.
     let popover = gtk::Popover::builder()
         .autohide(false)
         .can_target(false)
+        .has_arrow(false)
         .position(gtk::PositionType::Top)
         .child(&content)
         .build();
