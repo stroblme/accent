@@ -247,37 +247,31 @@ fn upsert(
     existing_id: Option<i64>,
     stats: &mut ReconcileStats,
 ) -> Result<i64> {
-    // A note is read whole and hashed raw. Everything else that decodes as text under
-    // [`MAX_INDEXED_BODY`] is read through `fs::read_text`, which brings the NUL sniff, the CRLF
-    // normalisation and the `lossy` flag with it; a lossy decode is dropped because its byte
-    // offsets would no longer point at what is on disk. PDFs and binaries stay cheap
-    // `(mtime, size, ino)` rows; the `pdf` feature will add text extraction and can reuse the
-    // same hash column when it does.
+    // Everything is read through `fs::read_text`, the same call the editor opens a tab with, so
+    // that every byte offset the index hands out — a search hit, a backlink, a heading — lands on
+    // the buffer it is applied to. That is what makes a CRLF note work: the buffer holds `\n`,
+    // and so must the text the offsets were counted in. `read_text` also brings the NUL sniff
+    // and the `lossy` flag; a lossy note is still indexed because its buffer holds the same
+    // replacement characters, while a lossy source file is dropped rather than indexed as text
+    // it is not. Only a note is read past [`MAX_INDEXED_BODY`], and the size test uses the stat
+    // the walk already took rather than pulling a 15 MiB file into memory for the cap to throw
+    // away. PDFs and binaries stay cheap `(mtime, size, ino)` rows; the `pdf` feature will add
+    // text extraction and can reuse the same hash column when it does.
     //
-    // The two branches hash different bytes — a note's raw file, a text file's normalised text.
-    // That is safe and deliberate: a hash is only ever compared against an earlier hash of the
-    // same file by the same branch, never across kinds, so the two need not agree.
-    //
-    // The size test uses the stat the walk already took rather than letting `read_text` pull a
-    // 15 MiB file into memory only for the cap to throw it away.
-    let (hash, text) = match f.kind {
-        FileKind::Markdown => match std::fs::read(&f.canonical) {
-            Ok(bytes) => {
-                stats.bytes_read += bytes.len() as u64;
-                let h = blake3::hash(&bytes);
-                (Some(h), Some(String::from_utf8_lossy(&bytes).into_owned()))
-            }
-            // Vanished or unreadable mid-walk: keep the stat row, drop the content.
-            Err(_) => (None, None),
-        },
-        FileKind::Other if f.size <= MAX_INDEXED_BODY => match crate::fs::read_text(&f.canonical) {
-            Ok(crate::fs::Read::Text(t)) if !t.lossy => {
-                stats.bytes_read += t.text.len() as u64;
-                let h = blake3::hash(t.text.as_bytes());
-                (Some(h), Some(t.text))
-            }
-            _ => (None, None),
-        },
+    // The hash is of the normalised text, never of the raw file. Safe, because a hash is only
+    // ever compared against an earlier hash of the same file taken the same way.
+    let read = match f.kind {
+        FileKind::Markdown => crate::fs::read_text(&f.canonical).ok(),
+        FileKind::Other if f.size <= MAX_INDEXED_BODY => crate::fs::read_text(&f.canonical).ok(),
+        _ => None,
+    };
+    let (hash, text) = match read {
+        Some(crate::fs::Read::Text(t)) if f.kind == FileKind::Markdown || !t.lossy => {
+            stats.bytes_read += t.text.len() as u64;
+            (Some(blake3::hash(t.text.as_bytes())), Some(t.text))
+        }
+        // Vanished or unreadable mid-walk, binary, or over the cap: keep the stat row, drop the
+        // content.
         _ => (None, None),
     };
 
@@ -451,6 +445,33 @@ mod tests {
         assert_eq!(st.files, 4);
         assert_eq!(st.notes, 2, "conflicts and pdfs are not searchable notes");
         assert_eq!(st.conflicts, 1);
+    }
+
+    /// The `!BUG`: a CRLF note was indexed from its raw bytes while the editor held it as LF, so
+    /// every offset drifted by one byte per preceding line.
+    #[test]
+    fn offsets_in_a_crlf_note_address_the_normalised_buffer() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("crlf.md"),
+            "# Title\r\nline\r\n[[Beta]]\r\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let bl = ix.backlinks("sub/Beta.md").unwrap();
+        let from_crlf = bl.iter().find(|b| b.src_rel_path == "crlf.md").unwrap();
+        assert_eq!(from_crlf.byte_start, "# Title\nline\n".len() as i64);
+        let crate::fs::Read::Text(buffer) =
+            crate::fs::read_text(&vault.path().join("crlf.md")).unwrap()
+        else {
+            panic!("a note reads as text");
+        };
+        assert_eq!(
+            &buffer.text[from_crlf.byte_start as usize..from_crlf.byte_end as usize],
+            "[[Beta]]"
+        );
     }
 
     #[test]
