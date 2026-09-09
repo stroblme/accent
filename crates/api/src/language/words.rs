@@ -55,12 +55,19 @@ pub(crate) fn word_before(line: &str, character: u32) -> Option<(u32, String)> {
     Some((start as u32, chars[start..].iter().collect()))
 }
 
-/// Every word of `text` and how often it occurs, for the ranking.
-fn counts(text: &str) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
+/// Every word of `text`, spelled as the document spells it, with the key a query matches on and
+/// how often it occurs.
+///
+/// The lower-cased key is stored rather than folded per query: a completion is asked for on every
+/// keystroke and would otherwise re-case every distinct word in the document each time.
+fn counts(text: &str) -> HashMap<String, (String, usize)> {
+    let mut counts: HashMap<String, (String, usize)> = HashMap::new();
     for word in text.split(|c: char| !is_word(c)) {
         if word.chars().count() >= MIN_WORD {
-            *counts.entry(word.to_string()).or_default() += 1;
+            counts
+                .entry(word.to_string())
+                .or_insert_with(|| (word.to_lowercase(), 0))
+                .1 += 1;
         }
     }
     counts
@@ -120,7 +127,8 @@ fn cased(word: &str, prefix: &str) -> String {
 /// One open document: its text, for the line the caret is on, and its words, for the ranking.
 struct Doc {
     text: String,
-    counts: HashMap<String, usize>,
+    /// As written -> (what a query matches, how often it occurs).
+    counts: HashMap<String, (String, usize)>,
 }
 
 /// The word source for one vault's prose documents.
@@ -164,17 +172,17 @@ impl Words {
             end: pos,
         };
 
-        let mut own: Vec<(&String, &usize)> = doc
+        let mut own: Vec<(&String, &(String, usize))> = doc
             .counts
             .iter()
-            .filter(|(w, n)| w.to_lowercase().starts_with(&prefix) && (**w != typed || **n > 1))
+            .filter(|(w, (low, n))| low.starts_with(&prefix) && (**w != typed || *n > 1))
             .collect();
-        own.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-        let mut seen: HashSet<String> = HashSet::new();
+        own.sort_by(|a, b| b.1.1.cmp(&a.1.1).then_with(|| a.0.cmp(b.0)));
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut labels: Vec<String> = own
             .into_iter()
             .take(CAP)
-            .filter(|(w, _)| seen.insert(w.to_lowercase()))
+            .filter(|(_, (low, _))| seen.insert(low))
             .map(|(w, _)| w.clone())
             .collect();
 
@@ -185,7 +193,7 @@ impl Words {
                 break;
             }
             // The dictionary knows the word being typed too; it is not a suggestion.
-            if *word != prefix && seen.insert(word.clone()) {
+            if *word != prefix && seen.insert(word) {
                 labels.push(cased(word, &typed));
             }
         }

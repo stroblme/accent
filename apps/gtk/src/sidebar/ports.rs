@@ -3,10 +3,12 @@
 
 use crate::widgets::{scroller, status_page};
 use adw::prelude::*;
+use gtk::gio;
 use gtk::glib;
 use gtk::pango;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Two machines wired together, which is what a forward is: a port on one cabled to a port on the
 /// other. The rest of Adwaita's network names are signal strengths, a server tower or a VPN
@@ -17,8 +19,9 @@ pub(super) const ICON: &str = "network-wired-symbolic";
 #[allow(clippy::type_complexity)]
 pub struct Data {
     /// Forward a remote port to a local one. Answers an error message when ssh refuses, which is
-    /// what the pane shows.
-    pub add_forward: Box<dyn Fn(u16, u16) -> Result<(), String>>,
+    /// what the pane shows. Called on a worker thread: ssh has to answer before this returns, and
+    /// a host that is slow to would otherwise hold the window.
+    pub add_forward: Arc<dyn Fn(u16, u16) -> Result<(), String> + Send + Sync>,
     pub remove_forward: Box<dyn Fn(u16, u16)>,
 }
 
@@ -111,20 +114,31 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
             let Some((from, to)) = ports(&local.text(), &remote.text()) else {
                 return;
             };
-            match (data.add_forward)(from, to) {
-                Ok(()) => {
-                    banner.set_revealed(false);
-                    forwards.borrow_mut().push((from, to));
-                    list.append(&forward_row(from, to, drop_forward.clone()));
-                    local.set_text("");
-                    remote.set_text("");
-                    switch_body();
+            let (forwards, list, banner) = (forwards.clone(), list.clone(), banner.clone());
+            let (local, remote) = (local.clone(), remote.clone());
+            let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
+            let add = data.add_forward.clone();
+            glib::spawn_future_local(async move {
+                let answered = gio::spawn_blocking(move || add(from, to)).await;
+                match answered {
+                    Ok(Ok(())) => {
+                        banner.set_revealed(false);
+                        forwards.borrow_mut().push((from, to));
+                        list.append(&forward_row(from, to, drop_forward));
+                        local.set_text("");
+                        remote.set_text("");
+                        switch_body();
+                    }
+                    Ok(Err(message)) => {
+                        banner.set_title(&message);
+                        banner.set_revealed(true);
+                    }
+                    Err(_) => {
+                        banner.set_title("Cannot forward this port");
+                        banner.set_revealed(true);
+                    }
                 }
-                Err(message) => {
-                    banner.set_title(&message);
-                    banner.set_revealed(true);
-                }
-            }
+            });
         }
     });
 

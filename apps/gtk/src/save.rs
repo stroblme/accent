@@ -51,7 +51,28 @@ impl App {
                     self.ask_overwrite(tab);
                 }
             }
+            // Offline is not a disk error: nothing is wrong with the file, the vault is simply
+            // not there to write to. The banner across the window is the one place that says so,
+            // and it has the way back, so an autosave that cannot land every few seconds says
+            // nothing further (DESIGN.md, States: a state that persists is a banner, and a toast
+            // is a thing that happened and is over).
+            Err(SaveError::Offline) => {
+                self.show_offline();
+                if explicit {
+                    self.toast("Not connected, so nothing was saved");
+                }
+            }
             Err(e) => self.cannot("save", e),
+        }
+    }
+
+    /// Say the vault is unreachable, unless something already is.
+    ///
+    /// A save can notice the link is down before the connection thread has reported it, and the
+    /// banner it would raise then must not overwrite the reason a real `Event::Disconnected` gave.
+    fn show_offline(&self) {
+        if !self.connection.is_revealed() {
+            self.show_connection_banner("The vault is not answering");
         }
     }
 
@@ -213,11 +234,13 @@ impl App {
             e => format!("{rel} could not be saved: {e}"),
         };
         let dialog = adw::AlertDialog::new(Some("Unsaved Changes"), Some(&body));
-        dialog.add_responses(&[
-            ("cancel", "Cancel"),
-            ("discard", "Discard"),
-            ("overwrite", "Overwrite"),
-        ]);
+        // Overwriting means writing again, which is the very thing that just failed for want of a
+        // connection: offering it would be offering nothing.
+        let mut responses: Vec<(&str, &str)> = vec![("cancel", "Cancel"), ("discard", "Discard")];
+        if !matches!(error, SaveError::Offline) {
+            responses.push(("overwrite", "Overwrite"));
+        }
+        dialog.add_responses(&responses);
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");

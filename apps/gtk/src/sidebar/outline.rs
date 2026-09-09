@@ -12,7 +12,12 @@ const INDENT: i32 = 12;
 
 /// What the Outline pane says with nothing to outline.
 pub(super) fn empty() -> gtk::Widget {
-    status_page(ICON, "No Outline", "Open a note to see its headings.").upcast()
+    status_page(
+        ICON,
+        "No Outline",
+        "Open a file to see its headings, symbols or bookmarks.",
+    )
+    .upcast()
 }
 
 /// A sentence in the Outline pane's own shape, for a tab that has no outline to give.

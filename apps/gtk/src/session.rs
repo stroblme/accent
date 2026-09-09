@@ -241,6 +241,10 @@ impl App {
         let Some(vault) = self.vault() else {
             return;
         };
+        // Once per window, whether it was restored on opening or on the connection arriving.
+        if self.restored.replace(true) {
+            return;
+        }
         let session = vault.session();
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.

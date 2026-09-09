@@ -271,6 +271,7 @@ pub fn build_window(
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
         reconciled: Cell::new(false),
+        restored: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
         refresh: RefCell::new(None),
@@ -302,6 +303,21 @@ pub fn build_window(
         }
     }
 
+    // The banner's one button, which until now was a label with nothing behind it. `reconnect`
+    // returns before the connection exists and reports itself through the events, so the banner
+    // is what says it is working — and stops taking presses — until `Event::Connected` takes it
+    // down or `Event::Disconnected` puts a fresh reason on it.
+    app.connection.connect_button_clicked(glib::clone!(
+        #[weak(rename_to = app)]
+        app,
+        move |banner| {
+            let Some(vault) = app.vault() else { return };
+            banner.set_title("Reconnecting…");
+            banner.set_sensitive(false);
+            vault.reconnect();
+        }
+    ));
+
     wire_pane(&app, &first);
 
     install_actions(&app);
@@ -326,7 +342,12 @@ pub fn build_window(
             {
                 tracing::warn!("saving config: {e:#}");
             }
-            app.restore_session();
+            // A remote vault that is still connecting has nothing to read a tab out of yet, so
+            // the restore waits for `Event::Connected` rather than filling the window with
+            // failures. Everything else restores here, before the first frame anyone looks at.
+            if !app.connecting() {
+                app.restore_session();
+            }
             if let Some(rel) = note {
                 app.open_path(&rel);
             }
@@ -439,11 +460,11 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
 /// What the Tags pane asks of the index.
 fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     sidebar::TagsData {
-        tags: Box::new({
+        tags: Arc::new({
             let vault = vault.clone();
             move || vault.tags().unwrap_or_default()
         }),
-        files_with_tag: Box::new({
+        files_with_tag: Arc::new({
             let vault = vault.clone();
             move |tag| {
                 vault
@@ -461,7 +482,7 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
 /// is kept but the list the pane shows.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
-        add_forward: Box::new({
+        add_forward: Arc::new({
             let vault = vault.clone();
             move |local, remote| match vault.remote() {
                 Some(r) => r.forward(local, remote),
@@ -639,6 +660,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
     let reconciled = Rc::downgrade(app);
+    let exclude = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -655,8 +677,14 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {
             let Some(app) = flush.upgrade() else { return };
-            for rel in rels {
-                if let Some(tab) = app.tab_for(rel).filter(|tab| tab.modified.get()) {
+            // Each path is a subtree and not only a key: a folder on its way to the trash or into
+            // another folder takes every note under it, and their buffers have to be written out
+            // before the file moves. `trashed_with` is the same "is under" the close path asks.
+            for tab in app.open_tabs() {
+                let under = rels
+                    .iter()
+                    .any(|rel| fileops::trashed_with(rel, &tab.rel()));
+                if under && tab.modified.get() {
                     app.save_tab(&tab, false);
                 }
             }
@@ -669,6 +697,22 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 .filter_map(|rel| app.tab_for(rel))
                 .filter(|tab| !app.refresh_tab(tab))
                 .count()
+        }),
+        exclude: Box::new(move |dir| {
+            let Some(app) = exclude.upgrade() else { return };
+            {
+                let mut config = app.config.borrow_mut();
+                if config.search.exclude.iter().any(|e| e == dir) {
+                    return app.toast(&format!("{dir} is already left out of search"));
+                }
+                config.search.exclude.push(dir.to_string());
+            }
+            settings::save(&app.config.borrow());
+            // The one path that turns git's answer and this list into the set the tree dims and
+            // the index leaves out. Called whole rather than half-copied here; what it repeats on
+            // top of the exclusions is a branch readout and a `git show` per tab.
+            app.on_git_changed();
+            app.toast(&format!("Left {dir} out of search"));
         }),
         close: Box::new(move |rel| {
             let Some(app) = close.upgrade() else { return };

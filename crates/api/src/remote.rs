@@ -14,11 +14,12 @@
 //! `~/.ssh/config`, ProxyJump and the agent; a passphrase prompt comes back to us through
 //! `SSH_ASKPASS`, which the app answers with a dialog.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
@@ -29,6 +30,10 @@ use crate::{Event, VaultConfig};
 /// How much of the server binary goes out per write, and therefore how often the progress bar
 /// moves while it is uploading.
 const CHUNK: usize = 256 * 1024;
+
+/// Where a call in flight leaves its request id, so a caller that gives up on the answer can
+/// cancel it at the server.
+pub type Asked = Mutex<Option<u64>>;
 
 /// Where a remote vault has got to. The UI shows the first two as the wait it already knows how
 /// to show, and the third as a banner with a way back.
@@ -51,9 +56,15 @@ pub struct Remote {
     /// config on `hello` instead of inside it, and a reconnect carries it again.
     ghost: Mutex<bool>,
     client: Mutex<Option<Arc<Client>>>,
+    /// The documents the window has open, as the server was last told about them: the language
+    /// they were opened as, and the text they were last sent with.
+    ///
+    /// A reconnect reaches a `serve` that has never heard of them, so every `change_document`,
+    /// `completion` or `hover` about a tab that is still open would come back "not open" until
+    /// that tab was closed and opened again. Kept here rather than in the façade because this is
+    /// the only place that knows a connection has been replaced.
+    docs: Mutex<HashMap<String, (String, String)>>,
     state: Mutex<State>,
-    /// Woken when `state` changes, so a call made while connecting waits rather than failing.
-    ready: Condvar,
     child: Mutex<Option<Child>>,
     events: Sender<Event>,
 }
@@ -69,8 +80,8 @@ impl Remote {
             config: Mutex::new(cfg),
             ghost: Mutex::new(true),
             client: Mutex::new(None),
+            docs: Mutex::new(HashMap::new()),
             state: Mutex::new(State::Connecting),
-            ready: Condvar::new(),
             child: Mutex::new(None),
             events,
         });
@@ -131,8 +142,19 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T, RpcError> {
+        self.call_tracked(method, params, &Asked::default())
+    }
+
+    /// The same, leaving the request id in `asked` for [`cancel`](Self::cancel).
+    pub fn call_tracked<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        asked: &Asked,
+    ) -> Result<T, RpcError> {
+        self.remember(method, &params);
         let client = self.wait_for_client()?;
-        let answer = client.call(method, params);
+        let answer = client.call_tracked(method, params, asked);
         if let Err(e) = &answer
             && client.is_dead()
         {
@@ -141,33 +163,92 @@ impl Remote {
         answer
     }
 
-    fn wait_for_client(&self) -> Result<Arc<Client>, RpcError> {
-        let mut state = self.locked(&self.state);
-        while *state == State::Connecting {
-            let (guard, timeout) = self
-                .ready
-                .wait_timeout(state, crate::rpc::DEADLINE)
-                .unwrap_or_else(|e| e.into_inner());
-            state = guard;
-            if timeout.timed_out() {
-                break;
+    /// Tell the server nobody is waiting for that request any more. Nothing to do if it never
+    /// got as far as being asked, or if the connection has gone since.
+    pub fn cancel(&self, asked: &Asked) {
+        let Some(id) = *self.locked(asked) else {
+            return;
+        };
+        if let Some(client) = self.locked(&self.client).clone() {
+            client.cancel(id);
+        }
+    }
+
+    /// Keep what the server would have to be told again, so a new one can be.
+    ///
+    /// Recorded whether or not the call lands: a document opened while the link was down is one
+    /// the window has open, and the reconnect is exactly when the server has to hear about it.
+    fn remember(&self, method: &str, params: &serde_json::Value) {
+        if !method.ends_with("_document") {
+            return;
+        }
+        let at = |n: usize| params.get(n).and_then(serde_json::Value::as_str);
+        let Some(rel) = at(0).map(str::to_string) else {
+            return;
+        };
+        let mut docs = self.locked(&self.docs);
+        match method {
+            "open_document" => {
+                if let (Some(language), Some(text)) = (at(1), at(2)) {
+                    docs.insert(rel, (language.to_string(), text.to_string()));
+                }
+            }
+            "change_document" => {
+                if let (Some(text), Some(held)) = (at(1), docs.get_mut(&rel)) {
+                    held.1 = text.to_string();
+                }
+            }
+            "close_document" => {
+                docs.remove(&rel);
+            }
+            _ => {}
+        }
+    }
+
+    /// Tell a freshly started server about the documents the window still has open.
+    fn reopen(&self, client: &Client) {
+        let open: Vec<(String, String, String)> = self
+            .locked(&self.docs)
+            .iter()
+            .map(|(rel, (language, text))| (rel.clone(), language.clone(), text.clone()))
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        self.say("Reopening the documents");
+        for (rel, language, text) in open {
+            // One that will not reopen is one tab without a language, not a failed connection.
+            if let Err(e) =
+                client.call::<serde_json::Value>("open_document", json!([rel, language, text]))
+            {
+                tracing::warn!("reopening {rel} on the new server: {e}");
             }
         }
-        if let State::Disconnected(why) = &*state {
-            return Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: why.clone(),
-                data: None,
-            });
+    }
+
+    /// The client, or why there is not one.
+    ///
+    /// A call made while the link is still being established is refused on the spot rather than
+    /// made to wait for it. The wait used to be up to [`crate::rpc::DEADLINE`], and the caller is
+    /// as often as not the GTK main loop, so a slow host froze the window it had just opened — and
+    /// an upload longer than the deadline made every call fail anyway, saying "not connected"
+    /// about a connection that was still being made. The UI hears [`Event::Connected`] and asks
+    /// again; there is nothing here worth blocking a frame for.
+    fn wait_for_client(&self) -> Result<Arc<Client>, RpcError> {
+        match &*self.locked(&self.state) {
+            State::Connecting => {
+                return Err(RpcError {
+                    code: crate::rpc::CONNECTING,
+                    message: "still connecting".to_string(),
+                    data: None,
+                });
+            }
+            State::Disconnected(why) => return Err(RpcError::disconnected(why)),
+            State::Connected => {}
         }
-        drop(state);
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
-            None => Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: "not connected".to_string(),
-                data: None,
-            }),
+            None => Err(RpcError::disconnected("not connected")),
         }
     }
 
@@ -319,7 +400,6 @@ impl Remote {
             .spawn(move || match self.connect() {
                 Ok(()) => {
                     *self.locked(&self.state) = State::Connected;
-                    self.ready.notify_all();
                     let _ = self.events.send(Event::Connected);
                 }
                 Err(e) => self.disconnect(&e),
@@ -346,11 +426,13 @@ impl Remote {
         }
         *state = State::Disconnected(why.to_string());
         drop(state);
-        self.ready.notify_all();
         let _ = self.events.send(Event::Disconnected(why.to_string()));
     }
 
     fn connect(&self) -> Result<(), String> {
+        // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
+        // so without this a retry would leak an ssh child and a reader thread every time.
+        self.teardown();
         self.say(&format!("Connecting to {}", self.url.host));
         if let Some(dir) = self.ctl.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -369,19 +451,20 @@ impl Remote {
             });
         }
 
-        self.provision()?;
-        self.spawn_server()
+        let hash = self.provision()?;
+        self.spawn_server(&hash)
     }
 
-    /// Put the right server binary on the host, if it is not already there.
-    fn provision(&self) -> Result<(), String> {
+    /// Put the right server binary on the host, if it is not already there, and answer with what
+    /// it is named by: the hash the caller would otherwise read the 6.4 MB binary again to get.
+    fn provision(&self) -> Result<String, String> {
         self.say("Checking the remote server");
         let local = ssh::server_binary().map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
         let hash = ssh::hash_of(&bytes);
 
         if self.ssh_output(&ssh::have_server_cmd(&hash)).is_ok() {
-            return Ok(());
+            return Ok(hash);
         }
 
         let total = bytes.len();
@@ -420,7 +503,7 @@ impl Remote {
             .wait_with_output()
             .map_err(|e| format!("uploading the server: {e}"))?;
         match out.status.success() {
-            true => Ok(()),
+            true => Ok(hash),
             false => Err(format!(
                 "cannot install the server: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -428,11 +511,9 @@ impl Remote {
         }
     }
 
-    fn spawn_server(&self) -> Result<(), String> {
+    fn spawn_server(&self, hash: &str) -> Result<(), String> {
         self.say("Opening the vault");
-        let local = ssh::server_binary().map_err(|e| e.to_string())?;
-        let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
-        let command = ssh::serve_cmd(&ssh::server_path(&ssh::hash_of(&bytes)), &self.url.path);
+        let command = ssh::serve_cmd(&ssh::server_path(hash), &self.url.path);
         let mut child = self
             .ssh(&ssh::run(&self.url, &self.ctl, &command))
             .stdin(Stdio::piped())
@@ -456,31 +537,35 @@ impl Remote {
             .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
             .map_err(|e| format!("the server did not answer: {e}"))?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
+        self.reopen(&client);
         *self.locked(&self.client) = Some(client);
         Ok(())
     }
 
     fn locked<'a, T>(&self, m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
-        m.lock().unwrap_or_else(|e| e.into_inner())
+        crate::locked(m)
     }
 
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
         m.read().unwrap_or_else(|e| e.into_inner())
     }
-}
 
-impl Drop for Remote {
-    /// Close the server, reap the ssh process, then take the master down with it.
+    /// Let go of the server this connection had: the rpc client, and the ssh process carrying it.
     ///
-    /// The order matters and so does the `wait`: a `Child` that is never waited for is the zombie
-    /// this phase exists to avoid, and `-O exit` is what takes the shells and the port forwards
-    /// with it rather than leaving them behind on the host.
-    fn drop(&mut self) {
-        if let Some(client) = self.locked(&self.client).take() {
-            client.shutdown();
+    /// Both the window closing and a reconnect come through here, which is what stops a retry
+    /// leaving a zombie ssh and a reader thread behind for every attempt.
+    ///
+    /// The order is what keeps a window closable. The writer goes first, so `serve` sees EOF and
+    /// exits of its own accord; the child is given a second to follow and killed if it does not —
+    /// a `Child` that is never waited for being the zombie this phase exists to avoid. Only then
+    /// is the reader thread joined, because it ends when ssh's stdout closes, and a wedged ssh
+    /// would otherwise hold the join for the fifteen seconds of a ServerAlive timeout, or forever.
+    fn teardown(&self) {
+        let client = self.locked(&self.client).take();
+        if let Some(client) = &client {
+            client.close();
         }
         if let Some(mut child) = self.locked(&self.child).take() {
-            // ssh exits on its own once the server sees EOF; kill it if it does not.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
             loop {
                 match child.try_wait() {
@@ -496,6 +581,19 @@ impl Drop for Remote {
                 }
             }
         }
+        if let Some(client) = &client {
+            client.join();
+        }
+    }
+}
+
+impl Drop for Remote {
+    /// Close the server, reap the ssh process, then take the master down with it.
+    ///
+    /// `-O exit` is what takes the shells and the port forwards with it rather than leaving them
+    /// behind on the host, so it goes last and only here: a reconnect wants the master kept.
+    fn drop(&mut self) {
+        self.teardown();
         let _ = self
             .ssh(&ssh::exit(&self.url, &self.ctl))
             .stdin(Stdio::null())

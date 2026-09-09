@@ -6,6 +6,9 @@
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
+/// How many rows Page Up and Page Down move by. A completion list is at most
+/// [`COMPLETIONS`] long and shows five or six of them at a time, so a page is a screenful.
+const PAGE: usize = 5;
 /// How many folders a path entry offers at once before the list stops.
 const COMPLETIONS: usize = 12;
 
@@ -64,12 +67,23 @@ fn completion_key(
     if offers == 0 || mods.intersects(chord) {
         return Step::Pass;
     }
+    let last = offers - 1;
     match key {
         gdk::Key::Down | gdk::Key::KP_Down if !open => Step::Open,
         gdk::Key::Down | gdk::Key::KP_Down => {
-            Step::Select(Some(selected.map_or(0, |i| (i + 1).min(offers - 1))))
+            Step::Select(Some(selected.map_or(0, |i| (i + 1).min(last))))
         }
         gdk::Key::Up | gdk::Key::KP_Up => Step::Select(selected.and_then(|i| i.checked_sub(1))),
+        // A page and the two ends, on a list that is open. They walk within the offers rather
+        // than off the top of them: the way back to what was typed is Up from the first row.
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down if open => {
+            Step::Select(Some(selected.map_or(0, |i| (i + PAGE).min(last))))
+        }
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up if open => {
+            Step::Select(Some(selected.map_or(0, |i| i.saturating_sub(PAGE))))
+        }
+        gdk::Key::Home | gdk::Key::KP_Home if open => Step::Select(Some(0)),
+        gdk::Key::End | gdk::Key::KP_End if open => Step::Select(Some(last)),
         gdk::Key::Return | gdk::Key::KP_Enter => selected.map_or(Step::Pass, Step::Apply),
         gdk::Key::Tab | gdk::Key::KP_Tab | gdk::Key::ISO_Left_Tab if open => {
             Step::Apply(selected.unwrap_or(0))
@@ -344,6 +358,27 @@ mod tests {
         assert_eq!(key(gdk::Key::KP_Up, true, Some(1)), Step::Select(Some(0)));
         assert_eq!(key(gdk::Key::Up, true, Some(0)), Step::Select(None));
         assert_eq!(key(gdk::Key::Up, true, None), Step::Select(None));
+    }
+
+    #[test]
+    fn a_page_and_the_two_ends_walk_the_open_list() {
+        let key = |k, open, sel| completion_key(k, gdk::ModifierType::empty(), 12, open, sel);
+        assert_eq!(key(gdk::Key::Page_Down, true, None), Step::Select(Some(0)));
+        assert_eq!(
+            key(gdk::Key::Page_Down, true, Some(0)),
+            Step::Select(Some(5))
+        );
+        // Neither end is ever walked past.
+        assert_eq!(
+            key(gdk::Key::Page_Down, true, Some(9)),
+            Step::Select(Some(11))
+        );
+        assert_eq!(key(gdk::Key::Page_Up, true, Some(2)), Step::Select(Some(0)));
+        assert_eq!(key(gdk::Key::Home, true, Some(7)), Step::Select(Some(0)));
+        assert_eq!(key(gdk::Key::KP_End, true, None), Step::Select(Some(11)));
+        // With the list away they are the entry's own: Home and End move the caret.
+        assert_eq!(key(gdk::Key::Home, false, None), Step::Pass);
+        assert_eq!(key(gdk::Key::Page_Down, false, None), Step::Pass);
     }
 
     #[test]

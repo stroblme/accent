@@ -172,11 +172,13 @@ pub fn reference_target(row: &str) -> Option<Location> {
 /// has references to whatever the caret is on.
 fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
     match tab.map(|tab| tab.flavour().is_note()) {
+        Some(true) => ("No Backlinks", "No note links to the open one."),
         Some(false) => (
             "No References",
             "Nothing refers to the symbol under the caret.",
         ),
-        _ => ("No Backlinks", "No note links to the open one."),
+        // A PDF, an image, or nothing open at all: no note whose backlinks these could be.
+        None => ("No References", "Open a note to see what links to it."),
     }
 }
 

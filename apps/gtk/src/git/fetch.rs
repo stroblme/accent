@@ -114,9 +114,16 @@ pub(super) struct Fetched {
 /// Read what `depth` asks for. `known` is the repositories the pane already holds, which is what
 /// a refresh below [`Depth::Discover`] runs against rather than looking for them again.
 pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Repo>) -> Fetched {
-    // `Vault::repos` cannot fail today; when it can, its `Err` belongs here as `None` and the
-    // pane keeps the repositories it had.
-    let repos = (depth >= Depth::Discover).then(|| vault.repos());
+    // A refusal is not "there are no repositories": on `Err` the pane keeps the ones it had,
+    // which is what a remote whose link dropped mid-refresh needs.
+    let repos = match (depth >= Depth::Discover).then(|| vault.repos()) {
+        Some(Ok(repos)) => Some(repos),
+        Some(Err(e)) => {
+            tracing::debug!("listing the repositories: {e}");
+            None
+        }
+        None => None,
+    };
     let against: &[Repo] = repos.as_deref().unwrap_or(&known);
     let statuses: Vec<Status> = against
         .iter()

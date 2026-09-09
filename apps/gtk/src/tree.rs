@@ -1,7 +1,7 @@
 //! Lazy vault file tree: `gtk::ListView` over a `gtk::TreeListModel` whose children come from
 //! `Vault::list_dir(prefix)`, one directory level per expansion.
 
-use crate::widgets::{scroller, set_class};
+use crate::widgets::{scroller, set_class, status_page};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
 use accent_core::markdown::is_image;
@@ -183,7 +183,7 @@ pub struct Tree {
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
-    ignored: Rc<RefCell<HashSet<String>>>,
+    ignored: Rc<RefCell<Ignored>>,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
@@ -197,6 +197,7 @@ impl Tree {
     /// `GtkTreeListRow` and collapses the directories the reader had opened, while re-binding
     /// only touches the handful of rows actually visible.
     pub fn set_ignored(&self, ignored: HashSet<String>) {
+        let ignored = Ignored::new(ignored);
         if *self.ignored.borrow() == ignored {
             return;
         }
@@ -244,14 +245,30 @@ impl Tree {
                 .collect()
         };
         for (dir, store) in stores {
-            // A directory that is gone keeps no model: a same-named one created later must be
-            // listed afresh instead of re-expanding into the files this one used to hold. Asked
-            // of the index rather than of the disk, which on a remote vault is not here at all.
-            if !dir.is_empty() && !self.vault.exists(dir) {
-                self.cache.borrow_mut().remove(dir);
+            if dir.is_empty() {
+                fill(&store, &self.vault, dir);
                 continue;
             }
-            fill(&store, &self.vault, dir);
+            // A directory that is gone keeps no model: a same-named one created later must be
+            // listed afresh instead of re-expanding into the files this one used to hold. Asked
+            // of the index rather than of the disk, which on a remote vault is not here at all —
+            // and asked on a worker thread, because on that vault it is one round trip per
+            // invalidated directory and a reindex invalidates a handful at a time.
+            let (vault, cache, dir) = (self.vault.clone(), self.cache.clone(), dir.clone());
+            glib::spawn_future_local(async move {
+                let there = gio::spawn_blocking({
+                    let (vault, dir) = (vault.clone(), dir.clone());
+                    move || vault.exists(&dir)
+                })
+                .await;
+                match there {
+                    Ok(true) => fill(&store, &vault, &dir),
+                    Ok(false) => {
+                        cache.borrow_mut().remove(&dir);
+                    }
+                    Err(_) => tracing::warn!("the tree worker panicked"),
+                }
+            });
         }
     }
 
@@ -303,19 +320,48 @@ impl Tree {
     }
 }
 
-/// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
-/// Whether git ignores `rel`. The set holds paths as git reports them, so a wholly ignored
-/// directory is one entry with a trailing slash and everything under it is ignored with it;
-/// a partly ignored directory has its files listed one by one instead.
-pub fn is_ignored(set: &HashSet<String>, rel: &str) -> bool {
-    if set.is_empty() {
-        return false;
-    }
-    set.contains(rel)
-        || set.contains(&format!("{rel}/"))
-        || ancestors(rel).any(|dir| set.contains(&format!("{dir}/")))
+/// What search leaves out, in the two shapes git reports it: a wholly ignored directory as one
+/// entry with a trailing slash, everything under it ignored with it, and a partly ignored
+/// directory's files listed one by one.
+///
+/// Split into the two sets when it arrives rather than asked in git's own spelling on every bind:
+/// the old shape built `format!("{rel}/")` for the row and one more for each of its ancestors,
+/// which is a handful of allocations per row on a path the reader is only scrolling past.
+#[derive(Default, PartialEq, Eq)]
+pub struct Ignored {
+    files: HashSet<String>,
+    /// Without the trailing slash, so an ancestor is a lookup and not a string to build.
+    dirs: HashSet<String>,
 }
 
+impl Ignored {
+    pub fn new(entries: HashSet<String>) -> Ignored {
+        let (mut files, mut dirs) = (HashSet::new(), HashSet::new());
+        for entry in entries {
+            match entry.strip_suffix('/') {
+                Some(dir) => {
+                    dirs.insert(dir.to_string());
+                }
+                None => {
+                    files.insert(entry);
+                }
+            }
+        }
+        Ignored { files, dirs }
+    }
+
+    /// Whether `rel` is left out: named itself, or inside a directory that is.
+    pub fn has(&self, rel: &str) -> bool {
+        if self.files.is_empty() && self.dirs.is_empty() {
+            return false;
+        }
+        self.files.contains(rel)
+            || self.dirs.contains(rel)
+            || ancestors(rel).any(|dir| self.dirs.contains(dir))
+    }
+}
+
+/// Every directory above `rel`, outermost first: `a/b/c.md` yields `a` then `a/b`.
 fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
     rel.match_indices('/').map(|(at, _)| &rel[..at])
 }
@@ -469,6 +515,11 @@ fn move_target(
 /// The blank area below the last row is the other one, and a tree scrolled deep in a large vault
 /// has none, which is what this is for: it is always on screen. A label rather than a list row,
 /// because it stands for what the whole listing is of — there is nothing to open or expand.
+/// The row is as tall as the controls the other panes open with, so the three sit in one band:
+/// 6 px of margin and then 34 px of row, which is the Search pane's entry (`search.rs`, margin 6
+/// on a `GtkSearchEntry` whose Adwaita minimum is 34) and the Git pane's branch chooser (`git.rs`,
+/// the same margin on a `GtkDropDown` of the same minimum). A label alone measured 20 px, which
+/// put the vault name six pixels above both of them.
 fn root_row(label: &str) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)
@@ -476,13 +527,20 @@ fn root_row(label: &str) -> gtk::Box {
         .margin_end(12)
         .margin_top(6)
         .margin_bottom(6)
+        .height_request(34)
         .tooltip_text(label)
         .build();
-    row.append(&gtk::Image::from_icon_name(icon_name('d')));
+    row.append(
+        &gtk::Image::builder()
+            .icon_name(icon_name('d'))
+            .valign(gtk::Align::Center)
+            .build(),
+    );
     row.append(
         &gtk::Label::builder()
             .label(basename(label))
             .xalign(0.0)
+            .valign(gtk::Align::Center)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
             .css_classes(["heading"])
             .build(),
@@ -502,7 +560,7 @@ pub fn build(
     on_move: impl Fn(&str, &str) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
-    let ignored: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+    let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache) = (vault.clone(), cache.clone());
         move |obj| {
@@ -627,7 +685,7 @@ pub fn build(
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
         // to have the class taken off it again. A row the index does not hold is dimmed by the
         // same rule and for the same reason the ignored ones are: search does not reach it.
-        let dim = !item.indexed || is_ignored(&bind_ignored.borrow(), &item.rel);
+        let dim = !item.indexed || bind_ignored.borrow().has(&item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             set_class(widget, "dim-label", dim);
         }
@@ -708,9 +766,34 @@ pub fn build(
     // menu parented to the list is frozen at its first-frame size and `GtkPopoverMenu`'s inner
     // scrolled window turns everything that grows afterwards into a scrollbar. If a scrollbar
     // ever comes back, the next dial is setting that inner scrolled window's policies to Never.
+    // A vault with nothing in it gets the sentence every other pane's emptiness gets, rather than
+    // a blank column that reads as a tree that failed to load (DESIGN.md, States). Driven by the
+    // root store, which is filled from a worker thread and so is empty for a frame either way.
+    let body = gtk::Stack::builder().vexpand(true).build();
+    body.add_named(&scroller, Some("list"));
+    body.add_named(
+        &status_page(
+            "folder-symbolic",
+            "Empty Vault",
+            "Create a note to start writing.",
+        ),
+        Some("empty"),
+    );
+    let show_rows = {
+        let body = body.clone();
+        move |rows: u32| {
+            body.set_visible_child_name(match rows {
+                0 => "empty",
+                _ => "list",
+            });
+        }
+    };
+    show_rows(root.n_items());
+    root.connect_items_changed(move |store, _, _, _| show_rows(store.n_items()));
+
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&vault_row);
-    host.append(&scroller);
+    host.append(&body);
     Tree {
         host,
         view,
@@ -758,16 +841,18 @@ mod tests {
 
     #[test]
     fn is_ignored_covers_a_file_a_directory_and_what_is_under_it() {
-        let set: HashSet<String> = ["build/".to_string(), "notes/a.log".to_string()]
-            .into_iter()
-            .collect();
-        assert!(is_ignored(&set, "notes/a.log"));
-        assert!(is_ignored(&set, "build"));
-        assert!(is_ignored(&set, "build/deep/thing.o"));
-        assert!(!is_ignored(&set, "notes/b.log"));
+        let set = Ignored::new(
+            ["build/".to_string(), "notes/a.log".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(set.has("notes/a.log"));
+        assert!(set.has("build"));
+        assert!(set.has("build/deep/thing.o"));
+        assert!(!set.has("notes/b.log"));
         // A directory whose name merely starts the same is a different directory.
-        assert!(!is_ignored(&set, "builder/x"));
-        assert!(!is_ignored(&HashSet::new(), "build/x"));
+        assert!(!set.has("builder/x"));
+        assert!(!Ignored::default().has("build/x"));
     }
 
     #[test]

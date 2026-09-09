@@ -128,6 +128,14 @@ pub fn for_disk(text: &str, crlf: bool, strip_trailing: bool) -> String {
 pub enum SaveError {
     #[error("file changed on disk since it was read")]
     ChangedOnDisk { current: Etag },
+    /// The vault is on another machine that is not answering: nothing was written, nothing is
+    /// wrong with the file, and the buffer is still the only copy of the edits.
+    ///
+    /// Never produced here — a save on this machine has a disk to fail against — but it is in
+    /// this enum because there is one save path above it and the difference matters at the top of
+    /// it: a link that is down is a state the window already shows, not a disk error to report.
+    #[error("the vault is not connected")]
+    Offline,
     #[error(transparent)]
     Io(#[from] io::Error),
 }

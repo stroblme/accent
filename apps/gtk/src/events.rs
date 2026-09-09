@@ -171,11 +171,32 @@ impl App {
             Event::Connecting { what, fraction } => {
                 self.statusbar.set_progress(Some(&format!("{what}…")));
                 self.connect.show(fraction);
+                // A reconnect keeps its banner up while it works, so that banner says which step
+                // it is on rather than sitting on one word through a 6.4 MB upload.
+                if self.connection.is_revealed() {
+                    self.connection.set_title(&format!("{what}…"));
+                }
             }
+            // The vault answers from here on. Everything asked while it did not was told so
+            // rather than made to wait, so all of it is asked again — and the tabs the session
+            // was holding are opened now that there is something to open them from.
             Event::Connected => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
                 self.hide_connection_banner();
+                if let Some(tree) = self.tree.get() {
+                    tree.refresh();
+                }
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.mark_tags_dirty();
+                }
+                if let Some(git) = self.git.get() {
+                    // Nothing was discovered while the link was down, so this starts at the top.
+                    git.schedule_refresh(git::Depth::Discover);
+                }
+                self.refresh_corpus();
+                self.restore_session();
+                self.sync_active();
             }
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);

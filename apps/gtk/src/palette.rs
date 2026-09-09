@@ -32,6 +32,8 @@ const OPENERS: [&str; 2] = ["app.open-vault", "app.open-remote"];
 const MAX_RESULTS: usize = 200;
 /// Long enough to swallow a burst of keystrokes, short enough to feel immediate.
 const DEBOUNCE: Duration = Duration::from_millis(50);
+/// How many rows Page Up and Page Down move by: what the 420 px dialog shows at once.
+const PAGE: u32 = 10;
 
 /// One thing the palette can offer.
 pub enum Item {
@@ -127,6 +129,26 @@ impl Mode {
             Mode::Tags => "Filter by tag…",
             Mode::Vaults => "Search recent vaults…",
         }
+    }
+}
+
+/// Where a key moves the highlight in a list of `n` rows, or `None` where the key is not the
+/// list's and the entry should have it. The arrows step, a page is [`PAGE`] rows, and Home and
+/// End are the two ends — the keys every list in GNOME answers, on a dialog whose keyboard never
+/// leaves the search box.
+fn step(key: gdk::Key, at: u32, n: u32) -> Option<u32> {
+    if n == 0 {
+        return None;
+    }
+    let last = n - 1;
+    match key {
+        gdk::Key::Down | gdk::Key::KP_Down => Some((at + 1).min(last)),
+        gdk::Key::Up | gdk::Key::KP_Up => Some(at.saturating_sub(1)),
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down => Some((at + PAGE).min(last)),
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up => Some(at.saturating_sub(PAGE)),
+        gdk::Key::Home | gdk::Key::KP_Home => Some(0),
+        gdk::Key::End | gdk::Key::KP_End => Some(last),
+        _ => None,
     }
 }
 
@@ -776,6 +798,30 @@ pub fn present(
             }
         }
     });
+    // Delete on a highlighted Open Recent row does what its trash button does — but only where
+    // the key is free: in a text entry Delete takes the character after the caret, so it is the
+    // list's only when there is none to take. Nothing is deleted from disk either way.
+    let forget_row: Rc<dyn Fn(&gtk::SearchEntry) -> glib::Propagation> = Rc::new({
+        let (forget, selection) = (forget.clone(), selection.clone());
+        move |entry: &gtk::SearchEntry| {
+            let text = entry.text();
+            if (entry.position() as usize) < text.chars().count() {
+                return glib::Propagation::Proceed;
+            }
+            let Some(boxed) = selection
+                .selected_item()
+                .and_downcast::<glib::BoxedAnyObject>()
+            else {
+                return glib::Propagation::Proceed;
+            };
+            let item: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
+            let Item::Vault(key) = &*item else {
+                return glib::Propagation::Proceed;
+            };
+            forget(key);
+            glib::Propagation::Stop
+        }
+    });
     list.set_factory(Some(&row_factory(rebind, forget, clashes.clone())));
 
     refresh("");
@@ -901,18 +947,22 @@ pub fn present(
     });
     dialog.add_controller(escape);
 
-    // Arrow keys move the list selection while the entry keeps focus.
+    // The list is driven from the entry, which keeps the focus: the arrows, a page and the two
+    // ends move the highlight, and Delete forgets the recent vault under it.
     let keys = gtk::EventControllerKey::new();
-    keys.connect_key_pressed(move |_, key, _, _| {
-        let n = selection.n_items();
-        let cur = selection.selected();
-        match key {
-            gdk::Key::Down if n > 0 => selection.set_selected((cur + 1).min(n - 1)),
-            gdk::Key::Up if n > 0 => selection.set_selected(cur.saturating_sub(1)),
-            _ => return glib::Propagation::Proceed,
+    keys.connect_key_pressed({
+        let (entry, forget) = (entry.clone(), forget_row.clone());
+        move |_, key, _, _| {
+            if key == gdk::Key::Delete || key == gdk::Key::KP_Delete {
+                return forget(&entry);
+            }
+            let Some(to) = step(key, selection.selected(), selection.n_items()) else {
+                return glib::Propagation::Proceed;
+            };
+            selection.set_selected(to);
+            list.scroll_to(to, gtk::ListScrollFlags::NONE, None);
+            glib::Propagation::Stop
         }
-        list.scroll_to(selection.selected(), gtk::ListScrollFlags::NONE, None);
-        glib::Propagation::Stop
     });
     entry.add_controller(keys);
 
@@ -923,6 +973,20 @@ pub fn present(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_list_keys_step_a_row_a_page_and_to_the_ends() {
+        assert_eq!(step(gdk::Key::Down, 0, 25), Some(1));
+        assert_eq!(step(gdk::Key::Up, 0, 25), Some(0));
+        assert_eq!(step(gdk::Key::Page_Down, 0, 25), Some(10));
+        assert_eq!(step(gdk::Key::Page_Down, 20, 25), Some(24));
+        assert_eq!(step(gdk::Key::Page_Up, 3, 25), Some(0));
+        assert_eq!(step(gdk::Key::End, 0, 25), Some(24));
+        assert_eq!(step(gdk::Key::KP_Home, 24, 25), Some(0));
+        // Every other key belongs to the entry, and an empty list has nothing to move.
+        assert_eq!(step(gdk::Key::a, 0, 25), None);
+        assert_eq!(step(gdk::Key::Down, 0, 0), None);
+    }
 
     #[test]
     fn parse_query_reads_only_the_leading_character() {

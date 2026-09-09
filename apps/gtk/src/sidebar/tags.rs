@@ -7,12 +7,16 @@ use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// What the Tags pane asks of the index.
+///
+/// Both run on a worker thread, so they may touch nothing the main loop owns: on a remote vault
+/// each is a round trip, and the pane must not hold the window while the host answers.
 #[allow(clippy::type_complexity)]
 pub struct Data {
-    pub tags: Box<dyn Fn() -> Vec<(String, i64)>>,
-    pub files_with_tag: Box<dyn Fn(&str) -> Vec<String>>,
+    pub tags: Arc<dyn Fn() -> Vec<(String, i64)> + Send + Sync>,
+    pub files_with_tag: Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>,
 }
 
 /// Case-insensitive substring filtering for the Tags pane. An empty needle keeps everything, so
@@ -126,6 +130,10 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         }
     });
 
+    // Which tag the file list is answering for. The listing lands from a worker thread, so an
+    // answer for a tag the user has already clicked past is dropped rather than painted.
+    let showing: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+
     // Selection drives the filter, so a single click picks a tag and the refill's "no selection"
     // hides the list through the same path.
     selection.connect_selected_item_notify({
@@ -135,21 +143,35 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             heading.clone(),
             data.clone(),
         );
+        let showing = showing.clone();
         move |selection| {
             let Some(boxed) = selection
                 .selected_item()
                 .and_downcast::<glib::BoxedAnyObject>()
             else {
+                showing.borrow_mut().clear();
                 files.splice(0, files.n_items(), &[]);
                 files_box.set_visible(false);
                 return;
             };
             let name = boxed.borrow::<(String, i64)>().0.clone();
-            let rows = (data.files_with_tag)(&name);
-            let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
-            files.splice(0, files.n_items(), refs.as_slice());
             heading.set_text(&name);
             files_box.set_visible(true);
+            *showing.borrow_mut() = name.clone();
+            let (files, showing) = (files.clone(), showing.clone());
+            let look_up = data.files_with_tag.clone();
+            glib::spawn_future_local(async move {
+                let wanted = name.clone();
+                let listed = gio::spawn_blocking(move || look_up(&wanted)).await;
+                let Ok(rows) = listed else {
+                    return tracing::warn!("the tag worker panicked");
+                };
+                if *showing.borrow() != name {
+                    return;
+                }
+                let refs: Vec<&str> = rows.iter().map(String::as_str).collect();
+                files.splice(0, files.n_items(), refs.as_slice());
+            });
         }
     });
 
@@ -181,11 +203,19 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         move |_| apply()
     });
 
+    // One GROUP BY over the index on a local vault, a round trip on a remote one: asked for off
+    // the main loop, and spliced in when it lands.
     let refill: Rc<dyn Fn()> = Rc::new({
         let (all, apply, data) = (all.clone(), apply.clone(), data.clone());
         move || {
-            *all.borrow_mut() = (data.tags)();
-            apply();
+            let (all, apply, tags) = (all.clone(), apply.clone(), data.tags.clone());
+            glib::spawn_future_local(async move {
+                let Ok(rows) = gio::spawn_blocking(move || tags()).await else {
+                    return tracing::warn!("the tag worker panicked");
+                };
+                *all.borrow_mut() = rows;
+                apply();
+            });
         }
     });
 
