@@ -153,6 +153,9 @@ struct Inner {
     /// Where the readout goes, called with the label rather than the numbers so the bar does not
     /// have to know how a preview counts.
     report: RefCell<Option<Report>>,
+    /// Whether the count handler is already on WebKit's find controller. The reporter itself is
+    /// replaceable, the handler is not: connecting a second one would count every match twice.
+    counting: Cell<bool>,
 }
 
 impl Inner {
@@ -350,6 +353,7 @@ impl Preview {
             total: Cell::new(0),
             at: Cell::new(0),
             report: RefCell::new(None),
+            counting: Cell::new(false),
         });
 
         inner.view.connect_load_changed(glib::clone!(
@@ -516,6 +520,11 @@ impl Preview {
         let Some(finder) = self.inner.view.find_controller() else {
             return;
         };
+        // The handler reads the reporter out of `inner` when it fires, so one is enough however
+        // many times this is called; a second would report each count twice.
+        if self.inner.counting.replace(true) {
+            return;
+        }
         finder.connect_counted_matches(glib::clone!(
             #[weak(rename_to = inner)]
             self.inner,
