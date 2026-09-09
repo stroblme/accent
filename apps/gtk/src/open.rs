@@ -274,9 +274,8 @@ impl App {
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
     }
 
@@ -630,9 +629,8 @@ impl App {
             self.zoom.get(),
         );
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        self.tabs().set_selected_page(&tab.page);
+        self.select_new_page(&tab.page);
         self.mark_opened(&tab.page, Opened::Preview);
-        self.sync_active();
         tab
     }
 
@@ -653,9 +651,8 @@ impl App {
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
         self.docs.borrow_mut().push(wrap(viewer.clone()));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
         viewer
     }
@@ -939,12 +936,24 @@ impl App {
         let page = tab.page.clone();
         self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
         if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
             waiting(self, &tab);
+        }
+    }
+
+    /// Put a page that has just been added to the active pane in front.
+    ///
+    /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
+    /// pane is selected as it is added, before its document is in `docs`, so that one gets no
+    /// notify from here and is synced by hand instead.
+    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage) {
+        let tabs = self.tabs();
+        match tabs.selected_page().as_ref() == Some(page) {
+            true => self.sync_active(),
+            false => tabs.set_selected_page(page),
         }
     }
 

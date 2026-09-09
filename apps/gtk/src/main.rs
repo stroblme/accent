@@ -692,17 +692,16 @@ impl App {
             ),
         );
         let page = term.page.clone();
-        self.tabs().set_selected_page(&page);
+        let view = term.view.clone();
+        self.docs.borrow_mut().push(Doc::Terminal(term));
+        self.select_new_page(&page);
         // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
         // unable to hear a keystroke, which is a terminal you have to click before you can type
         // in. From an idle, because the page has only just been selected and the widget it holds
         // is not on screen to take focus until the frame it was added in is done.
-        let view = term.view.clone();
         glib::idle_add_local_once(move || {
             view.grab_focus();
         });
-        self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.sync_active();
     }
 
     /// The branch of the repository the active document sits in, which for a nested repository is
