@@ -10,6 +10,7 @@
 //! time: when it lands and the box has moved on since, the current one is started instead of
 //! painted.
 
+use crate::widgets::{Debounce, Pulse, label_factory, row_text, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
@@ -433,11 +434,6 @@ impl Sidebar {
 
 // --- pure helpers, the only part of this module the tests can reach ------------------------------
 
-/// Whether the search progress bar is drawn after `pulses` steps of a query still running.
-fn shows_bar(pulses: u32) -> bool {
-    pulses >= SHOW_AFTER
-}
-
 /// FTS5 wraps matched terms in `«` and `»` (see `Index::search`). Escape first, so a note holding a
 /// literal `<` or `&` cannot corrupt the markup, and only then turn the markers into bold. A note
 /// can contain those guillemets itself, so nesting is counted rather than substituted blindly and
@@ -561,23 +557,9 @@ struct Row {
 
 /// A `GtkListView` of plain strings — references and the files carrying a tag are the same row.
 fn path_list(model: &gtk::StringList, on_activate: impl Fn(&str) + 'static) -> gtk::ListView {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::Middle)
-            .build();
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        if let (Some(label), Some(s)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::StringObject>(),
-        ) {
-            label.set_text(&s.string());
+    let factory = label_factory(pango::EllipsizeMode::Middle, |label, item| {
+        if let Some(text) = row_text(item) {
+            label.set_text(&text);
         }
     });
 
@@ -599,31 +581,6 @@ fn path_list(model: &gtk::StringList, on_activate: impl Fn(&str) + 'static) -> g
         }
     });
     view
-}
-
-/// The shared empty state of every pane. A full-size `AdwStatusPage` is drawn for a window, not
-/// for a 200 px column: `.compact` takes the icon from 128 to 96 px, drops the title a step and
-/// halves the margins from 36 to 24.
-///
-/// ponytail: libadwaita has no smaller variant than `.compact`, so if it still crowds a narrow
-/// sidebar the next dial is an app CSS rule shrinking the icon inside `statuspage.compact`.
-fn status_page(icon: &str, title: &str, description: &str) -> adw::StatusPage {
-    let page = adw::StatusPage::builder()
-        .icon_name(icon)
-        .title(title)
-        .description(description)
-        .vexpand(true)
-        .build();
-    page.add_css_class("compact");
-    page
-}
-
-fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(child)
-        .build()
 }
 
 // --- search pane --------------------------------------------------------------------------------
@@ -651,24 +608,13 @@ struct Search {
     replace_entry: gtk::Entry,
     apply: gtk::Button,
     progress: gtk::ProgressBar,
-    /// The timer pulsing [`Search::progress`], shared with the timer's own closure so it can
-    /// clear the slot when it stops itself.
-    pulse: Rc<Cell<Option<glib::SourceId>>>,
+    /// The timer stepping [`Search::progress`] while a query is on a worker thread.
+    pulse: Pulse,
     body: gtk::Stack,
     results: gio::ListStore,
     /// A query is on a worker thread. Only one runs at a time; the rest of the box is read again
     /// when it lands.
     busy: Cell<bool>,
-}
-
-impl Drop for Search {
-    /// A pane that goes away takes its pulse timer with it, as `editor.rs` does with its
-    /// debounces.
-    fn drop(&mut self) {
-        if let Some(id) = self.pulse.take() {
-            id.remove();
-        }
-    }
 }
 
 impl Search {
@@ -709,29 +655,10 @@ impl Search {
     /// because a bar that appears and goes in the same breath reads as a flash, not as progress.
     fn set_busy(&self, busy: bool) {
         self.progress.set_opacity(0.0);
-        if let Some(id) = self.pulse.take() {
-            id.remove();
+        self.pulse.stop();
+        if busy {
+            self.pulse.start(PULSE, SHOW_AFTER);
         }
-        if !busy {
-            return;
-        }
-        let (bar, slot) = (self.progress.clone(), self.pulse.clone());
-        let mut pulses = 0;
-        self.pulse.set(Some(glib::timeout_add_local(PULSE, move || {
-            // `Search` is kept alive by the handlers it connected to its own widgets, so `Drop`
-            // is not guaranteed to run. An unrooted bar means the window closed under a query;
-            // that is the timer's cue to stop on its own.
-            if bar.root().is_none() {
-                slot.set(None);
-                return glib::ControlFlow::Break;
-            }
-            pulses += 1;
-            if shows_bar(pulses) {
-                bar.set_opacity(1.0);
-                bar.pulse();
-            }
-            glib::ControlFlow::Continue
-        })));
     }
 
     /// Run what the box currently asks for, or note that the running query has to be redone.
@@ -1167,40 +1094,28 @@ fn search_pane(data: &Rc<Data>, on_open: &OnOpen) -> SearchPane {
         replace_entry: replace_entry.clone(),
         apply: apply.clone(),
         progress: progress.clone(),
-        pulse: Rc::new(Cell::new(None)),
+        pulse: Pulse::new(&progress),
         body: body.clone(),
         results,
         busy: Cell::new(false),
     });
 
-    // Debounce: one pending source at a time, replaced on every keystroke. A toggle is a click
-    // rather than a burst, so it re-runs the query straight away.
-    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    // A toggle is a click rather than a burst, so only what is typed is debounced.
+    let debounce = Rc::new(Debounce::new(DEBOUNCE));
     let debounced: Rc<dyn Fn()> = Rc::new({
-        let (search, pending) = (search.clone(), pending.clone());
+        let (search, debounce) = (search.clone(), debounce.clone());
         move || {
-            if let Some(id) = pending.borrow_mut().take() {
-                id.remove();
-            }
-            let id = glib::timeout_add_local_once(DEBOUNCE, {
-                let (search, pending) = (search.clone(), pending.clone());
-                move || {
-                    *pending.borrow_mut() = None;
-                    search.start();
-                }
-            });
-            *pending.borrow_mut() = Some(id);
+            let search = search.clone();
+            debounce.call(move || search.start());
         }
     });
 
     entry.connect_search_changed({
-        let (search, debounced, pending) = (search.clone(), debounced.clone(), pending.clone());
+        let (search, debounced, debounce) = (search.clone(), debounced.clone(), debounce.clone());
         move |entry| {
             // Clearing the entry is free, so it cancels the pending query and repaints at once.
             if entry.text().trim().is_empty() {
-                if let Some(id) = pending.borrow_mut().take() {
-                    id.remove();
-                }
+                debounce.cancel();
                 return search.start();
             }
             debounced();
@@ -1674,23 +1589,9 @@ pub fn outline_list<T: Copy + 'static>(
     let levels: Vec<u8> = rows.iter().map(|(level, _, _)| *level).collect();
     let targets: Vec<T> = rows.iter().map(|(_, _, at)| *at).collect();
 
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::End)
-            .build();
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        if let (Some(label), Some(s)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::StringObject>(),
-        ) {
-            label.set_text(&s.string());
+    let factory = label_factory(pango::EllipsizeMode::End, move |label, item| {
+        if let Some(text) = row_text(item) {
+            label.set_text(&text);
             let level = levels.get(item.position() as usize).copied().unwrap_or(1);
             label.set_margin_start(OUTLINE_INDENT * i32::from(level.saturating_sub(1)));
         }
@@ -1730,9 +1631,6 @@ mod tests {
 
     #[test]
     fn a_query_shorter_than_the_grace_period_never_draws_a_bar() {
-        assert!(!shows_bar(0), "the bar is not up when the query starts");
-        assert!(!shows_bar(SHOW_AFTER - 1));
-        assert!(shows_bar(SHOW_AFTER));
         // A requery nobody asked for costs a few milliseconds on a warm index; the wait has to be
         // long enough to cover one and short enough that a real query still reports itself.
         assert!((100..=300).contains(&(PULSE * SHOW_AFTER).as_millis()));

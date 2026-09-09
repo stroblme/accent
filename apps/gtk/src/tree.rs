@@ -1,6 +1,7 @@
 //! Lazy vault file tree: `gtk::ListView` over a `gtk::TreeListModel` whose children come from
 //! `Vault::list_dir(prefix)`, one directory level per expansion.
 
+use crate::widgets::{scroller, set_class};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
 use accent_core::markdown::is_image;
@@ -627,10 +628,7 @@ pub fn build(
         // same rule and for the same reason the ignored ones are: search does not reach it.
         let dim = !item.indexed || is_ignored(&bind_ignored.borrow(), &item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
-            match dim {
-                true => widget.add_css_class("dim-label"),
-                false => widget.remove_css_class("dim-label"),
-            }
+            set_class(widget, "dim-label", dim);
         }
     });
 
@@ -701,11 +699,7 @@ pub fn build(
         row_at(&view, x, y).is_none().then(String::new)
     }));
 
-    let scroller = gtk::ScrolledWindow::builder()
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&view)
-        .build();
+    let scroller = scroller(&view);
     // ponytail: a plain `GtkBox` around the scroller, purely so the context menu has a
     // layout-managed widget to hang off. GTK re-presents a popover from its parent's
     // `allocate_native_children`, which only runs for widgets that use a layout manager;

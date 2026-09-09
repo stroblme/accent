@@ -50,6 +50,7 @@ mod terminal;
 mod theme;
 mod tree;
 mod typing;
+mod widgets;
 mod wire;
 mod zoom;
 
