@@ -221,16 +221,42 @@ impl Client {
 
     /// Ask, and wait for the answer.
     pub fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, RpcError> {
-        let value = self.call_value(method, params)?;
+        self.call_tracked(method, params, &Mutex::new(None))
+    }
+
+    /// The same, leaving the request id in `asked` so a caller that gives up on the answer can
+    /// [`cancel`](Self::cancel) it at the server.
+    pub fn call_tracked<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        asked: &Mutex<Option<u64>>,
+    ) -> Result<T, RpcError> {
+        let value = self.call_value(method, params, asked)?;
         serde_json::from_value(value)
             .map_err(|e| RpcError::failed(format!("{method} answered something unreadable: {e}")))
     }
 
-    fn call_value(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+    /// Tell the server this request has no reader left. A notification, with no id of its own:
+    /// there is no answer to it, and a request that has already finished simply is not there.
+    pub fn cancel(&self, id: u64) {
+        let _ = emit(
+            &self.out,
+            &json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]}),
+        );
+    }
+
+    fn call_value(
+        &self,
+        method: &str,
+        params: Value,
+        asked: &Mutex<Option<u64>>,
+    ) -> Result<Value, RpcError> {
         if self.is_dead() {
             return Err(RpcError::disconnected("not connected"));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        *locked(asked) = Some(id);
         let (tx, rx) = channel();
         locked(&self.pending).insert(id, tx);
 
@@ -277,6 +303,21 @@ impl Client {
         self.close();
         self.join();
     }
+}
+
+/// The language requests a server has running, by the request id that asked for them.
+///
+/// A `cancel` takes one out and aborts it, which drops the future and so tells the language
+/// server the same thing. Without it a completion the user typed past kept a thread busy to the
+/// deadline and the answer went into a pipe nobody was reading.
+type InFlight = Arc<Mutex<HashMap<u64, tokio::task::AbortHandle>>>;
+
+thread_local! {
+    /// The request this worker thread is answering, and where to register what it waits on.
+    /// Set by [`serve_local`], read by [`block`]; unset everywhere else, which is what makes a
+    /// vault used directly rather than served register nothing.
+    static SERVING: std::cell::RefCell<Option<(u64, InFlight)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// One message from the server: an answer for somebody, or an event for everybody.
@@ -362,6 +403,7 @@ pub(crate) fn serve_local(
         })
         .ok();
 
+    let live: InFlight = Arc::new(Mutex::new(HashMap::new()));
     let mut workers = Vec::new();
     for line in BufReader::new(input).lines() {
         let Ok(line) = line else { break };
@@ -380,8 +422,22 @@ pub(crate) fn serve_local(
             .to_string();
         let params = msg.get("params").cloned().unwrap_or(json!([]));
 
-        let (vault, out) = (vault.clone(), out.clone());
+        // The one method with nothing to answer: whoever asked has stopped waiting, so the work
+        // is dropped rather than finished.
+        if method == "cancel" {
+            if let Some(target) = params.get(0).and_then(Value::as_u64)
+                && let Some(handle) = locked(&live).remove(&target)
+            {
+                handle.abort();
+            }
+            continue;
+        }
+
+        let (vault, out, live) = (vault.clone(), out.clone(), live.clone());
         let worker = std::thread::spawn(move || {
+            if let Some(id) = id {
+                SERVING.with_borrow_mut(|serving| *serving = Some((id, live)));
+            }
             let answer = dispatch(&vault, &method, &params);
             let Some(id) = id else { return };
             let line = match answer {
@@ -533,10 +589,21 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
     }
 }
 
-/// Wait for a language request. The task is not dropped before it answers, so nothing is
-/// cancelled: the caller on the other end of the pipe is already waiting for this one.
+/// Wait for a language request, registered so that a `cancel` for it can drop it.
+///
+/// The registration is what makes cancellation real on the far side: aborting the task drops the
+/// future, which is what sends `$/cancelRequest` to the language server underneath it. A vault
+/// that is not being served registers nothing and simply waits.
 pub(crate) fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
-    accent_lsp::runtime().block_on(task)
+    let serving = SERVING.with_borrow(Clone::clone);
+    if let Some((id, live)) = &serving {
+        locked(live).insert(*id, task.abort_handle());
+    }
+    let answer = accent_lsp::runtime().block_on(task);
+    if let Some((id, live)) = &serving {
+        locked(live).remove(id);
+    }
+    answer
 }
 
 /// The two arguments every exact-search method carries, compiled where the files are. A pattern
@@ -730,6 +797,18 @@ mod tests {
             .unwrap_err();
         assert_eq!(refused.code, IO);
         assert_eq!(refused.io_error().kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A cancel is a notification: it is taken, nothing comes back for it, and the connection
+    /// carries on answering. One for a request that has already finished is simply not there.
+    #[test]
+    fn a_cancel_is_taken_and_leaves_the_connection_answering() {
+        let w = Wired::open();
+        assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
+
+        w.client.cancel(9999);
+        let tags: Vec<(String, i64)> = w.client.call("tags", json!([])).unwrap();
+        assert!(tags.iter().any(|(tag, _)| tag == "tag"), "{tags:?}");
     }
 
     #[test]

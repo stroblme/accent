@@ -377,7 +377,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "see [[B]] for details\n");
         f.write("B.md", "the target\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
         f
     }
@@ -410,7 +410,7 @@ mod tests {
         f.write("a.md", "colour and colour\n");
         f.write("sub/b.md", "Colour\n");
         f.write("c.md", "nothing here\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plain = Options::default();
@@ -440,7 +440,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "zorblat once\n");
         f.write("tool.py", "zorblat\nzorblat again\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plain = Options::default();
@@ -459,7 +459,7 @@ mod tests {
     fn replace_expands_groups_only_outside_literal_mode() {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "hello world\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let opts = Options {
@@ -611,7 +611,7 @@ mod tests {
         f.write("Dir/Old.md", "the deep one\n");
         f.write("Old.md", "a different note\n");
         f.write("Ref.md", "deep: [[Dir/Old]]\nshallow: [[Old]]\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plan = f.vault.plan_rename("Dir/Old.md", "Dir/Renamed.md").unwrap();
@@ -632,7 +632,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("Dir/Old.md", "the deep one\n");
         f.write("Ref.md", "deep: [[Dir/Old]]\nshallow: [[Old]]\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plan = f.vault.plan_rename("Dir/Old.md", "Dir/Renamed.md").unwrap();
@@ -652,7 +652,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("a/b/note.md", "kumquat harvest\n");
         f.write("a/b/sub/x.md", "deep\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
         assert_eq!(
             f.vault.note_paths().unwrap(),

@@ -272,7 +272,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("Note.md", "hello");
         f.write("sub/Deep.md", "deep");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         assert_eq!(
@@ -289,7 +289,7 @@ mod tests {
         f.write("Note.md", "hello");
         f.write("node_modules/pkg/index.js", "js");
         f.write("apples/a.md", "a");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let root = f.vault.list_dir("").unwrap();
@@ -322,7 +322,7 @@ mod tests {
         f.write("a.md", "zorblat in a note\n");
         std::fs::create_dir_all(f.vault.root().join("node_modules")).unwrap();
         f.write("node_modules/dep.js", "// zorblat\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plain = Options::default();
@@ -346,7 +346,7 @@ mod tests {
         for i in 0..50 {
             f.write(&format!("node_modules/pkg{i:02}/dep.js"), "// zorblat\n");
         }
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plain = Options::default();
@@ -366,7 +366,7 @@ mod tests {
         f.write("keep.txt", "keep");
         // Not a note: a note is listed whether or not git ignores it.
         f.write("build/out.txt", "out");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         f.vault.set_excluded(&["build/".to_string()]).unwrap();
@@ -389,7 +389,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("tool.py", "import os\nprint('zorblat')\n");
         f.write("bin.dat", "\0zorblat\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let (hits, total) = f
@@ -408,7 +408,7 @@ mod tests {
     fn resolve_link_matches_a_stem_case_insensitively() {
         let f = Fixture::open(VaultConfig::default());
         f.write("Sub/Meeting Notes.md", "hello");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         assert_eq!(
@@ -442,7 +442,7 @@ mod tests {
                 .unwrap();
             assert!(out.status.success(), "git init in {}", dir.display());
         }
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let repos = f.vault.repos().unwrap();

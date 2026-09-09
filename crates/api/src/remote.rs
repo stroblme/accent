@@ -31,6 +31,10 @@ use crate::{Event, VaultConfig};
 /// moves while it is uploading.
 const CHUNK: usize = 256 * 1024;
 
+/// Where a call in flight leaves its request id, so a caller that gives up on the answer can
+/// cancel it at the server.
+pub type Asked = Mutex<Option<u64>>;
+
 /// Where a remote vault has got to. The UI shows the first two as the wait it already knows how
 /// to show, and the third as a banner with a way back.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,15 +142,36 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T, RpcError> {
+        self.call_tracked(method, params, &Asked::default())
+    }
+
+    /// The same, leaving the request id in `asked` for [`cancel`](Self::cancel).
+    pub fn call_tracked<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        asked: &Asked,
+    ) -> Result<T, RpcError> {
         self.remember(method, &params);
         let client = self.wait_for_client()?;
-        let answer = client.call(method, params);
+        let answer = client.call_tracked(method, params, asked);
         if let Err(e) = &answer
             && client.is_dead()
         {
             self.disconnect(&e.message);
         }
         answer
+    }
+
+    /// Tell the server nobody is waiting for that request any more. Nothing to do if it never
+    /// got as far as being asked, or if the connection has gone since.
+    pub fn cancel(&self, asked: &Asked) {
+        let Some(id) = *self.locked(asked) else {
+            return;
+        };
+        if let Some(client) = self.locked(&self.client).clone() {
+            client.cancel(id);
+        }
     }
 
     /// Keep what the server would have to be told again, so a new one can be.

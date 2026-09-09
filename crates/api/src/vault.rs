@@ -148,12 +148,17 @@ impl Vault {
         }
     }
 
-    pub fn rescan(&self) {
+    /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
+    ///
+    /// A local vault posts to its own worker and cannot fail; a remote one is a round trip, and
+    /// a failure is the caller's to see rather than something to drop on the floor.
+    pub fn rescan(&self) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => v.rescan(),
-            Backend::Remote(r) => {
-                let _ = r.call::<()>("rescan", json!([]));
+            Backend::Local(v) => {
+                v.rescan();
+                Ok(())
             }
+            Backend::Remote(r) => r.call("rescan", json!([])).map_err(remote_err),
         }
     }
 
@@ -532,7 +537,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("Attachments/img.png", "not really a png");
         f.write("Note.md", "![[img.png]]\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         // What the preview is handed for `![[img.png]]`: a basename, and the file is elsewhere.
@@ -557,7 +562,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "see [[Beta]] and [[Nope]] #rust\n");
         f.write("sub/Beta.md", "# Beta\nbody\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let rt = accent_lsp::runtime();
@@ -615,7 +620,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "see [[Beta]]\n");
         f.write("sub/Beta.md", "intro\n\n# Beta\nbody\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         accent_lsp::runtime().block_on(async {
