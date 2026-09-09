@@ -455,6 +455,11 @@ fn render_loop(
                         Ok(fresh) => {
                             doc = fresh;
                             etag = accent_core::fs::Etag::of(&path).ok();
+                            // The ledger is of the document that just went: its ids mirror an
+                            // `/Annots` array this one need not share, so a later Ctrl+Z would
+                            // resolve one to an index and delete whatever now sits there. It
+                            // also carries `dirty`, which the fresh document is not.
+                            ink = Ink::default();
                             send(&view, Reply::Reloaded(page_sizes(&doc)));
                         }
                         Err(e) => tracing::debug!("reloading {}: {e:#}", path.display()),
