@@ -159,8 +159,6 @@ fn key(pos: Pos) -> (u32, u32) {
 
 /// Every diagnostic covering `pos`. What the hover appends to the server's own answer, all four
 /// severities included: a hint that says nothing on screen has to say it here.
-// The hover provider is the only caller and arrives with the rest of `hover.rs`.
-#[allow(dead_code)]
 pub fn at(items: &[Diagnostic], pos: Pos) -> Vec<&Diagnostic> {
     items
         .iter()

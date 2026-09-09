@@ -35,9 +35,10 @@
 //! `begin_user_action`.
 
 use crate::editor::{caret, line_end, line_prefix};
+use gtk::glib::translate::IntoGlib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, graphene};
+use gtk::{gdk, glib, graphene, pango};
 use sourceview5::prelude::ViewExt as _;
 
 /// What a key means at every caret. Anything outside this list clears the carets instead.
@@ -179,6 +180,39 @@ fn word_range(
     }
 }
 
+/// What the text tags at `iter` do to a glyph, as Pango attributes: the size, the weight, the
+/// slant and the face. Read from the character *before* the caret, which is the one the caret is
+/// writing after — at the end of a heading line the character after it is the newline, which the
+/// heading's own span does not cover.
+///
+/// The tags arrive in ascending priority, and a later attribute of the same kind wins, so the
+/// answer is the tag that would win on the character itself.
+fn tag_attributes(iter: &gtk::TextIter) -> pango::AttrList {
+    let attrs = pango::AttrList::new();
+    let mut probe = *iter;
+    if !probe.starts_line() {
+        probe.backward_char();
+    }
+    for tag in probe.tags() {
+        if tag.is_scale_set() {
+            attrs.insert(pango::AttrFloat::new_scale(tag.scale()));
+        }
+        // Bold or not: the editor's own tags are the only ones here and they are all 700.
+        if tag.is_weight_set() && tag.weight() >= pango::Weight::Bold.into_glib() {
+            attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
+        }
+        if tag.is_style_set() {
+            attrs.insert(pango::AttrInt::new_style(tag.style()));
+        }
+        if tag.is_family_set()
+            && let Some(family) = tag.family()
+        {
+            attrs.insert(pango::AttrString::new_family(&family));
+        }
+    }
+    attrs
+}
+
 /// The alpha a caret is painted at `elapsed` µs into a blink of period `period` µs: solid for the
 /// first two thirds, then down to nothing and back over the last third. Ramped rather than
 /// snapped, which is what GTK4 does with the primary caret this stands in for.
@@ -226,6 +260,10 @@ mod imp {
         pub blinked_at: Cell<i64>,
         /// The tick callback that repaints the blink, while there is one to repaint.
         pub blink: RefCell<Option<gtk::TickCallbackId>>,
+        /// Whether Up and Down move by a line of the document rather than by a row of the
+        /// screen. What a column of carets asks for in code; in wrapped prose one Down would be
+        /// a whole paragraph, which can be several screens.
+        pub logical_lines: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -301,11 +339,16 @@ mod imp {
             // as not-yet-written. It is only ever asked for at the end of a line, so there is
             // nothing to its right to draw over.
             if let Some(text) = self.ghost.borrow().as_deref() {
-                let at = obj.iter_location(&caret(&buffer));
+                let caret = caret(&buffer);
+                let at = obj.iter_location(&caret);
                 let dim = crate::highlight::with_alpha(colour, colour.alpha() * GHOST_ALPHA);
+                let layout = obj.create_pango_layout(Some(text));
+                // The layout carries the view's font and nothing the tags at the caret say, so
+                // inside a heading the suggestion was drawn at body size next to text at 1.6.
+                layout.set_attributes(Some(&tag_attributes(&caret)));
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(at.x() as f32, at.y() as f32));
-                snapshot.append_layout(&obj.create_pango_layout(Some(text)), &dim);
+                snapshot.append_layout(&layout, &dim);
                 snapshot.restore();
             }
         }
@@ -331,12 +374,15 @@ mod imp {
             self.parent_delete_from_cursor(type_, count);
         }
 
-        /// Up and Down move by a line of the document and Home and End go to that line's ends: a
-        /// wrapped paragraph is one line to move through, not a screenful of rows. `Pages` and
-        /// everything else keep GTK's display-based behaviour, which is what they are for.
+        /// Up and Down move by a line of the document where the view asked for it, and Home and
+        /// End go to that line's ends: a wrapped line of code is one line to move through, not a
+        /// screenful of rows. `Pages` and everything else keep GTK's display-based behaviour,
+        /// which is what they are for.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
             match step {
-                gtk::MovementStep::DisplayLines => self.obj().move_by_lines(count, extend),
+                gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
+                    self.obj().move_by_lines(count, extend)
+                }
                 gtk::MovementStep::DisplayLineEnds => {
                     self.goal.set(None);
                     // GTK implements `ParagraphEnds` as the start and the end of the line.
@@ -368,6 +414,14 @@ impl Default for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make Up and Down step a line of the document rather than a row of the screen. Set for the
+    /// code flavours, where a wrapped line is one statement and the column is what the key is
+    /// asked for; prose keeps GTK's own behaviour, where a paragraph is a line and stepping over
+    /// one would be several screens.
+    pub fn set_logical_lines(&self, on: bool) {
+        self.imp().logical_lines.set(on);
     }
 
     /// Paint `text` after the caret, or nothing. The suggestion never enters the buffer, so it

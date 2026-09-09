@@ -144,6 +144,11 @@ fn folded_starts(buffer: &gtk::TextBuffer, folds: &[Fold]) -> HashSet<u32> {
 /// moved down three lines is re-applied where it is now. `old` is what the tab folded against.
 pub fn resync(buffer: &gtk::TextBuffer, old: &[Fold], new: &[Fold]) {
     let shut = folded_starts(buffer, old);
+    // Nothing is hidden, so there is nothing to lift: this runs on every refresh, 300 ms after
+    // every edit, and lifting the tag is a pass over the whole buffer.
+    if shut.is_empty() {
+        return;
+    }
     unfold_all(buffer);
     for f in new.iter().filter(|f| shut.contains(&f.start_line)) {
         fold(buffer, *f);

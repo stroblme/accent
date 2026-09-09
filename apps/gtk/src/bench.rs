@@ -228,6 +228,8 @@ fn bench_git(app: &Rc<App>) {
 /// [`multicaret::View::press`] is the key controller's own handler.
 fn bench_keys(app: &Rc<App>) {
     let view = multicaret::View::new();
+    // The drills are about the code flavours, which is where the logical-line moves are wanted.
+    view.set_logical_lines(true);
     view.set_wrap_mode(gtk::WrapMode::Word);
     let window = gtk::Window::builder()
         .default_width(320)

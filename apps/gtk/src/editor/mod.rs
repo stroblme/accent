@@ -17,6 +17,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -174,7 +175,11 @@ pub struct Tab {
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
-    links: RefCell<Vec<Link>>,
+    /// The note's links, each with the character range it covers. Characters and not the bytes
+    /// the parse reports them in: the pointer asks which link it is over on every motion event
+    /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
+    /// pointer each time.
+    links: RefCell<Vec<(Range<i32>, Link)>>,
     /// What the language server last said about this file, and the provider that shows the loud
     /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
     /// both read it back after the paint.
@@ -250,7 +255,11 @@ fn build(
 
     // A subclass, so `Shift+Alt+Up`/`Down` can leave extra carets in the buffer. Everything else
     // in this file treats it as the plain view it is.
-    let view: sourceview5::View = multicaret::View::new().upcast();
+    let subclass = multicaret::View::new();
+    // Up and Down by a line of the document, which is what a column of carets in code asks for.
+    // In prose a line is a paragraph and one Down would be several screens, so it keeps GTK's.
+    subclass.set_logical_lines(!flavour.is_note());
+    let view: sourceview5::View = subclass.upcast();
     view.set_buffer(Some(&buffer));
     view.set_monospace(!flavour.is_note());
     view.add_css_class(match flavour {
@@ -1106,16 +1115,15 @@ impl Tab {
         self.link_at_iter(&iter)
     }
 
-    /// Link ranges are byte offsets into the note, `TextIter`s count characters, so the text up
-    /// to the iter is what translates between them.
+    /// The link covering `iter`, compared in the buffer's own coordinates: the translation from
+    /// the parse's byte ranges happened once, when the note was analysed.
     fn link_at_iter(&self, iter: &gtk::TextIter) -> Option<Link> {
-        let start = self.buffer.start_iter();
-        let byte = self.buffer.text(&start, iter, true).len();
+        let at = iter.offset();
         self.links
             .borrow()
             .iter()
-            .find(|link| link.range.contains(&byte))
-            .cloned()
+            .find(|(range, _)| range.contains(&at))
+            .map(|(_, link)| link.clone())
     }
 
     /// Called 1 s after the last edit and when focus leaves the view. Never fires while
@@ -1165,28 +1173,33 @@ impl Tab {
         if let Some(id) = self.debounce.borrow_mut().take() {
             id.remove();
         }
-        if self.buffer.char_count() <= INSTANT {
+        let instant = self.buffer.char_count() <= INSTANT;
+        if instant {
             self.reanalyse();
-        } else {
+        } else if self.flavour.is_note() {
             // Too long for a full pass inside a frame, so the line under the caret is styled now
             // and everything else waits: what a typist watches change is the line they are typing.
-            if self.flavour.is_note() {
-                let line = caret(&self.buffer).line();
-                highlight::apply_line(&self.buffer, line);
-            }
-            let id = glib::timeout_add_local_once(
-                DEBOUNCE,
-                glib::clone!(
-                    #[weak(rename_to = tab)]
-                    self,
-                    move || {
-                        *tab.debounce.borrow_mut() = None;
+            let line = caret(&self.buffer).line();
+            highlight::apply_line(&self.buffer, line);
+        }
+        // The change bars are a second whole-buffer copy and a line diff against the committed
+        // text, which is too much to spend on a keystroke however short the note is, and nothing
+        // a typist watches: they follow the debounce at either size.
+        let id = glib::timeout_add_local_once(
+            DEBOUNCE,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || {
+                    *tab.debounce.borrow_mut() = None;
+                    tab.update_marks();
+                    if !instant {
                         tab.reanalyse();
                     }
-                ),
-            );
-            *self.debounce.borrow_mut() = Some(id);
-        }
+                }
+            ),
+        );
+        *self.debounce.borrow_mut() = Some(id);
         self.schedule_autosave();
     }
 
@@ -1194,20 +1207,37 @@ impl Tab {
     /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
     /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
     fn reanalyse(self: &Rc<Self>) {
-        self.analyse();
+        self.analyse_text();
         self.emit(&self.on_edited);
     }
 
-    /// Re-derive whatever this tab's text implies. A note gets its styling spans and its link
-    /// table; code gets nothing, because the style scheme colours it from the language.
+    /// Everything this tab's text implies, the change bars included: what a reload or a template
+    /// needs, where the whole document has moved at once.
     fn analyse(&self) {
+        self.analyse_text();
+        self.update_marks();
+    }
+
+    /// The half of [`Tab::analyse`] a keystroke can afford. A note gets its styling spans and its
+    /// link table; code gets nothing, because the style scheme colours it from the language.
+    fn analyse_text(&self) {
         match self.flavour {
-            Flavour::Note => *self.links.borrow_mut() = highlight::apply(&self.buffer).links,
+            Flavour::Note => {
+                let (analysis, offsets) = highlight::apply(&self.buffer);
+                *self.links.borrow_mut() = analysis
+                    .links
+                    .into_iter()
+                    .map(|link| {
+                        let range =
+                            offsets.char_of(link.range.start)..offsets.char_of(link.range.end);
+                        (range, link)
+                    })
+                    .collect();
+            }
             Flavour::Csv => highlight::apply_csv(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
         }
-        self.update_marks();
         // The tags the sticky title reads are the ones that were just re-applied.
         self.update_sticky();
         if let Some(compare) = self.comparison() {
@@ -1215,8 +1245,8 @@ impl Tab {
         }
     }
 
-    /// Redraw the gutter's change bars from the committed text. Rides the same path as styling,
-    /// so it follows a keystroke on a small note and the debounce on a large one.
+    /// Redraw the gutter's change bars from the committed text. On the debounce, not the
+    /// keystroke: it copies the whole buffer and diffs it against the committed text.
     fn update_marks(&self) {
         let head = self.head.borrow();
         let Some(head) = head.as_ref() else {
