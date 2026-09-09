@@ -939,24 +939,35 @@ impl PdfView {
         }
     }
 
-    /// The tool a press really means. The mode itself while nothing but a mouse is plugged in;
-    /// with a pen attached the hand selects and only the pen draws, unless the preference says
-    /// otherwise, and the pen's eraser tip erases whatever is in hand.
+    /// The tool a press really means. A pen draws, its eraser tip erases whatever is in hand,
+    /// and a finger never draws — touch is for moving the page. A mouse draws while nothing
+    /// but a mouse is plugged in; with a pen attached the hand selects, unless the preference
+    /// says otherwise.
     fn effective_mode(&self, controller: &impl IsA<gtk::EventController>) -> Mode {
         let mode = self.imp().mode.get();
         if mode == Mode::Select {
             return mode;
         }
+        // A pen is known by its tool: on Wayland a tablet's events arrive on a logical device
+        // whose source is a mouse, and only the tool says otherwise. X11 without libwacom has
+        // no tool, and there the device's source is what says pen.
         let tool = controller.current_event().and_then(|e| e.device_tool());
-        if tool.is_some_and(|t| t.tool_type() == gdk::DeviceToolType::Eraser) {
+        if tool
+            .as_ref()
+            .is_some_and(|t| t.tool_type() == gdk::DeviceToolType::Eraser)
+        {
             return Mode::Eraser;
         }
-        let pen = controller
-            .current_event_device()
-            .is_some_and(|d| d.source() == gdk::InputSource::Pen);
-        match !pen && !self.imp().style.borrow().mouse && stylus_attached() {
-            true => Mode::Select,
-            false => mode,
+        let source = controller.current_event_device().map(|d| d.source());
+        if tool.is_some() || source == Some(gdk::InputSource::Pen) {
+            return mode;
+        }
+        if source == Some(gdk::InputSource::Touchscreen) {
+            return Mode::Select;
+        }
+        match self.imp().style.borrow().mouse || !stylus_attached() {
+            true => mode,
+            false => Mode::Select,
         }
     }
 
