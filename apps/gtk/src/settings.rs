@@ -33,6 +33,14 @@ pub fn present(
     page(parent.as_ref(), config, root, Rc::new(on_change));
 }
 
+/// Write `config` to disk, and say so in the log when that fails: the change is already in force
+/// on screen, and a preference that will not outlive the process is not worth a dialog.
+pub fn save(config: &Config) {
+    if let Err(e) = config.save() {
+        tracing::warn!("saving config: {e:#}");
+    }
+}
+
 /// The dialog itself, split off so Restore Defaults can build it a second time. Every row reads
 /// its value once, at construction, so a reset that changes all of them is a new page rather than
 /// a handle kept on each row.
@@ -48,9 +56,7 @@ fn page(
         let (config, on_change) = (config.clone(), on_change.clone());
         move || {
             let snapshot = config.borrow().clone();
-            if let Err(e) = snapshot.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
+            save(&snapshot);
             on_change(&snapshot);
         }
     });

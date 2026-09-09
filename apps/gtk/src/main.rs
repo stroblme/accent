@@ -260,6 +260,8 @@ struct App {
     tree_painted: Cell<i64>,
     /// The pending post-edit refresh: the preview's re-render and the status bar's word count.
     refresh: RefCell<Option<glib::SourceId>>,
+    /// The pending re-query of the note links every open PDF highlights.
+    pdf_links: RefCell<Option<glib::SourceId>>,
     session: RefCell<Option<glib::SourceId>>,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
@@ -307,13 +309,20 @@ impl App {
         self.connection.set_revealed(false);
     }
 
-    /// Say why something needs a folder open, for the actions that do.
+    /// Say why something needs a folder open, for the actions that do — a folder on this machine,
+    /// for the few that write next to a file rather than through the vault.
     fn needs_vault(&self, what: &str) {
-        self.toast(&format!("Open a folder to {what}"));
+        self.toast(&format!("Open a local folder to {what}"));
     }
 
     fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
+    }
+
+    /// A failure, in the one shape every failure toast takes: "Cannot <what>: <why>". A reason
+    /// that runs to several lines is a dialog's, not a toast's.
+    fn cannot(&self, what: &str, why: impl std::fmt::Display) {
+        self.toast(&format!("Cannot {what}: {why:#}"));
     }
 
     /// The file operations the tree, the tab menus and the palette share. `None` without a vault:
@@ -432,6 +441,31 @@ impl App {
     /// Every open document, cloned out for the same reason as [`App::open_tabs`].
     fn docs(&self) -> Vec<Doc> {
         self.docs.borrow().clone()
+    }
+
+    /// The open documents of one kind, cloned out likewise.
+    fn pdfs(&self) -> Vec<Rc<pdftab::PdfTab>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.pdf().cloned())
+            .collect()
+    }
+
+    fn diffs(&self) -> Vec<Rc<diff::DiffTab>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.diff().cloned())
+            .collect()
+    }
+
+    fn terminals(&self) -> Vec<Rc<terminal::Term>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.terminal().cloned())
+            .collect()
     }
 
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
@@ -635,10 +669,8 @@ impl App {
     }
 
     fn restyle_terminals(&self) {
-        for doc in self.docs() {
-            if let Some(term) = doc.terminal() {
-                term.restyle();
-            }
+        for term in self.terminals() {
+            term.restyle();
         }
     }
 
@@ -692,17 +724,16 @@ impl App {
             ),
         );
         let page = term.page.clone();
-        self.tabs().set_selected_page(&page);
+        let view = term.view.clone();
+        self.docs.borrow_mut().push(Doc::Terminal(term));
+        self.select_new_page(&page);
         // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
         // unable to hear a keystroke, which is a terminal you have to click before you can type
         // in. From an idle, because the page has only just been selected and the widget it holds
         // is not on screen to take focus until the frame it was added in is done.
-        let view = term.view.clone();
         glib::idle_add_local_once(move || {
             view.grab_focus();
         });
-        self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.sync_active();
     }
 
     /// The branch of the repository the active document sits in, which for a nested repository is
@@ -806,11 +837,9 @@ impl App {
         let on = {
             let mut config = self.config.borrow_mut();
             config.minimap = !config.minimap;
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
             config.minimap
         };
+        settings::save(&self.config.borrow());
         for tab in self.open_tabs() {
             tab.set_minimap(on);
         }
@@ -916,19 +945,15 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.restyle();
         }
-        for doc in self.docs() {
-            if let Some(diff) = doc.diff() {
-                diff.set_font(config.editor_font.as_deref(), self.zoom.get());
-                diff.restyle();
-            }
+        for diff in self.diffs() {
+            diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+            diff.restyle();
         }
         // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
         // though the system's dark state, and with it the notify handler, never moved.
-        for doc in self.docs() {
-            if let Some(pdf) = doc.pdf() {
-                pdf.restyle();
-                pdf.set_drawing_config(config.drawing.clone());
-            }
+        for pdf in self.pdfs() {
+            pdf.restyle();
+            pdf.set_drawing_config(config.drawing.clone());
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();

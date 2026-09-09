@@ -251,26 +251,10 @@ impl App {
             "goto-line" => self.open_find(find::Mode::Goto),
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
-            "duplicate-line" => {
-                if let Some(tab) = self.active() {
-                    tab.duplicate_line();
-                }
-            }
-            "toggle-comment" => {
-                if let Some(tab) = self.active() {
-                    tab.toggle_comment();
-                }
-            }
-            "toggle-wrap" => {
-                if let Some(tab) = self.active() {
-                    tab.toggle_wrap();
-                }
-            }
-            "delete-line" => {
-                if let Some(tab) = self.active() {
-                    tab.delete_line();
-                }
-            }
+            "duplicate-line" => self.with_active(Tab::duplicate_line),
+            "toggle-comment" => self.with_active(Tab::toggle_comment),
+            "toggle-wrap" => self.with_active(Tab::toggle_wrap),
+            "delete-line" => self.with_active(Tab::delete_line),
             "newline-below" => {
                 // `Ctrl+Return` belongs to the git commit box while the keyboard is in it
                 // (DESIGN.md, Git pane). A window accelerator is dispatched ahead of any
@@ -280,52 +264,18 @@ impl App {
                     tab.newline_below();
                 }
             }
-            "scroll-up" => {
-                if let Some(tab) = self.active() {
-                    tab.scroll_lines(-1);
-                }
-            }
-            "scroll-down" => {
-                if let Some(tab) = self.active() {
-                    tab.scroll_lines(1);
-                }
-            }
-            "caret-above" => {
-                if let Some(tab) = self.active() {
-                    tab.add_caret(false);
-                }
-            }
-            "caret-below" => {
-                if let Some(tab) = self.active() {
-                    tab.add_caret(true);
-                }
-            }
+            "scroll-up" => self.with_active(|tab| tab.scroll_lines(-1)),
+            "scroll-down" => self.with_active(|tab| tab.scroll_lines(1)),
+            "caret-above" => self.with_active(|tab| tab.add_caret(false)),
+            "caret-below" => self.with_active(|tab| tab.add_caret(true)),
             "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
             "back" => self.navigate(false),
             "forward" => self.navigate(true),
-            "pdf-invert" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.toggle_invert();
-                }
-            }
-            "pdf-copy" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.copy_selection();
-                }
-            }
-            "pdf-copy-link" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.copy_link();
-                }
-            }
-            "pdf-next-page" | "pdf-previous-page" => {
-                if let Some(pdf) = self.active_pdf() {
-                    match name {
-                        "pdf-next-page" => pdf.next_page(),
-                        _ => pdf.previous_page(),
-                    }
-                }
-            }
+            "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
+            "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
+            "pdf-copy-link" => self.with_pdf(|pdf| pdf.copy_link()),
+            "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
+            "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
             "pdf-export-highlights" => self.export_highlights(),
             "pdf-draw" => self.set_drawing(!self.drawing.get()),
             "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
@@ -336,14 +286,8 @@ impl App {
             "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
             "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
-            "pdf-fit-width" | "pdf-fit-page" => {
-                if let Some(pdf) = self.active_pdf() {
-                    pdf.set_zoom(match name {
-                        "pdf-fit-page" => PdfZoom::FitPage,
-                        _ => PdfZoom::FitWidth,
-                    });
-                }
-            }
+            "pdf-fit-width" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitWidth)),
+            "pdf-fit-page" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitPage)),
             "minimap" => self.toggle_minimap(),
             "copy-relative-path" => {
                 if let (Some(rel), Some(ops)) =
@@ -420,26 +364,10 @@ impl App {
             }
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => self.go_to_definition(),
-            "fold" => {
-                if let Some(tab) = self.active() {
-                    tab.fold_at_caret();
-                }
-            }
-            "unfold" => {
-                if let Some(tab) = self.active() {
-                    tab.unfold_at_caret();
-                }
-            }
-            "fold-all" => {
-                if let Some(tab) = self.active() {
-                    tab.fold_all();
-                }
-            }
-            "unfold-all" => {
-                if let Some(tab) = self.active() {
-                    tab.unfold_all();
-                }
-            }
+            "fold" => self.with_active(Tab::fold_at_caret),
+            "unfold" => self.with_active(Tab::unfold_at_caret),
+            "fold-all" => self.with_active(Tab::fold_all),
+            "unfold-all" => self.with_active(Tab::unfold_all),
             "rename" => {
                 let target = self
                     .selected_row()
@@ -461,6 +389,21 @@ impl App {
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
+        }
+    }
+
+    /// Run `f` on the active text tab. Over anything else the action is a no-op, which is what
+    /// every editing chord does over an image or a PDF.
+    fn with_active(&self, f: impl FnOnce(&Tab)) {
+        if let Some(tab) = self.active() {
+            f(&tab);
+        }
+    }
+
+    /// The same for the actions that only mean something over a PDF.
+    fn with_pdf(&self, f: impl FnOnce(&Rc<pdftab::PdfTab>)) {
+        if let Some(pdf) = self.active_pdf() {
+            f(&pdf);
         }
     }
 
@@ -532,10 +475,8 @@ impl App {
                 Some(accels) => config.shortcuts.insert(action.to_string(), accels),
                 None => config.shortcuts.remove(action),
             };
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
         }
+        settings::save(&self.config.borrow());
         self.apply_accels();
         accels_for(&self.config.borrow(), action)
     }

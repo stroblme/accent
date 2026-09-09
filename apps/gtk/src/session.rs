@@ -220,10 +220,8 @@ impl App {
             // it was left at, which is the whole point of remembering it.
             pdf: {
                 let mut places = self.vault().map(|v| v.session().pdf).unwrap_or_default();
-                for doc in self.docs() {
-                    if let Some(pdf) = doc.pdf() {
-                        places.insert(doc.key(), pdf.place());
-                    }
+                for pdf in self.pdfs() {
+                    places.insert(pdf.key(), pdf.place());
                 }
                 places
             },
@@ -250,12 +248,16 @@ impl App {
         // ponytail: every note comes back into one pane, because the session does not record the
         // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
         // being what someone who left four panes open expects.
+        // A text tab arrives from the worker later and selects itself as it lands, so the one
+        // that was active is put back in front after every arrival; the synchronous opens, a PDF
+        // or an image, are in place by the end of the loop and get the same treatment once.
         for key in &session.open {
-            self.open_path(key);
+            let active = session.active.clone();
+            self.with_tab(key, Opened::Kept, move |app, _| {
+                app.select_doc(active.as_deref())
+            });
         }
-        if let Some(doc) = session.active.as_deref().and_then(|key| self.doc_for(key)) {
-            self.tabs().set_selected_page(doc.page());
-        }
+        self.select_doc(session.active.as_deref());
         // Restoring tabs selects each in turn, and none of that is somewhere the reader went, so
         // the pane starts with an empty history rather than with the order the restore happened in.
         for pane in self.panes.borrow().iter() {
@@ -281,6 +283,13 @@ impl App {
                 action,
                 RECENT_COMMANDS,
             );
+        }
+    }
+
+    /// Bring the tab holding `key` to the front, if there is one.
+    fn select_doc(&self, key: Option<&str>) {
+        if let Some(doc) = key.and_then(|key| self.doc_for(key)) {
+            self.reveal_page(doc.page());
         }
     }
 }

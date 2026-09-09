@@ -22,6 +22,9 @@ pub struct Shell {
     pub shell_keys: Cell<bool>,
 }
 
+/// What an `app.` action does, given the shell and the application it was fired at.
+type AppAction = fn(&Rc<Shell>, &adw::Application);
+
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
 ///
 /// libadwaita detaches a dragged page from its view for the length of the drag, and neither
@@ -45,67 +48,40 @@ impl Shell {
     /// is what the `win.` trampoline in [`install_actions`] does for everything else: an action
     /// the palette lists has to be an action the palette can learn.
     pub fn install_app_actions(self: &Rc<Self>, gtk_app: &adw::Application) {
-        let open = gio::SimpleAction::new("open-vault", None);
-        open.connect_activate({
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| {
-                shell.record(&gtk_app, "app.open-vault");
-                shell.choose_vault(&gtk_app);
-            }
-        });
-        gtk_app.add_action(&open);
-
-        let remote = gio::SimpleAction::new("open-remote", None);
-        remote.connect_activate({
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| {
-                shell.record(&gtk_app, "app.open-remote");
-                shell.choose_remote(&gtk_app);
-            }
-        });
-        gtk_app.add_action(&remote);
-
         // GNOME Shell offers New Window in the launcher's context menu only when it finds an
         // `app.new-window` action, the `new-window` desktop action, or one of the SingleWindow
         // keys. Both of the first two are provided: this is the one DESIGN.md's Keyboard rule
         // asks for, and the desktop file carries the other for a shell that reads it first.
-        let new_window = gio::SimpleAction::new("new-window", None);
-        new_window.connect_activate({
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| {
-                shell.record(&gtk_app, "app.new-window");
-                shell.start_screen(&gtk_app);
-            }
-        });
-        gtk_app.add_action(&new_window);
-
-        let close = gio::SimpleAction::new("close-vault", None);
-        close.connect_activate({
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| {
-                shell.record(&gtk_app, "app.close-vault");
-                shell.close_vault(&gtk_app);
-            }
-        });
-        gtk_app.add_action(&close);
-
-        // Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
-        // down without emitting `close-request`, which is where unsaved buffers get written and
-        // where a failed save gets to stop the exit. The application ends on its own once the last
-        // window is gone, so a window that refuses to close also refuses to quit.
-        let quit = gio::SimpleAction::new("quit", None);
-        quit.connect_activate({
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |_, _| {
-                // Recorded before the windows go: the session is written by each window's own
-                // `close-request`, which runs after this and carries the entry with it.
-                shell.record(&gtk_app, "app.quit");
-                for window in gtk_app.windows() {
-                    window.close();
+        let actions: [(&str, AppAction); 5] = [
+            ("open-vault", Shell::choose_vault),
+            ("open-remote", Shell::choose_remote),
+            ("new-window", Shell::start_screen),
+            ("close-vault", Shell::close_vault),
+            ("quit", Shell::quit),
+        ];
+        for (name, run) in actions {
+            let action = gio::SimpleAction::new(name, None);
+            action.connect_activate({
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |_, _| {
+                    shell.record(&gtk_app, &format!("app.{name}"));
+                    run(&shell, &gtk_app);
                 }
-            }
-        });
-        gtk_app.add_action(&quit);
+            });
+            gtk_app.add_action(&action);
+        }
+    }
+
+    /// Close the windows rather than calling `quit()`: `GtkApplication::quit` tears the process
+    /// down without emitting `close-request`, which is where unsaved buffers get written and
+    /// where a failed save gets to stop the exit. The application ends on its own once the last
+    /// window is gone, so a window that refuses to close also refuses to quit. The command was
+    /// recorded before the windows go: the session is written by each window's own
+    /// `close-request`, which runs after this and carries the entry with it.
+    fn quit(self: &Rc<Self>, gtk_app: &adw::Application) {
+        for window in gtk_app.windows() {
+            window.close();
+        }
     }
 
     /// The [`App`] behind a window, for the app-scoped actions: they are fired at the application
@@ -334,8 +310,11 @@ impl Shell {
         root: PathBuf,
         note: Option<String>,
     ) {
-        if let Some(window) = self.window_for(&root) {
-            window.present();
+        if let Some(app) = self.app_for(&root) {
+            app.window.present();
+            if let Some(note) = note {
+                app.open_path(&note);
+            }
             return;
         }
         self.add_window(gtk_app, Some(root), note);
@@ -491,12 +470,12 @@ impl Shell {
         into.close_page(page);
     }
 
-    fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
+    fn app_for(&self, root: &Path) -> Option<Rc<App>> {
         let windows = self.windows.borrow();
         let (_, app) = windows
             .iter()
             .find(|(path, _)| path.as_deref() == Some(root))?;
-        Some(app.window.clone())
+        Some(app.clone())
     }
 
     /// Open `path` wherever it belongs: in the window whose vault contains it, or in the one

@@ -51,7 +51,7 @@ impl App {
                     self.ask_overwrite(tab);
                 }
             }
-            Err(e) => self.toast(&format!("Save failed: {e}")),
+            Err(e) => self.cannot("save", e),
         }
     }
 
@@ -146,7 +146,7 @@ impl App {
             return false;
         }
         if let Err(e) = tab.reload_keep_cursor() {
-            self.toast(&format!("Reload failed: {e}"));
+            self.cannot("reload", e);
         }
         // A reload writes the buffer without an edit event, so the count and the dot are asked
         // for here rather than waiting for the next keystroke.
@@ -181,7 +181,7 @@ impl App {
                 "compare" => app.compare_with_disk(&tab),
                 "overwrite" => match app.write_tab(&tab, None) {
                     Ok(()) => app.toast("Overwritten"),
-                    Err(e) => app.toast(&format!("Save failed: {e}")),
+                    Err(e) => app.cannot("save", e),
                 },
                 _ => {}
             },
@@ -229,7 +229,7 @@ impl App {
                     "overwrite" => match app.write_tab(&tab, None) {
                         Ok(()) => true,
                         Err(e) => {
-                            app.toast(&format!("Save failed: {e}"));
+                            app.cannot("save", e);
                             false
                         }
                     },
@@ -270,7 +270,7 @@ impl App {
             Some(Alert::Compare) => self.compare_with_disk(tab),
             Some(Alert::Restore) => match self.write_tab(tab, None) {
                 Ok(()) => self.toast("Saved"),
-                Err(e) => self.toast(&format!("Save failed: {e}")),
+                Err(e) => self.cannot("save", e),
             },
             // Looked up again rather than remembered: the copy may have been resolved from
             // another window, or by Syncthing, since the banner went up.
@@ -335,7 +335,7 @@ impl App {
                     Err(SaveError::ChangedOnDisk { .. }) => {
                         app.toast(&format!("{} changed on disk again", tab.rel()));
                     }
-                    Err(e) => app.toast(&format!("Save failed: {e}")),
+                    Err(e) => app.cannot("save", e),
                 }
             }
         ));
@@ -413,7 +413,7 @@ impl App {
                     tab.leave_compare();
                     let Some(vault) = app.vault() else { return };
                     if let Err(e) = vault.adopt_conflict(&original, &conflict) {
-                        return app.toast(&format!("Cannot resolve: {e:#}"));
+                        return app.cannot("resolve", e);
                     }
                     tab.discard();
                     app.refresh_tab(&tab);

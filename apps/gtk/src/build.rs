@@ -273,6 +273,7 @@ pub fn build_window(
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
         refresh: RefCell::new(None),
+        pdf_links: RefCell::new(None),
         session: RefCell::new(None),
         recent_notes: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
@@ -531,11 +532,8 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             let Some(app) = set_tree.upgrade() else {
                 return;
             };
-            let mut config = app.config.borrow_mut();
-            config.git_tree = on;
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
+            app.config.borrow_mut().git_tree = on;
+            settings::save(&app.config.borrow());
         }),
     })
 }
@@ -630,11 +628,8 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         }),
         open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
-            app.open_path(rel);
-            if !stops.is_empty() {
-                let stops = stops.to_vec();
-                app.on_tab(rel.to_string(), move |tab| tab.place_stops(&stops));
-            }
+            let stops = stops.to_vec();
+            app.with_tab(rel, Opened::Kept, move |_, tab| tab.place_stops(&stops));
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {

@@ -3,12 +3,6 @@
 
 use super::*;
 
-/// A jump into a file that is not open yet waits for the read: how often it looks for the tab,
-/// and how many times before it gives up. 300 ms in all, which is five times the ~60 ms a read
-/// from the remote vault this was developed against costs.
-const OPEN_POLL: Duration = Duration::from_millis(30);
-const OPEN_TRIES: usize = 10;
-
 /// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
 const REFERENCES: Duration = Duration::from_millis(300);
 
@@ -123,36 +117,17 @@ impl App {
         let (path, anchor) = split_pdf_anchor(&loc.path);
         let (key, at) = (path.to_string(), loc.range.start);
         self.mark();
-        match doc::is_loose_key(&key) {
-            // Outside the vault: the same door a file dropped on the window comes through, and
-            // the tab it opens gets no language server of its own.
-            true => self.open_path(&key),
-            false => self.open_preview(&key),
-        }
+        // Outside the vault: the same door a file dropped on the window comes through, and the
+        // tab it opens gets no language server of its own.
+        let how = match doc::is_loose_key(&key) {
+            true => Opened::Kept,
+            false => Opened::Preview,
+        };
         if anchor.is_some() {
+            self.open_as(&key, how);
             return self.show_pdf_anchor(&key, anchor);
         }
-        self.on_tab(key, move |tab| tab.goto_pos(at));
-    }
-
-    /// Do something to the tab holding `key`, once there is one.
-    ///
-    /// The one door for every jump that follows an open. A file that is not open yet is read on a
-    /// worker thread, so its tab arrives a turn or two later; this waits for it rather than
-    /// dropping the jump on the floor, and gives up rather than waiting on a file that will not
-    /// open at all.
-    pub fn on_tab(self: &Rc<Self>, key: String, f: impl Fn(&Rc<Tab>) + 'static) {
-        let weak = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
-            for _ in 0..OPEN_TRIES {
-                let Some(app) = weak.upgrade() else { return };
-                if let Some(tab) = app.tab_for(&key) {
-                    return f(&tab);
-                }
-                drop(app);
-                glib::timeout_future(OPEN_POLL).await;
-            }
-        });
+        self.with_tab(&key, how, move |_, tab| tab.goto_pos(at));
     }
 }
 

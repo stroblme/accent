@@ -35,21 +35,25 @@ impl App {
         self.open_as(key, Opened::Preview);
     }
 
-    fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
+    pub fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
-            // A session pointing at a file that has since been deleted lands here too, and
-            // "outside this vault" would be the wrong thing to say about it.
-            return match self.root().join(key).exists() {
-                true => self.toast(&format!("{key} is outside this vault")),
-                false => self.toast(&format!("Cannot open {key}: no such file")),
-            };
+            self.awaiting.borrow_mut().remove(key);
+            // Deleted since the session named it, or never in this vault: the vault has answered
+            // the same way for both, and this machine's disk cannot tell them apart for a remote.
+            return self.cannot(&format!("open {key}"), "not in this vault");
         };
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
+            self.awaiting.borrow_mut().remove(&key);
             return self.reveal_page(doc.page());
         }
-        match doc::kind_of(&key) {
+        let kind = doc::kind_of(&key);
+        // Only text becomes a `Tab`, so anything else has nothing for a waiting closure to run on.
+        if !matches!(kind, Kind::Note | Kind::Text) {
+            self.awaiting.borrow_mut().remove(&key);
+        }
+        match kind {
             Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
@@ -113,7 +117,10 @@ impl App {
             }
             match read {
                 Ok(read) => app.adopt_text(&key, read, flavour, how),
-                Err(_) => tracing::warn!("the reader panicked on {key}"),
+                Err(_) => {
+                    app.awaiting.borrow_mut().remove(&key);
+                    tracing::warn!("the reader panicked on {key}");
+                }
             }
         });
     }
@@ -151,7 +158,10 @@ impl App {
                     how,
                 );
             }
-            Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
+            Err(e) => {
+                self.awaiting.borrow_mut().remove(key);
+                return self.cannot(&format!("open {key}"), e);
+            }
         };
         let prefs = self.prefs();
         let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
@@ -261,9 +271,8 @@ impl App {
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
     }
 
@@ -285,7 +294,7 @@ impl App {
     /// the template's `{{title}}` means.
     pub fn insert_template(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
-            return self.toast("Open a note to insert a template into");
+            return self.cannot("insert a template", "no note is open");
         };
         let Some(ops) = self.need_ops("insert a template") else {
             return;
@@ -307,11 +316,11 @@ impl App {
     /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
     pub fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
-            return self.toast("Open a note to put a sketch in");
+            return self.cannot("add a sketch", "no note is open");
         };
         let rel = tab.rel();
         if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
-            return self.toast("A sketch needs a note in a local vault");
+            return self.needs_vault("add a sketch");
         }
         let Some(vault) = self.vault() else { return };
         // Beside the note, numbered from one: there is no attachments directory to put it in, and
@@ -333,14 +342,14 @@ impl App {
 
         let bytes = match accent_core::pdf::blank_pdf() {
             Ok(bytes) => bytes,
-            Err(e) => return self.toast(&format!("Cannot make a sketch: {e:#}")),
+            Err(e) => return self.cannot("make a sketch", e),
         };
         let path = match vault.resolve(&key) {
             Ok(path) => path,
-            Err(e) => return self.toast(&format!("Cannot make a sketch: {e}")),
+            Err(e) => return self.cannot("make a sketch", e),
         };
         if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
-            return self.toast(&format!("Cannot write {key}: {e}"));
+            return self.cannot(&format!("write {key}"), e);
         }
 
         tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
@@ -359,7 +368,7 @@ impl App {
         let Some(pdf) = self.active_pdf() else { return };
         if showing && !self.pdf_is_writable(&pdf) {
             self.drawing_button.set_active(false);
-            return self.toast("Drawing needs a local vault");
+            return self.needs_vault("draw on a PDF");
         }
         self.drawing.set(showing);
         self.drawing_button.set_active(showing);
@@ -377,7 +386,7 @@ impl App {
     pub fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
         let Some(pdf) = self.active_pdf() else { return };
         if !self.pdf_is_writable(&pdf) {
-            return self.toast("Drawing needs a local vault");
+            return self.needs_vault("draw on a PDF");
         }
         let wanted = match pdf.mode() == mode {
             true => pdfview::Mode::Select,
@@ -400,14 +409,10 @@ impl App {
     /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
     fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
-        let config = self.config.borrow().clone();
-        if let Err(e) = config.save() {
-            tracing::warn!("saving config: {e:#}");
-        }
-        for doc in self.docs() {
-            if let Some(pdf) = doc.pdf() {
-                pdf.set_drawing_config(config.drawing.clone());
-            }
+        let config = self.config.borrow();
+        settings::save(&config);
+        for pdf in self.pdfs() {
+            pdf.set_drawing_config(config.drawing.clone());
         }
     }
 
@@ -435,7 +440,7 @@ impl App {
     pub fn export_highlights(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
         if !self.pdf_is_writable(&pdf) {
-            return self.toast("Exporting highlights needs a local vault");
+            return self.needs_vault("export highlights");
         }
         pdf.export_highlights(theme::accent_rgb());
     }
@@ -443,7 +448,7 @@ impl App {
     /// What an export came back with.
     fn exported(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, result: Result<usize, String>) {
         match result {
-            Err(e) => self.toast(&format!("Cannot export: {e}")),
+            Err(e) => self.cannot("export", e),
             Ok(0) => self.toast("Nothing new to export"),
             Ok(n) => {
                 let name = doc::file_name(&pdf.key()).to_string();
@@ -480,25 +485,31 @@ impl App {
     // is a highlight that appears a third of a second after the note is written; an
     // `Event::Indexed` from the worker is the upgrade.
     pub fn sync_pdf_links_soon(self: &Rc<Self>) {
-        if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
+        if self.pdfs().is_empty() {
             return;
         }
-        glib::timeout_add_local_once(
+        // One timer, restarted: a burst of watcher events is one query per PDF, not one per event.
+        if let Some(id) = self.pdf_links.borrow_mut().take() {
+            id.remove();
+        }
+        let id = glib::timeout_add_local_once(
             std::time::Duration::from_millis(300),
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move || app.sync_all_pdf_links()
+                move || {
+                    *app.pdf_links.borrow_mut() = None;
+                    app.sync_all_pdf_links();
+                }
             ),
         );
+        *self.pdf_links.borrow_mut() = Some(id);
     }
 
     /// The same for every open PDF, after something changed the notes.
     fn sync_all_pdf_links(&self) {
-        for doc in self.docs() {
-            if let Doc::Pdf(pdf) = doc {
-                self.sync_pdf_links(&pdf);
-            }
+        for pdf in self.pdfs() {
+            self.sync_pdf_links(&pdf);
         }
     }
 
@@ -555,6 +566,7 @@ impl App {
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
     /// sentence and at most one button).
     fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
+        self.awaiting.borrow_mut().remove(key);
         let key = key.to_string();
         let status = adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
@@ -616,9 +628,8 @@ impl App {
             self.zoom.get(),
         );
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        self.tabs().set_selected_page(&tab.page);
+        self.select_new_page(&tab.page);
         self.mark_opened(&tab.page, Opened::Preview);
-        self.sync_active();
         tab
     }
 
@@ -639,9 +650,8 @@ impl App {
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
         self.docs.borrow_mut().push(wrap(viewer.clone()));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
         viewer
     }
@@ -653,17 +663,17 @@ impl App {
     /// the note opens as a preview and the next such click takes the same tab.
     pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.mark();
-        self.open_preview(rel);
-        if let Some(at) = at {
-            self.select_when_open(rel, at);
+        match at {
+            Some(at) => self.select_when_open(rel, at),
+            None => self.open_preview(rel),
         }
     }
 
     /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
     /// followed link.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
-        self.on_tab(rel.to_string(), move |tab| {
-            if let Some(chars) = char_range(&tab.text(), at.clone()) {
+        self.with_tab(rel, Opened::Preview, move |_, tab| {
+            if let Some(chars) = char_range(&tab.text(), at) {
                 tab.goto_range(chars);
             }
         });
@@ -712,7 +722,7 @@ impl App {
                             unsaved,
                         ));
                     }
-                    Ok(Err(e)) => app.toast(&format!("Cannot replace: {e:#}")),
+                    Ok(Err(e)) => app.cannot("replace", e),
                     Err(_) => tracing::warn!("the replace worker panicked"),
                 }
             }
@@ -736,7 +746,7 @@ impl App {
                 self.show_pdf_anchor(&rel, anchor);
             }
             Ok(None) => self.toast(&format!("No note called {target}")),
-            Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
+            Err(e) => self.cannot(&format!("resolve {target}"), e),
         }
     }
 
@@ -925,18 +935,31 @@ impl App {
         let page = tab.page.clone();
         self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
-        self.tabs().set_selected_page(&page);
+        self.select_new_page(&page);
         self.mark_opened(&page, how);
-        self.sync_active();
         self.save_session_soon();
         if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
             waiting(self, &tab);
         }
     }
 
+    /// Put a page that has just been added to the active pane in front.
+    ///
+    /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
+    /// pane is selected as it is added, before its document is in `docs`, so that one gets no
+    /// notify from here and is synced by hand instead.
+    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage) {
+        let tabs = self.tabs();
+        match tabs.selected_page().as_ref() == Some(page) {
+            true => self.sync_active(),
+            false => tabs.set_selected_page(page),
+        }
+    }
+
     /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
     /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
-    /// text never gets there, and its `f` is simply never run.
+    /// text never gets there, and its `f` is dropped where that is decided, so it cannot run on
+    /// a later open of the same key.
     pub fn with_tab(
         self: &Rc<Self>,
         key: &str,
