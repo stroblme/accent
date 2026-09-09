@@ -404,6 +404,8 @@ fn thin_catmull_rom_and_hit() {
     assert_eq!(thin(&pts, 1.0), vec![(0.0, 0.0), (3.0, 0.0)]);
     // A stroke that never moved is a dot, not an empty path.
     assert_eq!(thin(&[(1.0, 2.0), (1.0, 2.0)], 1.0), vec![(1.0, 2.0)]);
+    // No points is no curve, rather than an underflow.
+    assert!(catmull_rom(&[]).is_empty());
     assert!(thin(&[], 1.0).is_empty());
 
     // Three points on a line give two segments that stay on it and end where they should.

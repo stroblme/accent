@@ -388,11 +388,15 @@ impl PdfView {
     /// to the fresh list, or to the list's end after a move, or goes if the stroke did.
     pub fn set_inks(&self, page: usize, inks: Vec<accent_core::pdf::InkShape>) {
         {
+            // A move that the thread could not make leaves the page exactly as the widget last
+            // saw it, and the stroke where it was: the list itself says which happened, so a
+            // failed move no longer hands the selection to whatever sits at the end.
+            let landed = self.imp().inks.borrow().get(&page) != Some(&inks);
             let mut adjust = self.imp().adjust.borrow_mut();
             if let Some(a) = adjust.as_ref()
                 && a.page == page
             {
-                let fresh = match self.imp().reselect.replace(false) {
+                let fresh = match self.imp().reselect.replace(false) && landed {
                     true => inks.last(),
                     false => inks.iter().find(|i| i.index == a.index),
                 };
