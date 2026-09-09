@@ -597,6 +597,11 @@ impl PdfTab {
         self.emit(&self.on_mode);
     }
 
+    /// What the preferences say about the tools.
+    pub fn set_drawing_config(&self, config: accent_core::config::DrawingConfig) {
+        self.view.set_drawing_config(config);
+    }
+
     /// Show or hide the ring of tools.
     pub fn set_drawing(&self, showing: bool, at: Option<(f64, f64)>) {
         self.ring.set_visible(showing, at);
