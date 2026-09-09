@@ -209,6 +209,17 @@ pub struct Tab {
     pub lang: lang::State,
 }
 
+/// Where a reload has to put the reader back: the caret, and the line at the top of the view with
+/// where that line sat, so the same text goes back under the same edge however far the new bytes
+/// move it.
+#[derive(Clone, Copy)]
+struct Anchor {
+    offset: i32,
+    top_line: i32,
+    top_y: i32,
+    scrolled: f64,
+}
+
 /// A buffer and a view over `text`, set up for `flavour`: what the editor and a comparison's
 /// read-only companion have in common, so the two sides of a diff render one note alike.
 fn build(
@@ -792,50 +803,74 @@ impl Tab {
     }
 
     /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
-    pub fn reload_keep_cursor(self: &Rc<Self>) -> std::io::Result<()> {
-        let offset = caret(&self.buffer).offset();
-        // Where the page is, kept alongside the caret: the scroll position, and the line at the
-        // top of the view with where that line sits in the buffer, so the same text goes back
-        // under the same edge however far the reload moves it. Replacing the buffer empties it,
-        // which drops the view to line one, and a scroll to the caret from there parks it
+    ///
+    /// The bytes are read on a worker thread, the way `open.rs` reads a file into a new tab: a
+    /// watcher can fire this on any file, and a synchronous read of a large one held the window
+    /// for as long as the disk took. `done` is told how it ended, once.
+    pub fn reload_keep_cursor(
+        self: &Rc<Self>,
+        done: impl Fn(&Rc<Tab>, std::io::Result<()>) + 'static,
+    ) {
+        // Where the caret and the page are, measured before the read: replacing the buffer empties
+        // it, which drops the view to line one, and a scroll to the caret from there parks it
         // against whichever edge is nearer instead of putting the page back.
         let (top_iter, _) = self.view.line_at_y(self.view.visible_rect().y());
-        let (top_line, top_y) = (top_iter.line(), self.view.line_yrange(&top_iter).0);
-        let scrolled = self.view.vadjustment().map_or(0.0, |v| v.value());
-        let text = match fs::read_text(&self.path())? {
-            fs::Read::Text(text) => text,
-            // It stopped being text while we had it open. The buffer keeps the last readable
-            // version rather than showing the user a screen of replacement characters.
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "not text any more",
-                ));
-            }
+        let anchor = Anchor {
+            offset: caret(&self.buffer).offset(),
+            top_line: top_iter.line(),
+            top_y: self.view.line_yrange(&top_iter).0,
+            scrolled: self.view.vadjustment().map_or(0.0, |v| v.value()),
         };
+        let path = self.path();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking(move || fs::read_text(&path)).await;
+            let Some(tab) = weak.upgrade() else { return };
+            let text = match read {
+                Ok(Ok(fs::Read::Text(text))) => text,
+                // It stopped being text while we had it open. The buffer keeps the last readable
+                // version rather than showing the user a screen of replacement characters.
+                Ok(Ok(_)) => {
+                    return done(
+                        &tab,
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "not text any more",
+                        )),
+                    );
+                }
+                Ok(Err(e)) => return done(&tab, Err(e)),
+                Err(_) => return done(&tab, Err(std::io::Error::other("the reader panicked"))),
+            };
+            tab.adopt_reload(text, anchor);
+            done(&tab, Ok(()));
+        });
+    }
+
+    /// Put a reload's text in the buffer and the reader back where they were looking.
+    fn adopt_reload(self: &Rc<Self>, text: fs::Text, anchor: Anchor) {
         self.crlf.set(text.crlf);
         self.lossy.set(text.lossy);
         let etag = text.etag;
         self.set_text(&text.text);
         let iter = self
             .buffer
-            .iter_at_offset(offset.min(self.buffer.char_count()));
+            .iter_at_offset(anchor.offset.min(self.buffer.char_count()));
         self.buffer.place_cursor(&iter);
         // One idle later, because the buffer has only just been replaced: a position measured
         // against lines the view has not laid out yet lands short of the line it was given.
         let (view, buffer) = (self.view.clone(), self.buffer.clone());
         glib::idle_add_local_once(move || {
             let iter = buffer
-                .iter_at_line(top_line.min(buffer.line_count() - 1))
+                .iter_at_line(anchor.top_line.min(buffer.line_count() - 1))
                 .unwrap_or_else(|| buffer.end_iter());
-            let moved = view.line_yrange(&iter).0 - top_y;
+            let moved = view.line_yrange(&iter).0 - anchor.top_y;
             if let Some(vadjustment) = view.vadjustment() {
-                vadjustment.set_value(scrolled + f64::from(moved));
+                vadjustment.set_value(anchor.scrolled + f64::from(moved));
             }
         });
         self.mark_clean(etag);
         self.clear_disk_alert();
-        Ok(())
     }
 
     pub fn restyle(&self) {
