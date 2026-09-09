@@ -18,7 +18,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
@@ -52,8 +52,6 @@ pub struct Remote {
     ghost: Mutex<bool>,
     client: Mutex<Option<Arc<Client>>>,
     state: Mutex<State>,
-    /// Woken when `state` changes, so a call made while connecting waits rather than failing.
-    ready: Condvar,
     child: Mutex<Option<Child>>,
     events: Sender<Event>,
 }
@@ -70,7 +68,6 @@ impl Remote {
             ghost: Mutex::new(true),
             client: Mutex::new(None),
             state: Mutex::new(State::Connecting),
-            ready: Condvar::new(),
             child: Mutex::new(None),
             events,
         });
@@ -141,22 +138,26 @@ impl Remote {
         answer
     }
 
+    /// The client, or why there is not one.
+    ///
+    /// A call made while the link is still being established is refused on the spot rather than
+    /// made to wait for it. The wait used to be up to [`crate::rpc::DEADLINE`], and the caller is
+    /// as often as not the GTK main loop, so a slow host froze the window it had just opened — and
+    /// an upload longer than the deadline made every call fail anyway, saying "not connected"
+    /// about a connection that was still being made. The UI hears [`Event::Connected`] and asks
+    /// again; there is nothing here worth blocking a frame for.
     fn wait_for_client(&self) -> Result<Arc<Client>, RpcError> {
-        let mut state = self.locked(&self.state);
-        while *state == State::Connecting {
-            let (guard, timeout) = self
-                .ready
-                .wait_timeout(state, crate::rpc::DEADLINE)
-                .unwrap_or_else(|e| e.into_inner());
-            state = guard;
-            if timeout.timed_out() {
-                break;
+        match &*self.locked(&self.state) {
+            State::Connecting => {
+                return Err(RpcError {
+                    code: crate::rpc::CONNECTING,
+                    message: "still connecting".to_string(),
+                    data: None,
+                });
             }
+            State::Disconnected(why) => return Err(RpcError::failed(why)),
+            State::Connected => {}
         }
-        if let State::Disconnected(why) = &*state {
-            return Err(RpcError::failed(why));
-        }
-        drop(state);
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
             None => Err(RpcError::failed("not connected")),
@@ -311,7 +312,6 @@ impl Remote {
             .spawn(move || match self.connect() {
                 Ok(()) => {
                     *self.locked(&self.state) = State::Connected;
-                    self.ready.notify_all();
                     let _ = self.events.send(Event::Connected);
                 }
                 Err(e) => self.disconnect(&e),
@@ -338,7 +338,6 @@ impl Remote {
         }
         *state = State::Disconnected(why.to_string());
         drop(state);
-        self.ready.notify_all();
         let _ = self.events.send(Event::Disconnected(why.to_string()));
     }
 

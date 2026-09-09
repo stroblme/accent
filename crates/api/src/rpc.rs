@@ -41,6 +41,9 @@ pub const CHANGED_ON_DISK: i64 = -32001;
 pub const IO: i64 = -32002;
 /// Everything else, already formatted for a human.
 pub const FAILED: i64 = -32000;
+/// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
+/// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
+pub const CONNECTING: i64 = -32003;
 
 /// What the far end said instead of an answer.
 #[derive(Debug, Clone)]
@@ -59,6 +62,11 @@ impl std::fmt::Display for RpcError {
 impl std::error::Error for RpcError {}
 
 impl RpcError {
+    /// Whether the far end was merely not there yet, which is a wait rather than a failure.
+    pub fn is_connecting(&self) -> bool {
+        self.code == CONNECTING
+    }
+
     pub(crate) fn failed(message: impl std::fmt::Display) -> RpcError {
         RpcError {
             code: FAILED,

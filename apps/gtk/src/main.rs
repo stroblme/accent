@@ -262,6 +262,10 @@ struct App {
     /// Whether a reconcile has finished, so the index can be trusted for backlinks. A real flag
     /// rather than the status label, which is also hidden before the first `Progress` arrives.
     reconciled: Cell<bool>,
+    /// Whether the stored tabs have been put back. A remote vault answers nothing until it is
+    /// connected, so its window waits for `Event::Connected` to restore them, and this is what
+    /// keeps a later reconnect from restoring them a second time over the tabs already open.
+    restored: Cell<bool>,
     /// The tab `setup-menu` named, so the tab context menu acts on the page that was
     /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
     /// what makes the same actions work from the palette.
@@ -306,6 +310,15 @@ impl App {
         self.vault()
             .and_then(|v| v.remote().map(|r| r.url().host.clone()))
             .unwrap_or_default()
+    }
+
+    /// Whether this window's vault is one on another machine that has not answered yet. Nothing
+    /// it holds can be read while that is true, and everything asked for while it was is asked
+    /// again on `Event::Connected`.
+    fn connecting(&self) -> bool {
+        self.vault()
+            .and_then(|v| v.remote())
+            .is_some_and(|r| r.state() == accent_api::remote::State::Connecting)
     }
 
     /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
@@ -958,8 +971,16 @@ impl App {
     /// or a re-read from disk can have changed.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
-            vault.set_config(config.vault(&self.root()));
-            vault.set_ghost(config.ghost_text);
+            // Both of these are a `hello` round trip on a remote vault, and this runs from the
+            // preferences dialog, on the main loop. Sent from a worker and not waited for: the
+            // server takes the config on `hello` too, so one that does not land is corrected by
+            // the next connection rather than lost.
+            let (vault, vault_config, ghost) =
+                (vault.clone(), config.vault(&self.root()), config.ghost_text);
+            gio::spawn_blocking(move || {
+                vault.set_config(vault_config);
+                vault.set_ghost(ghost);
+            });
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.

@@ -271,6 +271,7 @@ pub fn build_window(
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
         reconciled: Cell::new(false),
+        restored: Cell::new(false),
         menu_page: RefCell::new(None),
         tree_painted: Cell::new(0),
         refresh: RefCell::new(None),
@@ -326,7 +327,12 @@ pub fn build_window(
             {
                 tracing::warn!("saving config: {e:#}");
             }
-            app.restore_session();
+            // A remote vault that is still connecting has nothing to read a tab out of yet, so
+            // the restore waits for `Event::Connected` rather than filling the window with
+            // failures. Everything else restores here, before the first frame anyone looks at.
+            if !app.connecting() {
+                app.restore_session();
+            }
             if let Some(rel) = note {
                 app.open_path(&rel);
             }
