@@ -6784,6 +6784,9 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind.
+/// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
+/// highlight made of each selection, plus the two match colours and the priorities of the tags
+/// they are painted with.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6798,6 +6801,7 @@ fn install_bench_hooks(app: &Rc<App>) {
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
+    let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -6805,6 +6809,7 @@ fn install_bench_hooks(app: &Rc<App>) {
         && compare.is_none()
         && pdf.is_none()
         && tabs.is_none()
+        && occur.is_none()
         && !git
         && !keys
         && !chrome
@@ -6828,6 +6833,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rels) = tabs {
             return bench_tabs(&app, &rels);
+        }
+        if let Some(rel) = occur {
+            return bench_occurrences(&app, &rel);
         }
         if shell_keys {
             return bench_shell_keys(&app);
@@ -7400,6 +7408,127 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
     tab.buffer
         .iter_at_line(line)
         .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// Select things in the note at `rel` and print what the muted occurrence highlight made of each:
+/// the query it took and the character ranges it painted. Then open the find bar on the same word,
+/// so the last lines say what happens where a find-bar match and a muted occurrence land on the
+/// same text: both tags are on it, and the find bar's is the higher priority of the two.
+///
+/// The buffer is filled with text of its own first: the ranges are the point, and they have to be
+/// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
+/// well inside the one-second autosave.
+fn bench_occurrences(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        // ASCII throughout, so the byte offset `find` gives is also the character offset the
+        // buffer counts in.
+        let text = "Alpha beta alpha\ngamma ALPHA delta\nx y\n";
+        tab.set_text(text);
+        let (find_colour, muted_colour) = tab.match_colours();
+        println!("bench occur colours find={find_colour:?} muted={muted_colour:?}");
+
+        for (label, selected) in [
+            // Two characters, and the three occurrences differ in case: the shortest selection
+            // that highlights anything, matched the way the find bar matches.
+            ("two_chars", "al"),
+            ("word", "beta"),
+            // A selection whose own case is the odd one out still finds the other two.
+            ("cased", "ALPHA"),
+            // Neither of these highlights anything.
+            ("one_char", "x"),
+            ("multi_line", "alpha\ngamma"),
+        ] {
+            let at = text.find(selected).expect("bench needle") as i32;
+            tab.buffer.select_range(
+                &tab.buffer.iter_at_offset(at),
+                &tab.buffer
+                    .iter_at_offset(at + selected.chars().count() as i32),
+            );
+            let (query, tag) = tab.occurrence_highlight();
+            println!(
+                "bench occur case={label} select={selected:?} query={query:?} at={:?}",
+                bench_tag_ranges(&tab, &tag)
+            );
+        }
+
+        // Both highlights on the same word. The find bar's tag has to be the higher priority of
+        // the two, or the muted hint would paint over the match the user is stepping through —
+        // and it has to stay that way across an edit, which is when gtksourceview re-raises its
+        // own tag.
+        tab.set_query("al");
+        tab.set_highlight(true);
+        bench_pump();
+        let at = text.find("al").expect("bench needle") as i32;
+        tab.buffer.select_range(
+            &tab.buffer.iter_at_offset(at),
+            &tab.buffer.iter_at_offset(at + 2),
+        );
+        let (_, muted) = tab.occurrence_highlight();
+        let find = bench_search_tag(&tab, find_colour.as_deref());
+        println!(
+            "bench occur overlap find={:?} muted={:?}",
+            find.as_ref()
+                .map(|tag| bench_tag_ranges(&tab, tag))
+                .unwrap_or_default(),
+            bench_tag_ranges(&tab, &muted)
+        );
+        for what in ["unedited", "edited"] {
+            println!(
+                "bench occur priority {what} find={:?} muted={}",
+                bench_search_tag(&tab, find_colour.as_deref()).map(|tag| tag.priority()),
+                muted.priority()
+            );
+            tab.buffer.insert(&mut tab.buffer.end_iter(), "al\n");
+            bench_pump();
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Turn the main loop until it has nothing left to dispatch. The find bar's own highlight is
+/// scanned on an idle, so its tag is on nothing at all the instant its query is set.
+fn bench_pump() {
+    let context = glib::MainContext::default();
+    for _ in 0..10_000 {
+        if !context.iteration(false) {
+            return;
+        }
+    }
+}
+
+/// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps
+/// that tag to itself, and the scheme's `search-match` background is what it was given.
+fn bench_search_tag(tab: &Rc<Tab>, colour: Option<&str>) -> Option<gtk::TextTag> {
+    let wanted = gdk::RGBA::parse(colour?).ok()?;
+    let mut found = None;
+    tab.buffer.tag_table().foreach(|tag| {
+        if found.is_none() && tag.is_background_set() && tag.background_rgba() == Some(wanted) {
+            found = Some(tag.clone());
+        }
+    });
+    found
+}
+
+/// Where `tag` is on, as character offsets.
+fn bench_tag_ranges(tab: &Rc<Tab>, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
+    let mut ranges = Vec::new();
+    let mut iter = tab.buffer.start_iter();
+    loop {
+        if !iter.starts_tag(Some(tag)) && !iter.forward_to_tag_toggle(Some(tag)) {
+            return ranges;
+        }
+        let start = iter.offset();
+        if !iter.forward_to_tag_toggle(Some(tag)) {
+            ranges.push((start, tab.buffer.end_iter().offset()));
+            return ranges;
+        }
+        ranges.push((start, iter.offset()));
+    }
 }
 
 /// A shell focused in a window that does not have the keyboard must not narrow the application's
