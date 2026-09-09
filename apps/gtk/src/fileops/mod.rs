@@ -53,8 +53,9 @@ pub struct Ops {
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
-    /// Save any dirty tab for these paths before the file moves under them, and reload the ones
-    /// listed afterwards. Called with the notes a rename is about to rewrite.
+    /// Save any dirty tab at or under these paths before the file moves under them, and reload
+    /// the ones listed afterwards. Called with the notes a rename is about to rewrite, and with
+    /// the folder a trash or a move is about to take: a path here is a subtree, not only a key.
     pub flush: Box<dyn Fn(&[String])>,
     /// Reload these paths' tabs from disk, returning how many were left alone because their
     /// buffer still holds unsaved edits (those get the changed-on-disk banner instead).
@@ -464,8 +465,9 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
     let path = ops.vault.root().join(rel);
     let name = basename(rel).to_string();
     let (ops, rel) = (ops.clone(), rel.to_string());
-    // What lands in the trash should be what the user last saw, so a dirty tab is written out
-    // before the file moves. Whatever cannot be written stays visible in its tab's banner.
+    // What lands in the trash should be what the user last saw, so every dirty tab under it is
+    // written out before the file moves — a folder takes the notes inside it, and their unsaved
+    // edits used to go with it in silence. Whatever cannot be written stays in its tab's banner.
     (ops.flush)(std::slice::from_ref(&rel));
     // A vault on another machine has no session bus to ask and no trash to ask it about, so the
     // only delete there is is the permanent one — which is exactly the case this already has a

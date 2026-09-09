@@ -655,8 +655,14 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {
             let Some(app) = flush.upgrade() else { return };
-            for rel in rels {
-                if let Some(tab) = app.tab_for(rel).filter(|tab| tab.modified.get()) {
+            // Each path is a subtree and not only a key: a folder on its way to the trash or into
+            // another folder takes every note under it, and their buffers have to be written out
+            // before the file moves. `trashed_with` is the same "is under" the close path asks.
+            for tab in app.open_tabs() {
+                let under = rels
+                    .iter()
+                    .any(|rel| fileops::trashed_with(rel, &tab.rel()));
+                if under && tab.modified.get() {
                     app.save_tab(&tab, false);
                 }
             }
