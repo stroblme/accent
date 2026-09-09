@@ -158,22 +158,9 @@ impl PdfDoc {
         // Control points included: a Bézier stays inside its control polygon, so this box holds
         // the curve without evaluating it.
         let bounds = points_of(segs)
-            .fold(
-                Rect {
-                    left: first.0,
-                    top: first.1,
-                    right: first.0,
-                    bottom: first.1,
-                },
-                |r, (x, y)| {
-                    r.union(Rect {
-                        left: x,
-                        top: y,
-                        right: x,
-                        bottom: y,
-                    })
-                },
-            )
+            .fold(Rect::from_corners(first, first), |r, p| {
+                r.union(Rect::from_corners(p, p))
+            })
             .grow(width / 2.0 + 1.0);
 
         let mut path = PdfPagePathObject::new(

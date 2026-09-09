@@ -480,18 +480,10 @@ impl PdfTab {
         self.ring.at()
     }
 
-    /// What the status bar says while a pen is out, or nothing while one is not.
+    /// What the status bar says while a pen is out, or nothing while one is not. The action's
+    /// own label, so the readout, the ring's tooltip and the palette say one word between them.
     pub fn mode_label(&self) -> Option<&'static str> {
-        match self.view.mode() {
-            pdfview::Mode::Select => None,
-            pdfview::Mode::Pen => Some("Pen"),
-            pdfview::Mode::Highlighter => Some("Highlighter"),
-            pdfview::Mode::Eraser => Some("Eraser"),
-            pdfview::Mode::Line => Some("Line"),
-            pdfview::Mode::Rect => Some("Rectangle"),
-            pdfview::Mode::Circle => Some("Circle"),
-            pdfview::Mode::Adjust => Some("Adjust"),
-        }
+        self.view.mode().action().map(crate::actions::label_of)
     }
 
     /// Called when the pen is picked up or put down.

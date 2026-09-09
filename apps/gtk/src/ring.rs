@@ -44,7 +44,7 @@ impl Choice {
     /// Write the choice for `tool` into the config. The shapes share the pen's style, and the
     /// eraser's width is its reach.
     pub fn apply(self, tool: Mode, config: &mut DrawingConfig) {
-        match (styled(tool), self) {
+        match (tool.style_owner(), self) {
             (Mode::Eraser, Choice::Width(w)) => config.eraser_radius = w,
             (Mode::Eraser, Choice::Colour(_)) => {}
             (Mode::Highlighter, Choice::Width(w)) => config.highlighter_width = w,
@@ -55,28 +55,16 @@ impl Choice {
     }
 }
 
-/// Whose style a tool draws in: its own for the highlighter and the eraser, the pen's for the
-/// pen and every shape.
-fn styled(tool: Mode) -> Mode {
-    match tool {
-        Mode::Highlighter | Mode::Eraser => tool,
-        _ => Mode::Pen,
-    }
-}
-
-/// The tools, in the order they sit on the ring: pen at the top, then clockwise.
-const TOOLS: [(Mode, &str, &str); 7] = [
-    (Mode::Pen, "win.pdf-pen", "tool-pen-symbolic"),
-    (
-        Mode::Highlighter,
-        "win.pdf-highlighter",
-        "tool-highlighter-symbolic",
-    ),
-    (Mode::Eraser, "win.pdf-eraser", "tool-eraser-symbolic"),
-    (Mode::Line, "win.pdf-line", "tool-line-symbolic"),
-    (Mode::Rect, "win.pdf-rect", "tool-rect-symbolic"),
-    (Mode::Circle, "win.pdf-circle", "tool-circle-symbolic"),
-    (Mode::Adjust, "win.pdf-adjust", "tool-adjust-symbolic"),
+/// The tools, in the order they sit on the ring: pen at the top, then clockwise. Each one's
+/// action and label are [`Mode::action`]'s, so a button says what the palette says.
+const TOOLS: [(Mode, &str); 7] = [
+    (Mode::Pen, "tool-pen-symbolic"),
+    (Mode::Highlighter, "tool-highlighter-symbolic"),
+    (Mode::Eraser, "tool-eraser-symbolic"),
+    (Mode::Line, "tool-line-symbolic"),
+    (Mode::Rect, "tool-rect-symbolic"),
+    (Mode::Circle, "tool-circle-symbolic"),
+    (Mode::Adjust, "tool-adjust-symbolic"),
 ];
 
 /// A ring of tool buttons, and the hub that moves it.
@@ -121,12 +109,15 @@ impl Ring {
         place(&root, &hub, centre, centre, BUTTON);
 
         let mut buttons = Vec::new();
-        for (i, (mode, action, icon)) in TOOLS.iter().enumerate() {
+        for (i, (mode, icon)) in TOOLS.iter().enumerate() {
+            let Some(action) = mode.action() else {
+                continue;
+            };
             let (dx, dy) = orbit(i, TOOLS.len(), ORBIT);
             let button = gtk::ToggleButton::builder()
                 .icon_name(*icon)
                 .tooltip_text(crate::actions::label_of(action))
-                .action_name(*action)
+                .action_name(action)
                 .build();
             button.add_css_class("circular");
             button.add_css_class("osd");
@@ -195,7 +186,8 @@ impl Ring {
                 self,
                 move |_| {
                     let tool = ring.tool.get();
-                    if let Some((_, widths)) = WIDTHS.iter().find(|(m, _)| *m == styled(tool)) {
+                    let owner = tool.style_owner();
+                    if let Some((_, widths)) = WIDTHS.iter().find(|(m, _)| *m == owner) {
                         ring.choose(tool, Choice::Width(widths[i]));
                     }
                 }
@@ -236,7 +228,7 @@ impl Ring {
     /// Show the tool in hand's options, checked as the config has them, and nothing for a tool
     /// with none.
     fn sync_options(&self) {
-        let tool = styled(self.tool.get());
+        let tool = self.tool.get().style_owner();
         let config = self.config.borrow();
         let widths = match self.tool.get() {
             Mode::Select | Mode::Adjust => None,

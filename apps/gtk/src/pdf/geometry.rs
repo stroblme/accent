@@ -2,6 +2,8 @@
 //!
 //! Pure, so the arithmetic that decides what is on screen is testable without a display.
 
+use gtk::graphene;
+
 /// Between pages, and around the column. The 12 of DESIGN.md's spacing scale.
 const GAP: f32 = 12.0;
 
@@ -41,6 +43,26 @@ pub struct Layout {
     pub pages: Vec<PageRect>,
     pub width: f32,
     pub height: f32,
+}
+
+impl Layout {
+    /// A point in the scrolled content as a point on `page`, in that page's own points. The one
+    /// definition of the transform; [`Layout::rect_of`] is its inverse.
+    pub fn to_page(&self, page: usize, cx: f32, cy: f32) -> Option<(f32, f32)> {
+        let rect = self.pages.get(page)?;
+        Some(((cx - rect.x) / self.scale, (cy - rect.y) / self.scale))
+    }
+
+    /// A rectangle of `page`, in that page's own points, as one in the scrolled content — what
+    /// every overlay is painted into.
+    pub fn rect_of(&self, page: &PageRect, r: &accent_core::pdf::Rect) -> graphene::Rect {
+        graphene::Rect::new(
+            page.x + r.left * self.scale,
+            page.y + r.top * self.scale,
+            r.width() * self.scale,
+            r.height() * self.scale,
+        )
+    }
 }
 
 /// A reading position that survives a zoom, a resize and a reload: which page, and the fraction
