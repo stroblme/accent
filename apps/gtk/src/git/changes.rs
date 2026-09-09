@@ -3,8 +3,14 @@
 use super::compare::Sides;
 use super::*;
 
-/// How far one level of the changes tree is indented, in px.
-const INDENT: i32 = 12;
+/// How far one level of the changes tree is indented, in px. `GtkTreeExpander`'s own step, so a
+/// folder here sits where the same folder sits in the Files tree.
+const INDENT: i32 = 16;
+
+/// How far a file row is inset past the chevron its folder row leads with, in px: the chevron and
+/// the box's spacing. Without it a file starts under its folder's icon rather than under its name,
+/// and the two read as one column of rows rather than as a tree.
+const FILE_INSET: i32 = 22;
 
 /// Which list a row belongs to, which is what decides the letter it shows, the buttons it offers
 /// and what activating it compares.
@@ -190,7 +196,8 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     header.append(&all);
     header.append(&view);
 
-    // A folder of the tree view: the chevron says whether it is open, the label carries whatever
+    // A folder of the tree view: the chevron says whether it is open, the folder icon says it is
+    // one — the same icon the Files tree gives a directory — and the label carries whatever
     // segments this row adds to the one above it.
     let chevron = gtk::Image::new();
     let folder_name = gtk::Label::builder()
@@ -200,6 +207,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .build();
     let folder = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     folder.append(&chevron);
+    folder.append(&gtk::Image::from_icon_name("folder-symbolic"));
     folder.append(&folder_name);
 
     let entry = file_line();
@@ -331,7 +339,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             depth,
         } => {
             stack.set_visible_child_name("entry");
-            entry.set_margin_start(depth as i32 * INDENT);
+            entry.set_margin_start(inset(depth));
             let directory = match depth {
                 0 => split_name(&e.path).0,
                 _ => "",
@@ -421,6 +429,14 @@ fn rows_of(
         rows.extend(subs.iter().cloned().map(Row::Submodule));
     }
     rows
+}
+
+/// How far in a file row of the tree view starts. Flat rows are not indented at all.
+fn inset(depth: usize) -> i32 {
+    match depth {
+        0 => 0,
+        depth => depth as i32 * INDENT + FILE_INSET,
+    }
 }
 
 /// What identifies a folder row while it is collapsed. The section is part of it because the same
