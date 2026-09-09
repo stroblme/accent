@@ -1,6 +1,7 @@
 # Accent
 
 This is an opinionated text editor which can serve as a knowledge management system and IDE in one software as a result of my personal frustration with Obsidian and VSCode.
+Focusing on speed and efficiency paired with a aggressively minimal design aimed to remove all the clutter.
 
 TODO: some more description
 
