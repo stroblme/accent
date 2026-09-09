@@ -618,13 +618,14 @@ impl PdfTab {
         self.current.set(None);
         self.view.set_marks(std::collections::HashMap::new());
         self.query.set(self.query.get() + 1);
-        if !text.is_empty() {
-            self.ask(Request::Search {
-                query: self.query.get(),
-                text: text.to_string(),
-                from: 0,
-            });
-        }
+        // Sent even when there is nothing to look for: a query of the same kind takes over from
+        // the one running, so this is what stops a search the reader has cleared or closed the
+        // bar on, which used to finish the whole document into replies nobody reads.
+        self.ask(Request::Search {
+            query: self.query.get(),
+            text: text.to_string(),
+            from: 0,
+        });
         self.emit(&self.on_matches);
     }
 
