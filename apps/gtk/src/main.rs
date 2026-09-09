@@ -33,8 +33,7 @@ mod open;
 mod palette;
 mod paned;
 mod panes;
-mod pdftab;
-mod pdfview;
+mod pdf;
 mod preview;
 mod references;
 mod ring;
@@ -70,6 +69,10 @@ use gtk::{gdk, gio, glib, graphene};
 use layout::{Mode, Presenting};
 use open::Opened;
 use panes::{Pane, Place, Side, Spot, Zone};
+// The widget and the tab kept the names the rest of the window calls them by when
+// they moved into `pdf/`.
+pub(crate) use pdf as pdfview;
+pub(crate) use pdf::tab as pdftab;
 use references::{PdfAnchor, char_range, reference_target, split_pdf_anchor};
 use session::Corpus;
 use shell::Shell;

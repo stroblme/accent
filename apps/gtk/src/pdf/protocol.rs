@@ -1,0 +1,119 @@
+//! What crosses the channel between the tab and the thread that renders its document.
+
+use std::collections::HashMap;
+use std::sync::mpsc::Sender;
+
+use accent_api::PdfLink;
+use accent_core::pdf;
+
+use super::cache::{TileKey, Want};
+
+/// Where every note link that highlights a document lands, per page: the quads to paint and the
+/// index of the link each came from.
+pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
+
+/// What the render thread sends back. Every variant is `Send`, because each one travels to the
+/// main loop inside its own idle callback.
+pub enum Reply {
+    Tile(TileKey, accent_core::pdf::RgbaImage),
+    Lowres {
+        page: u32,
+        dark: bool,
+        image: accent_core::pdf::RgbaImage,
+    },
+    Links(usize, Vec<accent_core::pdf::Link>),
+    /// One page's glyphs and their boxes, for selecting text on it.
+    Text(usize, Vec<accent_core::pdf::Glyph>),
+    Outline(Vec<accent_core::pdf::Outline>),
+    /// One page's matches for the query identified by `query`; a later one abandons it.
+    Found {
+        query: u64,
+        page: usize,
+        hits: Vec<Vec<accent_core::pdf::Rect>>,
+    },
+    /// The file was read: these are its page sizes. The first one arrives when the document is
+    /// opened, which is why a tab can be on screen before anything is known about it.
+    Reloaded(Vec<(f32, f32)>),
+    /// Where every note link that highlights this document lands on the page today, and which
+    /// link each one is. The whole map every time, so a stale page cannot survive underneath.
+    Highlights(Highlights),
+    /// An export finished: how many annotations it wrote, or why it could not.
+    Exported(Result<usize, String>),
+    /// Every ink stroke of one page with its box and style, for the Adjust tool to take hold of.
+    Inks {
+        page: usize,
+        inks: Vec<accent_core::pdf::InkShape>,
+    },
+    /// This page's annotations changed, so what is cached of it is of the old page.
+    PageChanged(usize),
+    /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
+    /// write from someone else's and does not reload over strokes drawn since.
+    Saved(accent_core::fs::Etag),
+    /// The document could not be opened at all, with the reason to show in its place.
+    Failed(String),
+}
+
+/// What the render thread is asked for.
+pub enum Request {
+    /// Visible tiles first, then one viewport of prefetch. A newer batch replaces an older one.
+    ///
+    /// The colours are resolved by the caller, not here: `theme.rs` keeps the chosen theme in
+    /// thread-local state, so a render thread asking it would always get the default.
+    Tiles {
+        scale: f32,
+        dark: bool,
+        theme: pdf::Theme,
+        wants: Vec<Want>,
+    },
+    Links(usize),
+    /// The glyphs of one page, so text on it can be selected.
+    Text(usize),
+    Outline,
+    Search {
+        query: u64,
+        text: String,
+        /// The first page still to look at. A query the reader interrupted comes back with this
+        /// moved on, so it finishes the document instead of stopping where it was pushed aside.
+        from: usize,
+    },
+    /// Where the note links that highlight this document land on the page today.
+    Highlights(Vec<PdfLink>),
+    /// Write those links into the file as real `/Highlight` annotations, in `color`.
+    Export {
+        links: Vec<PdfLink>,
+        color: [u8; 3],
+    },
+    /// One free-hand stroke, in that page's own points, drawn the way its tool draws.
+    Ink {
+        page: usize,
+        points: Vec<(f32, f32)>,
+        style: pdf::InkStyle,
+    },
+    /// One shape, drawn the way the pen draws.
+    Shape {
+        page: usize,
+        shape: pdf::Shape,
+        style: pdf::InkStyle,
+    },
+    /// Take off whichever stroke passes within `radius` page points of this point. Whole
+    /// strokes, never part of one.
+    Erase {
+        page: usize,
+        at: (f32, f32),
+        radius: f32,
+    },
+    /// Every ink stroke of a page with its box and style, for the Adjust tool.
+    Inks(usize),
+    /// Move or resize one stroke; it comes back at the end of the page's `/Annots`.
+    Transform {
+        page: usize,
+        index: usize,
+        matrix: pdf::Matrix,
+    },
+    /// Undo the last stroke drawn or move made in this session.
+    Undo,
+    /// Write the drawn-on document out, if anything was drawn since the last time. The channel,
+    /// where there is one, is told when that is done — which is what the window close waits on.
+    Save(Option<Sender<()>>),
+    Reload,
+}
