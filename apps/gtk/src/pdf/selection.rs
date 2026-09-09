@@ -197,11 +197,10 @@ impl PdfTab {
     pub(super) fn link_at(&self, view: &PdfView, x: f64, y: f64) -> Option<LinkTarget> {
         let (page, px, py) = view.page_point(x, y)?;
         let links = self.links.borrow();
-        links.get(&page)?.iter().find_map(|link| {
-            let r = link.rect;
-            let inside = px >= r.left && px <= r.right && py >= r.top && py <= r.bottom;
-            inside.then(|| link.target.clone())
-        })
+        links
+            .get(&page)?
+            .iter()
+            .find_map(|link| link.rect.contains((px, py)).then(|| link.target.clone()))
     }
 }
 
@@ -236,7 +235,7 @@ fn nearest(glyphs: &[pdf::Glyph], (x, y): (f32, f32)) -> Option<usize> {
     let mut best: Option<(f32, usize)> = None;
     for (i, glyph) in glyphs.iter().enumerate() {
         let r = glyph.rect;
-        if x >= r.left && x <= r.right && y >= r.top && y <= r.bottom {
+        if r.contains((x, y)) {
             return Some(i);
         }
         // Distance to the box, zero along an axis the point already lies within.

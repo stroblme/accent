@@ -119,6 +119,21 @@ impl Rect {
         bottom: 0.0,
     };
 
+    /// The rectangle two corners span, in either order: what a drag from `a` to `b` covers.
+    pub fn from_corners(a: (f32, f32), b: (f32, f32)) -> Rect {
+        Rect {
+            left: a.0.min(b.0),
+            top: a.1.min(b.1),
+            right: a.0.max(b.0),
+            bottom: a.1.max(b.1),
+        }
+    }
+
+    /// Whether a point is inside, edges included.
+    pub fn contains(&self, (x, y): (f32, f32)) -> bool {
+        (self.left..=self.right).contains(&x) && (self.top..=self.bottom).contains(&y)
+    }
+
     pub(super) fn from_pdf(r: PdfRect, page_height: f32) -> Self {
         Rect {
             left: r.left().value,
@@ -137,8 +152,9 @@ impl Rect {
         )
     }
 
-    /// The same rectangle with `by` points of room on every side.
-    pub(super) fn grow(self, by: f32) -> Rect {
+    /// The same rectangle with `by` points of room on every side, which is the grip a hit test
+    /// allows itself.
+    pub fn grow(self, by: f32) -> Rect {
         Rect {
             left: self.left - by,
             top: self.top - by,

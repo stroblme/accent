@@ -261,12 +261,10 @@ impl PdfView {
     pub fn highlight_at(&self, x: f64, y: f64) -> Option<usize> {
         let (page, px, py) = self.page_point(x, y)?;
         let highlights = self.imp().highlights.borrow();
-        highlights.get(&page)?.iter().find_map(|(quads, link)| {
-            let inside = quads
-                .iter()
-                .any(|q| (q.left..=q.right).contains(&px) && (q.top..=q.bottom).contains(&py));
-            inside.then_some(*link)
-        })
+        highlights
+            .get(&page)?
+            .iter()
+            .find_map(|(quads, link)| quads.iter().any(|q| q.contains((px, py))).then_some(*link))
     }
 
     /// What a drag over the page does.
@@ -307,7 +305,7 @@ impl PdfView {
     // pressure is the upgrade.
     pub fn ink_style(&self, mode: Mode) -> accent_core::pdf::InkStyle {
         let c = self.imp().style.borrow();
-        let (width, colour, alpha, multiply) = match mode {
+        let (width, colour, alpha, multiply) = match mode.style_owner() {
             Mode::Highlighter => (
                 c.highlighter_width,
                 c.highlighter_color,
@@ -513,14 +511,11 @@ impl PdfView {
     fn point_on(&self, page: usize, x: f64, y: f64) -> (f32, f32) {
         let (cx, cy) = self.content_at(x, y);
         let layout = self.imp().layout.borrow();
-        let (size, rect) = (self.page_size(page), layout.pages.get(page).copied());
-        let Some((rect, (pw, ph))) = rect.zip(size) else {
+        let at = layout.to_page(page, cx, cy);
+        let Some(((x, y), (pw, ph))) = at.zip(self.page_size(page)) else {
             return (0.0, 0.0);
         };
-        (
-            ((cx - rect.x) / layout.scale).clamp(0.0, pw),
-            ((cy - rect.y) / layout.scale).clamp(0.0, ph),
-        )
+        (x.clamp(0.0, pw), y.clamp(0.0, ph))
     }
 
     /// Draw one page again, because what it holds changed — a stroke, an erase, an export.
@@ -661,16 +656,13 @@ impl PdfView {
     pub fn page_point(&self, x: f64, y: f64) -> Option<(usize, f32, f32)> {
         let (cx, cy) = self.content_at(x, y);
         let layout = self.imp().layout.borrow();
-        let (page, rect) = layout
+        let (page, _) = layout
             .pages
             .iter()
             .enumerate()
             .find(|(_, r)| cy >= r.y && cy <= r.y + r.h && cx >= r.x && cx <= r.x + r.w)?;
-        Some((
-            page,
-            (cx - rect.x) / layout.scale,
-            (cy - rect.y) / layout.scale,
-        ))
+        let (x, y) = layout.to_page(page, cx, cy)?;
+        Some((page, x, y))
     }
 
     /// Report the two ends of a drag, each as a page and a point on it.
@@ -697,11 +689,7 @@ impl PdfView {
         let (cx, cy) = self.content_at(x, y);
         let layout = self.imp().layout.borrow();
         let page = page_at(&layout, f64::from(cy));
-        let rect = layout.pages.get(page)?;
-        Some((
-            page,
-            ((cx - rect.x) / layout.scale, (cy - rect.y) / layout.scale),
-        ))
+        Some((page, layout.to_page(page, cx, cy)?))
     }
 
     fn content_at(&self, x: f64, y: f64) -> (f32, f32) {
@@ -1338,29 +1326,13 @@ mod imp {
                 if let Some(page_highlights) = highlights.get(&index) {
                     let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.2);
                     for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
-                        snapshot.append_color(
-                            &colour,
-                            &graphene::Rect::new(
-                                rect.x + quad.left * layout.scale,
-                                rect.y + quad.top * layout.scale,
-                                quad.width() * layout.scale,
-                                quad.height() * layout.scale,
-                            ),
-                        );
+                        snapshot.append_color(&colour, &layout.rect_of(rect, quad));
                     }
                 }
                 if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
                     let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
                     for glyph in boxes {
-                        snapshot.append_color(
-                            &colour,
-                            &graphene::Rect::new(
-                                rect.x + glyph.left * layout.scale,
-                                rect.y + glyph.top * layout.scale,
-                                glyph.width() * layout.scale,
-                                glyph.height() * layout.scale,
-                            ),
-                        );
+                        snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
                     }
                 }
                 for stroke in strokes.iter().filter(|s| s.page == index) {
@@ -1370,14 +1342,10 @@ mod imp {
                     };
                     let points = &stroke.points;
                     match (stroke.tool, points.as_slice()) {
-                        (super::Mode::Rect, &[a, b]) => {
-                            let (p, q) = (point(&a), point(&b));
-                            builder.add_rect(&graphene::Rect::new(
-                                p.x().min(q.x()),
-                                p.y().min(q.y()),
-                                (p.x() - q.x()).abs(),
-                                (p.y() - q.y()).abs(),
-                            ));
+                        (Mode::Rect, &[a, b]) => {
+                            builder.add_rect(
+                                &layout.rect_of(rect, &accent_core::pdf::Rect::from_corners(a, b)),
+                            );
                         }
                         (super::Mode::Circle, &[a, b]) => {
                             let radius = (b.0 - a.0).hypot(b.1 - a.1) * layout.scale;
@@ -1435,13 +1403,10 @@ mod imp {
                         ghost.set_line_join(gsk::LineJoin::Round);
                         snapshot.append_stroke(&builder.to_path(), &ghost, &colour);
                     }
-                    let (tl, br) = (
-                        point((a.bounds.left, a.bounds.top)),
-                        point((a.bounds.right, a.bounds.bottom)),
-                    );
-                    let (l, t) = (tl.x().min(br.x()), tl.y().min(br.y()));
-                    let (r, b) = (tl.x().max(br.x()), tl.y().max(br.y()));
-                    let frame = graphene::Rect::new(l, t, r - l, b - t);
+                    let moved = mapped(a.bounds, a.matrix);
+                    let frame = layout.rect_of(rect, &moved);
+                    let (l, t) = (frame.x(), frame.y());
+                    let (r, b) = (l + frame.width(), t + frame.height());
                     snapshot.append_border(
                         &gsk::RoundedRect::from_rect(frame, 0.0),
                         &[1.0; 4],
@@ -1475,15 +1440,7 @@ mod imp {
                         };
                         let colour =
                             gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
-                        snapshot.append_color(
-                            &colour,
-                            &graphene::Rect::new(
-                                rect.x + mark.left * layout.scale,
-                                rect.y + mark.top * layout.scale,
-                                mark.width() * layout.scale,
-                                mark.height() * layout.scale,
-                            ),
-                        );
+                        snapshot.append_color(&colour, &layout.rect_of(rect, mark));
                     }
                 }
             }

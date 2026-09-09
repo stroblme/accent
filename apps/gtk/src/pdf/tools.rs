@@ -42,6 +42,32 @@ impl Mode {
     pub fn shapes(self) -> bool {
         matches!(self, Mode::Line | Mode::Rect | Mode::Circle)
     }
+
+    /// The window action that puts this tool in hand, or `None` for Select, which is what having
+    /// no tool in hand is. The one map from a tool to a name: the ring's buttons, the status
+    /// bar's readout and the palette all read the label out of `ACTIONS` through it, so the three
+    /// cannot drift apart.
+    pub fn action(self) -> Option<&'static str> {
+        Some(match self {
+            Mode::Select => return None,
+            Mode::Pen => "win.pdf-pen",
+            Mode::Highlighter => "win.pdf-highlighter",
+            Mode::Eraser => "win.pdf-eraser",
+            Mode::Line => "win.pdf-line",
+            Mode::Rect => "win.pdf-rect",
+            Mode::Circle => "win.pdf-circle",
+            Mode::Adjust => "win.pdf-adjust",
+        })
+    }
+
+    /// Whose width and colour a tool draws in: its own for the highlighter and the eraser, the
+    /// pen's for the pen and every shape.
+    pub fn style_owner(self) -> Mode {
+        match self {
+            Mode::Highlighter | Mode::Eraser => self,
+            _ => Mode::Pen,
+        }
+    }
 }
 
 /// How close to an axis, in degrees, a line has to be to snap onto it.
@@ -74,12 +100,7 @@ pub fn shape_of(mode: Mode, a: (f32, f32), b: (f32, f32)) -> Option<accent_core:
     }
     match mode {
         Mode::Line => Some(Shape::Line { a, b }),
-        Mode::Rect => Some(Shape::Rect(accent_core::pdf::Rect {
-            left: a.0.min(b.0),
-            top: a.1.min(b.1),
-            right: a.0.max(b.0),
-            bottom: a.1.max(b.1),
-        })),
+        Mode::Rect => Some(Shape::Rect(accent_core::pdf::Rect::from_corners(a, b))),
         Mode::Circle => Some(Shape::Circle { centre: a, radius }),
         _ => None,
     }
@@ -103,11 +124,7 @@ pub enum Handle {
 /// middle, else nothing.
 pub fn handle_at(bounds: accent_core::pdf::Rect, at: (f32, f32), grip: f32) -> Option<Handle> {
     let near = |v: f32, edge: f32| (v - edge).abs() <= grip;
-    let inside = at.0 >= bounds.left - grip
-        && at.0 <= bounds.right + grip
-        && at.1 >= bounds.top - grip
-        && at.1 <= bounds.bottom + grip;
-    if !inside {
+    if !bounds.grow(grip).contains(at) {
         return None;
     }
     let (l, r) = (near(at.0, bounds.left), near(at.0, bounds.right));
@@ -179,16 +196,10 @@ pub(super) fn mapped(
     r: accent_core::pdf::Rect,
     m: accent_core::pdf::Matrix,
 ) -> accent_core::pdf::Rect {
-    let (a, b) = (
+    accent_core::pdf::Rect::from_corners(
         accent_core::pdf::apply(m, (r.left, r.top)),
         accent_core::pdf::apply(m, (r.right, r.bottom)),
-    );
-    accent_core::pdf::Rect {
-        left: a.0.min(b.0),
-        top: a.1.min(b.1),
-        right: a.0.max(b.0),
-        bottom: a.1.max(b.1),
-    }
+    )
 }
 
 /// The stroke the Adjust tool has hold of, and the drag being applied to it.
