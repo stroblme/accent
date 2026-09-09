@@ -4,6 +4,7 @@
 //! mismatch we drop everything and rebuild rather than migrate.
 
 use crate::markdown;
+use crate::path;
 use crate::walk::{self, FileKind, ScanOptions};
 use anyhow::{Context, Result};
 use rusqlite::functions::FunctionFlags;
@@ -586,8 +587,8 @@ impl Index {
                 if base.is_empty() {
                     continue;
                 }
-                // `'0'` is the byte after `'/'`, so `[base/, base0)` is exactly the subtree.
-                st.execute(params![base, format!("{base}/"), format!("{base}0")])?;
+                let (lo, hi) = path::subtree_range(base);
+                st.execute(params![base, lo, hi])?;
             }
         }
         tx.commit()?;
@@ -667,15 +668,12 @@ impl Index {
     /// [`remove_file`](Self::remove_file) without the link resolution; see
     /// [`update_file_batched`](Self::update_file_batched).
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
-        // `'0'` is the byte after `'/'`, so `[rel/, rel0)` is exactly the descendants of `rel`
-        // and the range stays on the `rel_path` index.
+        let (lo, hi) = path::subtree_range(rel);
         let ids: Vec<i64> = {
             let mut st = self.conn.prepare_cached(
                 "SELECT id FROM files WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
             )?;
-            let rows = st.query_map(params![rel, format!("{rel}/"), format!("{rel}0")], |r| {
-                r.get(0)
-            })?;
+            let rows = st.query_map(params![rel, lo, hi], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
         if ids.is_empty() {
@@ -883,7 +881,7 @@ fn upsert(
     }
 
     // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
-    // heading, so nothing but a note reaches the analyser; the `file_stem` fallback below is what
+    // heading, so nothing but a note reaches the analyser; the `path::stem` fallback below is what
     // gives every other file a title.
     let analysis = match f.kind {
         FileKind::Markdown => text.as_deref().map(markdown::analyze),
@@ -892,7 +890,7 @@ fn upsert(
     let title = analysis
         .as_ref()
         .and_then(|a| a.title.clone())
-        .or_else(|| file_stem(&f.rel_path));
+        .or_else(|| Some(path::stem(&f.rel_path)));
 
     let id: i64 = tx
         .prepare_cached(
@@ -908,7 +906,7 @@ fn upsert(
         .query_row(
             params![
                 f.rel_path,
-                parent_dir(&f.rel_path),
+                path::parent_dir(&f.rel_path),
                 f.canonical.to_string_lossy(),
                 f.dev as i64,
                 f.ino as i64,
@@ -987,20 +985,6 @@ fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM files WHERE id = ?1")?
         .execute([id])?;
     Ok(())
-}
-
-/// Directory part of a vault-relative path: `"a/b/c.md"` -> `"a/b"`, `"a.md"` -> `""`.
-/// Stored per row so one directory level is an index lookup rather than a scan.
-fn parent_dir(rel_path: &str) -> &str {
-    match rel_path.rsplit_once('/') {
-        Some((dir, _)) => dir,
-        None => "",
-    }
-}
-
-fn file_stem(rel_path: &str) -> Option<String> {
-    let base = rel_path.rsplit('/').next()?;
-    Some(markdown::strip_ext(base))
 }
 
 fn link_kind_i64(k: markdown::LinkKind) -> i64 {
@@ -2508,13 +2492,6 @@ mod tests {
             vec![(outside.path().canonicalize().unwrap(), "linked".to_string())]
         );
         assert_eq!(ix.stats().unwrap().dirs, 2);
-    }
-
-    #[test]
-    fn parent_dir_of_rel_path() {
-        assert_eq!(parent_dir("a.md"), "");
-        assert_eq!(parent_dir("sub/Beta.md"), "sub");
-        assert_eq!(parent_dir("a/b/c.md"), "a/b");
     }
 
     /// `list_files` is one directory level: the root must not report grandchildren, and a

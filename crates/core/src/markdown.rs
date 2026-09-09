@@ -511,7 +511,7 @@ fn is_external(dest: &str) -> bool {
     }
 }
 
-fn percent_decode(s: &str) -> String {
+pub fn percent_decode(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();
     }
