@@ -38,12 +38,9 @@ impl App {
     pub fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
             self.awaiting.borrow_mut().remove(key);
-            // A session pointing at a file that has since been deleted lands here too, and
-            // "outside this vault" would be the wrong thing to say about it.
-            return match self.root().join(key).exists() {
-                true => self.toast(&format!("{key} is outside this vault")),
-                false => self.toast(&format!("Cannot open {key}: no such file")),
-            };
+            // Deleted since the session named it, or never in this vault: the vault has answered
+            // the same way for both, and this machine's disk cannot tell them apart for a remote.
+            return self.toast(&format!("Cannot open {key}: not in this vault"));
         };
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
