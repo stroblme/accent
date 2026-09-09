@@ -1,0 +1,1021 @@
+//! Opening a file into a tab: the only door into one. What a key opens as, the worker read, the
+//! PDF, image, diff and status tabs, and adopting the result into a pane.
+
+use super::*;
+
+/// Why a tab was opened, which decides whether it stays.
+///
+/// A tab opened by browsing — a click in the sidebar tree, a search hit, a Git row, a wikilink
+/// followed — is a `Preview`: the next such open closes it and takes its place, so clicking down
+/// a list of notes to see what is in them leaves one tab rather than twenty. Anything the reader
+/// named is `Kept`: the palette, Open File…, a drop, a rename, the command line and the session,
+/// where the file was asked for by name and the tab is meant to stay. A preview tab becomes a
+/// kept one the moment it is edited, its own tab is double-clicked, or it is moved to another
+/// pane, all three being the reader saying they want to keep it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Opened {
+    Kept,
+    Preview,
+}
+
+impl App {
+    /// Open anything, from the tree, the palette, a link, a drop, the session or the command
+    /// line. This is the only door into a tab.
+    ///
+    /// What a file opens as is decided by its name first, and then by its bytes when the name
+    /// says "text": a `.png` that is really random bytes is still an image tab, but a `.py` full
+    /// of NULs is a status page rather than a screen of garbage.
+    pub fn open_path(self: &Rc<Self>, key: &str) {
+        self.open_as(key, Opened::Kept);
+    }
+
+    /// Open `key` for a look: the tab is this pane's preview, and the next such open takes its
+    /// place instead of leaving it behind. What a click in the sidebar and a followed link do.
+    pub fn open_preview(self: &Rc<Self>, key: &str) {
+        self.open_as(key, Opened::Preview);
+    }
+
+    fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
+        let Some((key, path)) = self.locate(key) else {
+            // A session pointing at a file that has since been deleted lands here too, and
+            // "outside this vault" would be the wrong thing to say about it.
+            return match self.root().join(key).exists() {
+                true => self.toast(&format!("{key} is outside this vault")),
+                false => self.toast(&format!("Cannot open {key}: no such file")),
+            };
+        };
+        // A note that is already open keeps whatever it is: looking at a real tab again does not
+        // demote it, and looking at the preview again does not promote it.
+        if let Some(doc) = self.doc_for(&key) {
+            return self.reveal_page(doc.page());
+        }
+        match doc::kind_of(&key) {
+            Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
+            Kind::Image => self.open_image(&key, &path, how),
+            Kind::Pdf => self.open_pdf(&key, &path, how),
+            Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
+        }
+    }
+
+    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before.
+    ///
+    /// The old tab goes after the new one is in place, so the pane never stands empty and closes
+    /// itself out from under the note arriving in it.
+    fn mark_opened(&self, page: &adw::TabPage, how: Opened) {
+        if how != Opened::Preview {
+            return;
+        }
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        if let Some(old) = pane.set_preview(page) {
+            pane.tabs.close_page(&old);
+        }
+    }
+
+    /// The preferences every text tab is built with.
+    fn prefs(&self) -> Prefs {
+        let config = self.config.borrow();
+        Prefs {
+            spellcheck: config.spellcheck,
+            ghost_text: config.ghost_text,
+            font: config.editor_font.clone(),
+            zoom: self.zoom.get(),
+            column_width: config.column_width,
+            minimap: config.minimap,
+            line_numbers: config.line_numbers,
+        }
+    }
+
+    /// A text file in an editor tab, unless its bytes say it is not one after all.
+    ///
+    /// The read happens on a worker thread, so opening a note on a remote vault does not hold the
+    /// window for the round trip — measured at ~60 ms to the host this was developed against,
+    /// which is four frames. Locally it lands in the same turn of the loop and nothing changes.
+    fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour, how: Opened) {
+        // A loose file has no vault to ask, so it still reads its own absolute path.
+        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let (key, path) = (key.to_string(), path.to_path_buf());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking({
+                let key = key.clone();
+                move || match vault {
+                    Some(vault) => vault.read_text(&key),
+                    None => accent_core::fs::read_text(&path),
+                }
+            })
+            .await;
+            let Some(app) = weak.upgrade() else { return };
+            // Two clicks on the same row while the first read was in flight: the tab exists now.
+            if app.doc_for(&key).is_some() {
+                return;
+            }
+            match read {
+                Ok(read) => app.adopt_text(&key, read, flavour, how),
+                Err(_) => tracing::warn!("the reader panicked on {key}"),
+            }
+        });
+    }
+
+    /// What [`open_text`](Self::open_text) does once the bytes are in hand.
+    fn adopt_text(
+        self: &Rc<Self>,
+        key: &str,
+        read: std::io::Result<accent_core::fs::Read>,
+        flavour: Flavour,
+        how: Opened,
+    ) {
+        let text = match read {
+            Ok(accent_core::fs::Read::Text(text)) => text,
+            Ok(accent_core::fs::Read::Binary { size }) => {
+                return self.open_status(
+                    key,
+                    "Binary File",
+                    &format!("{} is not text, so there is nothing to edit.", human(size)),
+                    how,
+                );
+            }
+            Ok(accent_core::fs::Read::TooLarge { size }) => {
+                return self.open_status(
+                    key,
+                    "File Too Large",
+                    // The file's size goes through `human`, which is decimal because that is what
+                    // GNOME shows in Files. The cap does not: it is `16 * 1024 * 1024`, and
+                    // decimal units render that as "16.8 MB", which is not the number anyone set.
+                    &format!(
+                        "{} is over the {} MiB accent will read into an editor.",
+                        human(size),
+                        accent_core::fs::MAX_TEXT / (1024 * 1024)
+                    ),
+                    how,
+                );
+            }
+            Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
+        };
+        let prefs = self.prefs();
+        let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
+        self.adopt(tab, how);
+        if flavour.is_note() {
+            self.sync_conflict_banner(key, None);
+        }
+    }
+
+    /// A PDF, in the reader.
+    fn open_pdf(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
+        let place = self
+            .vault()
+            .and_then(|v| v.session().pdf.get(key).copied())
+            .unwrap_or_default();
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
+        let pdf = pdftab::open(
+            &path,
+            key,
+            doc::file_name(key),
+            &fileops::display_path(&self.root(), key),
+            &self.tabs(),
+            place,
+        );
+        pdf.set_drawing_config(self.config.borrow().drawing.clone());
+        pdf.connect_zoom(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                app.refresh_zoom();
+                app.save_session_soon();
+            }
+        ));
+        // A page jump, a link followed, an outline row: the reader is leaving a place, and the
+        // pane's history is where that goes. Fired before the view moves.
+        pdf.connect_jump(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| app.mark_page(&pdf.page)
+        ));
+        pdf.connect_page(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                // Edge-triggered: `PdfView` reports the page under the middle of the viewport
+                // only when it changes, so this is once per page boundary crossed, not once per
+                // scrolled pixel, and needs no debounce of its own.
+                app.sync_status();
+                app.save_session_soon();
+            }
+        ));
+        pdf.connect_outline(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_outline()
+        ));
+        pdf.connect_opened(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| {
+                app.sync_opening();
+                app.sync_outline();
+                // The page count is known now, so the readout has something to say at last.
+                app.sync_status();
+                // And the pages are there to paint the notes' highlights onto.
+                app.sync_pdf_links(pdf);
+            }
+        ));
+        pdf.connect_mode(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_status()
+        ));
+        pdf.connect_note(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            // A zero-length range: the caret goes to the `[[`, nothing is selected.
+            move |rel, at| app.open_note_at(rel, Some(at..at))
+        ));
+        pdf.connect_export(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, result| app.exported(pdf, result)
+        ));
+        pdf.connect_choice(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, tool, choice| app.pdf_choice(tool, choice)
+        ));
+        pdf.connect_matches(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| {
+                if let Some(pane) = app.pane_of(&pdf.page) {
+                    pane.find.set_matches_text(&pdf.matches_label());
+                }
+            }
+        ));
+        pdf.connect_uri(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |uri| {
+                let launcher = gtk::UriLauncher::new(uri);
+                launcher.launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+            }
+        ));
+        let page = pdf.page.clone();
+        self.mark_loose(&page, key);
+        self.docs.borrow_mut().push(Doc::Pdf(pdf));
+        self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
+        self.sync_active();
+        self.save_session_soon();
+    }
+
+    /// The PDF in the active tab, for the actions that only mean something in one.
+    pub fn active_pdf(&self) -> Option<Rc<pdftab::PdfTab>> {
+        self.active_doc()?.pdf().cloned()
+    }
+
+    /// Whether a PDF tab's file is one this machine may write to.
+    ///
+    /// On a remote vault `PdfTab::path()` is the ssh cache copy, and writing annotations there
+    /// would change a scratch file nobody reads. A loose tab is an absolute path here, so it is
+    /// writable whatever vault the window is on.
+    fn pdf_is_writable(&self, pdf: &Rc<pdftab::PdfTab>) -> bool {
+        doc::is_loose_key(&pdf.key()) || !self.vault().is_some_and(|v| v.is_remote())
+    }
+
+    /// Insert Template…: a template's text at the caret of the active note, whose stem is what
+    /// the template's `{{title}}` means.
+    pub fn insert_template(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to insert a template into");
+        };
+        let Some(ops) = self.need_ops("insert a template") else {
+            return;
+        };
+        let title = Path::new(&tab.rel())
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        fileops::insert_template(
+            ops,
+            &title,
+            Box::new(move |text, stops| tab.insert_stops(text, stops)),
+        );
+    }
+
+    /// A blank page to draw on, beside the note that embeds it.
+    ///
+    /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
+    /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    pub fn insert_sketch(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to put a sketch in");
+        };
+        let rel = tab.rel();
+        if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
+            return self.toast("A sketch needs a note in a local vault");
+        }
+        let Some(vault) = self.vault() else { return };
+        // Beside the note, numbered from one: there is no attachments directory to put it in, and
+        // inventing one would be a setting nobody asked for.
+        let stem = Path::new(&rel)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let dir = Path::new(&rel)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty());
+        let key = (1..)
+            .map(|n| match dir {
+                Some(dir) => format!("{}/{stem}-sketch-{n}.pdf", dir.display()),
+                None => format!("{stem}-sketch-{n}.pdf"),
+            })
+            .find(|key| !vault.exists(key));
+        let Some(key) = key else { return };
+
+        let bytes = match accent_core::pdf::blank_pdf() {
+            Ok(bytes) => bytes,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e:#}")),
+        };
+        let path = match vault.resolve(&key) {
+            Ok(path) => path,
+            Err(e) => return self.toast(&format!("Cannot make a sketch: {e}")),
+        };
+        if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
+            return self.toast(&format!("Cannot write {key}: {e}"));
+        }
+
+        tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
+        let at = self.pane_of(&tab.page).unwrap_or_else(|| self.pane());
+        self.open_beside(&at, Side::Right, &key);
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(&key) {
+            pdf.set_mode(pdfview::Mode::Pen);
+        }
+    }
+
+    /// Show or hide the ring of drawing tools over the page.
+    ///
+    /// The window's state rather than the tab's: the button is in the header, and moving between
+    /// two PDFs with the tools out should not put them away.
+    pub fn set_drawing(self: &Rc<Self>, showing: bool) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if showing && !self.pdf_is_writable(&pdf) {
+            self.drawing_button.set_active(false);
+            return self.toast("Drawing needs a local vault");
+        }
+        self.drawing.set(showing);
+        self.drawing_button.set_active(showing);
+        // Putting the tools away puts the pen down with them; taking them out arms the last tool.
+        let tool = match showing {
+            true => self.tool.get(),
+            false => pdfview::Mode::Select,
+        };
+        pdf.set_drawing(showing, self.ring_at.get());
+        pdf.set_mode(tool);
+        self.sync_status();
+    }
+
+    /// Pick up one of the tools. The same one twice goes back to reading, the tools staying out.
+    pub fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Drawing needs a local vault");
+        }
+        let wanted = match pdf.mode() == mode {
+            true => pdfview::Mode::Select,
+            false => mode,
+        };
+        // Remembered even when it is put down, so the ring coming back offers the same tool.
+        if wanted != pdfview::Mode::Select {
+            self.tool.set(wanted);
+        }
+        // Reaching a tool from the palette with the ring away is what takes it out.
+        if wanted != pdfview::Mode::Select && !self.drawing.get() {
+            self.drawing.set(true);
+            self.drawing_button.set_active(true);
+            pdf.set_drawing(true, self.ring_at.get());
+        }
+        pdf.set_mode(wanted);
+        self.sync_status();
+    }
+
+    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
+    fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
+        choice.apply(tool, &mut self.config.borrow_mut().drawing);
+        let config = self.config.borrow().clone();
+        if let Err(e) = config.save() {
+            tracing::warn!("saving config: {e:#}");
+        }
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.set_drawing_config(config.drawing.clone());
+            }
+        }
+    }
+
+    /// Put the active PDF's tools where this window last had them, and take the position back
+    /// from whichever tab is losing them.
+    pub fn sync_drawing(&self) {
+        if let Some(pdf) = self.active_pdf() {
+            // Whatever this tab's ring was dragged to is where the next one starts.
+            if let Some(at) = pdf.ring_at() {
+                self.ring_at.set(Some(at));
+            }
+            pdf.set_drawing(self.drawing.get(), self.ring_at.get());
+            let showing = self.drawing.get();
+            pdf.set_mode(match showing {
+                true => self.tool.get(),
+                false => pdfview::Mode::Select,
+            });
+        }
+        // Only a PDF can be drawn on, so the button goes with the tab.
+        self.drawing_button.set_visible(self.active_pdf().is_some());
+        self.drawing_button.set_active(self.drawing.get());
+    }
+
+    /// Write the note links that highlight the open PDF into the file, as real annotations.
+    pub fn export_highlights(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.toast("Exporting highlights needs a local vault");
+        }
+        pdf.export_highlights(theme::accent_rgb());
+    }
+
+    /// What an export came back with.
+    fn exported(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, result: Result<usize, String>) {
+        match result {
+            Err(e) => self.toast(&format!("Cannot export: {e}")),
+            Ok(0) => self.toast("Nothing new to export"),
+            Ok(n) => {
+                let name = doc::file_name(&pdf.key()).to_string();
+                let plural = if n == 1 { "highlight" } else { "highlights" };
+                self.toast(&format!("Exported {n} {plural} into {name}"));
+                // Ask again: the ones now in the file drop out of the painted overlay, because
+                // the page's own pixels carry them.
+                self.sync_pdf_links(pdf);
+            }
+        }
+    }
+
+    /// Tell a PDF tab which note links highlight it.
+    fn sync_pdf_links(&self, pdf: &Rc<pdftab::PdfTab>) {
+        let key = pdf.key();
+        // A file outside every vault has no index to ask.
+        if doc::is_loose_key(&key) {
+            return;
+        }
+        let Some(vault) = self.vault() else { return };
+        match vault.pdf_links(&key) {
+            Ok(links) => pdf.set_note_links(links),
+            Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
+        }
+    }
+
+    /// The same, once the notes that just changed have reached the index.
+    ///
+    /// A moment later, and not at once, because the link rows are resolved at the end of the
+    /// worker's batch while the event that a file changed is emitted inside it — and our own
+    /// saves emit nothing at all, by design.
+    ///
+    // ponytail: a timer, because there is no event for "the index is current now". The ceiling
+    // is a highlight that appears a third of a second after the note is written; an
+    // `Event::Indexed` from the worker is the upgrade.
+    pub fn sync_pdf_links_soon(self: &Rc<Self>) {
+        if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
+            return;
+        }
+        glib::timeout_add_local_once(
+            std::time::Duration::from_millis(300),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.sync_all_pdf_links()
+            ),
+        );
+    }
+
+    /// The same for every open PDF, after something changed the notes.
+    fn sync_all_pdf_links(&self) {
+        for doc in self.docs() {
+            if let Doc::Pdf(pdf) = doc {
+                self.sync_pdf_links(&pdf);
+            }
+        }
+    }
+
+    /// An image, in a tab that only looks at it.
+    fn open_image(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
+        // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
+        // widget needs real bytes, and the protocol deliberately carries none.
+        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
+        let picture = gtk::Picture::for_filename(&path);
+        picture.set_content_fit(gtk::ContentFit::ScaleDown);
+        picture.set_can_shrink(true);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .child(&picture)
+            .build();
+        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
+        // On the scroller rather than the picture: while the image is fitted it is smaller than
+        // the viewport, and a wheel over the empty space around it has to zoom too. Bubble
+        // phase, ahead of the scroller's own controller, as everywhere else.
+        let viewer = Rc::downgrade(&image);
+        zoom_on_wheel(
+            &scroller,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| {
+                    if let Some(image) = viewer.upgrade() {
+                        app.zoom_image(&image, Some(out));
+                    }
+                }
+            ),
+        );
+    }
+
+    /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
+    /// else: the PDF engine, an image, the preview's assets.
+    ///
+    /// ponytail: on a remote vault this downloads on the main thread, so a large PDF holds the
+    /// window for as long as the transfer takes. Move it to a worker thread with the opening
+    /// status the PDF tab already shows if that ever bites.
+    fn local_copy(&self, key: &str) -> Option<PathBuf> {
+        let vault = self.vault()?;
+        match vault.fetch(key) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("fetching {key}: {e}");
+                None
+            }
+        }
+    }
+
+    /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
+    /// sentence and at most one button).
+    fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
+        let key = key.to_string();
+        let status = adw::StatusPage::builder()
+            .icon_name("dialog-warning-symbolic")
+            .title(title)
+            .description(body)
+            .build();
+        let button = gtk::Button::builder()
+            .label("Show in Files")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
+        button.connect_clicked(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[strong]
+            key,
+            move |_| {
+                let path = app.root().join(&key);
+                let toast = app.clone();
+                fileops::reveal(&app.window, &path, move |m| toast.toast(m));
+            }
+        ));
+        status.set_child(Some(&button));
+        self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic", how);
+    }
+
+    /// A comparison of two texts that are not files, as a tab. `key` says which comparison it is,
+    /// so asking for the same one twice brings the tab already showing it up to date rather than
+    /// stacking a second copy; `file` is the name behind it, which decides how it is coloured.
+    /// It opens as the pane's preview, like a file clicked in the tree: a list of changed files
+    /// is exactly the surface that would otherwise stack a tab per click.
+    pub fn open_diff(
+        self: &Rc<Self>,
+        key: &str,
+        file: &str,
+        title: &str,
+        old: (&str, &str),
+        new: (&str, &str),
+    ) -> Rc<diff::DiffTab> {
+        if let Some(Doc::Diff(tab)) = self.doc_for(key) {
+            tab.set_texts(old.1, new.1);
+            self.reveal_page(&tab.page);
+            return tab;
+        }
+        let flavour = match doc::kind_of(file) {
+            Kind::Note => Flavour::Note,
+            _ => flavour_of(file),
+        };
+        let font = self.config.borrow().editor_font.clone();
+        let tab = diff::DiffTab::open(
+            &self.tabs(),
+            key,
+            file,
+            title,
+            flavour,
+            old,
+            new,
+            font.as_deref(),
+            self.zoom.get(),
+        );
+        self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
+        self.tabs().set_selected_page(&tab.page);
+        self.mark_opened(&tab.page, Opened::Preview);
+        self.sync_active();
+        tab
+    }
+
+    /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
+    /// [`App::open_status`].
+    fn adopt_viewer(
+        self: &Rc<Self>,
+        wrap: fn(Rc<doc::Viewer>) -> Doc,
+        key: &str,
+        child: &impl IsA<gtk::Widget>,
+        icon: &str,
+        how: Opened,
+    ) -> Rc<doc::Viewer> {
+        let page = self.tabs().append(child);
+        page.set_title(doc::file_name(key));
+        page.set_tooltip(&fileops::display_path(&self.root(), key));
+        page.set_icon(Some(&gio::ThemedIcon::new(icon)));
+        self.mark_loose(&page, key);
+        let viewer = doc::Viewer::new(key, page.clone());
+        self.docs.borrow_mut().push(wrap(viewer.clone()));
+        self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
+        self.sync_active();
+        self.save_session_soon();
+        viewer
+    }
+
+    /// Open a note over the byte range a sidebar search result matched, so it opens on the match
+    /// rather than at the top and the match is marked where it lands.
+    ///
+    /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
+    /// the note opens as a preview and the next such click takes the same tab.
+    pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
+        self.mark();
+        self.open_preview(rel);
+        if let Some(at) = at {
+            self.select_when_open(rel, at);
+        }
+    }
+
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
+    /// followed link.
+    fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
+        self.on_tab(rel.to_string(), move |tab| {
+            if let Some(chars) = char_range(&tab.text(), at.clone()) {
+                tab.goto_range(chars);
+            }
+        });
+    }
+
+    /// Rewrite every match of `re` in the vault, from the sidebar's Replace All.
+    ///
+    /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
+    /// would come back as a changed-on-disk banner instead of a replacement. That part is the
+    /// main loop's, and so is the reload afterwards; the rewrite between them is not. It is a
+    /// read, a substitution and an fsync per note — 1.9 s across 245 notes and 35 s across 3.3k
+    /// of them, measured on the generated vault — so it goes to a worker thread and `done` hands
+    /// the sidebar back its pane when it lands.
+    pub fn replace_in_notes(
+        self: &Rc<Self>,
+        query: String,
+        options: accent_api::Options,
+        replacement: String,
+        literal: bool,
+        done: Box<dyn FnOnce()>,
+    ) {
+        let Some(vault) = self.vault().cloned() else {
+            done();
+            return self.needs_vault("replace across notes");
+        };
+        let Some(ops) = self.ops().cloned() else {
+            done();
+            return;
+        };
+        let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
+        (ops.flush)(&open);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let outcome = gio::spawn_blocking(move || {
+                vault.replace_all(&query, options, &replacement, literal)
+            })
+            .await;
+            if let Some(app) = weak.upgrade() {
+                match outcome {
+                    Ok(Ok(report)) => {
+                        let unsaved = (ops.reload)(&report.rewritten);
+                        app.toast(&replace_message(
+                            report.matches,
+                            report.rewritten.len(),
+                            report.failed.len(),
+                            unsaved,
+                        ));
+                    }
+                    Ok(Err(e)) => app.toast(&format!("Cannot replace: {e:#}")),
+                    Err(_) => tracing::warn!("the replace worker panicked"),
+                }
+            }
+            done();
+        });
+    }
+
+    /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
+    pub fn open_target(self: &Rc<Self>, target: &str) {
+        let Some(vault) = self.vault() else {
+            return self.needs_vault("follow a link");
+        };
+        // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
+        let (target, anchor) = split_pdf_anchor(target);
+        // Where the link was, so Back returns to it. Before the open, and before the selection
+        // change it causes records the same place, which coalesces into this one.
+        self.mark();
+        match vault.resolve_link(target) {
+            Ok(Some(rel)) => {
+                self.open_preview(&rel);
+                self.show_pdf_anchor(&rel, anchor);
+            }
+            Ok(None) => self.toast(&format!("No note called {target}")),
+            Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
+        }
+    }
+
+    /// Show the page and selection an anchor names, if the tab just opened is that PDF.
+    ///
+    /// Called straight after the tab is opened rather than through `on_tab`, which waits for a
+    /// *text* tab: `open_pdf` has already pushed the document by the time it returns.
+    pub fn show_pdf_anchor(&self, key: &str, anchor: Option<PdfAnchor>) {
+        let Some((page, selection)) = anchor else {
+            return;
+        };
+        if let Some(Doc::Pdf(pdf)) = self.doc_for(key) {
+            pdf.show_link(page, selection);
+        }
+    }
+
+    /// Where `key` really is: the key to open it under, and the path to read.
+    ///
+    /// Wikilink targets come out of note content, so `![[../../../../etc/passwd]]` reaches
+    /// `open_path` from the preview and has to be stopped here rather than by the reader. The
+    /// check is the vault's own lexical one: canonicalising would refuse a note reached through
+    /// one of the directory symlinks a vault links in on purpose, which the walk indexed and the
+    /// tree is already showing.
+    fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
+        if doc::is_loose_key(key) {
+            let path = PathBuf::from(key);
+            return path.is_file().then(|| (key.to_string(), path));
+        }
+        // A window with no vault has nothing to be relative to, so only absolute keys open.
+        let vault = self.vault()?;
+        let path = vault.resolve(key).ok()?;
+        // Asked of the vault rather than of this machine: on a remote one the path is the host's
+        // and `exists()` here would answer about a file that was never meant to be here.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
+        if !vault.exists(&key) {
+            return None;
+        }
+        // Normalised, so `./a.md` and `a.md` are one tab rather than two.
+        Some((key, path))
+    }
+
+    /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one
+    /// from outside opens as a loose tab in this window, marked as being from outside it.
+    pub fn open_file_dialog(self: &Rc<Self>) {
+        let dialog = gtk::FileDialog::builder().title("Open File").build();
+        if let Some(vault) = self.vault() {
+            dialog.set_initial_folder(Some(&gio::File::for_path(vault.root())));
+        }
+        dialog.open(
+            Some(&self.window),
+            gio::Cancellable::NONE,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |result| {
+                    // A dismissed chooser is an error here, and not one worth a toast.
+                    let Some(path) = result.ok().and_then(|file| file.path()) else {
+                        return;
+                    };
+                    let key = match app.vault().and_then(|v| path.strip_prefix(v.root()).ok()) {
+                        Some(rel) => rel.to_string_lossy().into_owned(),
+                        None => path.to_string_lossy().into_owned(),
+                    };
+                    app.open_path(&key);
+                }
+            ),
+        );
+    }
+
+    /// A tab on a file from outside this window's vault says so on its own tab, so saving it is
+    /// never a surprise and it is obvious why it has no backlinks.
+    fn mark_loose(&self, page: &adw::TabPage, key: &str) {
+        if self.vault.is_some() && doc::is_loose_key(key) {
+            page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
+            page.set_indicator_tooltip("Outside this vault");
+        }
+    }
+
+    /// Wire a freshly opened tab into the window.
+    fn adopt(self: &Rc<Self>, tab: Rc<Tab>, how: Opened) {
+        // Ctrl+scroll zooms the document, as it zooms a PDF page, through the same step and the
+        // same readout. On the view rather than on the window: a window-level controller would
+        // have to work out which tab the pointer is over and would race the PDF's own, while this
+        // one only ever sees a text tab. Bubble phase, ahead of the scrolled window's controller,
+        // which is the order `pdfview` relies on for the same reason.
+        zoom_on_wheel(
+            &tab.view,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+            ),
+        );
+
+        tab.connect_autosave(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |tab| app.save_tab(tab, false)
+        ));
+        tab.connect_edited(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |tab| {
+                lang::changed(tab);
+                app.queue_refresh(tab);
+                if app.is_active(tab) {
+                    app.sync_outline();
+                }
+            }
+        ));
+        tab.connect_banner(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |tab| app.answer_banner(tab)
+        ));
+        tab.connect_follow(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.go_to_definition()
+        ));
+        tab.connect_cursor(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |tab| {
+                app.sync_scroll(tab);
+                // A code tab's references are about the symbol under the caret, so they follow
+                // it — but only while the pane is on screen, since nobody is reading it otherwise.
+                if !tab.flavour().is_note()
+                    && app.is_active(tab)
+                    && app.sidebar_column.is_visible()
+                    && app
+                        .sidebar
+                        .get()
+                        .is_some_and(|s| s.is_showing("references"))
+                {
+                    app.refresh_references();
+                }
+            }
+        ));
+        // The chrome hides on the keystroke itself, not on the debounce that follows it.
+        tab.buffer.connect_changed(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            tab,
+            move |_| app.on_edit(&tab)
+        ));
+
+        // A file inside the vault gets a document on the language layer; a loose file has no
+        // vault to open it on.
+        if let Some(vault) = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned()
+        {
+            lang::attach(
+                &tab,
+                vault,
+                lang::Hooks {
+                    on_symbols: Rc::new(glib::clone!(
+                        #[weak(rename_to = app)]
+                        self,
+                        move |tab: &Rc<Tab>| {
+                            // The pinned title is drawn from the same symbols, so it is redrawn
+                            // whether or not this tab is the one being looked at.
+                            tab.update_sticky();
+                            if app.is_active(tab) {
+                                app.sync_outline();
+                            }
+                        }
+                    )),
+                },
+            );
+        }
+
+        // Nothing else watches a loose file: the vault's worker only reports on its own tree.
+        if doc::is_loose_key(&tab.rel()) {
+            tab.watch_file(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |tab| app.file_changed(tab)
+            ));
+        }
+        self.mark_loose(&tab.page, &tab.rel());
+        let page = tab.page.clone();
+        self.fetch_head(&tab);
+        self.docs.borrow_mut().push(Doc::Text(tab.clone()));
+        self.tabs().set_selected_page(&page);
+        self.mark_opened(&page, how);
+        self.sync_active();
+        self.save_session_soon();
+        if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
+            waiting(self, &tab);
+        }
+    }
+
+    /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
+    /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
+    /// text never gets there, and its `f` is simply never run.
+    pub fn with_tab(
+        self: &Rc<Self>,
+        key: &str,
+        how: Opened,
+        f: impl FnOnce(&Rc<App>, &Rc<Tab>) + 'static,
+    ) {
+        if let Some(tab) = self.tab_for(key) {
+            self.reveal_page(&tab.page);
+            return f(self, &tab);
+        }
+        self.awaiting
+            .borrow_mut()
+            .insert(key.to_string(), Box::new(f));
+        self.open_as(key, how);
+    }
+}
+
+/// Which editor a text file gets. Only CSV is special: its columns are coloured instead of it
+/// being handed to a language, because `csv.lang` would tint numbers and strings underneath.
+fn flavour_of(key: &str) -> Flavour {
+    match doc::file_name(key).rsplit_once('.') {
+        Some((_, ext)) if ext.eq_ignore_ascii_case("csv") => Flavour::Csv,
+        _ => Flavour::Code,
+    }
+}
+
+/// A byte count as a person reads it, in the decimal units GNOME shows in Files.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["bytes", "kB", "MB", "GB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1000.0 && unit + 1 < UNITS.len() {
+        size /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} bytes"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
+/// What the toast says after a Replace All: what it wrote, what it could not, and what is still
+/// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
+fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
+    let plural = |n: usize, one: &str, many: &str| match n {
+        1 => format!("1 {one}"),
+        n => format!("{n} {many}"),
+    };
+    let mut message = match matches {
+        0 => "Nothing to replace".to_string(),
+        _ => format!(
+            "Replaced {} in {}",
+            plural(matches, "match", "matches"),
+            plural(notes, "note", "notes")
+        ),
+    };
+    if failed > 0 {
+        message.push_str(&format!("; {failed} could not be written"));
+    }
+    if unsaved > 0 {
+        message.push_str(&format!(
+            "; {unsaved} have unsaved changes and were not reloaded"
+        ));
+    }
+    message
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replace_toast_counts_matches_notes_and_what_went_wrong() {
+        assert_eq!(replace_message(0, 0, 0, 0), "Nothing to replace");
+        assert_eq!(replace_message(1, 1, 0, 0), "Replaced 1 match in 1 note");
+        assert_eq!(replace_message(7, 3, 0, 0), "Replaced 7 matches in 3 notes");
+        assert_eq!(
+            replace_message(7, 3, 1, 2),
+            "Replaced 7 matches in 3 notes; 1 could not be written; 2 have unsaved changes and were not reloaded"
+        );
+    }
+}
