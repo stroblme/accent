@@ -586,11 +586,6 @@ impl App {
         )));
     }
 
-    /// Show the header's progress bar while the active tab is a PDF still being opened.
-    ///
-    /// The same thin bar indexing uses, for the same reason: something is being read and the
-    /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
-    /// that exists only while an open is in flight.
     /// The file's own facts in the status bar: what it is, whether it is saved, and its one
     /// count — a note's words, a code tab's diagnostics, a PDF's page.
     fn sync_status(&self) {
@@ -784,6 +779,11 @@ impl App {
         });
     }
 
+    /// Show the header's progress bar while the active tab is a PDF still being opened.
+    ///
+    /// The same thin bar indexing uses, for the same reason: something is being read and the
+    /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
+    /// that exists only while an open is in flight.
     fn sync_opening(self: &Rc<Self>) {
         let opening = self
             .active_doc()
