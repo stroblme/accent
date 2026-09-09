@@ -78,7 +78,7 @@ use session::Corpus;
 use shell::Shell;
 use sourceview5::prelude::ViewExt as _;
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -203,6 +203,10 @@ struct App {
     sidebar: OnceCell<sidebar::Sidebar>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
+    /// The exclusion set the index was last given — git's ignored paths and the `[search]
+    /// exclude` list as one — and `None` until a refresh has written one. Kept so that the write,
+    /// which is a few thousand `UPDATE`s, happens when the set moves rather than on every save.
+    excluded: RefCell<Option<HashSet<String>>>,
     /// The References request in flight. Replaced rather than queued: the caret moves faster
     /// than a server answers.
     references: RefCell<Option<glib::JoinHandle<()>>>,
@@ -766,6 +770,15 @@ impl App {
         // mechanism at all — a refresh lands here whether or not it found one.
         let mut excluded = git.ignored();
         excluded.extend(self.config.borrow().search.exclude.iter().cloned());
+        // Only where it really moved. A refresh lands on every save and the write below is a few
+        // thousand `UPDATE`s on a large vault — the very write the ROADMAP's "Index writes" row
+        // records as contending with autosave's reindex. The set that was written last is kept so
+        // the question can be asked at all, and it starts as `None` rather than empty: the first
+        // refresh of a window has to clear whatever the last session recorded.
+        if self.excluded.borrow().as_ref() == Some(&excluded) {
+            return self.after_git_changed(git);
+        }
+        self.excluded.replace(Some(excluded.clone()));
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(excluded.clone());
         }
@@ -790,6 +803,11 @@ impl App {
                 }
             });
         }
+        self.after_git_changed(git);
+    }
+
+    /// What follows every git refresh, whether or not the exclusion set moved with it.
+    fn after_git_changed(self: &Rc<Self>, git: &Rc<git::Panel>) {
         self.sync_branch();
         // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
         // merely noticed an edit is telling us about the very buffer the marks came from.

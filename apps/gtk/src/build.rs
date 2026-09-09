@@ -246,6 +246,7 @@ pub fn build_window(
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
+        excluded: RefCell::new(None),
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
@@ -456,7 +457,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     );
     let _ = app.git.set(git);
     if let Some(git) = app.git.get() {
-        git.schedule_refresh();
+        git.schedule_refresh(git::Depth::Discover);
     }
 }
 
