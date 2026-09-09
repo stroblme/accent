@@ -17,6 +17,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
@@ -174,7 +175,11 @@ pub struct Tab {
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
-    links: RefCell<Vec<Link>>,
+    /// The note's links, each with the character range it covers. Characters and not the bytes
+    /// the parse reports them in: the pointer asks which link it is over on every motion event
+    /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
+    /// pointer each time.
+    links: RefCell<Vec<(Range<i32>, Link)>>,
     /// What the language server last said about this file, and the provider that shows the loud
     /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
     /// both read it back after the paint.
@@ -1106,16 +1111,15 @@ impl Tab {
         self.link_at_iter(&iter)
     }
 
-    /// Link ranges are byte offsets into the note, `TextIter`s count characters, so the text up
-    /// to the iter is what translates between them.
+    /// The link covering `iter`, compared in the buffer's own coordinates: the translation from
+    /// the parse's byte ranges happened once, when the note was analysed.
     fn link_at_iter(&self, iter: &gtk::TextIter) -> Option<Link> {
-        let start = self.buffer.start_iter();
-        let byte = self.buffer.text(&start, iter, true).len();
+        let at = iter.offset();
         self.links
             .borrow()
             .iter()
-            .find(|link| link.range.contains(&byte))
-            .cloned()
+            .find(|(range, _)| range.contains(&at))
+            .map(|(_, link)| link.clone())
     }
 
     /// Called 1 s after the last edit and when focus leaves the view. Never fires while
@@ -1214,7 +1218,18 @@ impl Tab {
     /// link table; code gets nothing, because the style scheme colours it from the language.
     fn analyse_text(&self) {
         match self.flavour {
-            Flavour::Note => *self.links.borrow_mut() = highlight::apply(&self.buffer).links,
+            Flavour::Note => {
+                let (analysis, offsets) = highlight::apply(&self.buffer);
+                *self.links.borrow_mut() = analysis
+                    .links
+                    .into_iter()
+                    .map(|link| {
+                        let range =
+                            offsets.char_of(link.range.start)..offsets.char_of(link.range.end);
+                        (range, link)
+                    })
+                    .collect();
+            }
             Flavour::Csv => highlight::apply_csv(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}

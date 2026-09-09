@@ -217,11 +217,13 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     }
 }
 
-/// Re-analyse the whole buffer, re-apply our tags, and hand the analysis back so a caller that
-/// also wants the links parses the note once instead of twice. Roughly 0.08 ms on a 2 KB note and
-/// 6 ms on half a megabyte, which is what lets short notes restyle on the keystroke; the analysis
-/// needs the text as one contiguous copy, so it stays on the main thread either way.
-pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
+/// Re-analyse the whole buffer, re-apply our tags, and hand the analysis back — with the byte to
+/// character table it was tagged through, so a caller that also wants the links in the buffer's
+/// own coordinates neither parses the note twice nor rebuilds the table. Roughly 0.08 ms on a
+/// 2 KB note and 6 ms on half a megabyte, which is what lets short notes restyle on the
+/// keystroke; the analysis needs the text as one contiguous copy, so it stays on the main thread
+/// either way.
+pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
     for name in TAG_NAMES.iter().chain(WRAP_TAGS.iter()) {
@@ -245,7 +247,7 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
         let e = crate::editor::line_end(buffer, n as i32);
         buffer.apply_tag_by_name(WRAP_TAGS[column - 1], &s, &e);
     }
-    analysis
+    (analysis, offsets)
 }
 
 /// Tag one span, with the hanging indent that pulls an ATX heading's `#` markers out into the
