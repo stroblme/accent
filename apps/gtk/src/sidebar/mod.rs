@@ -386,10 +386,12 @@ fn references_body(
     on_reference: impl Fn(&str) + 'static,
 ) -> (gtk::Stack, adw::StatusPage) {
     let stack = gtk::Stack::builder().vexpand(true).build();
+    // What the pane says before any tab has been opened; from then on the window sets the words
+    // to suit what the tab holds (`references::references_empty`).
     let empty = status_page(
         BACKLINK_ICON,
-        "No Backlinks",
-        "No note links to the open one.",
+        "No References",
+        "Open a note to see what links to it.",
     );
     stack.add_named(&empty, Some("empty"));
     stack.add_named(&scroller(&path_list(model, on_reference)), Some("list"));

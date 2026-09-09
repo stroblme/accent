@@ -636,7 +636,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     body.add_named(
         &status_page(
             "system-search-symbolic",
-            "Search Notes",
+            "Search Files",
             "Type to search this vault. Ignored files are left out; All puts them back.",
         ),
         Some("prompt"),
@@ -645,7 +645,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         &status_page(
             "system-search-symbolic",
             "No Results",
-            "Nothing in this vault matches this search.",
+            "Try a different search.",
         ),
         Some("empty"),
     );
