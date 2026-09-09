@@ -397,8 +397,15 @@ fn render_loop(
                             send(&view, Reply::Saved(written));
                         }
                         // Left dirty on purpose: the next stroke's save tries again, and the
-                        // drawing is still in the document either way.
-                        Err(e) => tracing::warn!("saving {}: {e}", path.display()),
+                        // drawing is still in the document either way. A file that cannot be
+                        // written at all — read-only, or changed on disk since it was read —
+                        // would otherwise take every stroke silently and lose the lot at close;
+                        // the reader is told instead, and a foreign write is answered by the
+                        // watcher's reload, which is what clears the ledger.
+                        Err(e) => {
+                            tracing::warn!("saving {}: {e}", path.display());
+                            send(&view, Reply::SaveFailed(e));
+                        }
                     }
                     // Dropping the sender is the signal: the receiver's `recv` returns either
                     // way, so a failed save does not hang the window that is closing.

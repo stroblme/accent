@@ -241,6 +241,14 @@ impl App {
             // A zero-length range: the caret goes to the `[[`, nothing is selected.
             move |rel, at| app.open_note_at(rel, Some(at..at))
         ));
+        pdf.connect_save_failed(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, why| {
+                let name = doc::file_name(&pdf.key()).to_string();
+                app.cannot(&format!("save {name}"), why);
+            }
+        ));
         pdf.connect_export(glib::clone!(
             #[weak(rename_to = app)]
             self,
