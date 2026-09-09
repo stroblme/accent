@@ -184,45 +184,162 @@ pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
     anyhow::anyhow!("{}", e.message)
 }
 
-macro_rules! ask {
-    ($self:ident, $local:expr, $method:literal, $params:expr) => {
-        match &$self.backend {
-            Backend::Local(v) => $local(v),
-            Backend::Remote(r) => r.call($method, $params).map_err(remote_err),
+/// The methods that mean the same thing wherever the files are, written once.
+///
+/// Each line here used to be three that had to agree: a [`Vault`] method with a local arm and a
+/// remote one, an arm of the rpc dispatch answering it on the host, and the wire name spelling
+/// them the same. The name is now the wire name by construction, and a method that is added or
+/// removed is added or removed everywhere at once.
+///
+/// The first word is what the answer travels as. `io` is an [`io::Result`]; `any` is an
+/// [`anyhow::Result`], which crosses as a formatted message; `git` runs where the repository is
+/// and names the [`accent_core::git`] function after the wire name, because that name carries a
+/// `git_` prefix the module does not.
+///
+/// An argument marked `ref` is taken by reference and travels as the owned form of its type
+/// (`str` as a `String`); one marked `val` travels as itself.
+///
+/// What is *not* here is anything whose two sides differ: a save, which has an error of its own;
+/// the searches, which compile their pattern where the files are; the transfers, which carry
+/// bytes outside the protocol; and `repos`, which posts to the vault's own worker.
+macro_rules! methods {
+    // What one argument is, on the façade, on the wire, and at the call the host makes.
+    (@fty ref $t:ty) => { &$t };
+    (@fty val $t:ty) => { $t };
+    (@wty ref $t:ty) => { <$t as ToOwned>::Owned };
+    (@wty val $t:ty) => { $t };
+    (@pass ref $n:ident) => { &$n };
+    (@pass val $n:ident) => { $n };
+
+    // What the answer is, and how a remote failure reads as one.
+    (@ret io $t:ty) => { io::Result<$t> };
+    (@ret any $t:ty) => { Result<$t> };
+    (@ret git $t:ty) => { Result<$t> };
+    (@err io) => { rpc::RpcError::io_error };
+    (@err any) => { remote_err };
+    (@err git) => { remote_err };
+
+    // The call itself: on this machine, and on the host answering for it.
+    (@here $v:ident io $name:ident ($($a:tt)*)) => { $v.$name($($a)*) };
+    (@here $v:ident any $name:ident ($($a:tt)*)) => { $v.$name($($a)*) };
+    (@here $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
+        git::$core($($a)*).map_err(anyhow::Error::from)
+    };
+    (@serve $v:ident io $name:ident ($($a:tt)*)) => { rpc::io($v.$name($($a)*)) };
+    (@serve $v:ident any $name:ident ($($a:tt)*)) => { rpc::any($v.$name($($a)*)) };
+    (@serve $v:ident git $name:ident $core:ident ($($a:tt)*)) => {
+        rpc::git_result(git::$core($($a)*))
+    };
+
+    ($(
+        $(#[$doc:meta])*
+        $group:ident $name:ident $(= $core:ident)? ($($arg:ident : $kind:tt $t:ty),* $(,)?) -> $ret:ty;
+    )*) => {
+        impl Vault {
+            $(
+                $(#[$doc])*
+                pub fn $name(&self $(, $arg: methods!(@fty $kind $t))*)
+                    -> methods!(@ret $group $ret)
+                {
+                    match &self.backend {
+                        Backend::Local(_v) => methods!(@here _v $group $name $($core)? ($($arg),*)),
+                        Backend::Remote(r) => r
+                            .call(stringify!($name), json!([$($arg),*]))
+                            .map_err(methods!(@err $group)),
+                    }
+                }
+            )*
+        }
+
+        /// The half of the rpc dispatch this table writes: `None` for a method that is not one of
+        /// these, which is [`rpc::dispatch`]'s cue to try the ones it spells out itself.
+        pub(crate) fn dispatch(
+            vault: &Local,
+            method: &str,
+            p: &serde_json::Value,
+        ) -> Option<Result<serde_json::Value, rpc::RpcError>> {
+            $(
+                if method == stringify!($name) {
+                    // One `arg` per position, counted by shadowing rather than by hand.
+                    let _i = 0usize;
+                    $(
+                        let $arg: methods!(@wty $kind $t) = match rpc::arg(p, _i) {
+                            Ok(value) => value,
+                            Err(e) => return Some(Err(e)),
+                        };
+                        let _i = _i + 1;
+                    )*
+                    return Some(methods!(@serve vault $group $name $($core)?
+                        ($(methods!(@pass $kind $arg)),*)));
+                }
+            )*
+            None
         }
     };
 }
 
-// Files. Every one of these is the same operation on either machine; what differs is only where
-// the bytes are, and none of them carry any.
+methods! {
+    // ------------------------------------------------------------------ files
+    io read(rel: ref str) -> (String, Etag);
+    io read_text(rel: ref str) -> fs::Read;
+    io stat(rel: ref str) -> Option<Etag>;
+    /// Delete a file or a directory. Local vaults go to the system trash through the desktop, so
+    /// this is the remote path only — permanent, and confirmed as such by the UI.
+    io delete(rel: ref str) -> ();
+    io create_dir(rel: ref str) -> ();
+    any plan_rename(from: ref str, to: ref str) -> RenamePlan;
+    any rename(plan: ref RenamePlan, rewrite_links: val bool) -> RenameReport;
+    any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
+    any conflict_diff(original: ref str, conflict: ref str) -> Vec<DiffLine>;
+    any template_target(template: ref str) -> Option<String>;
+    any note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
+    any render_template(template: ref str, title: ref str) -> (String, Vec<usize>);
+    any templates() -> Vec<String>;
+
+    // ------------------------------------------------------------ index reads
+    any list_dir(rel: ref str) -> Vec<FileRow>;
+    any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    any tags() -> Vec<(String, i64)>;
+    any files_with_tag(tag: ref str) -> Vec<FileRow>;
+    any backlinks(rel: ref str) -> Vec<Backlink>;
+    /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
+    /// because that is where the notes and the index are.
+    any pdf_links(rel: ref str) -> Vec<PdfLink>;
+    any note_paths() -> Vec<String>;
+    any file_paths(include_ignored: val bool) -> Vec<String>;
+    any set_excluded(entries: ref [String]) -> ();
+    any recent_notes(limit: val usize) -> Vec<String>;
+    any resolve_link(target: ref str) -> Option<String>;
+    any conflicts() -> Vec<(String, String)>;
+    any conflicts_of(rel: ref str) -> Vec<String>;
+
+    // -------------------------------------------------------------------- git
+    // The repositories belong to the machine the files are on, so every one of these runs there —
+    // the `git` binary the user configured, with their hooks and their credential helper.
+    git git_status = status(repo: ref Repo) -> Status;
+    /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
+    /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
+    /// there is nothing in it for a remote host to do.
+    git git_log = log(repo: ref Repo, skip: val usize, limit: val usize) -> Vec<Commit>;
+    git git_show = show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
+    git git_changed_files = changed_files(repo: ref Repo, oid: ref str) -> Vec<(char, String)>;
+    git git_submodules = submodules(repo: ref Repo) -> Vec<Submodule>;
+    git git_branches = branches(repo: ref Repo) -> Vec<String>;
+    git git_checkout = checkout(repo: ref Repo, branch: ref str) -> ();
+    git git_checkout_commit = checkout_commit(repo: ref Repo, oid: ref str) -> ();
+    git git_create_branch = create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> ();
+    git git_delete_branch = delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();
+    git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String;
+    git git_sync = sync(repo: ref Repo) -> String;
+    /// Bring the remote-tracking refs up to date. Bounded by [`git::FETCH_TIMEOUT`], which is
+    /// under [`rpc::DEADLINE`] so that a fetch on a remote vault answers rather than times out.
+    git git_fetch = fetch(repo: ref Repo) -> String;
+    /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.
+    git git_incoming = incoming(repo: ref Repo) -> Vec<String>;
+}
+
+/// The rest: the methods whose two sides really do differ.
 impl Vault {
-    pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
-        match &self.backend {
-            Backend::Local(v) => v.read(rel),
-            Backend::Remote(r) => r
-                .call("read", json!([rel]))
-                .map_err(rpc::RpcError::io_error),
-        }
-    }
-
-    pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {
-        match &self.backend {
-            Backend::Local(v) => v.read_text(rel),
-            Backend::Remote(r) => r
-                .call("read_text", json!([rel]))
-                .map_err(rpc::RpcError::io_error),
-        }
-    }
-
-    pub fn stat(&self, rel: &str) -> io::Result<Option<Etag>> {
-        match &self.backend {
-            Backend::Local(v) => v.stat(rel),
-            Backend::Remote(r) => r
-                .call("stat", json!([rel]))
-                .map_err(rpc::RpcError::io_error),
-        }
-    }
-
     /// Whether there is anything at `rel`. One `stat`, and the answer the tree and the open path
     /// actually want.
     pub fn exists(&self, rel: &str) -> bool {
@@ -235,17 +352,6 @@ impl Vault {
             Backend::Remote(r) => r
                 .call("save", json!([rel, text, expected]))
                 .map_err(rpc::RpcError::save_error),
-        }
-    }
-
-    /// Delete a file or a directory. Local vaults go to the system trash through the desktop, so
-    /// this is the remote path only — permanent, and confirmed as such by the UI.
-    pub fn delete(&self, rel: &str) -> io::Result<()> {
-        match &self.backend {
-            Backend::Local(v) => v.delete(rel),
-            Backend::Remote(r) => r
-                .call("delete", json!([rel]))
-                .map_err(rpc::RpcError::io_error),
         }
     }
 
@@ -275,40 +381,16 @@ impl Vault {
         }
     }
 
+    /// Create a file, optionally from a template. The template is an `Option<&str>`, which is
+    /// neither a reference the table can borrow nor a value it can send, so this one is spelled
+    /// out.
     pub fn create_note(&self, rel: &str, template: Option<&str>) -> Result<(String, Vec<usize>)> {
-        ask!(
-            self,
-            |v: &Local| v.create_note(rel, template),
-            "create_note",
-            json!([rel, template])
-        )
-    }
-
-    pub fn create_dir(&self, rel: &str) -> io::Result<()> {
         match &self.backend {
-            Backend::Local(v) => v.create_dir(rel),
+            Backend::Local(v) => v.create_note(rel, template),
             Backend::Remote(r) => r
-                .call("create_dir", json!([rel]))
-                .map_err(rpc::RpcError::io_error),
+                .call("create_note", json!([rel, template]))
+                .map_err(remote_err),
         }
-    }
-
-    pub fn plan_rename(&self, from: &str, to: &str) -> Result<RenamePlan> {
-        ask!(
-            self,
-            |v: &Local| v.plan_rename(from, to),
-            "plan_rename",
-            json!([from, to])
-        )
-    }
-
-    pub fn rename(&self, plan: &RenamePlan, rewrite_links: bool) -> Result<RenameReport> {
-        ask!(
-            self,
-            |v: &Local| v.rename(plan, rewrite_links),
-            "rename",
-            json!([plan, rewrite_links])
-        )
     }
 
     /// Replace every match in every note that has one.
@@ -331,76 +413,6 @@ impl Vault {
                 .call("replace_all", json!([query, options, replacement, literal]))
                 .map_err(remote_err),
         }
-    }
-
-    pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
-        ask!(
-            self,
-            |v: &Local| v.adopt_conflict(original, conflict),
-            "adopt_conflict",
-            json!([original, conflict])
-        )
-    }
-
-    pub fn conflict_diff(&self, original: &str, conflict: &str) -> Result<Vec<DiffLine>> {
-        ask!(
-            self,
-            |v: &Local| v.conflict_diff(original, conflict),
-            "conflict_diff",
-            json!([original, conflict])
-        )
-    }
-
-    pub fn template_target(&self, template: &str) -> Result<Option<String>> {
-        ask!(
-            self,
-            |v: &Local| v.template_target(template),
-            "template_target",
-            json!([template])
-        )
-    }
-
-    pub fn note_from_template(&self, template: &str) -> Result<Option<(String, Vec<usize>)>> {
-        ask!(
-            self,
-            |v: &Local| v.note_from_template(template),
-            "note_from_template",
-            json!([template])
-        )
-    }
-
-    pub fn render_template(&self, template: &str, title: &str) -> Result<(String, Vec<usize>)> {
-        ask!(
-            self,
-            |v: &Local| v.render_template(template, title),
-            "render_template",
-            json!([template, title])
-        )
-    }
-
-    pub fn templates(&self) -> Result<Vec<String>> {
-        ask!(self, |v: &Local| v.templates(), "templates", json!([]))
-    }
-}
-
-// Index reads.
-impl Vault {
-    pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
-        ask!(self, |v: &Local| v.list_dir(rel), "list_dir", json!([rel]))
-    }
-
-    pub fn search(
-        &self,
-        query: &str,
-        limit: usize,
-        include_ignored: bool,
-    ) -> Result<Vec<SearchHit>> {
-        ask!(
-            self,
-            |v: &Local| v.search(query, limit, include_ignored),
-            "search",
-            json!([query, limit, include_ignored])
-        )
     }
 
     pub fn grep(
@@ -442,83 +454,6 @@ impl Vault {
         }
     }
 
-    pub fn tags(&self) -> Result<Vec<(String, i64)>> {
-        ask!(self, |v: &Local| v.tags(), "tags", json!([]))
-    }
-
-    pub fn files_with_tag(&self, tag: &str) -> Result<Vec<FileRow>> {
-        ask!(
-            self,
-            |v: &Local| v.files_with_tag(tag),
-            "files_with_tag",
-            json!([tag])
-        )
-    }
-
-    pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
-        ask!(
-            self,
-            |v: &Local| v.backlinks(rel),
-            "backlinks",
-            json!([rel])
-        )
-    }
-
-    /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
-    /// because that is where the notes and the index are.
-    pub fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
-        ask!(
-            self,
-            |v: &Local| v.pdf_links(rel),
-            "pdf_links",
-            json!([rel])
-        )
-    }
-
-    pub fn note_paths(&self) -> Result<Vec<String>> {
-        ask!(self, |v: &Local| v.note_paths(), "note_paths", json!([]))
-    }
-
-    pub fn file_paths(&self, include_ignored: bool) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |v: &Local| v.file_paths(include_ignored),
-            "file_paths",
-            json!([include_ignored])
-        )
-    }
-
-    pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
-        ask!(
-            self,
-            |v: &Local| v.set_excluded(entries),
-            "set_excluded",
-            json!([entries])
-        )
-    }
-
-    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |v: &Local| v.recent_notes(limit),
-            "recent_notes",
-            json!([limit])
-        )
-    }
-
-    pub fn resolve_link(&self, target: &str) -> Result<Option<String>> {
-        ask!(
-            self,
-            |v: &Local| v.resolve_link(target),
-            "resolve_link",
-            json!([target])
-        )
-    }
-
-    pub fn conflicts(&self) -> Result<Vec<(String, String)>> {
-        ask!(self, |v: &Local| v.conflicts(), "conflicts", json!([]))
-    }
-
     /// Which vault file an embed names, or `None` when nothing answers to it.
     ///
     /// `![[img.png]]` is written the way a wikilink is, so a basename on its own has to be found
@@ -533,186 +468,43 @@ impl Vault {
         self.resolve_link(rel).ok().flatten()
     }
 
-    pub fn conflicts_of(&self, rel: &str) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |v: &Local| v.conflicts_of(rel),
-            "conflicts_of",
-            json!([rel])
-        )
-    }
-}
-
-// Git. The repositories belong to the machine the files are on, so every one of these runs there
-// — the `git` binary the user configured, with their hooks and their credential helper.
-impl Vault {
-    pub fn repos(&self) -> Vec<Repo> {
+    /// The repositories the vault touches. A failure is the caller's to see: offline used to read
+    /// as "no repositories", which is what emptied the git pane on a dropped connection.
+    pub fn repos(&self) -> Result<Vec<Repo>> {
         match &self.backend {
-            Backend::Local(v) => v.repos(),
-            Backend::Remote(r) => r.call("repos", json!([])).unwrap_or_default(),
+            Backend::Local(v) => Ok(v.repos()),
+            Backend::Remote(r) => r.call("repos", json!([])).map_err(remote_err),
         }
     }
 
-    pub fn git_status(&self, repo: &Repo) -> Result<Status> {
-        ask!(
-            self,
-            |_: &Local| git::status(repo).map_err(anyhow::Error::from),
-            "git_status",
-            json!([repo])
-        )
-    }
-
-    /// One page of history. The graph itself is computed where it is drawn: [`git::lanes`] is a
-    /// forward pass over every commit so far, so the pane keeps the list and re-lanes it, and
-    /// there is nothing in it for a remote host to do.
-    pub fn git_log(&self, repo: &Repo, skip: usize, limit: usize) -> Result<Vec<Commit>> {
-        ask!(
-            self,
-            |_: &Local| git::log(repo, skip, limit).map_err(anyhow::Error::from),
-            "git_log",
-            json!([repo, skip, limit])
-        )
-    }
-
-    pub fn git_show(&self, repo: &Repo, rev: &str, path: &str) -> Result<Option<git::Blob>> {
-        ask!(
-            self,
-            |_: &Local| git::show(repo, rev, path).map_err(anyhow::Error::from),
-            "git_show",
-            json!([repo, rev, path])
-        )
-    }
-
-    pub fn git_changed_files(&self, repo: &Repo, oid: &str) -> Result<Vec<(char, String)>> {
-        ask!(
-            self,
-            |_: &Local| git::changed_files(repo, oid).map_err(anyhow::Error::from),
-            "git_changed_files",
-            json!([repo, oid])
-        )
-    }
-
-    pub fn git_submodules(&self, repo: &Repo) -> Result<Vec<Submodule>> {
-        ask!(
-            self,
-            |_: &Local| git::submodules(repo).map_err(anyhow::Error::from),
-            "git_submodules",
-            json!([repo])
-        )
-    }
-
-    pub fn git_branches(&self, repo: &Repo) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |_: &Local| git::branches(repo).map_err(anyhow::Error::from),
-            "git_branches",
-            json!([repo])
-        )
-    }
-
-    pub fn git_checkout(&self, repo: &Repo, branch: &str) -> Result<()> {
-        ask!(
-            self,
-            |_: &Local| git::checkout(repo, branch).map_err(anyhow::Error::from),
-            "git_checkout",
-            json!([repo, branch])
-        )
-    }
-
-    pub fn git_checkout_commit(&self, repo: &Repo, oid: &str) -> Result<()> {
-        ask!(
-            self,
-            |_: &Local| git::checkout_commit(repo, oid).map_err(anyhow::Error::from),
-            "git_checkout_commit",
-            json!([repo, oid])
-        )
-    }
-
-    pub fn git_create_branch(&self, repo: &Repo, name: &str, checkout: bool) -> Result<()> {
-        ask!(
-            self,
-            |_: &Local| git::create_branch(repo, name, checkout).map_err(anyhow::Error::from),
-            "git_create_branch",
-            json!([repo, name, checkout])
-        )
-    }
-
-    pub fn git_delete_branch(&self, repo: &Repo, name: &str, force: bool) -> Result<()> {
-        ask!(
-            self,
-            |_: &Local| git::delete_branch(repo, name, force).map_err(anyhow::Error::from),
-            "git_delete_branch",
-            json!([repo, name, force])
-        )
-    }
-
-    pub fn git_commit(&self, repo: &Repo, message: &str, all: bool) -> Result<String> {
-        ask!(
-            self,
-            |_: &Local| git::commit(repo, message, all).map_err(anyhow::Error::from),
-            "git_commit",
-            json!([repo, message, all])
-        )
-    }
-
-    pub fn git_sync(&self, repo: &Repo) -> Result<String> {
-        ask!(
-            self,
-            |_: &Local| git::sync(repo).map_err(anyhow::Error::from),
-            "git_sync",
-            json!([repo])
-        )
-    }
-
-    /// Bring the remote-tracking refs up to date. Bounded by [`git::FETCH_TIMEOUT`], which is
-    /// under [`rpc::DEADLINE`] so that a fetch on a remote vault answers rather than times out.
-    pub fn git_fetch(&self, repo: &Repo) -> Result<String> {
-        ask!(
-            self,
-            |_: &Local| git::fetch(repo).map_err(anyhow::Error::from),
-            "git_fetch",
-            json!([repo])
-        )
-    }
-
-    /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.
-    pub fn git_incoming(&self, repo: &Repo) -> Result<Vec<String>> {
-        ask!(
-            self,
-            |_: &Local| git::incoming(repo).map_err(anyhow::Error::from),
-            "git_incoming",
-            json!([repo])
-        )
-    }
-
+    /// `git` takes its paths as `&[&str]` and the wire carries owned strings, so these three
+    /// borrow before they call rather than going through the table.
     pub fn git_stage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-        ask!(
-            self,
-            |_: &Local| git::stage(repo, &borrowed).map_err(anyhow::Error::from),
-            "git_stage",
-            json!([repo, paths])
-        )
+        self.git_paths("git_stage", git::stage, repo, paths)
     }
 
     pub fn git_unstage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-        ask!(
-            self,
-            |_: &Local| git::unstage(repo, &borrowed).map_err(anyhow::Error::from),
-            "git_unstage",
-            json!([repo, paths])
-        )
+        self.git_paths("git_unstage", git::unstage, repo, paths)
     }
 
     pub fn git_discard(&self, repo: &Repo, paths: &[String]) -> Result<()> {
-        let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
-        ask!(
-            self,
-            |_: &Local| git::discard(repo, &borrowed).map_err(anyhow::Error::from),
-            "git_discard",
-            json!([repo, paths])
-        )
+        self.git_paths("git_discard", git::discard, repo, paths)
+    }
+
+    fn git_paths(
+        &self,
+        method: &str,
+        run: fn(&Repo, &[&str]) -> Result<(), git::Error>,
+        repo: &Repo,
+        paths: &[String],
+    ) -> Result<()> {
+        match &self.backend {
+            Backend::Local(_) => {
+                let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
+                run(repo, &borrowed).map_err(anyhow::Error::from)
+            }
+            Backend::Remote(r) => r.call(method, json!([repo, paths])).map_err(remote_err),
+        }
     }
 }
 

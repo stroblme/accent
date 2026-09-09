@@ -701,7 +701,7 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         // Asking for the repositories is what puts `.git` in the watch set.
-        assert_eq!(f.vault.repos().len(), 1);
+        assert_eq!(f.vault.repos().unwrap().len(), 1);
         git(&["add", "a.md"]);
         git(&["commit", "-qm", "one"]);
 

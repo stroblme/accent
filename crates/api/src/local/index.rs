@@ -445,7 +445,7 @@ mod tests {
         f.vault.rescan();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let repos = f.vault.repos();
+        let repos = f.vault.repos().unwrap();
         assert_eq!(
             repos.len(),
             2,
