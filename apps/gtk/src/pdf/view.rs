@@ -374,8 +374,8 @@ impl PdfView {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a point the eraser passed over.
-    pub fn connect_erase(&self, f: impl Fn(usize, (f32, f32)) + 'static) {
+    /// Called with a page and the index in its `/Annots` of a stroke the eraser passed over.
+    pub fn connect_erase(&self, f: impl Fn(usize, usize) + 'static) {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
@@ -507,8 +507,30 @@ impl PdfView {
             return;
         };
         let at = self.point_on(page, x, y);
+        let radius = self.imp().style.borrow().eraser_radius;
+        // Hit-tested here, against the strokes the tab keeps for this page, rather than on the
+        // render thread: that read and flattened every annotation on the page under the pdfium
+        // lock, once per pointer event of the drag.
+        let mut inks = self.imp().inks.borrow_mut();
+        let Some(list) = inks.get_mut(&page) else {
+            return;
+        };
+        let Some(found) = list
+            .iter()
+            .position(|ink| accent_core::pdf::hit(&ink.points, at, radius))
+        else {
+            return;
+        };
+        let index = list[found].index;
+        // Taken out here too, so a drag that passes over it again does not name an index the
+        // document no longer has: a delete shifts everything after it down one.
+        list.remove(found);
+        for ink in list.iter_mut().filter(|ink| ink.index > index) {
+            ink.index -= 1;
+        }
+        drop(inks);
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
-            f(page, at);
+            f(page, index);
         }
     }
 
@@ -805,7 +827,8 @@ mod imp {
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
-    type At = Box<dyn Fn(usize, (f32, f32))>;
+    /// A page and the index of a stroke on it: what the eraser passed over.
+    type At = Box<dyn Fn(usize, usize)>;
     type Transform = Box<dyn Fn(usize, usize, accent_core::pdf::Matrix)>;
 
     #[derive(glib::Properties)]

@@ -336,23 +336,19 @@ fn render_loop(
                         Err(e) => tracing::warn!("moving a stroke on page {page}: {e:#}"),
                     }
                 }
-                Request::Erase { page, at, radius } => {
-                    let hit = doc.ink_paths(page).unwrap_or_default();
-                    let found = hit.iter().find(|(_, points)| pdf::hit(points, at, radius));
-                    if let Some((index, _)) = found {
-                        let before = doc.annotation_count(page).unwrap_or(0);
-                        ink.note(page, before);
-                        let area = match doc.delete_annotation(page, *index) {
-                            Ok(area) => area,
-                            Err(e) => {
-                                tracing::warn!("erasing on page {page}: {e:#}");
-                                continue;
-                            }
-                        };
-                        ink.erased(page, *index);
-                        ink.dirty = true;
-                        send(&view, Reply::PageChanged(page, area));
-                    }
+                Request::Erase { page, index } => {
+                    let before = doc.annotation_count(page).unwrap_or(0);
+                    ink.note(page, before);
+                    let area = match doc.delete_annotation(page, index) {
+                        Ok(area) => area,
+                        Err(e) => {
+                            tracing::warn!("erasing on page {page}: {e:#}");
+                            continue;
+                        }
+                    };
+                    ink.erased(page, index);
+                    ink.dirty = true;
+                    send(&view, Reply::PageChanged(page, area));
                 }
                 Request::Undo => {
                     // One step per `Ctrl+Z`; a step whose annotation was erased since is skipped.
