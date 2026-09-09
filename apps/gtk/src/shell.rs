@@ -334,8 +334,11 @@ impl Shell {
         root: PathBuf,
         note: Option<String>,
     ) {
-        if let Some(window) = self.window_for(&root) {
-            window.present();
+        if let Some(app) = self.app_for(&root) {
+            app.window.present();
+            if let Some(note) = note {
+                app.open_path(&note);
+            }
             return;
         }
         self.add_window(gtk_app, Some(root), note);
@@ -491,12 +494,12 @@ impl Shell {
         into.close_page(page);
     }
 
-    fn window_for(&self, root: &Path) -> Option<adw::ApplicationWindow> {
+    fn app_for(&self, root: &Path) -> Option<Rc<App>> {
         let windows = self.windows.borrow();
         let (_, app) = windows
             .iter()
             .find(|(path, _)| path.as_deref() == Some(root))?;
-        Some(app.window.clone())
+        Some(app.clone())
     }
 
     /// Open `path` wherever it belongs: in the window whose vault contains it, or in the one
