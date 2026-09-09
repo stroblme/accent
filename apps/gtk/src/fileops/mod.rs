@@ -149,7 +149,9 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         let rel = child_path(&dir, &name);
         // `create_dir_all` is happy to find the directory already there, so the collision the
         // user cares about has to be asked about before the call rather than read off its error.
-        if ops.vault.root().join(&rel).exists() {
+        // Asked of the vault and not of this disk: `root()` is a path on the *remote* host, so
+        // the local `exists` there was always false and every clash went through as "Created".
+        if ops.vault.exists(&rel) {
             return (ops.toast)(&format!("{name} already exists"));
         }
         match ops.vault.create_dir(&rel) {
