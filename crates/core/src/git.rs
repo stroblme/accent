@@ -147,33 +147,16 @@ pub enum Error {
 /// `readonly` is not a hint: it sets `GIT_OPTIONAL_LOCKS=0`, and without it `git status` refreshes
 /// and rewrites `.git/index`. The GTK layer watches the repository, sees that write, asks for a
 /// status to explain it, and the two chase each other forever. Every query below passes `true`.
-fn run(root: &Path, args: &[&str], stdin: Option<&[u8]>, readonly: bool) -> Result<Vec<u8>, Error> {
-    Ok(output(root, args, stdin, readonly)?.stdout)
-}
-
-/// [`run`] for the two callers that want stderr as well.
-fn output(
-    root: &Path,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-    readonly: bool,
-) -> Result<Output, Error> {
-    let mut cmd = command(root, args, readonly);
-    let out = match stdin {
-        Some(bytes) => {
-            let mut child = cmd.stdin(Stdio::piped()).spawn()?;
-            // Dropping the handle at the end of the statement closes the pipe, which is what
-            // tells git the message is complete.
-            child
-                .stdin
-                .take()
-                .expect("stdin is piped")
-                .write_all(bytes)?;
-            child.wait_with_output()?
-        }
-        None => cmd.stdin(Stdio::null()).output()?,
-    };
-    checked(out)
+///
+/// It waits for ever, which is right for reading a local repository: this is a `git status` per
+/// save, and the poll interval [`bounded`] wakes on would be latency on every one of them.
+/// Everything that talks to a network — and the commit, whose hooks are the user's own programs —
+/// goes through [`bounded`] instead.
+fn run(root: &Path, args: &[&str], readonly: bool) -> Result<Vec<u8>, Error> {
+    let out = command(root, args, readonly)
+        .stdin(Stdio::null())
+        .output()?;
+    Ok(checked(out)?.stdout)
 }
 
 /// The command every call here runs, configured but not spawned. Its own function because
@@ -213,7 +196,6 @@ pub fn toplevel(dir: &Path) -> Result<Option<Repo>, Error> {
     let out = match run(
         dir,
         &["rev-parse", "--show-toplevel", "--absolute-git-dir"],
-        None,
         true,
     ) {
         Ok(out) => out,
@@ -235,7 +217,7 @@ pub fn nested(dir: &Path) -> Result<Option<Repo>, Error> {
     if std::fs::symlink_metadata(dir.join(".git")).is_err() {
         return Ok(None);
     }
-    let out = match run(dir, &["rev-parse", "--absolute-git-dir"], None, true) {
+    let out = match run(dir, &["rev-parse", "--absolute-git-dir"], true) {
         Ok(out) => out,
         Err(Error::Git(msg)) if msg.contains("not a git repository") => return Ok(None),
         Err(e) => return Err(e),
@@ -302,7 +284,6 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     let out = run(
         &repo.root,
         &["status", "--porcelain=v2", "-z", "--branch", "--ignored"],
-        None,
         true,
     )?;
     Ok(parse_status(&out))
@@ -410,9 +391,61 @@ fn entry(line: &str, fields: usize) -> Option<Entry> {
 /// comes back while its caller is listening.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How long a transfer the user asked for may run before it is killed.
+///
+/// Longer than [`FETCH_TIMEOUT`] because somebody is watching it: a large push over a slow link is
+/// not a hang, and cutting it off would be worse than waiting. Bounded all the same, because the
+/// UI holds the Sync button insensitive for the whole call — a pull that will never answer would
+/// otherwise pin it for the life of the process, and pin the thread it runs on with it.
+pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How often the wait below looks at the child. Short enough that a quick fetch is not padded,
 /// long enough that a slow one costs nothing to wait for.
 const POLL: Duration = Duration::from_millis(50);
+
+/// Run one git command and wait for it, killing it after `cap`.
+///
+/// The wait is ours rather than `Command`'s, which waits for ever. Everything that talks to a
+/// network needs to be able to give up — `GIT_TERMINAL_PROMPT=0` only stops it hanging on a
+/// *prompt*, and a host that accepts the connection and then says nothing holds the thread it runs
+/// on for as long as ssh's own timeout — and so does a commit, whose hooks are the user's own
+/// programs. `what` names the command in the refusal.
+fn bounded(
+    mut cmd: Command,
+    stdin: Option<&[u8]>,
+    cap: Duration,
+    what: &str,
+) -> Result<Output, Error> {
+    let mut child = match stdin {
+        Some(bytes) => {
+            let mut child = cmd.stdin(Stdio::piped()).spawn()?;
+            // Dropping the handle at the end of the statement closes the pipe, which is what
+            // tells git the message is complete.
+            child
+                .stdin
+                .take()
+                .expect("stdin is piped")
+                .write_all(bytes)?;
+            child
+        }
+        None => cmd.stdin(Stdio::null()).spawn()?,
+    };
+    let deadline = Instant::now() + cap;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Git(format!(
+                "the {what} did not finish within {} seconds",
+                cap.as_secs()
+            )));
+        }
+        std::thread::sleep(POLL);
+    }
+    // `try_wait` has already reaped the child and cached its status, so this only drains the two
+    // pipes. They hold a ref summary at most: git prints progress only to a terminal.
+    checked(child.wait_with_output()?)
+}
 
 /// Bring the remote-tracking refs up to date, and nothing else.
 ///
@@ -421,27 +454,11 @@ const POLL: Duration = Duration::from_millis(50);
 /// anything at all. Only this repository's configured remotes, because the caller is showing one
 /// repository and a vault may hold several.
 ///
-/// The wait is ours rather than `Command`'s: a fetch that never finishes must be killed, or the
-/// thread it is on is gone for the life of the process (see [`FETCH_TIMEOUT`]).
+/// Nobody is waiting for it, so it is the shortest-lived of the bounded calls (see
+/// [`FETCH_TIMEOUT`]).
 pub fn fetch(repo: &Repo) -> Result<String, Error> {
-    let mut child = command(&repo.root, &["fetch"], false)
-        .stdin(Stdio::null())
-        .spawn()?;
-    let deadline = Instant::now() + FETCH_TIMEOUT;
-    while child.try_wait()?.is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Git(format!(
-                "the fetch did not finish within {} seconds",
-                FETCH_TIMEOUT.as_secs()
-            )));
-        }
-        std::thread::sleep(POLL);
-    }
-    // `try_wait` has already reaped the child and cached its status, so this only drains the two
-    // pipes. They hold a ref summary at most: git prints progress only to a terminal.
-    Ok(transcribe(checked(child.wait_with_output()?)?))
+    let cmd = command(&repo.root, &["fetch"], false);
+    Ok(transcribe(bounded(cmd, None, FETCH_TIMEOUT, "fetch")?))
 }
 
 /// The commits the upstream has and HEAD does not: exactly what a pull would bring in.
@@ -452,7 +469,7 @@ pub fn fetch(repo: &Repo) -> Result<String, Error> {
 /// repository with no commits. The caller knows which of those it is from [`Branch`] and asks
 /// only when `behind` says there is something to list.
 pub fn incoming(repo: &Repo) -> Result<Vec<String>, Error> {
-    let out = run(&repo.root, &["rev-list", "HEAD..@{upstream}"], None, true)?;
+    let out = run(&repo.root, &["rev-list", "HEAD..@{upstream}"], true)?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .map(str::to_string)
@@ -481,7 +498,6 @@ pub fn log(repo: &Repo, skip: usize, n: usize) -> Result<Vec<Commit>, Error> {
             // and a body holds newlines, so the record separator has to be neither.
             "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1f%b%x1e",
         ],
-        None,
         true,
     )?;
     Ok(parse_log(&out))
@@ -604,7 +620,7 @@ pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
     if !repo.root.join(".gitmodules").exists() {
         return Ok(Vec::new());
     }
-    let out = run(&repo.root, &["submodule", "status"], None, true)?;
+    let out = run(&repo.root, &["submodule", "status"], true)?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
         .filter_map(parse_submodule)
@@ -651,7 +667,6 @@ pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Erro
             "--first-parent",
             oid,
         ],
-        None,
         true,
     )?;
     Ok(parse_name_status(&out))
@@ -714,7 +729,7 @@ impl Blob {
 /// A file that is new — untracked, or added but not yet committed — is a normal answer here, not
 /// an error, so the four ways git words "it isn't there" all become `Ok(None)`.
 pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
-    match run(&repo.root, &["show", &format!("{rev}:{path}")], None, true) {
+    match run(&repo.root, &["show", &format!("{rev}:{path}")], true) {
         Ok(bytes) => Ok(Some(Blob::of(&bytes))),
         Err(Error::Git(msg))
             if msg.contains("does not exist") || msg.contains("exists on disk, but not in") =>
@@ -730,7 +745,6 @@ pub fn branches(repo: &Repo) -> Result<Vec<String>, Error> {
     let out = run(
         &repo.root,
         &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
-        None,
         true,
     )?;
     Ok(parse_branches(&out))
@@ -750,14 +764,14 @@ pub fn parse_branches(bytes: &[u8]) -> Vec<String> {
 /// or a tag cannot quietly detach HEAD instead. Whether the switch is safe is git's decision, not
 /// ours — it refuses where the working tree would be clobbered, and that refusal is the answer.
 pub fn checkout(repo: &Repo, branch: &str) -> Result<(), Error> {
-    run(&repo.root, &["switch", "--", branch], None, false)?;
+    run(&repo.root, &["switch", "--", branch], false)?;
     Ok(())
 }
 
 /// Move HEAD onto one commit, detached, which is how a past state is looked at without a branch
 /// being moved. Git refuses this too where the working tree would be clobbered.
 pub fn checkout_commit(repo: &Repo, oid: &str) -> Result<(), Error> {
-    run(&repo.root, &["switch", "--detach", oid], None, false)?;
+    run(&repo.root, &["switch", "--detach", oid], false)?;
     Ok(())
 }
 
@@ -769,7 +783,7 @@ pub fn create_branch(repo: &Repo, name: &str, checkout: bool) -> Result<(), Erro
         true => &["switch", "-c"],
         false => &["branch", "--"],
     };
-    run(&repo.root, &[args, &[name]].concat(), None, false)?;
+    run(&repo.root, &[args, &[name]].concat(), false)?;
     Ok(())
 }
 
@@ -780,7 +794,7 @@ pub fn delete_branch(repo: &Repo, name: &str, force: bool) -> Result<(), Error> 
         true => "-D",
         false => "-d",
     };
-    run(&repo.root, &["branch", flag, "--", name], None, false)?;
+    run(&repo.root, &["branch", flag, "--", name], false)?;
     Ok(())
 }
 
@@ -817,7 +831,6 @@ fn unborn(repo: &Repo) -> bool {
     run(
         &repo.root,
         &["rev-parse", "--verify", "--quiet", "HEAD"],
-        None,
         true,
     )
     .is_err()
@@ -830,7 +843,7 @@ pub fn discard(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
 /// `--` keeps a note called `-f`, or one whose name matches a branch, from being read as an option.
 fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
     let args = [verb, &["--"][..], paths].concat();
-    run(&repo.root, &args, None, false)?;
+    run(&repo.root, &args, false)?;
     Ok(())
 }
 
@@ -842,13 +855,18 @@ fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
 /// `all` is `git commit -a`, which is what the pane sends when nothing is staged: every tracked
 /// file's change goes in, deletions included, and an untracked file stays untracked. Deliberately
 /// not `git add -A`, which would sweep up whatever the user has not decided about yet.
+///
+/// Bounded like the transfers, and for the same reason: a `pre-commit` hook is one of the user's
+/// own programs, and one that never returns would hold the thread — and the pane's Commit button
+/// — for the life of the process.
 pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
     let args: &[&str] = match all {
         true => &["commit", "-a", "-F", "-"],
         false => &["commit", "-F", "-"],
     };
-    run(&repo.root, args, Some(message.as_bytes()), false)?;
-    let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], None, true)?;
+    let cmd = command(&repo.root, args, false);
+    bounded(cmd, Some(message.as_bytes()), TRANSFER_TIMEOUT, "commit")?;
+    let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], true)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
@@ -871,7 +889,6 @@ fn upstream(repo: &Repo) -> Option<String> {
             "--symbolic-full-name",
             "@{upstream}",
         ],
-        None,
         true,
     )
     .ok()?;
@@ -886,7 +903,7 @@ fn upstream(repo: &Repo) -> Option<String> {
 /// rather than picking one — pushing a branch to the wrong host is not something an automatic
 /// guess should be allowed to do.
 fn default_remote(repo: &Repo) -> Result<String, Error> {
-    let out = run(&repo.root, &["remote"], None, true)?;
+    let out = run(&repo.root, &["remote"], true)?;
     let text = String::from_utf8_lossy(&out);
     let remotes: Vec<&str> = text
         .lines()
@@ -945,8 +962,13 @@ fn publish(repo: &Repo) -> Result<String, Error> {
 /// There is nothing worth parsing in what a transfer prints, and plenty worth reading, so the UI
 /// gets the transcript as the terminal would show it — including stderr, where git puts the ref
 /// summary that says what actually moved.
+///
+/// Bounded by [`TRANSFER_TIMEOUT`]: this is where a pull that never answers would otherwise leave
+/// the Sync button insensitive for good.
 fn transcript(repo: &Repo, args: &[&str]) -> Result<String, Error> {
-    Ok(transcribe(output(&repo.root, args, None, false)?))
+    let cmd = command(&repo.root, args, false);
+    let what = args.first().copied().unwrap_or("transfer");
+    Ok(transcribe(bounded(cmd, None, TRANSFER_TIMEOUT, what)?))
 }
 
 /// Both streams in the order a terminal would have shown them.
