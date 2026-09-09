@@ -32,6 +32,9 @@ theme = "solarized"
 [search]
 exclude = ["Archive", "Code/vendor"]
 
+[drawing]
+mouse = false
+
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
@@ -87,6 +90,7 @@ pub struct Config {
     /// list means the action is deliberately unbound.
     pub shortcuts: BTreeMap<String, Vec<String>>,
     pub search: SearchConfig,
+    pub drawing: DrawingConfig,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -111,6 +115,16 @@ pub struct SearchConfig {
     pub exclude: Vec<String>,
 }
 
+/// How the PDF drawing tools behave. Global rather than per vault: a pen is a property of the
+/// machine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrawingConfig {
+    /// Draw with the mouse or touchpad even while a pen is attached. Off, the hand selects text
+    /// and only the pen draws — until no pen is attached at all, when the hand draws again.
+    pub mouse: bool,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -125,6 +139,7 @@ impl Default for Config {
             theme: Theme::System,
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
+            drawing: DrawingConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -479,6 +494,7 @@ daily_template = "DailyNote.md"
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
         assert!(c.shortcuts["win.about"].is_empty());
         assert_eq!(c.search.exclude, ["Archive", "Code/vendor"]);
+        assert!(!c.drawing.mouse);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
@@ -488,6 +504,7 @@ daily_template = "DailyNote.md"
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
+        assert_eq!(again.drawing, c.drawing);
     }
 
     #[test]

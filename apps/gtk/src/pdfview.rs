@@ -747,6 +747,37 @@ impl PdfView {
         });
     }
 
+    /// What the preferences say about the tools.
+    pub fn set_drawing_config(&self, config: accent_core::config::DrawingConfig) {
+        *self.imp().style.borrow_mut() = config;
+        self.queue_draw();
+    }
+
+    pub fn drawing_config(&self) -> accent_core::config::DrawingConfig {
+        self.imp().style.borrow().clone()
+    }
+
+    /// The tool a press really means. The mode itself while nothing but a mouse is plugged in;
+    /// with a pen attached the hand selects and only the pen draws, unless the preference says
+    /// otherwise, and the pen's eraser tip erases whatever is in hand.
+    fn effective_mode(&self, controller: &impl IsA<gtk::EventController>) -> Mode {
+        let mode = self.imp().mode.get();
+        if mode == Mode::Select {
+            return mode;
+        }
+        let tool = controller.current_event().and_then(|e| e.device_tool());
+        if tool.is_some_and(|t| t.tool_type() == gdk::DeviceToolType::Eraser) {
+            return Mode::Eraser;
+        }
+        let pen = controller
+            .current_event_device()
+            .is_some_and(|d| d.source() == gdk::InputSource::Pen);
+        match !pen && !self.imp().style.borrow().mouse && stylus_attached() {
+            true => Mode::Select,
+            false => mode,
+        }
+    }
+
     /// Called with a finished stroke: the page and its points, in that page's own points.
     pub fn connect_ink(&self, f: impl Fn(usize, Vec<(f32, f32)>) + 'static) {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
@@ -1032,6 +1063,14 @@ impl PdfView {
 /// The upper bound is never below the page size, which GTK asserts on and which a document
 /// smaller than the window otherwise breaks — an A4 sketch in a split pane, or any small page in
 /// a large one. There is nothing to scroll in that case either way: the value clamps to zero.
+/// Whether the seat has a stylus at all. Asked on the press rather than cached: a tablet can be
+/// plugged in mid-session.
+fn stylus_attached() -> bool {
+    gdk::Display::default()
+        .and_then(|d| d.default_seat())
+        .is_some_and(|s| !s.devices(gdk::SeatCapabilities::TABLET_STYLUS).is_empty())
+}
+
 fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     let Some(adjustment) = adjustment else {
         return;
@@ -1085,6 +1124,11 @@ mod imp {
         pub drag_from: Cell<Option<(f64, f64)>>,
         /// What a drag over the page does: select, draw, or erase.
         pub mode: Cell<super::Mode>,
+        /// The tool this drag really uses — the mode, or Select for a mouse press while a pen
+        /// is attached, or Eraser for the stylus's eraser tip — decided once, on the press.
+        pub drag_mode: Cell<super::Mode>,
+        /// What the config says about the tools; see [`super::PdfView::set_drawing_config`].
+        pub style: RefCell<accent_core::config::DrawingConfig>,
         /// Pages whose content changed and whose visible tiles are therefore out of date. The
         /// next frame turns each into the set of tile keys below, and forgets the page here.
         pub stale_pages: RefCell<HashSet<u32>>,
@@ -1144,6 +1188,8 @@ mod imp {
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 mode: Cell::new(super::Mode::default()),
+                drag_mode: Cell::new(super::Mode::default()),
+                style: RefCell::new(accent_core::config::DrawingConfig::default()),
                 stale_pages: RefCell::new(HashSet::new()),
                 stale_tiles: RefCell::new(HashSet::new()),
                 strokes: RefCell::new(Vec::new()),
@@ -1294,7 +1340,9 @@ mod imp {
                     // A pen or an eraser claims the sequence at once, unlike a selection, which
                     // waits to see whether the pointer moves: a stroke that let the scrolled
                     // window have the first few pixels would scroll the page under the hand.
-                    match obj.imp().mode.get() {
+                    let mode = obj.effective_mode(gesture);
+                    obj.imp().drag_mode.set(mode);
+                    match mode {
                         super::Mode::Select => {}
                         mode if mode.draws() => {
                             let Some((page, _, _)) = obj.page_point(x, y) else {
@@ -1323,7 +1371,7 @@ mod imp {
                     let Some((x, y)) = obj.imp().drag_from.get() else {
                         return;
                     };
-                    match obj.imp().mode.get() {
+                    match obj.imp().drag_mode.get() {
                         super::Mode::Select => {
                             // A few pixels of travel is a click with a shaky hand, not a
                             // selection.
@@ -1357,7 +1405,7 @@ mod imp {
                 obj,
                 move |_, dx, dy| {
                     let from = obj.imp().drag_from.replace(None);
-                    if obj.imp().mode.get().draws() {
+                    if obj.imp().drag_mode.get().draws() {
                         // The stroke stays painted until a tile carries it, so the page never
                         // blinks between the hand letting go and pdfium answering.
                         let finished = match obj.imp().strokes.borrow_mut().last_mut() {
@@ -1395,7 +1443,7 @@ mod imp {
                 move |gesture, _, x, y| {
                     obj.grab_focus();
                     // While a pen is out, a press is the start of a mark, not a link to follow.
-                    if obj.imp().mode.get() != super::Mode::Select {
+                    if obj.effective_mode(gesture) != super::Mode::Select {
                         return;
                     }
                     match gesture.current_button() {

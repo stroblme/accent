@@ -1799,6 +1799,7 @@ impl App {
             &self.tabs(),
             place,
         );
+        pdf.set_drawing_config(self.config.borrow().drawing.clone());
         pdf.connect_zoom(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -4748,6 +4749,7 @@ impl App {
         for doc in self.docs() {
             if let Some(pdf) = doc.pdf() {
                 pdf.restyle();
+                pdf.set_drawing_config(config.drawing.clone());
             }
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
