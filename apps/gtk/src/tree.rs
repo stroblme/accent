@@ -1,7 +1,7 @@
 //! Lazy vault file tree: `gtk::ListView` over a `gtk::TreeListModel` whose children come from
 //! `Vault::list_dir(prefix)`, one directory level per expansion.
 
-use crate::widgets::{scroller, set_class};
+use crate::widgets::{scroller, set_class, status_page};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
 use accent_core::markdown::is_image;
@@ -736,9 +736,34 @@ pub fn build(
     // menu parented to the list is frozen at its first-frame size and `GtkPopoverMenu`'s inner
     // scrolled window turns everything that grows afterwards into a scrollbar. If a scrollbar
     // ever comes back, the next dial is setting that inner scrolled window's policies to Never.
+    // A vault with nothing in it gets the sentence every other pane's emptiness gets, rather than
+    // a blank column that reads as a tree that failed to load (DESIGN.md, States). Driven by the
+    // root store, which is filled from a worker thread and so is empty for a frame either way.
+    let body = gtk::Stack::builder().vexpand(true).build();
+    body.add_named(&scroller, Some("list"));
+    body.add_named(
+        &status_page(
+            "folder-symbolic",
+            "Empty Vault",
+            "Create a note to start writing.",
+        ),
+        Some("empty"),
+    );
+    let show_rows = {
+        let body = body.clone();
+        move |rows: u32| {
+            body.set_visible_child_name(match rows {
+                0 => "empty",
+                _ => "list",
+            });
+        }
+    };
+    show_rows(root.n_items());
+    root.connect_items_changed(move |store, _, _, _| show_rows(store.n_items()));
+
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&vault_row);
-    host.append(&scroller);
+    host.append(&body);
     Tree {
         host,
         view,
