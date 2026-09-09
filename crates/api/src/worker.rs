@@ -16,7 +16,8 @@ use accent_core::path::parent_dir;
 use accent_core::walk::{self, FileKind};
 use accent_core::watch::{VaultEvent, Watcher};
 
-use crate::{Event, conflict_original_rel, conflict_pairs};
+use crate::Event;
+use crate::paths::{conflict_original_rel, conflict_pairs};
 
 /// Start the worker for a vault, and hand back the handle its `Drop` joins.
 pub(crate) fn spawn(
