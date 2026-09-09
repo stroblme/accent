@@ -74,7 +74,7 @@ impl Term {
     /// VTE clamps a scale to [0.25, 4.0], which contains the window's own [0.5, 3.0], so the two
     /// agree about what a zoom can be.
     pub fn set_zoom(&self, zoom: f64) {
-        self.view.set_font_scale(crate::clamp_zoom(zoom));
+        self.view.set_font_scale(crate::zoom::clamp_zoom(zoom));
     }
 
     /// What the status bar says about it, or nothing at all when the shell is at its own size.

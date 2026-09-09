@@ -578,10 +578,10 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
 ///
 /// `from` is a zoom, not a layout scale: reading the step back out of [`Layout::scale`] means
 /// dividing an `f32` by [`PT_TO_PX`], and past 230 % the drift that leaves is larger than
-/// [`crate::stepped_zoom`]'s epsilon, so the next tenth is the one the page is already at and
+/// [`crate::zoom::stepped_zoom`]'s epsilon, so the next tenth is the one the page is already at and
 /// the zoom stops moving.
 pub fn stepped(from: f64, out: bool) -> PdfZoom {
-    PdfZoom::Scale(crate::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
+    PdfZoom::Scale(crate::zoom::stepped_zoom(from, out).clamp(MIN_SCALE, MAX_SCALE))
 }
 
 /// Where a reading position resumes from, given the zoom it resumes into.
@@ -1616,7 +1616,7 @@ mod imp {
                     {
                         return glib::Propagation::Proceed;
                     }
-                    let steps = crate::wheel_steps(&obj.imp().scroll_accum, dy);
+                    let steps = crate::zoom::wheel_steps(&obj.imp().scroll_accum, dy);
                     for _ in 0..steps.abs() {
                         obj.zoom_step(steps > 0, Some(obj.imp().pointer.get()));
                     }
