@@ -44,7 +44,7 @@ pub enum VaultEvent {
 }
 
 /// `fs.inotify.max_user_watches`, or `None` where the sysctl is unreadable (Android, containers).
-pub fn inotify_budget() -> Option<u64> {
+fn inotify_budget() -> Option<u64> {
     std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
         .ok()?
         .trim()

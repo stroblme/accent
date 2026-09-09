@@ -111,13 +111,6 @@ pub struct Match {
     pub more: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeadingRow {
-    pub level: u8,
-    pub text: String,
-    pub byte_start: i64,
-}
-
 /// What [`Index::update_file`] did, so the caller knows whether to tell the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -172,11 +165,6 @@ impl Index {
         let conn = Connection::open(db_path)
             .with_context(|| format!("opening index {}", db_path.display()))?;
         Self::from_conn(conn)
-    }
-
-    /// For tests and short-lived tooling.
-    pub fn open_in_memory() -> Result<Self> {
-        Self::from_conn(Connection::open_in_memory()?)
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
@@ -240,10 +228,6 @@ impl Index {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Index { conn })
-    }
-
-    pub fn conn(&self) -> &Connection {
-        &self.conn
     }
 
     /// Every write transaction in this file, and `BEGIN IMMEDIATE` rather than rusqlite's default

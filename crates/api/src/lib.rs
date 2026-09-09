@@ -880,7 +880,6 @@ impl Local {
             tx: tx.clone(),
             events,
             watcher: None,
-            symlinks: Vec::new(),
             seen_conflicts: BTreeSet::new(),
             reported: BTreeSet::new(),
             git_dirs: Vec::new(),
@@ -1620,9 +1619,6 @@ struct Worker {
     tx: Sender<Msg>,
     events: Sender<Event>,
     watcher: Option<Watcher>,
-    /// `(canonical target, rel_path of the link)`, longest target first: inotify reports paths
-    /// inside a symlinked directory by their real location, and the UI needs the vault path.
-    symlinks: Vec<(PathBuf, String)>,
     /// Conflict copies the UI has already been offered, so a rescan never repeats one.
     seen_conflicts: BTreeSet<String>,
     /// Failures the UI has already been told about, so a recurring one is said once. See
@@ -1785,12 +1781,6 @@ impl Worker {
     }
 
     fn rebuild_watcher(&mut self) {
-        let mut symlinks = self.index.symlink_dirs(&self.root).unwrap_or_else(|e| {
-            tracing::warn!("listing symlinked directories: {e:#}");
-            Vec::new()
-        });
-        // Longest target first, so a link inside a linked tree maps through the deeper one.
-        symlinks.sort_by_key(|(target, _)| std::cmp::Reverse(target.as_os_str().len()));
         // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
         // must not come back in through a recursive watch on the root.
         let mut dirs = self.index.dirs(&self.root).unwrap_or_else(|e| {
@@ -1811,10 +1801,7 @@ impl Worker {
         match Watcher::new(&self.root, &dirs, move |e| {
             let _ = tx.send(Msg::Fs(e));
         }) {
-            Ok(w) => {
-                self.watcher = Some(w);
-                self.symlinks = symlinks;
-            }
+            Ok(w) => self.watcher = Some(w),
             Err(e) => self.fail("watching the vault", e),
         }
     }
@@ -1916,20 +1903,11 @@ impl Worker {
         }
     }
 
-    /// Watcher paths are absolute. Map one back into the vault, through a directory symlink when
-    /// the change happened in an external tree linked in.
+    /// Watcher paths are absolute. Map one back into the vault: the watch set is built from the
+    /// vault's own paths, so an event under a linked-in directory arrives spelled through the
+    /// link.
     fn rel(&self, abs: &Path) -> Option<String> {
-        let mapped = abs
-            .strip_prefix(&self.root)
-            .ok()
-            .map(Path::to_path_buf)
-            .or_else(|| {
-                self.symlinks.iter().find_map(|(target, link)| {
-                    abs.strip_prefix(target)
-                        .ok()
-                        .map(|rest| Path::new(link).join(rest))
-                })
-            })?;
+        let mapped = abs.strip_prefix(&self.root).ok()?;
         match mapped.to_str() {
             Some(rel) => Some(rel.to_string()),
             None => {

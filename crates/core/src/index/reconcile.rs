@@ -856,7 +856,16 @@ mod tests {
         );
 
         // The markdown analyser never sees it: `#` is a comment, not a tag or a heading.
-        assert!(ix.headings("tool.py").unwrap().is_empty());
+        let headings: i64 = ix
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM headings h JOIN files f ON f.id = h.file_id
+                 WHERE f.rel_path = 'tool.py'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(headings, 0);
         assert!(
             !ix.tags().unwrap().iter().any(|(t, _)| t == "atag"),
             "{:?}",
