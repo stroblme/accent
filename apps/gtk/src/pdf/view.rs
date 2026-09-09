@@ -268,6 +268,18 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// One page's matches, as a query finds them. The map is added to rather than rebuilt: a
+    /// search reports page by page, and rebuilding it for each was the whole map per reply.
+    pub fn add_marks(&self, page: usize, rects: Vec<accent_core::pdf::Rect>) {
+        self.imp()
+            .marks
+            .borrow_mut()
+            .entry(page)
+            .or_default()
+            .extend(rects);
+        self.queue_draw();
+    }
+
     /// Where the note links that highlight this document land, per page, each with the index of
     /// the link it came from.
     pub fn set_highlights(&self, highlights: Highlights) {

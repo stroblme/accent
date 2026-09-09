@@ -283,6 +283,11 @@ fn render_loop(
                     }
                 }
                 Request::Search { query, text, from } => {
+                    // An empty query is the bar being cleared or closed: it has already pushed
+                    // aside whatever was running, and there is nothing to look for.
+                    if text.is_empty() {
+                        continue;
+                    }
                     let pages = doc.page_count();
                     let mut at = from;
                     while at < pages {

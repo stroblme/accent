@@ -618,13 +618,14 @@ impl PdfTab {
         self.current.set(None);
         self.view.set_marks(std::collections::HashMap::new());
         self.query.set(self.query.get() + 1);
-        if !text.is_empty() {
-            self.ask(Request::Search {
-                query: self.query.get(),
-                text: text.to_string(),
-                from: 0,
-            });
-        }
+        // Sent even when there is nothing to look for: a query of the same kind takes over from
+        // the one running, so this is what stops a search the reader has cleared or closed the
+        // bar on, which used to finish the whole document into replies nobody reads.
+        self.ask(Request::Search {
+            query: self.query.get(),
+            text: text.to_string(),
+            from: 0,
+        });
         self.emit(&self.on_matches);
     }
 
@@ -1061,21 +1062,21 @@ impl PdfTab {
                 if query != self.query.get() {
                     return;
                 }
+                let found: Vec<pdf::Rect> = hits
+                    .iter()
+                    .filter_map(|hit| hit.iter().copied().reduce(pdf::Rect::union))
+                    .collect();
+                if found.is_empty() {
+                    return;
+                }
+                // Page order is the order a reader steps through them, and the thread walks the
+                // document forwards — so this page's matches go after the ones already found,
+                // which a binary search places without sorting the list again per reply.
                 let mut matches = self.matches.borrow_mut();
-                for hit in &hits {
-                    if let Some(rect) = hit.iter().copied().reduce(pdf::Rect::union) {
-                        matches.push((page, rect));
-                    }
-                }
-                // Kept in page order, which is the order a reader steps through them.
-                matches.sort_by_key(|(page, _)| *page);
-                let mut marks: std::collections::HashMap<usize, Vec<pdf::Rect>> =
-                    std::collections::HashMap::new();
-                for (page, rect) in matches.iter() {
-                    marks.entry(*page).or_default().push(*rect);
-                }
+                let at = matches.partition_point(|(seen, _)| *seen <= page);
+                matches.splice(at..at, found.iter().map(|rect| (page, *rect)));
                 drop(matches);
-                self.view.set_marks(marks);
+                self.view.add_marks(page, found);
                 self.emit(&self.on_matches);
             }
             Reply::Highlights(map) => self.view.set_highlights(map),
