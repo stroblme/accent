@@ -540,6 +540,8 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         )),
         "git_commit" => git_result(git::commit(&repo(0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
         "git_sync" => git_result(git::sync(&repo(0)?)),
+        "git_fetch" => git_result(git::fetch(&repo(0)?)),
+        "git_incoming" => git_result(git::incoming(&repo(0)?)),
         "git_stage" => git_result(git::stage(&repo(0)?, &refs(&paths(1)?))),
         "git_unstage" => git_result(git::unstage(&repo(0)?, &refs(&paths(1)?))),
         "git_discard" => git_result(git::discard(&repo(0)?, &refs(&paths(1)?))),

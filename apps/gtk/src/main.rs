@@ -6776,7 +6776,9 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
-/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
+/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
+/// times, plus the branch readout and how many history rows a background fetch marked as not
+/// pulled yet.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
@@ -6950,6 +6952,9 @@ fn bench_git(app: &Rc<App>) {
         let Some(git) = app.git.get() else {
             return bench_quit(&app);
         };
+        // Again: the session restore runs in the post-present idle and deliberately puts Files
+        // back, so the pane this hook is about is not the one on screen by the time it reads it.
+        app.show_pane("git");
         println!(
             "bench git_changes tree={} {}",
             git.tree(),
@@ -6962,6 +6967,7 @@ fn bench_git(app: &Rc<App>) {
             git.changes_rows()
         );
         println!("bench git_rows {}", git.log_rows());
+        println!("bench git_not_pulled {}", git.not_pulled_rows());
         println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
         git.activate_last_log_row();
         let app = app.clone();
