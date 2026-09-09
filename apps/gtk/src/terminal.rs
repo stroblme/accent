@@ -212,6 +212,10 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
 /// in the bubble phase — too late, because the shell has already turned the chord into an escape
 /// sequence by then. Copy and paste used to be here as hard-coded callbacks; they are
 /// `win.terminal-copy` and `win.terminal-paste` now, so they rebind and list in the palette.
+///
+/// Page Up and Page Down only. Ctrl+Tab is the window's reserved `win.next-tab`, which is
+/// dispatched before any controller of ours and walks the pane's most-recent order rather than
+/// the bar's — so a copy here never ran, and would have stepped the wrong way if it had.
 fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
     let keys = gtk::ShortcutController::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -221,12 +225,7 @@ fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
             keys.add_shortcut(gtk::Shortcut::new(Some(trigger), Some(action)));
         }
     };
-    for (accel, next) in [
-        ("<Control>Page_Up", false),
-        ("<Control><Shift>Tab", false),
-        ("<Control>Page_Down", true),
-        ("<Control>Tab", true),
-    ] {
+    for (accel, next) in [("<Control>Page_Up", false), ("<Control>Page_Down", true)] {
         let tabs = tabs.clone();
         add(
             accel,
