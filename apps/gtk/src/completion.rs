@@ -43,10 +43,13 @@ mod proposal_imp {
     use gtk::subclass::prelude::*;
     use sourceview5::subclass::prelude::*;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     #[derive(Default)]
     pub struct Proposal {
-        pub item: RefCell<Option<Completion>>,
+        /// Shared with the answer it came out of: a refilter builds a proposal per surviving item
+        /// on every keystroke, and a server can answer with thousands of them.
+        pub item: RefCell<Option<Rc<Completion>>>,
         /// The documentation the details panel shows, once `completionItem/resolve` has answered.
         pub doc: RefCell<Option<String>>,
         /// A resolve is in flight or has been done; it is asked for at most once per row.
@@ -73,14 +76,14 @@ glib::wrapper! {
 }
 
 impl Proposal {
-    fn new(item: Completion) -> Self {
+    fn new(item: Rc<Completion>) -> Self {
         let obj: Self = glib::Object::new();
         obj.imp().doc.replace(item.doc.clone());
         obj.imp().item.replace(Some(item));
         obj
     }
 
-    fn item(&self) -> Option<Completion> {
+    fn item(&self) -> Option<Rc<Completion>> {
         self.imp().item.borrow().clone()
     }
 }
@@ -113,8 +116,9 @@ mod provider_imp {
         /// holds the view, so a strong handle here would keep every closed tab alive.
         pub tab: RefCell<Weak<Tab>>,
         /// The whole of the last answer, which is what [`refilter`] narrows. The model handed to
-        /// the popup is only ever a filtered view of this.
-        items: RefCell<Vec<Completion>>,
+        /// the popup is only ever a filtered view of this, and shares these items rather than
+        /// copying them per keystroke.
+        items: RefCell<Vec<Rc<Completion>>>,
         /// The server stopped at a cap, so `items` is not the whole answer and the next
         /// keystroke asks again rather than narrowing.
         incomplete: Cell<bool>,
@@ -154,14 +158,22 @@ mod provider_imp {
         }
 
         /// The items still matching what has been typed, in the order the server ranked them.
+        ///
+        /// The typed prefix is read once rather than per item: it is the same text for every one
+        /// of them — they all opened at the same position — and reading it is a copy out of the
+        /// buffer, which a server that answers with thousands of items would otherwise do
+        /// thousands of times on every keystroke.
         fn matching(&self, context: &CompletionContext) -> gio::ListStore {
             let store = gio::ListStore::new::<Proposal>();
-            for item in self.items.borrow().iter() {
-                let typed = Self::typed(context, item);
+            let items = self.items.borrow();
+            let typed = match items.first() {
+                Some(item) => Self::typed(context, item).to_lowercase(),
+                None => return store,
+            };
+            for item in items.iter() {
                 let haystack = item.filter.as_deref().unwrap_or(&item.label);
                 if !typed.is_empty()
-                    && sourceview5::Completion::fuzzy_match(Some(haystack), &typed.to_lowercase())
-                        .is_none()
+                    && sourceview5::Completion::fuzzy_match(Some(haystack), &typed).is_none()
                 {
                     continue;
                 }
@@ -211,7 +223,7 @@ mod provider_imp {
                     }
                 );
                 if me.asked.get() == asked {
-                    *me.items.borrow_mut() = answer.items;
+                    *me.items.borrow_mut() = answer.items.into_iter().map(Rc::new).collect();
                     me.incomplete.set(answer.incomplete);
                 }
                 me.matching(&context)
@@ -303,7 +315,8 @@ mod provider_imp {
                     let cell = cell.clone();
                     let (me, proposal) = (self.ref_counted(), proposal.clone());
                     glib::spawn_future_local(async move {
-                        let Ok(full) = vault.resolve_completion(&tab.rel(), item).await else {
+                        let Ok(full) = vault.resolve_completion(&tab.rel(), (*item).clone()).await
+                        else {
                             return;
                         };
                         proposal.imp().doc.replace(full.doc.clone());
@@ -357,7 +370,7 @@ mod provider_imp {
             // Last in the document first, so applying one does not move the next. They sit
             // before the caret in practice — an import at the top of the file — which is why
             // they can be applied after the insert at all.
-            for edit in ordered(item.extra_edits) {
+            for edit in ordered(item.extra_edits.clone()) {
                 let mut from = lang::iter_at(&buffer, edit.range.start);
                 let mut to = lang::iter_at(&buffer, edit.range.end);
                 buffer.delete(&mut from, &mut to);
