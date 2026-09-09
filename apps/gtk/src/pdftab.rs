@@ -341,6 +341,12 @@ impl PdfTab {
         self.view.page_count()
     }
 
+    /// The widget a reader's keys have to reach: the reading view, which is where [`Self::wire_keys`]
+    /// puts them. What a window hands the keyboard to when it moves this tab into another pane.
+    pub fn key_target(&self) -> gtk::Widget {
+        self.view.clone().upcast()
+    }
+
     pub fn place(&self) -> Place {
         Place {
             page: self.view.current_page(),

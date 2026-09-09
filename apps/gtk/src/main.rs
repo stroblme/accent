@@ -1343,6 +1343,9 @@ impl App {
         }
         let pane = self.split_beside(at, side);
         from.tabs.transfer_page(page, &pane.tabs, 0);
+        // The page is the new pane's only one, so it is selected already; what it has not got is
+        // the keyboard. This is also where `move_tab` lands in a window with nowhere to move to.
+        self.focus_document(&pane);
     }
 
     /// The tab context menu's Split Right and friends: the page that was right-clicked, split off
@@ -1392,6 +1395,7 @@ impl App {
         // Selecting it is what makes the destination the active pane, retargets its find bar and
         // saves the session, all through the `selected-page` handler the pane already has.
         to.tabs.set_selected_page(&page);
+        self.focus_document(to);
     }
 
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
@@ -1442,6 +1446,36 @@ impl App {
         }
         *self.active_pane.borrow_mut() = pane.clone();
         true
+    }
+
+    /// Give the keyboard to what `pane` is showing, so a document moved into it takes the caret
+    /// with it.
+    ///
+    /// Without this the focus stays behind: the pane the tab came from selects its survivor while
+    /// the moved child still holds the keyboard, so libadwaita hands it to *that* document, and a
+    /// transfer that empties the pane drops the focus altogether. Everything a focused view draws
+    /// — the caret, GtkSourceView's current-line highlight — is then in the pane the reader has
+    /// just left, and the next keystroke goes there too.
+    ///
+    /// The document's own widget rather than the page's child: `grab_focus` on a container takes
+    /// the first thing in it that will have it, which for a note is whatever its banner is showing
+    /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image, a
+    /// status page and a two-blob comparison have no keys of their own and are left alone.
+    fn focus_document(&self, pane: &Pane) {
+        let widget: gtk::Widget = match self.doc_of(pane) {
+            Some(Doc::Text(tab)) => tab.view.clone().upcast(),
+            Some(Doc::Terminal(term)) => term.view.clone().upcast(),
+            Some(Doc::Pdf(pdf)) => pdf.key_target(),
+            _ => return,
+        };
+        // From an idle, as a new terminal's own focus is (see [`Self::open_terminal_at`]): the
+        // page has only just been attached, and a widget still mid-reparenting is not one GTK
+        // hands the keyboard to — measured, the grab does nothing and `GtkPaned` complains about
+        // a focus child that is not its child. The idle also runs after the pane the tab left has
+        // closed itself, that close being queued first.
+        glib::idle_add_local_once(move || {
+            widget.grab_focus();
+        });
     }
 
     /// What changes when a pane appears or goes: whether the tab bars may hide themselves, and
