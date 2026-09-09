@@ -28,7 +28,7 @@ const TAG_ADDED_EMPH: &str = "diff-added-emph";
 const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
 /// The runs of unchanged lines a changes-only view hides. Its own tag rather than `fold.rs`'s,
 /// so the editor's fold bookkeeping never mistakes a hidden run for a block it folded.
-const TAG_GAP: &str = "diff-gap";
+pub(crate) const TAG_GAP: &str = "diff-gap";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
 

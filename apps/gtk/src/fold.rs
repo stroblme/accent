@@ -105,19 +105,23 @@ pub fn is_folded(buffer: &gtk::TextBuffer, line: i32) -> bool {
     }
 }
 
-/// Show `iter` if a fold is hiding it. Every jump that moves the caret goes through this, so an
+/// Show `iter` if anything is hiding it. Every jump that moves the caret goes through this, so an
 /// outline row or a search hit inside a folded block opens it rather than landing out of sight.
+///
+/// Two things hide text in this window: the editor's own fold, and the run a comparison collapses
+/// between two hunks. A hit inside either used to land in invisible text, so both are opened here
+/// — and a comparison keeps its run open by itself for as long as the caret is in it.
 pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) {
-    let Some(tag) = tag(buffer) else {
-        return;
-    };
-    if !iter.has_tag(&tag) {
-        return;
+    let hiding = [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)];
+    for tag in hiding.into_iter().flatten() {
+        if !iter.has_tag(&tag) {
+            continue;
+        }
+        let (mut start, mut end) = (*iter, *iter);
+        start.backward_to_tag_toggle(Some(&tag));
+        end.forward_to_tag_toggle(Some(&tag));
+        buffer.remove_tag(&tag, &start, &end);
     }
-    let (mut start, mut end) = (*iter, *iter);
-    start.backward_to_tag_toggle(Some(&tag));
-    end.forward_to_tag_toggle(Some(&tag));
-    buffer.remove_tag(&tag, &start, &end);
 }
 
 /// Show everything.
