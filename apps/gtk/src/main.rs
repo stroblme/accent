@@ -778,7 +778,6 @@ impl App {
         if self.excluded.borrow().as_ref() == Some(&excluded) {
             return self.after_git_changed(git);
         }
-        self.excluded.replace(Some(excluded.clone()));
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(excluded.clone());
         }
@@ -786,23 +785,29 @@ impl App {
         // it out. It is a few thousand `UPDATE`s on a large vault, so it goes to a worker thread;
         // a search already on screen is asked again once it lands, because its answer changed
         // without the box being touched.
-        if let Some(vault) = self.vault.clone() {
-            let ignored: Vec<String> = excluded.into_iter().collect();
-            let weak = Rc::downgrade(self);
-            glib::spawn_future_local(async move {
-                let written = gio::spawn_blocking(move || vault.set_excluded(&ignored)).await;
-                match written {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => return tracing::warn!("recording the exclusion set: {e}"),
-                    Err(_) => return tracing::warn!("the exclusion-set writer panicked"),
-                }
-                if let Some(app) = weak.upgrade()
-                    && let Some(sidebar) = app.sidebar.get()
-                {
+        let Some(vault) = self.vault.clone() else {
+            self.excluded.replace(Some(excluded));
+            return self.after_git_changed(git);
+        };
+        let ignored: Vec<String> = excluded.iter().cloned().collect();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let written = gio::spawn_blocking(move || vault.set_excluded(&ignored)).await;
+            match written {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return tracing::warn!("recording the exclusion set: {e}"),
+                Err(_) => return tracing::warn!("the exclusion-set writer panicked"),
+            }
+            if let Some(app) = weak.upgrade() {
+                // Recorded only now: a write that failed — a remote one that outlasted the RPC
+                // deadline, say — has to be tried again by the next refresh rather than be
+                // remembered as done.
+                app.excluded.replace(Some(excluded));
+                if let Some(sidebar) = app.sidebar.get() {
                     sidebar.requery_search();
                 }
-            });
-        }
+            }
+        });
         self.after_git_changed(git);
     }
 

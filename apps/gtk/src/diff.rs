@@ -28,9 +28,16 @@ const TAG_ADDED_EMPH: &str = "diff-added-emph";
 const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
 /// The runs of unchanged lines a changes-only view hides. Its own tag rather than `fold.rs`'s,
 /// so the editor's fold bookkeeping never mistakes a hidden run for a block it folded.
-const TAG_GAP: &str = "diff-gap";
+pub(crate) const TAG_GAP: &str = "diff-gap";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
+
+/// Where the first hunk lands when a comparison opens, as a fraction of the view's height. A
+/// quarter down rather than at the top, so the lines that lead up to the change are visible too.
+const FIRST_HUNK_AT: f64 = 0.25;
+
+/// The mark [`Compare::reveal_first_hunk`] scrolls to, one per buffer and reused.
+const MARK_FIRST_HUNK: &str = "diff-first-hunk";
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
 const GAP_PX: i32 = 28;
 /// Inset of the hunk buttons from the pane's right edge.
@@ -507,6 +514,11 @@ pub struct Compare {
     /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
     /// about forever.
     settling: Cell<u8>,
+    /// Whether the next refresh should put the first hunk on screen. Set once, when the
+    /// comparison is built: a diff opens on what changed rather than on the top of a file whose
+    /// first difference is four hundred lines down. Cleared by the refresh that does it, because
+    /// after that where the view sits is the reader's business.
+    first_view: Cell<bool>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
 }
 
@@ -557,6 +569,7 @@ impl Compare {
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
             settling: Cell::new(0),
+            first_view: Cell::new(true),
             handlers: RefCell::new(Vec::new()),
         });
 
@@ -767,6 +780,47 @@ impl Compare {
         *self.overlays.borrow_mut() = overlays;
         self.settling.set(SETTLE);
         self.relayout();
+        if self.first_view.get() {
+            self.reveal_first_hunk();
+        }
+    }
+
+    /// Put the first hunk on screen, once. Both panes share a vertical adjustment, so scrolling
+    /// either scrolls both, and the first one with a line in that hunk is the one asked.
+    fn reveal_first_hunk(&self) {
+        let (lines, rows, starts) = (
+            self.lines.borrow(),
+            self.rows.borrow(),
+            self.starts.borrow(),
+        );
+        let Some(hunk) = diff::hunks(&lines, &rows).into_iter().next() else {
+            // Nothing has changed yet — an untouched buffer against its own index side. The next
+            // refresh that finds a difference is the one that opens on it.
+            return;
+        };
+        self.first_view.set(false);
+        for side in [Side::Old, Side::New] {
+            let Some(n) = hunk
+                .clone()
+                .find_map(|r| side.of(&rows[r]).and_then(|i| side.number(&lines[i])))
+            else {
+                continue;
+            };
+            let pane = self.pane(side);
+            let at = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
+            // A mark rather than the iter: `scroll_to_iter` gives up when the line it wants has
+            // not been laid out yet, which on a comparison that is opening is every line.
+            let mark = match pane.buffer.mark(MARK_FIRST_HUNK) {
+                Some(mark) => {
+                    pane.buffer.move_mark(&mark, &at);
+                    mark
+                }
+                None => pane.buffer.create_mark(Some(MARK_FIRST_HUNK), &at, true),
+            };
+            pane.view
+                .scroll_to_mark(&mark, 0.0, true, 0.0, FIRST_HUNK_AT);
+            return;
+        }
     }
 
     /// Take everything this module put on `side` back off: the tags, the padding, the buttons.
