@@ -81,7 +81,7 @@ pub fn install(tab: &Rc<Tab>) {
         #[weak(rename_to = tab)]
         tab,
         move |_, _, text| {
-            let Some(last) = text.chars().next_back() else {
+            let Some(last) = text.chars().next_back().filter(|_| !tab.is_loading()) else {
                 return;
             };
             let asks = tab

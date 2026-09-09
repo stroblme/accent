@@ -777,6 +777,13 @@ impl Tab {
         lang::changed(self);
     }
 
+    /// Whether the buffer is being replaced by us rather than typed in. The handlers that watch
+    /// `insert-text` ask before acting: a template pushed back through the buffer is not somebody
+    /// typing an opening bracket, and should raise neither signature help nor a suggestion.
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading.get()
+    }
+
     pub fn mark_clean(&self, etag: Etag) {
         self.etag.set(Some(etag));
         self.modified.set(false);

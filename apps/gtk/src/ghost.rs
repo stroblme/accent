@@ -64,7 +64,7 @@ pub fn install(tab: &Rc<Tab>) {
             let showing = tab
                 .ghost_view()
                 .and_then(|v| v.ghost())
-                .filter(|_| !tab.popup_shown.get())
+                .filter(|_| !tab.popup_shown.get() && !tab.is_loading())
                 .filter(|_| at.offset() == caret(&tab.buffer).offset());
             *tab.lang.ghost.typed.borrow_mut() = showing.and_then(|ghost| {
                 let rest = remainder(&ghost, text)?.to_string();
