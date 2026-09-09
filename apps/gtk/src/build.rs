@@ -303,6 +303,21 @@ pub fn build_window(
         }
     }
 
+    // The banner's one button, which until now was a label with nothing behind it. `reconnect`
+    // returns before the connection exists and reports itself through the events, so the banner
+    // is what says it is working — and stops taking presses — until `Event::Connected` takes it
+    // down or `Event::Disconnected` puts a fresh reason on it.
+    app.connection.connect_button_clicked(glib::clone!(
+        #[weak(rename_to = app)]
+        app,
+        move |banner| {
+            let Some(vault) = app.vault() else { return };
+            banner.set_title("Reconnecting…");
+            banner.set_sensitive(false);
+            vault.reconnect();
+        }
+    ));
+
     wire_pane(&app, &first);
 
     install_actions(&app);

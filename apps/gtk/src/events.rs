@@ -171,6 +171,11 @@ impl App {
             Event::Connecting { what, fraction } => {
                 self.statusbar.set_progress(Some(&format!("{what}…")));
                 self.connect.show(fraction);
+                // A reconnect keeps its banner up while it works, so that banner says which step
+                // it is on rather than sitting on one word through a 6.4 MB upload.
+                if self.connection.is_revealed() {
+                    self.connection.set_title(&format!("{what}…"));
+                }
             }
             // The vault answers from here on. Everything asked while it did not was told so
             // rather than made to wait, so all of it is asked again — and the tabs the session

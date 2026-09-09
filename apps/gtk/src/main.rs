@@ -325,11 +325,14 @@ impl App {
     /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
     fn show_connection_banner(&self, why: &str) {
         self.connection.set_title(why);
+        // Pressable again: an attempt that ended here is one the reader may want to repeat.
+        self.connection.set_sensitive(true);
         self.connection.set_revealed(true);
     }
 
     fn hide_connection_banner(&self) {
         self.connection.set_revealed(false);
+        self.connection.set_sensitive(true);
     }
 
     /// Say why something needs a folder open, for the actions that do — a folder on this machine,
