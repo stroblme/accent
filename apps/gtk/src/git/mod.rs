@@ -861,6 +861,29 @@ fn file_line() -> gtk::Box {
     row
 }
 
+/// Put one changed file on a [`file_line`]: its status letter, its name, and the directory it
+/// sits in. Both lists that show a file — the changes list and an expanded commit — bind their
+/// row through here, so the two read the same way.
+///
+/// `dir` is what the directory label shows rather than where the file is: a row under a folder
+/// leaves it empty, the path being on screen above it already.
+fn bind_file_line(row: &gtk::Box, letter: char, path: &str, dir: &str) {
+    let Some(mark) = row.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let (Some(name), Some(directory)) = (
+        mark.next_sibling().and_downcast::<gtk::Label>(),
+        mark.next_sibling()
+            .and_then(|n| n.next_sibling())
+            .and_downcast::<gtk::Label>(),
+    ) else {
+        return;
+    };
+    mark.set_text(&letter.to_string());
+    name.set_text(split_name(path).1);
+    directory.set_text(dir);
+}
+
 /// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
 /// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
 /// monitor is watching yet, so nothing would ever tell the pane to look again.
@@ -948,6 +971,19 @@ fn on_click(panel: &Rc<Panel>, button: &gtk::Button, f: impl Fn(&Rc<Panel>) + 's
             f(&panel);
         }
     });
+}
+
+/// What a list row carries. Every store in this pane holds [`glib::BoxedAnyObject`]s, and every
+/// reader of one wants a clone: the data under a recycled row is replaced without the widgets
+/// being rebuilt, so nothing here may hold a borrow past the call that took it.
+fn boxed<T: Clone + 'static>(object: Option<glib::Object>) -> Option<T> {
+    Some(
+        object?
+            .downcast::<glib::BoxedAnyObject>()
+            .ok()?
+            .borrow::<T>()
+            .clone(),
+    )
 }
 
 fn clamp(selected: usize, len: usize) -> usize {
