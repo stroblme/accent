@@ -14,6 +14,7 @@
 //! `~/.ssh/config`, ProxyJump and the agent; a passphrase prompt comes back to us through
 //! `SSH_ASKPASS`, which the app answers with a dialog.
 
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -51,6 +52,14 @@ pub struct Remote {
     /// config on `hello` instead of inside it, and a reconnect carries it again.
     ghost: Mutex<bool>,
     client: Mutex<Option<Arc<Client>>>,
+    /// The documents the window has open, as the server was last told about them: the language
+    /// they were opened as, and the text they were last sent with.
+    ///
+    /// A reconnect reaches a `serve` that has never heard of them, so every `change_document`,
+    /// `completion` or `hover` about a tab that is still open would come back "not open" until
+    /// that tab was closed and opened again. Kept here rather than in the façade because this is
+    /// the only place that knows a connection has been replaced.
+    docs: Mutex<HashMap<String, (String, String)>>,
     state: Mutex<State>,
     child: Mutex<Option<Child>>,
     events: Sender<Event>,
@@ -67,6 +76,7 @@ impl Remote {
             config: Mutex::new(cfg),
             ghost: Mutex::new(true),
             client: Mutex::new(None),
+            docs: Mutex::new(HashMap::new()),
             state: Mutex::new(State::Connecting),
             child: Mutex::new(None),
             events,
@@ -128,6 +138,7 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T, RpcError> {
+        self.remember(method, &params);
         let client = self.wait_for_client()?;
         let answer = client.call(method, params);
         if let Err(e) = &answer
@@ -136,6 +147,58 @@ impl Remote {
             self.disconnect(&e.message);
         }
         answer
+    }
+
+    /// Keep what the server would have to be told again, so a new one can be.
+    ///
+    /// Recorded whether or not the call lands: a document opened while the link was down is one
+    /// the window has open, and the reconnect is exactly when the server has to hear about it.
+    fn remember(&self, method: &str, params: &serde_json::Value) {
+        if !method.ends_with("_document") {
+            return;
+        }
+        let at = |n: usize| params.get(n).and_then(serde_json::Value::as_str);
+        let Some(rel) = at(0).map(str::to_string) else {
+            return;
+        };
+        let mut docs = self.locked(&self.docs);
+        match method {
+            "open_document" => {
+                if let (Some(language), Some(text)) = (at(1), at(2)) {
+                    docs.insert(rel, (language.to_string(), text.to_string()));
+                }
+            }
+            "change_document" => {
+                if let (Some(text), Some(held)) = (at(1), docs.get_mut(&rel)) {
+                    held.1 = text.to_string();
+                }
+            }
+            "close_document" => {
+                docs.remove(&rel);
+            }
+            _ => {}
+        }
+    }
+
+    /// Tell a freshly started server about the documents the window still has open.
+    fn reopen(&self, client: &Client) {
+        let open: Vec<(String, String, String)> = self
+            .locked(&self.docs)
+            .iter()
+            .map(|(rel, (language, text))| (rel.clone(), language.clone(), text.clone()))
+            .collect();
+        if open.is_empty() {
+            return;
+        }
+        self.say("Reopening the documents");
+        for (rel, language, text) in open {
+            // One that will not reopen is one tab without a language, not a failed connection.
+            if let Err(e) =
+                client.call::<serde_json::Value>("open_document", json!([rel, language, text]))
+            {
+                tracing::warn!("reopening {rel} on the new server: {e}");
+            }
+        }
     }
 
     /// The client, or why there is not one.
@@ -449,6 +512,7 @@ impl Remote {
             .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
             .map_err(|e| format!("the server did not answer: {e}"))?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
+        self.reopen(&client);
         *self.locked(&self.client) = Some(client);
         Ok(())
     }

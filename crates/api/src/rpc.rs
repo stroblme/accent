@@ -77,17 +77,58 @@ impl RpcError {
 
     /// The `SaveError` this stands for, so a remote save fails exactly as a local one does.
     pub fn save_error(self) -> SaveError {
-        match (self.code, self.data) {
-            (CHANGED_ON_DISK, Some(data)) => match serde_json::from_value::<Etag>(data) {
-                Ok(current) => SaveError::ChangedOnDisk { current },
-                Err(_) => SaveError::Io(std::io::Error::other(self.message)),
-            },
-            _ => SaveError::Io(std::io::Error::other(self.message)),
+        if self.code == CHANGED_ON_DISK
+            && let Some(data) = self.data.clone()
+            && let Ok(current) = serde_json::from_value::<Etag>(data)
+        {
+            return SaveError::ChangedOnDisk { current };
         }
+        SaveError::Io(self.io_error())
     }
 
+    /// The `io::Error` this stands for, kind and all.
+    ///
+    /// The kind travels in `data` because callers branch on it — the open path treats `NotFound`
+    /// as "offer to create it" rather than as a failure — and everything used to arrive as
+    /// `Other`, so the same file missing matched one way locally and another way remotely.
     pub fn io_error(self) -> std::io::Error {
-        std::io::Error::other(self.message)
+        match self.data.as_ref().and_then(Value::as_str).and_then(kind_of) {
+            Some(kind) => std::io::Error::new(kind, self.message),
+            None => std::io::Error::other(self.message),
+        }
+    }
+}
+
+/// The `io::ErrorKind`s worth carrying, by name.
+///
+/// `ErrorKind` is neither serialisable nor exhaustively matchable, so the ones the app actually
+/// branches on are named and everything else crosses as `Other` — which is what all of them used
+/// to cross as.
+const KINDS: &[(&str, std::io::ErrorKind)] = &[
+    ("NotFound", std::io::ErrorKind::NotFound),
+    ("PermissionDenied", std::io::ErrorKind::PermissionDenied),
+    ("AlreadyExists", std::io::ErrorKind::AlreadyExists),
+    ("InvalidInput", std::io::ErrorKind::InvalidInput),
+    ("InvalidData", std::io::ErrorKind::InvalidData),
+];
+
+fn kind_name(kind: std::io::ErrorKind) -> Option<&'static str> {
+    KINDS
+        .iter()
+        .find(|(_, k)| *k == kind)
+        .map(|(name, _)| *name)
+}
+
+fn kind_of(name: &str) -> Option<std::io::ErrorKind> {
+    KINDS.iter().find(|(n, _)| *n == name).map(|(_, k)| *k)
+}
+
+/// An `io::Error` as it crosses: the message a person reads, and the kind a caller matches on.
+pub(crate) fn io_failure(e: &std::io::Error) -> RpcError {
+    RpcError {
+        code: IO,
+        message: e.to_string(),
+        data: kind_name(e.kind()).map(Value::from),
     }
 }
 
@@ -375,11 +416,7 @@ pub(crate) fn any<T: serde::Serialize>(r: anyhow::Result<T>) -> Result<Value, Rp
 pub(crate) fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, RpcError> {
     match r {
         Ok(v) => ok(v),
-        Err(e) => Err(RpcError {
-            code: IO,
-            message: e.to_string(),
-            data: None,
-        }),
+        Err(e) => Err(io_failure(&e)),
     }
 }
 
@@ -430,11 +467,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
                 message: "file changed on disk since it was read".to_string(),
                 data: serde_json::to_value(current).ok(),
             }),
-            Err(SaveError::Io(e)) => Err(RpcError {
-                code: IO,
-                message: e.to_string(),
-                data: None,
-            }),
+            Err(SaveError::Io(e)) => Err(io_failure(&e)),
         },
         "create_note" => any(vault.create_note(
             &arg::<String>(p, 0)?,
@@ -660,6 +693,19 @@ mod tests {
                 if rel == "a.md" && items.len() == 1)),
             "the dangling link has to reach the client as a notification"
         );
+    }
+
+    /// A caller branches on the kind — the open path offers to create a note that is not there —
+    /// so the kind has to survive the wire rather than flattening to `Other`.
+    #[test]
+    fn a_missing_file_comes_back_as_not_found() {
+        let w = Wired::open();
+        let refused = w
+            .client
+            .call::<(String, Etag)>("read", json!(["nope.md"]))
+            .unwrap_err();
+        assert_eq!(refused.code, IO);
+        assert_eq!(refused.io_error().kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
