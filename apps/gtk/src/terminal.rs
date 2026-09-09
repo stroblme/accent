@@ -304,12 +304,12 @@ fn fill_menu(menu: &gio::Menu, link: Option<&str>) {
     menu.remove_all();
     let clipboard = gio::Menu::new();
     for action in ["win.terminal-copy", "win.terminal-paste"] {
-        clipboard.append(Some(crate::label_of(action)), Some(action));
+        clipboard.append(Some(crate::actions::label_of(action)), Some(action));
     }
     menu.append_section(None, &clipboard);
     let tab = gio::Menu::new();
     for action in ["win.terminal", "win.close-tab"] {
-        tab.append(Some(crate::label_of(action)), Some(action));
+        tab.append(Some(crate::actions::label_of(action)), Some(action));
     }
     menu.append_section(None, &tab);
     let Some(uri) = link else {

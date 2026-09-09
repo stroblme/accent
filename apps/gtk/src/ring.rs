@@ -125,7 +125,7 @@ impl Ring {
             let (dx, dy) = orbit(i, TOOLS.len(), ORBIT);
             let button = gtk::ToggleButton::builder()
                 .icon_name(*icon)
-                .tooltip_text(crate::label_of(action))
+                .tooltip_text(crate::actions::label_of(action))
                 .action_name(*action)
                 .build();
             button.add_css_class("circular");

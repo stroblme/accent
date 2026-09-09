@@ -118,38 +118,6 @@ impl Shell {
             .map(|(_, app)| app.clone())
     }
 
-    /// Push the accelerators in force into the application. Done wholesale: forty
-    /// `set_accels_for_action` calls are cheaper than working out which of them a config change
-    /// touched.
-    ///
-    /// A focused shell narrows the table to [`reserved`], because an application accelerator is
-    /// dispatched at the window ahead of the VTE and unbinding it is the only thing that lets the
-    /// key reach the shell. The filter reads the accelerators in force, so a rebound chord follows
-    /// the same rule as the default it replaced. The shell asked about is the active window's,
-    /// whichever window is rebuilding: the table is one for all of them.
-    pub fn apply_accels(&self, gtk_app: &gtk::Application) {
-        let config = self.config.borrow();
-        let shell = terminal::has_focus(gtk_app);
-        self.shell_keys.set(shell);
-        for (action, _, _) in ACTIONS {
-            let accels = accels_for(&config, action);
-            let accels: Vec<&str> = accels
-                .iter()
-                .map(String::as_str)
-                .filter(|accel| !shell || reserved(action, accel))
-                .collect();
-            gtk_app.set_accels_for_action(action, &accels);
-        }
-    }
-
-    /// The keyboard moved: rebuild the table if it crossed into or out of a shell. Only a change
-    /// is worth acting on — focus moves on every click, and the rebuild is sixty calls.
-    pub fn sync_accels(&self, gtk_app: &gtk::Application) {
-        if terminal::has_focus(gtk_app) != self.shell_keys.get() {
-            self.apply_accels(gtk_app);
-        }
-    }
-
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
     /// the start screen, which has no session to remember it in.
     fn record(&self, gtk_app: &adw::Application, action: &str) {
