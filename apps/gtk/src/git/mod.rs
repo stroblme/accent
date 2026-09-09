@@ -503,6 +503,10 @@ impl Panel {
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
             panel.refresh();
+            // And ask its remote what it has, rather than leaving the first look at a second
+            // repository up to five minutes stale. One round trip per pick, which is what makes
+            // this the user's choice rather than a timer's: nobody cycles a chooser for fun.
+            panel.autofetch();
         });
     }
 
