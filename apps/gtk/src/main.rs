@@ -6682,6 +6682,9 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it. Point it at a document of several pages: a one-page
 /// PDF is wholly on screen whatever the scroll offset was.
+/// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
+/// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
+/// switch and the last tab's close leave behind.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6695,12 +6698,14 @@ fn install_bench_hooks(app: &Rc<App>) {
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
+    let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
         && compare.is_none()
         && pdf.is_none()
+        && tabs.is_none()
         && !git
         && !keys
         && !chrome
@@ -6721,6 +6726,9 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
+        }
+        if let Some(rels) = tabs {
+            return bench_tabs(&app, &rels);
         }
         if shell_keys {
             return bench_shell_keys(&app);
@@ -7093,6 +7101,11 @@ fn bench_panes(app: &Rc<App>, rels: &str) {
         let Some(page) = app.tabs().selected_page() else {
             return bench_quit(&app);
         };
+        // Staged by hand, because nothing headless clicks into a view: the reader is typing in
+        // this pane, which is what makes "does the keyboard go with the tab" a question at all.
+        if let Some(tab) = app.active() {
+            tab.view.grab_focus();
+        }
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, 0);
     });
@@ -7120,16 +7133,92 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
     });
 }
 
-/// How many panes there are, and where in the window the one holding `page` sits.
+/// How many panes there are, and where in the window three things sit: the pane holding `page`,
+/// the pane a note would open into, and the pane holding the keyboard. All three have to name the
+/// same pane after a move, or the window says the tab went somewhere the caret did not.
 fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
     println!("bench panes {}", app.panes.borrow().len());
     let root = app.window.clone().upcast::<gtk::Widget>();
-    match app.pane_of(page) {
+    let at = |what: &str, pane: Option<&Rc<Pane>>| match pane {
         Some(pane) => {
-            let r = pane_rect(&pane, &root);
-            println!("bench tab_at x={} y={}", r.x().round(), r.y().round());
+            let r = pane_rect(pane, &root);
+            println!("bench {what} x={} y={}", r.x().round(), r.y().round());
         }
-        None => println!("bench tab_at none"),
+        None => println!("bench {what} none"),
+    };
+    at("tab_at", app.pane_of(page).as_ref());
+    at("active_at", Some(&app.pane()));
+    let focused = gtk::prelude::GtkWindowExt::focus(&app.window).and_then(|w| {
+        app.panes
+            .borrow()
+            .iter()
+            .find(|pane| w.is_ancestor(pane.widget()))
+            .cloned()
+    });
+    at("focus_at", focused.as_ref());
+}
+
+/// The find bar and the Outline pane across a tab switch and a close: a note with the bar open, a
+/// shell in front of it, the chord over that shell, back to the note, then a PDF, then every tab
+/// closed. One line per step, so what a switch and the last close leave behind is a printout
+/// rather than an argument.
+fn bench_tabs(app: &Rc<App>, rels: &str) {
+    let Some((note, pdf)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (note, pdf) = (note.to_string(), pdf.to_string());
+    app.open_path(&note);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        println!("bench find_over_note {}", app.pane().find.is_open());
+        app.open_terminal();
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            println!("bench find_over_shell {}", app.pane().find.is_open());
+            let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            println!("bench find_chord_over_shell {}", app.pane().find.is_open());
+            // Back to the note: the bar belongs to the pane, so this says whether it comes back
+            // on its own or wants the chord again.
+            if let Some(tab) = app.tab_for(&note) {
+                app.reveal_page(&tab.page);
+            }
+            println!("bench find_back_on_note {}", app.pane().find.is_open());
+            // And the chord still opens it: closing the bar over a shell must not leave it dead
+            // for the tab the reader comes back to.
+            let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            println!(
+                "bench find_chord_back_on_note {}",
+                app.pane().find.is_open()
+            );
+            app.open_path(&pdf);
+            // Long enough for the render thread to open the document: an outline read before that
+            // says "Opening…" whatever else is wrong.
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                println!("bench outline_pdf {}", bench_outline(&app));
+                for doc in app.docs() {
+                    app.close_page(doc.page());
+                }
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    println!("bench outline_closed {}", bench_outline(&app));
+                    bench_quit(&app);
+                });
+            });
+        });
+    });
+}
+
+/// What the Outline pane holds, by widget type — or by title where that is one of its status
+/// pages, "No Outline" being the empty state a closed document has to leave behind.
+fn bench_outline(app: &Rc<App>) -> String {
+    let Some(sidebar) = app.sidebar.get() else {
+        return "no sidebar".to_string();
+    };
+    match sidebar.outline_child() {
+        Some(child) => match child.downcast::<adw::StatusPage>() {
+            Ok(page) => format!("status {}", page.title()),
+            Err(child) => child.type_().name().to_string(),
+        },
+        None => "nothing".to_string(),
     }
 }
 

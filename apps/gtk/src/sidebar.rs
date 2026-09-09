@@ -349,6 +349,12 @@ impl Sidebar {
         }
     }
 
+    /// What the Outline pane is showing, which is what `ACCENT_BENCH_TABS` reads to say whether a
+    /// closed document left its outline behind.
+    pub fn outline_child(&self) -> Option<gtk::Widget> {
+        self.outline_bin.child()
+    }
+
     /// The tag list is out of date; refill it the next time the Tags pane is shown.
     pub fn mark_tags_dirty(&self) {
         if let Some(panes) = self.panes.as_ref() {
