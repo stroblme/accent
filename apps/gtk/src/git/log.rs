@@ -56,9 +56,10 @@ impl Panel {
         view.set_single_click_activate(true);
         let weak = Rc::downgrade(self);
         view.connect_activate(move |view, position| {
-            let (Some(panel), Some(item)) =
-                (weak.upgrade(), log_at(view.model().as_ref(), position))
-            else {
+            let (Some(panel), Some(item)) = (
+                weak.upgrade(),
+                boxed(view.model().and_then(|m| m.item(position))),
+            ) else {
                 return;
             };
             match item {
@@ -99,7 +100,7 @@ impl Panel {
         let mut start = None;
         let mut n = 0;
         for i in 0..self.log.n_items() {
-            if matches!(log_at_index(&self.log, i), Some(LogItem::File { .. })) {
+            if matches!(boxed(self.log.item(i)), Some(LogItem::File { .. })) {
                 start.get_or_insert(i);
                 n += 1;
             }
@@ -160,7 +161,7 @@ impl Panel {
     /// Where a commit sits in the log store, or `None` if it has since been spliced away.
     fn row_of_commit(&self, oid: &str) -> Option<u32> {
         (0..self.log.n_items()).find(|i| {
-            matches!(log_at_index(&self.log, *i), Some(LogItem::Commit(row)) if row.commit.id == oid)
+            matches!(boxed(self.log.item(*i)), Some(LogItem::Commit(row)) if row.commit.id == oid)
         })
     }
 
@@ -266,7 +267,7 @@ impl Panel {
         let incoming = &self.state.borrow().incoming;
         (0..self.log.n_items())
             .filter(|i| {
-                matches!(log_at_index(&self.log, *i),
+                matches!(boxed(self.log.item(*i)),
                     Some(LogItem::Commit(row)) if incoming.contains(&row.commit.id))
             })
             .count()
@@ -282,7 +283,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         #[weak]
         item,
         move |_, cr, _, height| {
-            if let Some(LogItem::Commit(row)) = log_of(&item) {
+            if let Some(LogItem::Commit(row)) = boxed(item.item()) {
                 draw_lanes(cr, &row, height as f64);
             }
         }
@@ -371,7 +372,8 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         #[weak]
         item,
         move |gesture, _, x, y| {
-            let (Some(panel), Some(LogItem::Commit(row))) = (weak.upgrade(), log_of(&item)) else {
+            let (Some(panel), Some(LogItem::Commit(row))) = (weak.upgrade(), boxed(item.item()))
+            else {
                 return;
             };
             gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -393,8 +395,10 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
 }
 
 fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
-    let (Some(stack), Some(item_row)) = (item.child().and_downcast::<gtk::Stack>(), log_of(item))
-    else {
+    let (Some(stack), Some(item_row)) = (
+        item.child().and_downcast::<gtk::Stack>(),
+        boxed::<LogItem>(item.item()),
+    ) else {
         return;
     };
     let (Some(commit), Some(file)) = (
@@ -408,19 +412,7 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         LogItem::Commit(row) => row,
         LogItem::File { letter, path, .. } => {
             stack.set_visible_child_name("file");
-            let (Some(mark), Some(dir)) = (
-                file.first_child().and_downcast::<gtk::Label>(),
-                file.last_child().and_downcast::<gtk::Label>(),
-            ) else {
-                return;
-            };
-            let Some(name) = mark.next_sibling().and_downcast::<gtk::Label>() else {
-                return;
-            };
-            mark.set_text(&letter.to_string());
-            let (directory, base) = split_name(&path);
-            name.set_text(base);
-            dir.set_text(directory);
+            bind_file_line(&file, letter, &path, split_name(&path).0);
             stack.set_tooltip_text(Some(&path));
             return;
         }
@@ -547,35 +539,6 @@ fn menu_item(label: &str, action: &str, oid: &str) -> gio::MenuItem {
         Some(&oid.to_variant()),
     );
     item
-}
-
-fn log_of(item: &gtk::ListItem) -> Option<LogItem> {
-    Some(
-        item.item()
-            .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<LogItem>()
-            .clone(),
-    )
-}
-
-fn log_at(model: Option<&gtk::SelectionModel>, position: u32) -> Option<LogItem> {
-    Some(
-        model?
-            .item(position)
-            .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<LogItem>()
-            .clone(),
-    )
-}
-
-fn log_at_index(store: &gio::ListStore, position: u32) -> Option<LogItem> {
-    Some(
-        store
-            .item(position)
-            .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<LogItem>()
-            .clone(),
-    )
 }
 
 fn now() -> i64 {

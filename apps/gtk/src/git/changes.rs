@@ -70,7 +70,7 @@ impl Panel {
             let Some(panel) = weak.upgrade() else {
                 return;
             };
-            if let Some(row) = row_at(view.model().as_ref(), position) {
+            if let Some(row) = boxed::<Row>(view.model().and_then(|m| m.item(position))) {
                 panel.activate(&row);
             }
         });
@@ -151,7 +151,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
                 Some(Row::Header {
                     all: Some(section), ..
                 }),
-            ) = (weak.upgrade(), row_of(&item))
+            ) = (weak.upgrade(), boxed(item.item()))
             else {
                 return;
             };
@@ -218,7 +218,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             item,
             move |_| {
                 let (Some(panel), Some(Row::Entry { entry, key, .. })) =
-                    (weak.upgrade(), row_of(&item))
+                    (weak.upgrade(), boxed(item.item()))
                 else {
                     return;
                 };
@@ -257,7 +257,7 @@ enum Act {
 fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let (Some(stack), Some(row), Some(panel)) = (
         item.child().and_downcast::<gtk::Stack>(),
-        row_of(item),
+        boxed::<Row>(item.item()),
         panel.upgrade(),
     ) else {
         return;
@@ -278,16 +278,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let Some(all) = title.next_sibling().and_downcast::<gtk::Button>() else {
         return;
     };
-    let (Some(letter), Some(actions)) = (
-        entry.first_child().and_downcast::<gtk::Label>(),
-        entry.last_child().and_downcast::<gtk::Box>(),
-    ) else {
-        return;
-    };
-    let (Some(name), Some(dir)) = (
-        letter.next_sibling().and_downcast::<gtk::Label>(),
-        actions.prev_sibling().and_downcast::<gtk::Label>(),
-    ) else {
+    let Some(actions) = entry.last_child().and_downcast::<gtk::Box>() else {
         return;
     };
 
@@ -341,15 +332,11 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
         } => {
             stack.set_visible_child_name("entry");
             entry.set_margin_start(depth as i32 * INDENT);
-            letter.set_text(&status_letter(&e, section).to_string());
-            let (directory, file) = split_name(&e.path);
-            name.set_text(file);
-            // Under a folder row the path is already on screen, and repeating it puts the
-            // directory on the row twice.
-            dir.set_text(match depth {
-                0 => directory,
+            let directory = match depth {
+                0 => split_name(&e.path).0,
                 _ => "",
-            });
+            };
+            bind_file_line(&entry, status_letter(&e, section), &e.path, directory);
             stack.set_tooltip_text(Some(&e.path));
             actions.set_visible(true);
             let Some((stage, unstage, discard)) = triple(&actions) else {
@@ -369,10 +356,11 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
         Row::Submodule(sub) => {
             stack.set_visible_child_name("entry");
             entry.set_margin_start(0);
-            letter.set_text(&sub.state.to_string());
-            let (directory, file) = split_name(&sub.path);
-            name.set_text(file);
-            dir.set_text(sub.describe.as_deref().unwrap_or(directory));
+            let directory = sub
+                .describe
+                .as_deref()
+                .unwrap_or_else(|| split_name(&sub.path).0);
+            bind_file_line(&entry, sub.state, &sub.path, directory);
             stack.set_tooltip_text(Some(&sub.oid));
             actions.set_visible(false);
         }
@@ -385,25 +373,6 @@ fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)>
     let unstage = stage.next_sibling()?;
     let discard = unstage.next_sibling()?;
     Some((stage, unstage, discard))
-}
-
-fn row_of(item: &gtk::ListItem) -> Option<Row> {
-    Some(
-        item.item()
-            .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<Row>()
-            .clone(),
-    )
-}
-
-fn row_at(model: Option<&gtk::SelectionModel>, position: u32) -> Option<Row> {
-    Some(
-        model?
-            .item(position)
-            .and_downcast::<glib::BoxedAnyObject>()?
-            .borrow::<Row>()
-            .clone(),
-    )
 }
 
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
