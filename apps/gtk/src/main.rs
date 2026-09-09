@@ -212,6 +212,15 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.back", "Back", &["<Alt>Left"]),
     ("win.forward", "Forward", &["<Alt>Right"]),
     // The PDF reader. The rest live in the palette, found by name rather than by chord.
+    //
+    // Paging carries no chord here, and cannot: a reader pages with `Space`, `Shift+Space`, `n`,
+    // `p` and the arrows, and an application accelerator is dispatched at the window ahead of
+    // whatever has the keyboard — a bare `space` in this table would stop the editor, the
+    // terminal and every entry in the app from taking one. Those keys stay on the PDF tab's own
+    // controller (`PdfTab::wire_keys`), which fires these two actions rather than paging itself,
+    // so the palette lists the commands and anything that can activate an action can page.
+    ("win.pdf-next-page", "Next Page", &[]),
+    ("win.pdf-previous-page", "Previous Page", &[]),
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
@@ -3891,6 +3900,14 @@ impl App {
             "pdf-copy-link" => {
                 if let Some(pdf) = self.active_pdf() {
                     pdf.copy_link();
+                }
+            }
+            "pdf-next-page" | "pdf-previous-page" => {
+                if let Some(pdf) = self.active_pdf() {
+                    match name {
+                        "pdf-next-page" => pdf.next_page(),
+                        _ => pdf.previous_page(),
+                    }
                 }
             }
             "pdf-export-highlights" => self.export_highlights(),
@@ -8155,6 +8172,23 @@ mod tests {
             assert!(
                 !NEVER_BIND.contains(&accel),
                 "AdwTabView holds {accel} for {what}, which the never-bind list reserves"
+            );
+        }
+    }
+
+    /// The two paging commands are in the table so they list in the palette, and carry no
+    /// accelerator there on purpose: a reader pages with `Space`, `n`, `p` and the arrows, and an
+    /// application accelerator is dispatched at the window ahead of whatever has the keyboard, so
+    /// a bare `space` in the table would stop the editor, the terminal and every entry in the app
+    /// from taking one. The keys stay on the PDF tab's own controller, which fires these.
+    #[test]
+    fn the_paging_commands_are_listed_and_carry_no_accelerator() {
+        for action in ["win.pdf-next-page", "win.pdf-previous-page"] {
+            let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
+            let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));
+            assert!(
+                accels.is_empty(),
+                "{action} would be a window-wide accelerator over every typing key"
             );
         }
     }

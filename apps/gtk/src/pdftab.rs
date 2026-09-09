@@ -431,6 +431,20 @@ impl PdfTab {
         self.view.goto_page(page, None);
     }
 
+    /// Page from a key, through `win.pdf-next-page` / `win.pdf-previous-page`.
+    ///
+    /// The keys are dispatched here rather than from the window's accelerator table — a bare
+    /// `space` or arrow there would be taken from every entry in the app — but the *command* is
+    /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
+    /// place the keys and the palette meet.
+    fn page(&self, forward: bool) {
+        let action = match forward {
+            true => "win.pdf-next-page",
+            false => "win.pdf-previous-page",
+        };
+        let _ = self.view.activate_action(action, None);
+    }
+
     pub fn next_page(&self) {
         self.show_page((self.view.current_page() + 1).min(self.page_count().saturating_sub(1)));
     }
@@ -1212,14 +1226,14 @@ impl PdfTab {
                         | gtk::gdk::ModifierType::SUPER_MASK,
                 );
                 match key {
-                    gtk::gdk::Key::space if shift => tab.previous_page(),
-                    gtk::gdk::Key::space => tab.next_page(),
-                    gtk::gdk::Key::n => tab.next_page(),
-                    gtk::gdk::Key::p => tab.previous_page(),
+                    gtk::gdk::Key::space if shift => tab.page(false),
+                    gtk::gdk::Key::space => tab.page(true),
+                    gtk::gdk::Key::n => tab.page(true),
+                    gtk::gdk::Key::p => tab.page(false),
                     // A page back and a page forth whatever the zoom: horizontal movement is
                     // Shift and the wheel, and one key cannot mean two things.
-                    gtk::gdk::Key::Left if bare => tab.previous_page(),
-                    gtk::gdk::Key::Right if bare => tab.next_page(),
+                    gtk::gdk::Key::Left if bare => tab.page(false),
+                    gtk::gdk::Key::Right if bare => tab.page(true),
                     gtk::gdk::Key::Up if bare => tab.view.scroll_step(false),
                     gtk::gdk::Key::Down if bare => tab.view.scroll_step(true),
                     _ => return glib::Propagation::Proceed,
