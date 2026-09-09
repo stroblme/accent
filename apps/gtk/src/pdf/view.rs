@@ -745,6 +745,11 @@ impl PdfView {
         // reader is anyway.
         let anchor = (!self.imp().layout.borrow().pages.is_empty()).then(|| self.anchor());
         let scale = clamp_scale(fit_scale(&sizes, self.imp().zoom.get(), w as f32, h as f32));
+        // Tiles waiting for a re-render at the scale being left are of a page nothing will paint
+        // again; the keys are the old scale's and would sit in the set for the life of the tab.
+        if self.imp().layout.borrow().scale != scale {
+            self.imp().stale_tiles.borrow_mut().clear();
+        }
         let layout = layout(&sizes, scale, w as f32);
         let (width, height) = (f64::from(layout.width), f64::from(layout.height));
         *self.imp().layout.borrow_mut() = layout;
