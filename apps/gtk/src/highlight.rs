@@ -75,6 +75,12 @@ fn tag_name(style: Style) -> &'static str {
     }
 }
 
+/// The heading tags, `h1` first: what a caller that asks "is this a heading" looks up, so the
+/// names live here with the tags themselves rather than as literals at every such site.
+pub const HEADING_TAGS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
+/// The fenced-block tag, for the same reason.
+pub const CODEBLOCK: &str = "codeblock";
+
 /// Heading scale factors, indexed by level - 1: what [`install_tags`] gives the `h1`..`h4` tags,
 /// and the 1.0 that leaves `h5` and `h6` at the body size. [`hang`] measures the markers with
 /// them, so the two lists cannot drift apart unnoticed.
@@ -178,7 +184,9 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("marker");
 }
 
-fn with_alpha(c: gdk::RGBA, alpha: f32) -> gdk::RGBA {
+/// The colour at `alpha`, which is how everything in the editor dims: composited over the
+/// view's background, a foreground at an alpha is the grey the eye reads as "quieter".
+pub fn with_alpha(c: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha)
 }
 
@@ -234,8 +242,7 @@ pub fn apply(buffer: &sourceview5::Buffer) -> markdown::Analysis {
         let Some(s) = buffer.iter_at_line(n as i32) else {
             continue;
         };
-        let mut e = s;
-        e.forward_to_line_end();
+        let e = crate::editor::line_end(buffer, n as i32);
         buffer.apply_tag_by_name(WRAP_TAGS[column - 1], &s, &e);
     }
     analysis

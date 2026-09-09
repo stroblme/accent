@@ -13,6 +13,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
+use crate::lang;
 use accent_api::{Diagnostic, Pos, Severity};
 use gtk::prelude::*;
 use gtk::{gdk, pango};
@@ -77,14 +78,8 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         WARNING,
         crate::diff::tint(crate::diff::WARNING_HUE, fg, 1.0),
     );
-    set(
-        INFO,
-        gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), INFO_ALPHA),
-    );
-    set(
-        HINT,
-        gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), HINT_ALPHA),
-    );
+    set(INFO, crate::highlight::with_alpha(fg, INFO_ALPHA));
+    set(HINT, crate::highlight::with_alpha(fg, HINT_ALPHA));
 }
 
 /// Paint `items` over the buffer, replacing whatever was there.
@@ -108,8 +103,8 @@ pub fn render(
     let mut lines: BTreeMap<i32, (AnnotationStyle, String, usize)> = BTreeMap::new();
     for item in items {
         let (from, mut to) = (
-            iter_at(buffer, item.range.start),
-            iter_at(buffer, item.range.end),
+            lang::iter_at(buffer, item.range.start),
+            lang::iter_at(buffer, item.range.end),
         );
         // A zero-width range is what a server sends for "here", and a tag over no characters
         // draws nothing. One character is the smallest thing the eye can be pointed at.
@@ -154,21 +149,6 @@ pub fn render(
             style,
         ));
     }
-}
-
-/// The iterator at `pos`, clamped to what the buffer actually has: a diagnostic can outlive the
-/// edit that shortened the line it was about, and an out-of-range offset is a GTK critical.
-pub fn iter_at(buffer: &sourceview5::Buffer, pos: Pos) -> gtk::TextIter {
-    let line = (pos.line as i32).clamp(0, (buffer.line_count() - 1).max(0));
-    let mut iter = buffer
-        .iter_at_line(line)
-        .unwrap_or_else(|| buffer.end_iter());
-    let mut end = iter;
-    if !end.ends_line() {
-        end.forward_to_line_end();
-    }
-    iter.set_line_offset((pos.character as i32).clamp(0, end.line_offset()));
-    iter
 }
 
 /// Reading order, which is what a range comparison means. `Pos` is not `Ord` — it crosses the

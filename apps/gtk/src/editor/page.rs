@@ -1,7 +1,7 @@
 //! The page a tab draws its text on: the font and zoom, the gutters and the column cap, the
 //! line-number gutter, the minimap and the sticky block title over the top of the view.
 
-use super::{Flavour, Tab};
+use super::{Flavour, Tab, line_end};
 use crate::{highlight, lang};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
@@ -347,19 +347,18 @@ impl Tab {
         // From the *end* of the top line, so a heading or a fence opening on that line is found
         // and then discarded by `sticky_opener` for being on screen already, rather than passed
         // over in favour of the one above it.
-        let mut from = first;
-        from.forward_to_line_end();
+        let from = line_end(&self.buffer, first.line());
         let table = self.buffer.tag_table();
         let previous = |name: &str| {
             let tag = table.lookup(name)?;
             let mut at = from;
             at.backward_to_tag_toggle(Some(&tag)).then(|| at.line())
         };
-        let heading = ["h1", "h2", "h3", "h4", "h5", "h6"]
+        let heading = highlight::HEADING_TAGS
             .iter()
             .filter_map(|name| previous(name))
             .max();
-        let fence = table.lookup("codeblock").and_then(|tag| {
+        let fence = table.lookup(highlight::CODEBLOCK).and_then(|tag| {
             // Only from inside the block: below it the nearest toggle is its closing one, which
             // is a block the reader has already left.
             let mut at = from;
@@ -408,8 +407,7 @@ impl Tab {
         let Some(start) = self.buffer.iter_at_line(line) else {
             return;
         };
-        let mut end = start;
-        end.forward_to_line_end();
+        let end = line_end(&self.buffer, line);
         self.sticky
             .set_text(self.buffer.text(&start, &end, false).trim_end());
         // The clamp centres the view in the scroller, so where the text column starts is not

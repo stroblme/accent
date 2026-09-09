@@ -2,7 +2,7 @@
 //! duplicate and delete, the comment toggle, wrapping, and the template snippets whose Tab stops
 //! are walked through the text they inserted.
 
-use super::Tab;
+use super::{Tab, caret, line_end};
 use crate::comment;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
@@ -35,8 +35,8 @@ fn paste_ready(line: &str) -> String {
 
 /// The caret's line, from its start to the start of the next one, so the trailing newline is part
 /// of it except on a last line that has none.
-pub(super) fn caret_line(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
-    let mut start = buffer.iter_at_mark(&buffer.get_insert());
+pub(super) fn line_bounds(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
+    let mut start = caret(buffer);
     start.set_line_offset(0);
     let mut end = start;
     // On the last line this lands on the end of the buffer and reports failure, which is
@@ -63,7 +63,7 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
         if buffer.has_selection() {
             return;
         }
-        let (start, end) = caret_line(&buffer);
+        let (start, end) = line_bounds(&buffer);
         view.clipboard()
             .set_text(&paste_ready(&buffer.text(&start, &end, true)));
     });
@@ -72,7 +72,7 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
         if buffer.has_selection() || !view.is_editable() {
             return;
         }
-        let (mut start, mut end) = caret_line(&buffer);
+        let (mut start, mut end) = line_bounds(&buffer);
         let line = buffer.text(&start, &end, true);
         view.clipboard().set_text(&paste_ready(&line));
         // A last line with no newline of its own takes the one above it, or the cut leaves the
@@ -137,15 +137,13 @@ impl Tab {
         let (mut start, mut end) = match self.buffer.selection_bounds() {
             Some(bounds) => bounds,
             None => {
-                let at = self.buffer.iter_at_mark(&self.buffer.get_insert());
+                let at = caret(&self.buffer);
                 (at, at)
             }
         };
         // Whole lines: a marker goes in front of a line, never in front of a word.
         start.set_line_offset(0);
-        if !end.ends_line() {
-            end.forward_to_line_end();
-        }
+        end = line_end(&self.buffer, end.line());
         let text = self.buffer.text(&start, &end, true);
         let toggled = match language.metadata("line-comment-start") {
             Some(marker) => comment::toggle_lines(&text, &marker),
@@ -181,9 +179,9 @@ impl Tab {
 
     // --- line operations -----------------------------------------------------------------
 
-    /// The caret's whole line; see [`caret_line`], which the clipboard handlers share.
+    /// The caret's whole line; see [`line_bounds`], which the clipboard handlers share.
     fn line_bounds(&self) -> (gtk::TextIter, gtk::TextIter) {
-        caret_line(self.buffer.upcast_ref())
+        line_bounds(self.buffer.upcast_ref())
     }
 
     /// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
@@ -257,7 +255,7 @@ impl Tab {
 
     /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk.
     pub fn insert_stops(&self, text: &str, stops: &[usize]) {
-        let mut at = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        let mut at = caret(&self.buffer);
         match stops.is_empty() {
             true => self.buffer.insert(&mut at, text),
             false => self.view.push_snippet(&snippet(text, stops), Some(&mut at)),

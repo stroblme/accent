@@ -12,6 +12,7 @@
 use crate::editor::{Flavour, Tab};
 use accent_api::{Kind, Pos, Support, Symbol, Vault};
 use gtk::glib;
+use gtk::prelude::*;
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -91,6 +92,16 @@ pub fn pos_of(iter: &gtk::TextIter) -> Pos {
         line: iter.line().max(0) as u32,
         character: iter.line_offset().max(0) as u32,
     }
+}
+
+/// The iter at `pos`, the inverse of [`pos_of`], clamped to what the buffer actually has: an
+/// answer can outlive the edit that shortened the line it was about, and an out-of-range offset is
+/// a GTK critical.
+pub fn iter_at(buffer: &impl IsA<gtk::TextBuffer>, pos: Pos) -> gtk::TextIter {
+    let end = crate::editor::line_end(buffer, pos.line as i32);
+    let mut iter = end;
+    iter.set_line_offset((pos.character as i32).clamp(0, end.line_offset()));
+    iter
 }
 
 /// The LSP language id for a tab: the GtkSourceView language's own id, which is the same name

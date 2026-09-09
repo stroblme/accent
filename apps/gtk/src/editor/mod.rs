@@ -26,6 +26,7 @@ mod compare;
 mod lines;
 mod page;
 mod search;
+mod text;
 
 pub use banner::Alert;
 use compare::Comparing;
@@ -35,6 +36,7 @@ pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name};
 use search::mute;
+pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
 const DEBOUNCE: Duration = Duration::from_millis(150);
@@ -509,47 +511,14 @@ pub fn open(
     tab.analyse();
     // `view.color()` only resolves the theme foreground once the widget is mapped. A tab added to
     // the visible TabView is mapped by `append` above, so restyle now *and* on every later map
-    // (a background tab is only mapped when it is first selected). Code takes its colours from
-    // the style scheme, which needs none of this.
-    if flavour == Flavour::Csv {
-        highlight::restyle_csv(&buffer);
-        view.connect_map(glib::clone!(
-            #[strong]
-            buffer,
-            move |_| highlight::restyle_csv(&buffer)
-        ));
-    }
-    if flavour.is_note() {
-        highlight::restyle(&buffer, &view);
-        view.connect_map(glib::clone!(
-            #[strong]
-            buffer,
-            move |view| {
-                highlight::restyle(&buffer, view);
-                highlight::hang(&buffer, view);
-            }
-        ));
-    }
-    // The change bars need the same resolved foreground, whatever the flavour: a source file in a
-    // repository gets them exactly as a note does.
-    marks.restyle(&view);
+    // (a background tab is only mapped when it is first selected). One hook for the lot: the
+    // spans, the change bars, the diagnostic underlines and the fold chevrons all mix that same
+    // foreground, and `Tab::restyle` is what a theme change already runs.
+    tab.restyle();
     view.connect_map(glib::clone!(
-        #[strong]
-        marks,
-        move |view| marks.restyle(view)
-    ));
-    // Same resolved foreground, same reason: the underlines and the chevrons are mixed with it.
-    diagnostics::restyle(&buffer, &view);
-    folds.restyle(&view);
-    view.connect_map(glib::clone!(
-        #[strong]
-        buffer,
-        #[strong]
-        folds,
-        move |view| {
-            diagnostics::restyle(&buffer, view);
-            folds.restyle(view);
-        }
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.restyle()
     ));
     folds.connect_toggle(glib::clone!(
         #[weak(rename_to = tab)]
@@ -681,10 +650,8 @@ pub fn sync_scheme(buffer: &sourceview5::Buffer) {
 }
 
 fn title_of(rel: &str) -> &str {
-    rel.rsplit('/')
-        .next()
-        .map(|n| n.strip_suffix(".md").unwrap_or(n))
-        .unwrap_or(rel)
+    let name = accent_core::path::basename(rel);
+    name.strip_suffix(".md").unwrap_or(name)
 }
 
 /// The language a file called `key` holding `text` is coloured as.
@@ -808,7 +775,7 @@ impl Tab {
 
     /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
     pub fn reload_keep_cursor(&self) -> std::io::Result<()> {
-        let offset = self.buffer.iter_at_mark(&self.buffer.get_insert()).offset();
+        let offset = caret(&self.buffer).offset();
         // Where the page is, kept alongside the caret: the scroll position, and the line at the
         // top of the view with where that line sits in the buffer, so the same text goes back
         // under the same edge however far the reload moves it. Replacing the buffer empties it,
@@ -932,10 +899,7 @@ impl Tab {
     }
 
     fn caret_line(&self) -> i32 {
-        self.buffer
-            .iter_at_mark(&self.buffer.get_insert())
-            .line()
-            .max(0)
+        caret(&self.buffer).line().max(0)
     }
 
     /// Fold the innermost block the caret is in.
@@ -983,8 +947,7 @@ impl Tab {
 
     /// 1-based, the way an editor counts lines and the preview's `data-line` markers do.
     pub fn cursor_line(&self) -> u32 {
-        let line = self.buffer.iter_at_mark(&self.buffer.get_insert()).line();
-        line.max(0) as u32 + 1
+        caret(&self.buffer).line().max(0) as u32 + 1
     }
 
     fn tab_title(&self) -> String {
@@ -1058,8 +1021,7 @@ impl Tab {
     // --- links ---------------------------------------------------------------------------
 
     pub fn link_at_cursor(&self) -> Option<Link> {
-        let iter = self.buffer.iter_at_mark(&self.buffer.get_insert());
-        self.link_at_iter(&iter)
+        self.link_at_iter(&caret(&self.buffer))
     }
 
     /// The link under a pointer position in the view's own coordinates.
@@ -1136,7 +1098,7 @@ impl Tab {
             // Too long for a full pass inside a frame, so the line under the caret is styled now
             // and everything else waits: what a typist watches change is the line they are typing.
             if self.flavour.is_note() {
-                let line = self.buffer.iter_at_mark(&self.buffer.get_insert()).line();
+                let line = caret(&self.buffer).line();
                 highlight::apply_line(&self.buffer, line);
             }
             let id = glib::timeout_add_local_once(

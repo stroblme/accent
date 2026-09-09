@@ -4,8 +4,8 @@
 //!
 //! The widgets live in `find.rs`, one bar per window. What is here is what belongs to one buffer.
 
-use super::Tab;
-use crate::{diagnostics, fold};
+use super::{Tab, caret, line_end};
+use crate::{fold, lang};
 use accent_api::Pos;
 use gtk::gdk;
 use gtk::prelude::*;
@@ -19,16 +19,23 @@ const OCCURRENCE_WEIGHT: f32 = 0.35;
 /// tag churn a full re-style is already dominated by.
 const OCCURRENCE_CAP: usize = 500;
 
+/// The background the style scheme paints a find-bar match in, which is the one colour both
+/// highlights are derived from.
+fn search_match_colour(buffer: &sourceview5::Buffer) -> Option<gdk::RGBA> {
+    buffer
+        .style_scheme()
+        .and_then(|scheme| scheme.style("search-match"))
+        .and_then(|style| style.background())
+        .and_then(|colour| gdk::RGBA::parse(&colour).ok())
+}
+
 /// Paint `tag` in the muted twin of the scheme's own `search-match` colour: the same hue at a
 /// third of its weight, so an occurrence of the selection reads as a hint while a find-bar match
 /// still reads as a hit. Derived rather than named, so the pair keeps its order in every scheme.
 pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
-    let found = buffer
-        .style_scheme()
-        .and_then(|scheme| scheme.style("search-match"))
-        .and_then(|style| style.background())
-        .and_then(|colour| gdk::RGBA::parse(&colour).ok());
-    let Some(mut colour) = found else { return };
+    let Some(mut colour) = search_match_colour(buffer) else {
+        return;
+    };
     colour.set_alpha(colour.alpha() * OCCURRENCE_WEIGHT);
     tag.set_background_rgba(Some(&colour));
 }
@@ -50,13 +57,19 @@ impl Tab {
         self.context.set_highlight(on);
     }
 
+    /// What is selected, or nothing when nothing is. The three readers below are this plus the
+    /// rule each of them applies to it.
+    fn selection_text(&self) -> Option<String> {
+        let (start, end) = self.buffer.selection_bounds()?;
+        Some(self.buffer.text(&start, &end, false).to_string())
+    }
+
     /// The selection, when it is worth showing every other occurrence of: two or more characters
     /// on one line. One character is in almost every line, and a selection that spans lines is a
     /// block being moved rather than a word being looked at.
     fn selected_occurrence(&self) -> Option<String> {
-        let (start, end) = self.buffer.selection_bounds()?;
-        let selected = self.buffer.text(&start, &end, false).to_string();
-        (selected.chars().count() >= 2 && !selected.contains('\n')).then_some(selected)
+        self.selection_text()
+            .filter(|s| s.chars().count() >= 2 && !s.contains('\n'))
     }
 
     /// Point the muted highlight at what is selected now: every other occurrence of it in this
@@ -102,31 +115,23 @@ impl Tab {
     /// the hint really is the weaker of the pair. The find bar's context has no match style of
     /// its own, so its colour is the scheme's `search-match`.
     pub fn match_colours(&self) -> (Option<String>, Option<String>) {
-        let find = self
-            .buffer
-            .style_scheme()
-            .and_then(|scheme| scheme.style("search-match"))
-            .and_then(|style| style.background())
-            .and_then(|colour| gdk::RGBA::parse(&colour).ok());
         let text = |colour: gdk::RGBA| colour.to_str().to_string();
         (
-            find.map(text),
+            search_match_colour(&self.buffer).map(text),
             self.occurrence_tag.background_rgba().map(text),
         )
     }
 
     /// A one-line selection, which is what the find bar prefills itself from.
     pub fn selected_query(&self) -> Option<String> {
-        let (s, e) = self.buffer.selection_bounds()?;
-        let selected = self.buffer.text(&s, &e, false).to_string();
-        (!selected.is_empty() && !selected.contains('\n')).then_some(selected)
+        self.selection_text()
+            .filter(|s| !s.is_empty() && !s.contains('\n'))
     }
 
     /// The selection as the sidebar search takes it. Its first line only: the box is one line
     /// high, and a whole paragraph pasted into it matches nothing anyway.
     pub fn selected_search(&self) -> Option<String> {
-        let (s, e) = self.buffer.selection_bounds()?;
-        let selected = self.buffer.text(&s, &e, false).to_string();
+        let selected = self.selection_text()?;
         let first = selected.lines().next().unwrap_or_default().to_string();
         (!first.is_empty()).then_some(first)
     }
@@ -134,7 +139,7 @@ impl Tab {
     /// Move to the next or previous match. `from_current` searches from the start of the current
     /// selection, so growing the query keeps the match the user is looking at.
     pub fn step(&self, forward: bool, from_current: bool) {
-        let insert = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        let insert = caret(&self.buffer);
         let (start, end) = self.buffer.selection_bounds().unwrap_or((insert, insert));
         let found = match (forward, from_current) {
             (true, true) => self.context.forward(&start),
@@ -218,7 +223,7 @@ impl Tab {
 
     /// Put the caret at a server position, which is zero-based and counts characters.
     pub fn goto_pos(&self, pos: Pos) {
-        self.jump_to(&diagnostics::iter_at(&self.buffer, pos), 0.25);
+        self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }
 
     /// Jump to a character range and mark it the way the find bar marks a match it found: the
@@ -252,16 +257,10 @@ impl Tab {
         self.view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.25);
     }
 
+    /// A 1-based line and column as an iter, both clamped to what the note has.
     fn line_iter(&self, line: i32, column: i32) -> gtk::TextIter {
-        let line = (line - 1).clamp(0, (self.buffer.line_count() - 1).max(0));
-        let mut iter = self
-            .buffer
-            .iter_at_line(line)
-            .unwrap_or_else(|| self.buffer.end_iter());
-        let mut end = iter;
-        if !end.ends_line() {
-            end.forward_to_line_end();
-        }
+        let end = line_end(&self.buffer, line - 1);
+        let mut iter = end;
         iter.set_line_offset((column - 1).clamp(0, end.line_offset()));
         iter
     }

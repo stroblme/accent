@@ -34,6 +34,7 @@
 //! caret. One undo step covers a whole multi-caret edit, because each replay runs inside a single
 //! `begin_user_action`.
 
+use crate::editor::{caret, line_end, line_prefix};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene};
@@ -153,9 +154,7 @@ fn space_range(
         other.forward_chars(run as i32);
         return Some((*at, other));
     }
-    let mut start = *at;
-    start.set_line_offset(0);
-    let run = spaces_behind(&buffer.text(&start, at, true))?;
+    let run = spaces_behind(&line_prefix(buffer, at))?;
     other.backward_chars(run as i32);
     Some((other, *at))
 }
@@ -302,12 +301,7 @@ mod imp {
             let carets = self.carets.borrow();
             if !carets.is_empty() {
                 let alpha = obj.blink_phase().map_or(1.0, |(e, p)| blink_alpha(e, p));
-                let tint = gdk::RGBA::new(
-                    colour.red(),
-                    colour.green(),
-                    colour.blue(),
-                    colour.alpha() * alpha,
-                );
+                let tint = crate::highlight::with_alpha(colour, colour.alpha() * alpha);
                 let insert = buffer.get_insert();
                 for mark in carets.iter().map(|c| &c.mark).chain([&insert]) {
                     let at = obj.iter_location(&buffer.iter_at_mark(mark));
@@ -321,13 +315,8 @@ mod imp {
             // as not-yet-written. It is only ever asked for at the end of a line, so there is
             // nothing to its right to draw over.
             if let Some(text) = self.ghost.borrow().as_deref() {
-                let at = obj.iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
-                let dim = gdk::RGBA::new(
-                    colour.red(),
-                    colour.green(),
-                    colour.blue(),
-                    colour.alpha() * GHOST_ALPHA,
-                );
+                let at = obj.iter_location(&caret(&buffer));
+                let dim = crate::highlight::with_alpha(colour, colour.alpha() * GHOST_ALPHA);
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(at.x() as f32, at.y() as f32));
                 snapshot.append_layout(&obj.create_pango_layout(Some(text)), &dim);
@@ -345,11 +334,7 @@ mod imp {
                 && count.abs() == 1
                 && obj.is_editable()
                 && !buffer.has_selection()
-                && let Some((mut from, mut to)) = space_range(
-                    &buffer,
-                    &buffer.iter_at_mark(&buffer.get_insert()),
-                    count > 0,
-                )
+                && let Some((mut from, mut to)) = space_range(&buffer, &caret(&buffer), count > 0)
             {
                 buffer.begin_user_action();
                 buffer.delete(&mut from, &mut to);
@@ -509,7 +494,7 @@ impl View {
     /// The caret furthest down (or up), which is the one the next line is measured from.
     fn outermost(&self, below: bool) -> gtk::TextIter {
         let buffer = self.buffer();
-        let mut furthest = buffer.iter_at_mark(&buffer.get_insert());
+        let mut furthest = caret(&buffer);
         for caret in self.imp().carets.borrow().iter() {
             let at = buffer.iter_at_mark(&caret.mark);
             let further = match below {
@@ -526,7 +511,7 @@ impl View {
     /// Every caret's character offset, the primary one included.
     fn caret_offsets(&self) -> Vec<i32> {
         let buffer = self.buffer();
-        let mut offsets = vec![buffer.iter_at_mark(&buffer.get_insert()).offset()];
+        let mut offsets = vec![caret(&buffer).offset()];
         offsets.extend(
             self.imp()
                 .carets
@@ -647,9 +632,7 @@ impl View {
                 // way the primary one does, each from the column it is actually in.
                 Edit::Tab => {
                     let width = self.tab_width() as usize;
-                    let mut start = at;
-                    start.set_line_offset(0);
-                    let column = visual_column(&buffer.text(&start, &at, true), width);
+                    let column = visual_column(&line_prefix(&buffer, &at), width);
                     let text = tab_insert(column, width, self.is_insert_spaces_instead_of_tabs());
                     buffer.insert(&mut at, &text);
                 }
@@ -741,7 +724,7 @@ impl View {
     /// Two carets driven onto the same character are one caret from here on.
     fn collapse(&self) {
         let buffer = self.buffer();
-        let mut seen = vec![buffer.iter_at_mark(&buffer.get_insert()).offset()];
+        let mut seen = vec![caret(&buffer).offset()];
         self.imp().carets.borrow_mut().retain(|caret| {
             let offset = buffer.iter_at_mark(&caret.mark).offset();
             if seen.contains(&offset) {
@@ -752,18 +735,6 @@ impl View {
             true
         });
     }
-}
-
-/// The end of `line`, before its newline. `forward_to_line_end` would run on to the next line
-/// from an empty one, so a line that is already at its end is left alone.
-fn line_end(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
-    let mut at = buffer
-        .iter_at_line(line)
-        .unwrap_or_else(|| buffer.end_iter());
-    if !at.ends_line() {
-        at.forward_to_line_end();
-    }
-    at
 }
 
 fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
