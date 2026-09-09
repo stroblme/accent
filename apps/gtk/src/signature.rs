@@ -9,17 +9,14 @@
 //! the moment it stops being about what the caret is inside: an answer of `None`, Escape, the
 //! caret leaving the line, the focus leaving the view, or the tab being switched away from.
 
-use crate::editor::Tab;
+use crate::editor::{Tab, caret};
+use crate::hover::WIDTH;
 use crate::lang;
 use accent_api::Signature;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-
-/// How wide the signature is let grow before it wraps, in characters. The same measure the hover
-/// uses, for the same reason.
-const WIDTH: i32 = 80;
 
 /// The signature popover of one tab, and the request that would fill it.
 #[derive(Default)]
@@ -84,7 +81,7 @@ pub fn install(tab: &Rc<Tab>) {
         #[weak(rename_to = tab)]
         tab,
         move |_, _, text| {
-            let Some(last) = text.chars().next_back() else {
+            let Some(last) = text.chars().next_back().filter(|_| !tab.is_loading()) else {
                 return;
             };
             let asks = tab
@@ -97,31 +94,12 @@ pub fn install(tab: &Rc<Tab>) {
         }
     ));
 
-    // Escape, ahead of everything else that would take it: while the popover is up it means
-    // "this call is not what I want to see", and nothing else in the view should also act on it.
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, _| match key == gdk::Key::Escape && tab.lang.signature.is_shown() {
-            true => {
-                tab.lang.signature.dismiss();
-                glib::Propagation::Stop
-            }
-            false => glib::Propagation::Proceed,
-        }
-    ));
-    tab.view.add_controller(keys);
-
     // The caret left the line the call is on: whatever is being typed now is not this call.
     tab.buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |buffer| {
-            let line = buffer.iter_at_mark(&buffer.get_insert()).line();
+            let line = caret(buffer).line();
             if tab.lang.signature.is_shown() && line != tab.lang.signature.line.get() {
                 tab.lang.signature.dismiss();
             }
@@ -144,6 +122,16 @@ pub fn install(tab: &Rc<Tab>) {
     ));
 }
 
+/// Escape while the popover is up means "this call is not what I want to see", and nothing else
+/// in the view should also act on it. `None` for every other key. `editor::keys` offers a press
+/// here first, ahead of the ghost text, which also wants Escape.
+pub fn on_key(tab: &Rc<Tab>, key: gdk::Key) -> Option<glib::Propagation> {
+    (key == gdk::Key::Escape && tab.lang.signature.is_shown()).then(|| {
+        tab.lang.signature.dismiss();
+        glib::Propagation::Stop
+    })
+}
+
 /// Ask what call the caret is inside, and show or hide the popover from the answer.
 pub fn request(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
@@ -157,7 +145,7 @@ pub fn request(tab: &Rc<Tab>) {
         let Some(tab) = weak.upgrade() else { return };
         lang::flush(tab.clone()).await;
         // Read after the flush, not before: the edit that asked for this may have moved it.
-        let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+        let caret = caret(&tab.buffer);
         let answer = vault.signature_help(&tab.rel(), lang::pos_of(&caret)).await;
         tracing::debug!(
             "signature for {}: {:?}",
@@ -186,27 +174,34 @@ fn show(tab: &Rc<Tab>, sig: &Signature) {
     code.set_markup(&markup(sig));
     content.append(&code);
     if let Some(doc) = sig.doc.as_deref().filter(|d| !d.is_empty()) {
-        content.append(
-            &gtk::Label::builder()
-                .label(doc)
-                .css_classes(["caption", "dim-label"])
-                .wrap(true)
-                .max_width_chars(WIDTH)
-                .xalign(0.0)
-                .build(),
-        );
+        // Dimmed the way the hover dims its own source line, rather than through `dim-label`:
+        // the two say the same thing beside the same code and should not say it in two greys.
+        let quiet = gtk::Label::builder()
+            .use_markup(true)
+            .wrap(true)
+            .max_width_chars(WIDTH)
+            .xalign(0.0)
+            .build();
+        quiet.set_markup(&format!(
+            "<span alpha=\"60%\">{}</span>",
+            glib::markup_escape_text(doc)
+        ));
+        content.append(&quiet);
     }
 
     // Never autohide and never targetable, for the reason the PDF link preview is neither: the
-    // caret is still in the text under it and a grab would be the end of typing.
+    // caret is still in the text under it and a grab would be the end of typing. No arrow either:
+    // the hover and the completion are assistants without one, and a third shape over the same
+    // text reads as a different kind of thing.
     let popover = gtk::Popover::builder()
         .autohide(false)
         .can_target(false)
+        .has_arrow(false)
         .position(gtk::PositionType::Top)
         .child(&content)
         .build();
     popover.set_parent(&tab.view);
-    let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+    let caret = caret(&tab.buffer);
     let at = tab.view.iter_location(&caret);
     let (x, y) = tab
         .view

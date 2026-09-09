@@ -29,7 +29,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-use crate::editor::Tab;
+use crate::editor::{Tab, caret};
 use crate::lang;
 
 /// What this tab knows about its ghost text. The suggestion itself lives on the view, which is
@@ -38,8 +38,6 @@ use crate::lang;
 pub struct State {
     /// The preference. Off means nothing is asked for and nothing is shown, at once.
     pub on: Cell<bool>,
-    /// The completion popup is up, so the ghost path stands aside.
-    popup: Cell<bool>,
     /// A suggestion being typed through: what is left of it, and the caret offset it belongs
     /// at once the insert that was announced has landed.
     typed: RefCell<Option<(String, i32)>>,
@@ -48,33 +46,14 @@ pub struct State {
 impl State {
     /// Whether a suggestion may be asked for at all, before looking at where the caret is.
     fn armed(&self, tab: &Tab) -> bool {
-        self.on.get() && !self.popup.get() && tab.lang.support().is_some_and(|s| s.inline)
+        self.on.get() && !tab.popup_shown.get() && tab.lang.support().is_some_and(|s| s.inline)
     }
 }
 
-/// Watch the tab for everything that ends a suggestion, and take Tab and Escape while one is up.
+/// Watch the tab for everything that ends a suggestion. Which keys reach [`on_key`] is
+/// `editor::keys`'s decision, and so is the popup's own show and hide.
 pub fn install(tab: &Rc<Tab>) {
     tab.lang.ghost.on.set(tab.ghost_text_wanted());
-
-    let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
-    completion.connect_show(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| {
-            tab.lang.ghost.popup.set(true);
-            clear(&tab);
-        }
-    ));
-    completion.connect_hide(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| {
-            tab.lang.ghost.popup.set(false);
-            // The popup was in the way of every answer while it was up, and nothing has been
-            // edited since, so there is no refresh coming: ask again here.
-            glib::spawn_future_local(async move { request(&tab).await });
-        }
-    ));
 
     // Before the insert lands, so the suggestion is still up and the location iter still says
     // where the characters go: what is typed on top of a suggestion only shortens it.
@@ -85,8 +64,8 @@ pub fn install(tab: &Rc<Tab>) {
             let showing = tab
                 .ghost_view()
                 .and_then(|v| v.ghost())
-                .filter(|_| !tab.lang.ghost.popup.get())
-                .filter(|_| at.offset() == caret_of(&tab).offset());
+                .filter(|_| !tab.popup_shown.get() && !tab.is_loading())
+                .filter(|_| at.offset() == caret(&tab.buffer).offset());
             *tab.lang.ghost.typed.borrow_mut() = showing.and_then(|ghost| {
                 let rest = remainder(&ghost, text)?.to_string();
                 Some((rest, at.offset() + text.chars().count() as i32))
@@ -107,27 +86,19 @@ pub fn install(tab: &Rc<Tab>) {
         tab,
         move |_| settle(&tab)
     ));
-
-    // Capture, so Tab is taken before the view turns it into an indent. Everything else is left
-    // alone, including Tab with no suggestion up.
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, state| on_key(&tab, key, state)
-    ));
-    tab.view.add_controller(keys);
 }
 
-fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-    let showing = tab.ghost_view().and_then(|v| v.ghost());
-    let Some(text) = showing.filter(|_| !tab.lang.ghost.popup.get()) else {
-        return glib::Propagation::Proceed;
-    };
-    match key {
+/// What a painted suggestion does with a key, or `None` for a key it does not want. `indenting`
+/// is the one case where Tab is not the suggestion's: a line holding only a list marker, where
+/// the key belongs to the item's indent.
+pub fn on_key(
+    tab: &Rc<Tab>,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+    indenting: bool,
+) -> Option<glib::Propagation> {
+    let text = tab.ghost_view().and_then(|v| v.ghost())?;
+    Some(match key {
         // Ctrl+Right writes one word of the suggestion; the rest stays painted, because the
         // insert goes through the buffer like a keystroke. Shift means a selection and Alt
         // belongs to the compositor, so both are left alone.
@@ -140,9 +111,9 @@ fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propa
             glib::Propagation::Stop
         }
         _ if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) => {
-            glib::Propagation::Proceed
+            return None;
         }
-        gdk::Key::Tab | gdk::Key::KP_Tab => {
+        gdk::Key::Tab | gdk::Key::KP_Tab if !indenting => {
             accept(tab, &text);
             glib::Propagation::Stop
         }
@@ -150,8 +121,8 @@ fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propa
             clear(tab);
             glib::Propagation::Stop
         }
-        _ => glib::Propagation::Proceed,
-    }
+        _ => return None,
+    })
 }
 
 /// Write `text` where the suggestion was painted, as one undo step. Whatever is left of the
@@ -182,7 +153,7 @@ fn remainder<'a>(ghost: &'a str, typed: &str) -> Option<&'a str> {
 fn settle(tab: &Tab) {
     let typed = tab.lang.ghost.typed.borrow().clone();
     match typed {
-        Some((rest, at)) if at == caret_of(tab).offset() => {
+        Some((rest, at)) if at == caret(&tab.buffer).offset() => {
             if let Some(view) = tab.ghost_view() {
                 view.set_ghost((!rest.is_empty()).then_some(rest));
             }
@@ -218,30 +189,29 @@ pub async fn request(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
-    let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
-    // Mid-line, a selection, or a column of carets: not a place a suggestion can be drawn.
-    if !caret.ends_line()
+    let at = caret(&tab.buffer);
+    // Mid-line, a selection, or a column of carets: not a place a suggestion can be drawn. Nor is
+    // a line holding only its indent and a list marker, where Tab is the item's indent and a
+    // suggestion would be in the way of writing the list at all.
+    if !at.ends_line()
         || tab.buffer.has_selection()
         || tab.ghost_view().is_some_and(|v| v.has_carets())
+        || crate::typing::marker_only(&crate::editor::line_prefix(&tab.buffer, &at))
     {
         return;
     }
-    let (rel, pos) = (tab.rel(), lang::pos_of(&caret));
+    let (rel, pos) = (tab.rel(), lang::pos_of(&at));
     match vault.inline_completion(&rel, pos).await {
         Ok(Some(text)) => {
             tracing::debug!("ghost for {rel} at {pos:?}: {text:?}");
             // The answer took a round trip; the caret may have moved on since.
-            if tab.lang.ghost.armed(tab) && lang::pos_of(&caret_of(tab)) == pos {
+            if tab.lang.ghost.armed(tab) && lang::pos_of(&caret(&tab.buffer)) == pos {
                 set(tab, Some(text));
             }
         }
         Ok(None) => clear(tab),
         Err(e) => tracing::debug!("ghost for {rel}: {e:#}"),
     }
-}
-
-fn caret_of(tab: &Tab) -> gtk::TextIter {
-    tab.buffer.iter_at_mark(&tab.buffer.get_insert())
 }
 
 #[cfg(test)]

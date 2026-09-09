@@ -34,9 +34,11 @@
 //! caret. One undo step covers a whole multi-caret edit, because each replay runs inside a single
 //! `begin_user_action`.
 
+use crate::editor::{caret, line_end, line_prefix};
+use gtk::glib::translate::IntoGlib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, graphene};
+use gtk::{gdk, glib, graphene, pango};
 use sourceview5::prelude::ViewExt as _;
 
 /// What a key means at every caret. Anything outside this list clears the carets instead.
@@ -153,9 +155,7 @@ fn space_range(
         other.forward_chars(run as i32);
         return Some((*at, other));
     }
-    let mut start = *at;
-    start.set_line_offset(0);
-    let run = spaces_behind(&buffer.text(&start, at, true))?;
+    let run = spaces_behind(&line_prefix(buffer, at))?;
     other.backward_chars(run as i32);
     Some((other, *at))
 }
@@ -178,6 +178,39 @@ fn word_range(
         other.backward_visible_word_start();
         (other, at)
     }
+}
+
+/// What the text tags at `iter` do to a glyph, as Pango attributes: the size, the weight, the
+/// slant and the face. Read from the character *before* the caret, which is the one the caret is
+/// writing after — at the end of a heading line the character after it is the newline, which the
+/// heading's own span does not cover.
+///
+/// The tags arrive in ascending priority, and a later attribute of the same kind wins, so the
+/// answer is the tag that would win on the character itself.
+fn tag_attributes(iter: &gtk::TextIter) -> pango::AttrList {
+    let attrs = pango::AttrList::new();
+    let mut probe = *iter;
+    if !probe.starts_line() {
+        probe.backward_char();
+    }
+    for tag in probe.tags() {
+        if tag.is_scale_set() {
+            attrs.insert(pango::AttrFloat::new_scale(tag.scale()));
+        }
+        // Bold or not: the editor's own tags are the only ones here and they are all 700.
+        if tag.is_weight_set() && tag.weight() >= pango::Weight::Bold.into_glib() {
+            attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
+        }
+        if tag.is_style_set() {
+            attrs.insert(pango::AttrInt::new_style(tag.style()));
+        }
+        if tag.is_family_set()
+            && let Some(family) = tag.family()
+        {
+            attrs.insert(pango::AttrString::new_family(&family));
+        }
+    }
+    attrs
 }
 
 /// The alpha a caret is painted at `elapsed` µs into a blink of period `period` µs: solid for the
@@ -227,6 +260,10 @@ mod imp {
         pub blinked_at: Cell<i64>,
         /// The tick callback that repaints the blink, while there is one to repaint.
         pub blink: RefCell<Option<gtk::TickCallbackId>>,
+        /// Whether Up and Down move by a line of the document rather than by a row of the
+        /// screen. What a column of carets asks for in code; in wrapped prose one Down would be
+        /// a whole paragraph, which can be several screens.
+        pub logical_lines: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -240,20 +277,6 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj().clone();
-
-            // Capture, so the keys we mirror never reach the view's own bindings. The window's
-            // capture-phase controller runs first and takes the caret and scroll chords with it,
-            // so those never arrive here either.
-            let keys = gtk::EventControllerKey::new();
-            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-            keys.connect_key_pressed(glib::clone!(
-                #[weak]
-                obj,
-                #[upgrade_or]
-                glib::Propagation::Proceed,
-                move |_, key, _, state| obj.press(key, state)
-            ));
-            obj.add_controller(keys);
 
             // The buffer arrives after construction. Every `mark-set` on it that we did not
             // cause is the user moving the primary caret — a click, a selection, a find-bar
@@ -302,12 +325,7 @@ mod imp {
             let carets = self.carets.borrow();
             if !carets.is_empty() {
                 let alpha = obj.blink_phase().map_or(1.0, |(e, p)| blink_alpha(e, p));
-                let tint = gdk::RGBA::new(
-                    colour.red(),
-                    colour.green(),
-                    colour.blue(),
-                    colour.alpha() * alpha,
-                );
+                let tint = crate::highlight::with_alpha(colour, colour.alpha() * alpha);
                 let insert = buffer.get_insert();
                 for mark in carets.iter().map(|c| &c.mark).chain([&insert]) {
                     let at = obj.iter_location(&buffer.iter_at_mark(mark));
@@ -321,16 +339,16 @@ mod imp {
             // as not-yet-written. It is only ever asked for at the end of a line, so there is
             // nothing to its right to draw over.
             if let Some(text) = self.ghost.borrow().as_deref() {
-                let at = obj.iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
-                let dim = gdk::RGBA::new(
-                    colour.red(),
-                    colour.green(),
-                    colour.blue(),
-                    colour.alpha() * GHOST_ALPHA,
-                );
+                let caret = caret(&buffer);
+                let at = obj.iter_location(&caret);
+                let dim = crate::highlight::with_alpha(colour, colour.alpha() * GHOST_ALPHA);
+                let layout = obj.create_pango_layout(Some(text));
+                // The layout carries the view's font and nothing the tags at the caret say, so
+                // inside a heading the suggestion was drawn at body size next to text at 1.6.
+                layout.set_attributes(Some(&tag_attributes(&caret)));
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(at.x() as f32, at.y() as f32));
-                snapshot.append_layout(&obj.create_pango_layout(Some(text)), &dim);
+                snapshot.append_layout(&layout, &dim);
                 snapshot.restore();
             }
         }
@@ -345,11 +363,7 @@ mod imp {
                 && count.abs() == 1
                 && obj.is_editable()
                 && !buffer.has_selection()
-                && let Some((mut from, mut to)) = space_range(
-                    &buffer,
-                    &buffer.iter_at_mark(&buffer.get_insert()),
-                    count > 0,
-                )
+                && let Some((mut from, mut to)) = space_range(&buffer, &caret(&buffer), count > 0)
             {
                 buffer.begin_user_action();
                 buffer.delete(&mut from, &mut to);
@@ -360,12 +374,15 @@ mod imp {
             self.parent_delete_from_cursor(type_, count);
         }
 
-        /// Up and Down move by a line of the document and Home and End go to that line's ends: a
-        /// wrapped paragraph is one line to move through, not a screenful of rows. `Pages` and
-        /// everything else keep GTK's display-based behaviour, which is what they are for.
+        /// Up and Down move by a line of the document where the view asked for it, and Home and
+        /// End go to that line's ends: a wrapped line of code is one line to move through, not a
+        /// screenful of rows. `Pages` and everything else keep GTK's display-based behaviour,
+        /// which is what they are for.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
             match step {
-                gtk::MovementStep::DisplayLines => self.obj().move_by_lines(count, extend),
+                gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
+                    self.obj().move_by_lines(count, extend)
+                }
                 gtk::MovementStep::DisplayLineEnds => {
                     self.goal.set(None);
                     // GTK implements `ParagraphEnds` as the start and the end of the line.
@@ -397,6 +414,14 @@ impl Default for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Make Up and Down step a line of the document rather than a row of the screen. Set for the
+    /// code flavours, where a wrapped line is one statement and the column is what the key is
+    /// asked for; prose keeps GTK's own behaviour, where a paragraph is a line and stepping over
+    /// one would be several screens.
+    pub fn set_logical_lines(&self, on: bool) {
+        self.imp().logical_lines.set(on);
     }
 
     /// Paint `text` after the caret, or nothing. The suggestion never enters the buffer, so it
@@ -484,9 +509,8 @@ impl View {
         }
     }
 
-    /// Whether a key press is going to be replayed at more than one caret. `typing.rs` asks
-    /// before it acts: its controller sits on the same widget in the same phase, so the order
-    /// GTK runs the two in is not something to depend on.
+    /// Whether a key press is going to be replayed at more than one caret, which is what
+    /// `editor::keys` asks before offering a press to anything below the carets in its chain.
     pub fn has_carets(&self) -> bool {
         !self.imp().carets.borrow().is_empty()
     }
@@ -509,7 +533,7 @@ impl View {
     /// The caret furthest down (or up), which is the one the next line is measured from.
     fn outermost(&self, below: bool) -> gtk::TextIter {
         let buffer = self.buffer();
-        let mut furthest = buffer.iter_at_mark(&buffer.get_insert());
+        let mut furthest = caret(&buffer);
         for caret in self.imp().carets.borrow().iter() {
             let at = buffer.iter_at_mark(&caret.mark);
             let further = match below {
@@ -526,7 +550,7 @@ impl View {
     /// Every caret's character offset, the primary one included.
     fn caret_offsets(&self) -> Vec<i32> {
         let buffer = self.buffer();
-        let mut offsets = vec![buffer.iter_at_mark(&buffer.get_insert()).offset()];
+        let mut offsets = vec![caret(&buffer).offset()];
         offsets.extend(
             self.imp()
                 .carets
@@ -604,8 +628,9 @@ impl View {
         self.scroll_mark_onscreen(&insert);
     }
 
-    /// One key press, at every caret. `pub(crate)` so a headless check can drive the carets the
-    /// way the key controller does, which is the only way to see them without a screen.
+    /// One key press, at every caret. Called by `editor::keys`, and by the headless check that
+    /// drives the carets the way that dispatcher does, which is the only way to see them without
+    /// a screen.
     pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         if self.imp().carets.borrow().is_empty() {
             return glib::Propagation::Proceed;
@@ -647,9 +672,7 @@ impl View {
                 // way the primary one does, each from the column it is actually in.
                 Edit::Tab => {
                     let width = self.tab_width() as usize;
-                    let mut start = at;
-                    start.set_line_offset(0);
-                    let column = visual_column(&buffer.text(&start, &at, true), width);
+                    let column = visual_column(&line_prefix(&buffer, &at), width);
                     let text = tab_insert(column, width, self.is_insert_spaces_instead_of_tabs());
                     buffer.insert(&mut at, &text);
                 }
@@ -741,7 +764,7 @@ impl View {
     /// Two carets driven onto the same character are one caret from here on.
     fn collapse(&self) {
         let buffer = self.buffer();
-        let mut seen = vec![buffer.iter_at_mark(&buffer.get_insert()).offset()];
+        let mut seen = vec![caret(&buffer).offset()];
         self.imp().carets.borrow_mut().retain(|caret| {
             let offset = buffer.iter_at_mark(&caret.mark).offset();
             if seen.contains(&offset) {
@@ -752,18 +775,6 @@ impl View {
             true
         });
     }
-}
-
-/// The end of `line`, before its newline. `forward_to_line_end` would run on to the next line
-/// from an empty one, so a line that is already at its end is left alone.
-fn line_end(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
-    let mut at = buffer
-        .iter_at_line(line)
-        .unwrap_or_else(|| buffer.end_iter());
-    if !at.ends_line() {
-        at.forward_to_line_end();
-    }
-    at
 }
 
 fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {

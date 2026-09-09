@@ -7,15 +7,14 @@
 //! highlighting pass, so a per-keystroke lookup would mean re-parsing. A list marker is visible in
 //! the line itself, and "am I inside a code fence" is already on the buffer as a tag.
 //!
-//! Every edit runs inside one `begin_user_action`/`end_user_action`, so one Ctrl+Z undoes it,
-//! and the whole controller stands down while there are secondary carets or a completion popup:
-//! both own Return, and neither wants a list marker inserted underneath them.
+//! Every edit runs inside one `begin_user_action`/`end_user_action`, so one Ctrl+Z undoes it.
+//! Which presses reach [`on_key`] at all is `editor::keys`'s decision: a completion popup and a
+//! column of carets both own Return, and neither wants a list marker inserted underneath them.
 
+use crate::editor::{caret, line_prefix};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
-use std::cell::Cell;
-use std::rc::Rc;
 
 /// Delimiters that close themselves when typed. Markdown emphasis is deliberately absent: a `*`
 /// that grew a second `*` under the caret would be in the way far more often than it helped.
@@ -110,6 +109,36 @@ pub fn continuation(line: &str) -> Option<Continue> {
 pub fn wrap_column(line: &str) -> usize {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     indent + marker_width(&line[indent..])
+}
+
+/// Whether `line` holds nothing but its indent and a list, task or quote marker: what Return on a
+/// list item leaves behind, and the one place Tab means "indent this item".
+///
+/// Read through [`continuation`], which already decides what "a marker and nothing after it"
+/// means — that is what it ends a list on — so the two cannot drift apart. A line of bare indent
+/// counts too: there is nothing on it either, and Tab is its indent.
+pub fn marker_only(line: &str) -> bool {
+    match continuation(line) {
+        Some(Continue::Unlist) => true,
+        Some(Continue::Insert(_)) => false,
+        None => !line.is_empty() && line.trim_start_matches([' ', '\t']).is_empty(),
+    }
+}
+
+/// What Tab inserts in front of such a line: the marker's own width in spaces, or one tab where
+/// the line is already indented with them. `None` where there is no marker to step past, which
+/// leaves the key to the view.
+pub fn list_indent(line: &str) -> Option<String> {
+    if !marker_only(line) {
+        return None;
+    }
+    let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let width = wrap_column(line) - indent;
+    match (width > 0, line[..indent].contains('\t')) {
+        (false, _) => None,
+        (true, true) => Some("\t".to_string()),
+        (true, false) => Some(" ".repeat(width)),
+    }
 }
 
 /// The width of the list or quote marker `rest` opens with, the spaces after it included, or 0
@@ -214,57 +243,22 @@ fn opens_fence(line: &str) -> bool {
         .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+'))
 }
 
-// ------------------------------------------------------------------------------- the controller
+// ------------------------------------------------------------------------------- the keys
 
-/// Give `view` the typing helpers. Called from `editor::open` after `completion::install`.
-pub fn install(view: &sourceview5::View) {
-    // The completion popup answers Return itself, and both its key controller and ours run in the
-    // capture phase on the same widget, so which of them GTK reaches first is not something to
-    // rely on. Its visibility is, and it is two signals away.
-    let popup = Rc::new(Cell::new(false));
-    let completion = sourceview5::prelude::ViewExt::completion(view);
-    completion.connect_show(glib::clone!(
-        #[strong]
-        popup,
-        move |_| popup.set(true)
-    ));
-    completion.connect_hide(glib::clone!(
-        #[strong]
-        popup,
-        move |_| popup.set(false)
-    ));
-
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed(glib::clone!(
-        #[weak]
-        view,
-        #[strong]
-        popup,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, state| match popup.get() {
-            true => glib::Propagation::Proceed,
-            false => on_key(&view, key, state),
-        }
-    ));
-    view.add_controller(keys);
-}
-
-fn on_key(view: &sourceview5::View, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-    // Every accelerator, and every multi-caret replay, keeps the key. The caret check is the
-    // reliable half of that: `multicaret`'s controller stops propagation when it acts, but it is
-    // on the same widget and the same phase, so this asks the view directly instead.
-    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
-        || view
-            .downcast_ref::<crate::multicaret::View>()
-            .is_some_and(|v| v.has_carets())
-    {
+/// What a note does with a press `editor::keys` has offered to nobody else. Every accelerator
+/// keeps its key: a modifier here is a chord, not typing.
+pub fn on_key(
+    view: &sourceview5::View,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> glib::Propagation {
+    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
         return glib::Propagation::Proceed;
     }
     match key {
         gdk::Key::Return | gdk::Key::KP_Enter => on_return(view),
         gdk::Key::BackSpace => on_backspace(view),
+        gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view),
         _ => match key.to_unicode().filter(|c| !c.is_control()) {
             Some(ch) => on_char(view, ch),
             None => glib::Propagation::Proceed,
@@ -272,15 +266,36 @@ fn on_key(view: &sourceview5::View, key: gdk::Key, state: gdk::ModifierType) -> 
     }
 }
 
+/// Tab on a line that is nothing but its indent and a marker indents the item by the width of
+/// that marker, so a nested item starts where its parent's text does — the column
+/// [`continuation`] writes the marker at, and the one `highlight::hang` wraps to. Anywhere else
+/// the key is the view's.
+fn on_tab(view: &sourceview5::View) -> glib::Propagation {
+    let buffer = view.buffer();
+    if buffer.has_selection() {
+        return glib::Propagation::Proceed;
+    }
+    let at = caret(&buffer);
+    let Some(indent) = list_indent(&line_prefix(&buffer, &at)) else {
+        return glib::Propagation::Proceed;
+    };
+    let mut start = at;
+    start.set_line_offset(0);
+    buffer.begin_user_action();
+    buffer.insert(&mut start, &indent);
+    buffer.end_user_action();
+    glib::Propagation::Stop
+}
+
 fn on_return(view: &sourceview5::View) -> glib::Propagation {
     let buffer = view.buffer();
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
     }
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let caret = caret(&buffer);
     let mut start = caret;
     start.set_line_offset(0);
-    let line = buffer.text(&start, &caret, true).to_string();
+    let line = line_prefix(&buffer, &caret).to_string();
 
     // The fence rule runs before the code-block guard on purpose: by the time Return arrives the
     // opening line is usually already tagged as the block it opened.
@@ -335,7 +350,7 @@ fn on_backspace(view: &sourceview5::View) -> glib::Propagation {
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
     }
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let caret = caret(&buffer);
     let mut before = caret;
     if !before.backward_char() || !deletes_pair(before.char(), char_at(&caret)) {
         return glib::Propagation::Proceed;
@@ -354,13 +369,13 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
     }
     let buffer = view.buffer();
     let selection = buffer.selection_bounds();
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let at = caret(&buffer);
     // Code and frontmatter are verbatim: a bracket there is data, not markup.
-    if selection.is_none() && verbatim(&buffer, &caret) {
+    if selection.is_none() && verbatim(&buffer, &at) {
         return glib::Propagation::Proceed;
     }
 
-    match pair(ch, char_at(&caret), selection.is_some()) {
+    match pair(ch, char_at(&at), selection.is_some()) {
         Pair::Wrap(open, close) => {
             let Some((s, e)) = selection else {
                 return glib::Propagation::Proceed;
@@ -382,11 +397,11 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             buffer.delete_mark(&to);
         }
         Pair::Insert(open, close) => {
-            let mut at = caret;
+            let mut at = at;
             buffer.begin_user_action();
             buffer.insert(&mut at, &format!("{open}{close}"));
             buffer.end_user_action();
-            let mut back = buffer.iter_at_mark(&buffer.get_insert());
+            let mut back = caret(&buffer);
             back.backward_char();
             buffer.place_cursor(&back);
             // The pair lands as one two-character insert, and GtkSourceCompletion only asks
@@ -398,7 +413,7 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             }
         }
         Pair::StepOver => {
-            let mut at = caret;
+            let mut at = at;
             at.forward_char();
             buffer.place_cursor(&at);
         }
@@ -415,7 +430,7 @@ fn char_at(iter: &gtk::TextIter) -> Option<char> {
 
 /// Whether `iter` is inside a code block or the frontmatter, where none of this applies.
 fn verbatim(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
-    ["codeblock", "frontmatter"]
+    [crate::highlight::CODEBLOCK, "frontmatter"]
         .iter()
         .filter_map(|name| buffer.tag_table().lookup(name))
         .any(|tag| iter.has_tag(&tag))
@@ -480,6 +495,36 @@ mod tests {
         ] {
             assert_eq!(wrap_column(line), 0, "{line:?}");
         }
+    }
+
+    /// What Return on a list item leaves behind, and where Tab therefore means "indent this".
+    /// A line with any text of its own is not it: there Tab is the view's own key.
+    #[test]
+    fn a_marker_only_line_is_where_tab_indents() {
+        for line in ["- ", "  - ", "1. ", "- [ ] ", "> ", "    "] {
+            assert!(marker_only(line), "{line:?}");
+        }
+        for line in ["", "- item", "plain", "-no space"] {
+            assert!(!marker_only(line), "{line:?}");
+        }
+    }
+
+    /// One indent step is the marker's own width, so a nested item starts where its parent's
+    /// text does. A line already indented with tabs keeps them.
+    #[test]
+    fn indenting_an_item_steps_by_its_own_marker() {
+        assert_eq!(list_indent("- ").as_deref(), Some("  "));
+        assert_eq!(list_indent("  - ").as_deref(), Some("  "));
+        assert_eq!(list_indent("1. ").as_deref(), Some("   "));
+        assert_eq!(list_indent("12. ").as_deref(), Some("    "));
+        assert_eq!(
+            list_indent("- [ ] ").as_deref(),
+            Some("  "),
+            "the box is content"
+        );
+        assert_eq!(list_indent("\t- ").as_deref(), Some("\t"), "tabs stay tabs");
+        assert_eq!(list_indent("    "), None, "no marker to step past");
+        assert_eq!(list_indent("- item"), None, "not on a line with text");
     }
 
     #[test]

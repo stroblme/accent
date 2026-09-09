@@ -76,13 +76,9 @@ pub fn fold(buffer: &gtk::TextBuffer, f: Fold) {
     }
     // A caret inside the block would be invisible and would type into text nobody can see, so it
     // comes out to the header line first.
-    let insert = buffer.iter_at_mark(&buffer.get_insert());
+    let insert = crate::editor::caret(buffer);
     if insert >= start && insert < end {
-        let mut header = line_start(buffer, f.start_line as i32);
-        if !header.ends_line() {
-            header.forward_to_line_end();
-        }
-        buffer.place_cursor(&header);
+        buffer.place_cursor(&crate::editor::line_end(buffer, f.start_line as i32));
     }
     buffer.apply_tag(&tag, &start, &end);
 }
@@ -148,6 +144,11 @@ fn folded_starts(buffer: &gtk::TextBuffer, folds: &[Fold]) -> HashSet<u32> {
 /// moved down three lines is re-applied where it is now. `old` is what the tab folded against.
 pub fn resync(buffer: &gtk::TextBuffer, old: &[Fold], new: &[Fold]) {
     let shut = folded_starts(buffer, old);
+    // Nothing is hidden, so there is nothing to lift: this runs on every refresh, 300 ms after
+    // every edit, and lifting the tag is a pass over the whole buffer.
+    if shut.is_empty() {
+        return;
+    }
     unfold_all(buffer);
     for f in new.iter().filter(|f| shut.contains(&f.start_line)) {
         fold(buffer, *f);
@@ -207,7 +208,7 @@ impl Renderer {
         let fg = view.as_ref().color();
         self.imp()
             .colour
-            .set(gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), ALPHA));
+            .set(crate::highlight::with_alpha(fg, ALPHA));
         if let Some(display) = gdk::Display::default() {
             let theme = gtk::IconTheme::for_display(&display);
             let look = |name| {

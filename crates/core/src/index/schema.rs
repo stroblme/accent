@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 /// Biggest non-markdown file whose text goes into the index.
 ///
@@ -36,9 +36,15 @@ CREATE TABLE files(
     git_ignored  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
+-- Every name a file answers a link by (`markdown::path_keys`, lower-cased), one row each, so
+-- resolving a link is an index lookup rather than a pass over every path. Directories have none.
+CREATE TABLE file_keys(file_id INTEGER NOT NULL, key TEXT NOT NULL);
 CREATE TABLE links(
     src_file      INTEGER NOT NULL,
     target        TEXT NOT NULL,
+    -- `markdown::link_key(target)`: what is compared against `file_keys.key`. Stored because
+    -- the fold is Unicode-aware and SQLite's `lower()` is not.
+    key           TEXT NOT NULL,
     resolved_file INTEGER,
     kind          INTEGER NOT NULL,
     anchor        TEXT,
@@ -77,7 +83,9 @@ CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
     INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
 END;
 
-CREATE INDEX idx_links_target   ON links(target);
+CREATE INDEX idx_links_key      ON links(key);
+CREATE INDEX idx_file_keys_key  ON file_keys(key);
+CREATE INDEX idx_file_keys_file ON file_keys(file_id);
 CREATE INDEX idx_links_resolved ON links(resolved_file);
 CREATE INDEX idx_links_src      ON links(src_file);
 CREATE INDEX idx_tags_name      ON tags(name);
@@ -98,6 +106,7 @@ DROP TABLE IF EXISTS notes;
 DROP TABLE IF EXISTS headings;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS links;
+DROP TABLE IF EXISTS file_keys;
 DROP TABLE IF EXISTS aliases;
 DROP TABLE IF EXISTS files;
 "#;

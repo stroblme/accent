@@ -3,112 +3,74 @@
 use super::{Backlink, Index, PdfLink};
 use crate::markdown;
 use anyhow::Result;
-use rusqlite::params;
-use std::collections::HashMap;
+use rusqlite::OptionalExtension;
+
+/// Obsidian's rule as one subquery: of the files answering to a link's key, the shortest
+/// `rel_path` wins, and the older row breaks a tie. Correlated on `links.key`, so it is what an
+/// `UPDATE links SET resolved_file = …` assigns; `NULL` when nothing answers.
+pub(super) const BEST_FILE: &str =
+    "(SELECT k.file_id FROM file_keys k JOIN files f ON f.id = k.file_id
+      WHERE k.key = links.key ORDER BY length(f.rel_path), f.id LIMIT 1)";
+
+/// [`BEST_FILE`] for one key handed in, answering with the path.
+const BEST_REL_PATH: &str = "SELECT f.rel_path FROM file_keys k JOIN files f ON f.id = k.file_id
+     WHERE k.key = ?1 ORDER BY length(f.rel_path), f.id LIMIT 1";
+
+/// [`Index::resolve_links`] narrowed to what one indexed file can have changed: the links it
+/// holds, and every link whose key it answers to — which is where a dangling link finds its new
+/// note, and a resolved one a shorter path. Both halves are index lookups.
+pub(super) fn resolve_links_of(tx: &rusqlite::Transaction<'_>, rel: &str) -> Result<()> {
+    tx.prepare_cached(&format!(
+        "UPDATE links SET resolved_file = {BEST_FILE}
+          WHERE src_file = (SELECT id FROM files WHERE rel_path = ?1)
+             OR key IN (SELECT k.key FROM file_keys k JOIN files f ON f.id = k.file_id
+                         WHERE f.rel_path = ?1)"
+    ))?
+    .execute([rel])?;
+    Ok(())
+}
 
 impl Index {
     /// Obsidian link resolution: a target matches a file's path or name, with or without the
     /// extension, case-insensitively; the shortest `rel_path` wins. Unmatched stays NULL.
     ///
-    /// ponytail: this re-resolves the whole `links` table, because adding one note can resolve
-    /// dangling links anywhere in the vault. It costs 225 ms at the 56k links of `testvault/`,
-    /// so callers that change many files must batch (see [`update_file_batched`](Self::update_file_batched))
-    /// and pay it once. Narrow it to the targets whose candidate set actually changed if even
-    /// once per batch becomes too much.
+    /// The whole `links` table in one statement, for the cold build and for a batch caller that
+    /// changed many files and resolves once. A single file's worth is [`resolve_links_of`], and a
+    /// a removal re-points its own links as it goes. Returns how many links resolve.
     pub fn resolve_links(&mut self) -> Result<usize> {
-        let mut by_key: HashMap<String, (usize, i64)> = HashMap::new();
-        {
-            let mut st = self
-                .conn
-                .prepare("SELECT id, rel_path FROM files WHERE kind <> 0")?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                let id: i64 = r.get(0)?;
-                let rel: String = r.get(1)?;
-                let len = rel.len();
-                for key in markdown::path_keys(&rel) {
-                    match by_key.get(&key) {
-                        Some((best, _)) if *best <= len => {}
-                        _ => {
-                            by_key.insert(key, (len, id));
-                        }
-                    }
-                }
-            }
-        }
-
-        let targets: Vec<String> = {
-            let mut st = self.conn.prepare("SELECT DISTINCT target FROM links")?;
-            let rows = st.query_map([], |r| r.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-
         let tx = self.write_tx()?;
-        tx.execute("UPDATE links SET resolved_file = NULL", [])?;
-        let mut resolved = 0usize;
-        {
-            let mut up = tx.prepare("UPDATE links SET resolved_file = ?1 WHERE target = ?2")?;
-            for t in &targets {
-                let key = markdown::link_key(t);
-                if let Some((_, id)) = by_key.get(&key) {
-                    resolved += up.execute(params![id, t])?;
-                }
-            }
-        }
+        tx.execute(&format!("UPDATE links SET resolved_file = {BEST_FILE}"), [])?;
+        let resolved: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM links WHERE resolved_file IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )?;
         tx.commit()?;
-        Ok(resolved)
+        Ok(resolved as usize)
+    }
+
+    /// [`resolve_links_of`] in a transaction of its own.
+    pub(super) fn resolve_links_of(&mut self, rel: &str) -> Result<()> {
+        let tx = self.write_tx()?;
+        resolve_links_of(&tx, rel)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// The file one link target points at, by the rules of [`resolve_links`](Self::resolve_links).
     /// `None` means the link dangles, which is what the UI offers to create.
-    ///
-    /// One pass over the file paths, not the key map `resolve_links` builds, because a map costs
-    /// four strings per file and this answers a single click;
-    /// [`resolve_targets`](Self::resolve_targets) is the one to ask for a whole note's links.
     pub fn resolve_target(&self, target: &str) -> Result<Option<String>> {
-        let key = markdown::link_key(target);
-        let mut st = self
+        Ok(self
             .conn
-            .prepare_cached("SELECT rel_path FROM files WHERE kind <> 0")?;
-        let mut rows = st.query([])?;
-        let mut best: Option<String> = None;
-        while let Some(r) = rows.next()? {
-            let rel: String = r.get(0)?;
-            let shorter = best.as_ref().is_none_or(|b| rel.len() < b.len());
-            if shorter && markdown::path_keys(&rel).contains(&key) {
-                best = Some(rel);
-            }
-        }
-        Ok(best)
+            .prepare_cached(BEST_REL_PATH)?
+            .query_row([markdown::link_key(target)], |r| r.get(0))
+            .optional()?)
     }
 
     /// [`resolve_target`](Self::resolve_target) for many targets at once, for the note whose
-    /// every wikilink has to be checked on each keystroke: the key map is built once and then
-    /// answers every target, instead of one full scan per link.
+    /// every wikilink has to be checked on each keystroke.
     pub fn resolve_targets(&self, targets: &[String]) -> Result<Vec<Option<String>>> {
-        let mut by_key: HashMap<String, String> = HashMap::new();
-        {
-            let mut st = self
-                .conn
-                .prepare_cached("SELECT rel_path FROM files WHERE kind <> 0")?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                let rel: String = r.get(0)?;
-                for key in markdown::path_keys(&rel) {
-                    // The shortest path answering to a key wins, as in `resolve_links`.
-                    match by_key.get(&key) {
-                        Some(best) if best.len() <= rel.len() => {}
-                        _ => {
-                            by_key.insert(key, rel.clone());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(targets
-            .iter()
-            .map(|t| by_key.get(&markdown::link_key(t)).cloned())
-            .collect())
+        targets.iter().map(|t| self.resolve_target(t)).collect()
     }
 
     /// Every link in the vault that points at a *page and selection* of this PDF.
@@ -183,7 +145,9 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::Change;
     use crate::index::testing::{fixture, open};
+    use crate::walk::FileKind;
     use std::fs;
 
     #[test]
@@ -227,8 +191,9 @@ mod tests {
         ix.conn.execute("DELETE FROM links", []).unwrap();
         ix.conn
             .execute(
-                "INSERT INTO links(src_file, target, kind, byte_start, byte_end)
-                 VALUES(?1, 'beta', 0, 10, 16), (?1, 'sub/Beta.md', 0, 20, 31), (?1, 'Nope', 0, 40, 44)",
+                "INSERT INTO links(src_file, target, key, kind, byte_start, byte_end)
+                 VALUES(?1, 'beta', 'beta', 0, 10, 16), (?1, 'sub/Beta.md', 'sub/beta.md', 0, 20, 31),
+                       (?1, 'Nope', 'nope', 0, 40, 44)",
                 [src],
             )
             .unwrap();
@@ -277,6 +242,32 @@ mod tests {
             ix.resolve_target("beta").unwrap().as_deref(),
             Some("sub/Beta.md")
         );
+    }
+
+    /// The incremental paths: a shallower namesake appearing takes a link over without a full
+    /// pass, and its removal hands the link back to the note that had it.
+    #[test]
+    fn a_new_namesake_takes_a_link_and_hands_it_back_when_removed() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
+
+        fs::write(vault.path().join("Beta.md"), "# Beta\n").unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "Beta.md").unwrap(),
+            Change::Added(FileKind::Markdown)
+        );
+        assert_eq!(ix.backlinks("Beta.md").unwrap().len(), 1);
+        assert!(ix.backlinks("sub/Beta.md").unwrap().is_empty());
+
+        fs::remove_file(vault.path().join("Beta.md")).unwrap();
+        assert_eq!(
+            ix.update_file(vault.path(), "Beta.md").unwrap(),
+            Change::Removed
+        );
+        assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
+        assert!(ix.unresolved_links().unwrap().is_empty());
     }
 
     #[test]
