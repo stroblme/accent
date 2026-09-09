@@ -764,11 +764,17 @@ impl Tab {
 
     /// Replace the buffer with `text` without marking the tab dirty. Callers are either loading
     /// from disk or about to write what they just put in.
-    pub fn set_text(&self, text: &str) {
+    ///
+    /// The language layer is told all the same. `loading` is what keeps `on_changed` out of this,
+    /// and with it the edit event that would otherwise carry the news: without this a silent
+    /// reload left the server, the symbols, the folds and the diagnostics describing the text the
+    /// file used to hold until the next keystroke.
+    pub fn set_text(self: &Rc<Self>, text: &str) {
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
         self.analyse();
+        lang::changed(self);
     }
 
     pub fn mark_clean(&self, etag: Etag) {
@@ -779,7 +785,7 @@ impl Tab {
     }
 
     /// Silent reload for a clean tab: the file changed on disk and there is nothing to lose.
-    pub fn reload_keep_cursor(&self) -> std::io::Result<()> {
+    pub fn reload_keep_cursor(self: &Rc<Self>) -> std::io::Result<()> {
         let offset = caret(&self.buffer).offset();
         // Where the page is, kept alongside the caret: the scroll position, and the line at the
         // top of the view with where that line sits in the buffer, so the same text goes back
