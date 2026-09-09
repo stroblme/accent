@@ -388,16 +388,17 @@ fn upsert(
         }
     }
     if let Some(body) = text.as_ref() {
-        // Explicit delete + insert: REPLACE would only fire the FTS delete trigger
-        // with recursive_triggers on.
-        tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
-            .execute([id])?;
         tx.prepare_cached("INSERT INTO notes(file_id, body, title) VALUES(?1,?2,?3)")?
             .execute(params![id, body, title.as_deref().unwrap_or_default()])?;
     }
     Ok(id)
 }
 
+/// Everything a file's content produced, so a re-read starts clean — and a file that could not
+/// be read keeps no stale body to be found by.
+///
+/// The `notes` row is deleted here and inserted afresh rather than `REPLACE`d: REPLACE would only
+/// fire the FTS delete trigger with `recursive_triggers` on.
 fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM links WHERE src_file = ?1")?
         .execute([id])?;
@@ -405,13 +406,13 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
         .execute([id])?;
     tx.prepare_cached("DELETE FROM headings WHERE file_id = ?1")?
         .execute([id])?;
+    tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 
 fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     clear_derived(tx, id)?;
-    tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
-        .execute([id])?;
     tx.prepare_cached("DELETE FROM aliases WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("UPDATE links SET resolved_file = NULL WHERE resolved_file = ?1")?
@@ -508,6 +509,24 @@ mod tests {
             ix.unresolved_links().unwrap(),
             vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string())],
             "the dangling target is reported as the vault path it names"
+        );
+    }
+
+    /// A note that stopped being readable — a NUL byte written into it, say — must not keep
+    /// answering searches with the body it used to have.
+    #[test]
+    fn a_note_that_becomes_unreadable_loses_its_stale_body() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(ix.search("ferris", 10, false).unwrap().len(), 1);
+
+        fs::write(vault.path().join("sub/Beta.md"), b"\0 not text any more").unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert!(ix.search("ferris", 10, false).unwrap().is_empty());
+        assert!(
+            ix.get_file("sub/Beta.md").unwrap().is_some(),
+            "the stat row stays"
         );
     }
 
