@@ -772,6 +772,27 @@ impl Vault {
         )
     }
 
+    /// Bring the remote-tracking refs up to date. Bounded by [`git::FETCH_TIMEOUT`], which is
+    /// under [`rpc::DEADLINE`] so that a fetch on a remote vault answers rather than times out.
+    pub fn git_fetch(&self, repo: &Repo) -> Result<String> {
+        ask!(
+            self,
+            |_: &Local| git::fetch(repo).map_err(anyhow::Error::from),
+            "git_fetch",
+            json!([repo])
+        )
+    }
+
+    /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.
+    pub fn git_incoming(&self, repo: &Repo) -> Result<Vec<String>> {
+        ask!(
+            self,
+            |_: &Local| git::incoming(repo).map_err(anyhow::Error::from),
+            "git_incoming",
+            json!([repo])
+        )
+    }
+
     pub fn git_stage(&self, repo: &Repo, paths: &[String]) -> Result<()> {
         let borrowed: Vec<&str> = paths.iter().map(String::as_str).collect();
         ask!(
