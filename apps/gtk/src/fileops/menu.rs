@@ -57,6 +57,11 @@ pub fn context_menu(
     // Rename is the move as well as the name: a path typed into it carries the file, which is
     // what replaced Move to… when the tree learned to take a drop.
     menu.append_item(&item("Rename", "rename", rel));
+    // Only a directory can be left out: `[search] exclude` is a list of folders, and the path is
+    // right here, which is why this beats a preferences row nobody can point at a folder from.
+    if is_dir {
+        menu.append_item(&item("Leave Out of Search", "exclude", rel));
+    }
     // Reading the name or the path out and leaving the app are neither edits nor deletions, so
     // they get a section of their own between the two. The name first: it is the shortest of the
     // three answers to "what is this file called", and the one a note's own prose wants.
@@ -144,6 +149,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("download", Box::new(download));
     add("upload", Box::new(upload));
     add("trash", Box::new(trash));
+    add("exclude", Box::new(|ops, rel| (ops.exclude)(rel)));
     group
 }
 

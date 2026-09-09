@@ -3,20 +3,12 @@
 
 use accent_core::path::{basename, parent_dir};
 
-/// Trim the typed name and refuse the ones that would not stay where they were put. A note
-/// called `../x` escapes the vault, and a leading dot hides the file from the tree.
-pub(super) fn sanitise_name(raw: &str) -> Result<String, &'static str> {
-    let name = raw.trim();
-    if name.is_empty() {
-        return Err("Enter a name.");
-    }
-    if name.contains('/') {
-        return Err("Names cannot contain a slash.");
-    }
-    if name.starts_with('.') {
-        return Err("Names cannot start with a dot.");
-    }
-    Ok(name.to_string())
+/// Every level of `dir`, outermost first: `a/b/c` yields `a`, `a/b`, `a/b/c`. What a `mkdir -p`
+/// would have had to make, so a failure can say how far it got.
+pub(super) fn levels(dir: &str) -> impl Iterator<Item = &str> {
+    dir.match_indices('/')
+        .map(|(at, _)| &dir[..at])
+        .chain(std::iter::once(dir))
 }
 
 /// Whether the name already carries a markdown extension.
@@ -131,26 +123,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sanitise_name_trims_and_accepts_a_normal_name() {
-        assert_eq!(
-            sanitise_name("  Meeting notes  "),
-            Ok("Meeting notes".into())
-        );
-        assert_eq!(
-            sanitise_name("Übung 1 – Rückblick"),
-            Ok("Übung 1 – Rückblick".into())
-        );
-        assert_eq!(sanitise_name("note.md"), Ok("note.md".into()));
-    }
-
-    #[test]
-    fn sanitise_name_rejects_what_would_escape_the_vault() {
-        assert!(sanitise_name("").is_err());
-        assert!(sanitise_name("   ").is_err());
-        assert!(sanitise_name("a/b").is_err());
-        assert!(sanitise_name("../x").is_err());
-        assert!(sanitise_name("..").is_err());
-        assert!(sanitise_name(".hidden").is_err());
+    fn levels_lists_what_a_mkdir_p_would_have_made() {
+        assert_eq!(levels("a/b/c").collect::<Vec<_>>(), ["a", "a/b", "a/b/c"]);
+        assert_eq!(levels("a").collect::<Vec<_>>(), ["a"]);
     }
 
     #[test]

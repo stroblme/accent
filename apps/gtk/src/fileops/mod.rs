@@ -19,8 +19,7 @@ pub use paths::move_dest;
 pub use transfer::{download, upload};
 
 use self::paths::{
-    already_exists, child_path, is_markdown, renamed_path, sanitise_name, split_ext, split_typed,
-    typed_path, verb,
+    already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
 use crate::dialogs::{alert, form, labelled};
 use crate::pathfield::{completions, look_again, path_field};
@@ -39,6 +38,13 @@ use std::sync::Arc;
 
 /// How many linking notes the rename dialog lists before it starts counting instead.
 const LISTED: usize = 20;
+
+/// The one line of an `anyhow` chain a toast has room for. `{e:#}` writes every layer of context
+/// the call collected — three or four clauses by the time it reaches here — where what the reader
+/// can act on is the root: "permission denied", "no space left on device".
+fn why(e: &anyhow::Error) -> String {
+    e.root_cause().to_string()
+}
 /// Everything the operations need from the app, without depending on it.
 // Boxed closures are the whole point of this struct; a type alias per field would only hide the
 // signature the caller has to write anyway.
@@ -64,6 +70,9 @@ pub struct Ops {
     /// takes the notes inside it. Only called once the file is really gone, so there is nothing
     /// left to write the buffer into and nothing to ask about.
     pub close: Box<dyn Fn(&str)>,
+    /// Add a directory to the vault's `[search] exclude` list, save it and refresh what search
+    /// leaves out. Offered on directory rows alone.
+    pub exclude: Box<dyn Fn(&str)>,
 }
 
 // --------------------------------------------------------------------------------- creating
@@ -122,18 +131,28 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
         }
         match ops.vault.create_note(&rel, template.map(String::as_str)) {
             Ok((created, stops)) => (ops.open)(&created, &stops),
-            Err(e) if already_exists(&e) => (ops.toast)(&format!("{name} already exists")),
-            Err(e) => (ops.toast)(&format!("Cannot create {name}: {e:#}")),
+            Err(e) if already_exists(&e) => {
+                (ops.toast)(&format!("Cannot create {name}: it already exists"))
+            }
+            Err(e) => (ops.toast)(&format!("Cannot create {name}: {}", why(&e))),
         }
     });
     focus_name(&entry, None);
 }
 
 /// New folder inside `dir` ("" is the vault root).
+///
+/// A name carrying `/` is a path relative to `dir`, as it is in New File and in Rename, and the
+/// levels it names are made with it — `Vault::create_dir` is `mkdir -p`. This was the one dialog
+/// left refusing a slash, so `a/b` took two trips through it.
 pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
     let entry = name_entry("Folder name", "");
     let form = form();
-    form.append(&entry);
+    form.append(&vault_path_field(&entry, &ops.vault, dir));
+    form.append(&name_preview(&entry, {
+        let dir = dir.to_string();
+        move |typed| typed_path(&dir, typed)
+    }));
 
     let dialog = name_dialog("New Folder", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
@@ -142,21 +161,21 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         if response != CONFIRM {
             return;
         }
-        let name = match sanitise_name(&typed.text()) {
-            Ok(name) => name,
+        let rel = match typed_path(&dir, &typed.text()) {
+            Ok(rel) => rel,
             Err(why) => return (ops.toast)(why),
         };
-        let rel = child_path(&dir, &name);
+        let name = basename(&rel).to_string();
         // `create_dir_all` is happy to find the directory already there, so the collision the
         // user cares about has to be asked about before the call rather than read off its error.
         // Asked of the vault and not of this disk: `root()` is a path on the *remote* host, so
         // the local `exists` there was always false and every clash went through as "Created".
         if ops.vault.exists(&rel) {
-            return (ops.toast)(&format!("{name} already exists"));
+            return (ops.toast)(&format!("Cannot create {name}: it already exists"));
         }
         match ops.vault.create_dir(&rel) {
             Ok(()) => (ops.toast)(&format!("Created {name}")),
-            Err(e) => (ops.toast)(&format!("Cannot create {name}: {e}")),
+            Err(e) => (ops.toast)(&made_what_it_could(&ops, &rel, &e.to_string())),
         }
     });
     focus_name(&entry, None);
@@ -202,7 +221,7 @@ pub fn new_from_template(ops: &Rc<Ops>) {
             Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
             // The file changed under the dialog; nothing was created, so nothing to undo.
             Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
-            Err(e) => (ops.toast)(&format!("Cannot create a note from {name}: {e:#}")),
+            Err(e) => (ops.toast)(&format!("Cannot create a note from {name}: {}", why(&e))),
         }
     });
 }
@@ -236,7 +255,11 @@ pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
         };
         match ops.vault.render_template(template, &title) {
             Ok((text, stops)) => insert(&text, &stops),
-            Err(e) => (ops.toast)(&format!("Cannot insert {}: {e:#}", basename(template))),
+            Err(e) => (ops.toast)(&format!(
+                "Cannot insert {}: {}",
+                basename(template),
+                why(&e)
+            )),
         }
     });
 }
@@ -345,7 +368,10 @@ pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
     // Asked before the move rather than read off its error, as `new_folder` does: the error names
     // an absolute path, which is not what anyone dropped anything on.
     if ops.vault.exists(to) {
-        return (ops.toast)(&format!("{} is already there", basename(to)));
+        return (ops.toast)(&format!(
+            "Cannot move {}: it is already there",
+            basename(to)
+        ));
     }
     plan(ops, from, to, "Moved");
 }
@@ -361,17 +387,17 @@ fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
     // would go through in silence and break every wikilink pointing at the note. Rename and a
     // dropped row both land here, which is why the check sits at the top rather than in either.
     if !(ops.reconciled)() {
-        return (ops.toast)("Still indexing, try again in a moment");
+        return (ops.toast)("Cannot rename yet: the vault is still being indexed");
     }
     let (vault, from, to) = (ops.vault.clone(), from.to_string(), to.to_string());
-    let ops = ops.clone();
+    let (ops, name) = (ops.clone(), basename(&from).to_string());
     glib::spawn_future_local(async move {
         let planned = gio::spawn_blocking(move || vault.plan_rename(&from, &to)).await;
         match planned {
             Ok(Ok(plan)) if plan.rewrites.is_empty() => apply(&ops, plan, false, verb),
             Ok(Ok(plan)) => confirm_links(&ops, plan, verb),
-            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename: {e:#}")),
-            Err(_) => (ops.toast)("Cannot rename"),
+            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
+            Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
         }
     });
 }
@@ -439,25 +465,32 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
     // The write itself is N notes rewritten, one fsync each, and on a remote vault a round trip
     // per note: the same worker thread the plan was made on.
     let (vault, to, ops) = (ops.vault.clone(), plan.to.clone(), ops.clone());
+    let name = basename(&plan.from).to_string();
     glib::spawn_future_local(async move {
         let done = gio::spawn_blocking(move || vault.rename(&plan, update_links)).await;
         match done {
             Ok(Ok(report)) => {
                 let unsaved = (ops.reload)(&report.rewritten);
-                (ops.toast)(&rename_message(verb, &to, report.failed.len(), unsaved));
+                (ops.toast)(&rename_message(
+                    verb,
+                    &name,
+                    &to,
+                    report.failed.len(),
+                    unsaved,
+                ));
             }
-            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename: {e:#}")),
-            Err(_) => (ops.toast)("Cannot rename"),
+            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
+            Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
         }
     });
 }
 
 /// What the toast says after a rename: where it went, what could not be rewritten, and what is
 /// still showing the old text because its tab has unsaved edits.
-fn rename_message(verb: &str, to: &str, failed: usize, unsaved: usize) -> String {
+fn rename_message(verb: &str, name: &str, to: &str, failed: usize, unsaved: usize) -> String {
     let mut message = match failed {
-        0 => format!("{verb} to {to}"),
-        n => format!("{verb}, but {n} notes could not be updated"),
+        0 => format!("{verb} {name} to {to}"),
+        n => format!("{verb} {name}, but {n} notes could not be updated"),
     };
     match unsaved {
         0 => {}
@@ -635,16 +668,33 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
 /// path that leaves the vault is still refused.
 ///
 /// ponytail: `create_dir_all` is not transactional, so a failure part way leaves behind whatever
-/// levels it did manage. The toast names the folder it stopped on, which is all New Folder offers
-/// either; make it clean up after itself if that is ever seen.
+/// levels it did manage. They are named rather than cleaned up — deleting a directory because a
+/// deeper one could not be made is the more dangerous of the two guesses, and one of the levels
+/// may have been there all along.
 fn make_parents(ops: &Ops, rel: &str) -> Result<(), String> {
     let dir = parent_dir(rel);
     if dir.is_empty() || ops.vault.exists(dir) {
         return Ok(());
     }
-    ops.vault
-        .create_dir(dir)
-        .map_err(|e| format!("Cannot create {dir}: {e}"))
+    match ops.vault.create_dir(dir) {
+        Ok(()) => Ok(()),
+        Err(e) => Err(made_what_it_could(ops, dir, &e.to_string())),
+    }
+}
+
+/// A failed `mkdir -p`, and the levels of it that are on disk now. Asked afterwards rather than
+/// tracked as it went: the vault is the only thing that knows how far the call got.
+fn made_what_it_could(ops: &Ops, dir: &str, why: &str) -> String {
+    let made: Vec<&str> = levels(dir)
+        .filter(|level| ops.vault.exists(level))
+        .collect();
+    match made.is_empty() {
+        true => format!("Cannot create {dir}: {why}"),
+        false => format!(
+            "Cannot create {dir}: {why}; {} was created",
+            made.join(", ")
+        ),
+    }
 }
 
 // --------------------------------------------------------------------------------- widgetry
@@ -754,18 +804,22 @@ mod tests {
 
     #[test]
     fn rename_message_names_both_kinds_of_leftover() {
-        assert_eq!(rename_message("Renamed", "b.md", 0, 0), "Renamed to b.md");
+        // The subject is named in every shape, as "Moved {name} to Trash" names it.
         assert_eq!(
-            rename_message("Moved", "x/b.md", 2, 0),
-            "Moved, but 2 notes could not be updated"
+            rename_message("Renamed", "a.md", "b.md", 0, 0),
+            "Renamed a.md to b.md"
         );
         assert_eq!(
-            rename_message("Renamed", "b.md", 0, 1),
-            "Renamed to b.md; 1 note has unsaved changes and was not reloaded"
+            rename_message("Moved", "a.md", "x/b.md", 2, 0),
+            "Moved a.md, but 2 notes could not be updated"
         );
         assert_eq!(
-            rename_message("Renamed", "b.md", 2, 3),
-            "Renamed, but 2 notes could not be updated; 3 notes have unsaved changes and were not reloaded"
+            rename_message("Renamed", "a.md", "b.md", 0, 1),
+            "Renamed a.md to b.md; 1 note has unsaved changes and was not reloaded"
+        );
+        assert_eq!(
+            rename_message("Renamed", "a.md", "b.md", 2, 3),
+            "Renamed a.md, but 2 notes could not be updated; 3 notes have unsaved changes and were not reloaded"
         );
     }
 
