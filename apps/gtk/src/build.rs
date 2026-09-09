@@ -246,6 +246,7 @@ pub fn build_window(
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
+        excluded: RefCell::new(None),
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
