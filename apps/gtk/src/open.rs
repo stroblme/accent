@@ -40,7 +40,7 @@ impl App {
             self.awaiting.borrow_mut().remove(key);
             // Deleted since the session named it, or never in this vault: the vault has answered
             // the same way for both, and this machine's disk cannot tell them apart for a remote.
-            return self.toast(&format!("Cannot open {key}: not in this vault"));
+            return self.cannot(&format!("open {key}"), "not in this vault");
         };
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
@@ -160,7 +160,7 @@ impl App {
             }
             Err(e) => {
                 self.awaiting.borrow_mut().remove(key);
-                return self.toast(&format!("Cannot open {key}: {e}"));
+                return self.cannot(&format!("open {key}"), e);
             }
         };
         let prefs = self.prefs();
@@ -294,7 +294,7 @@ impl App {
     /// the template's `{{title}}` means.
     pub fn insert_template(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
-            return self.toast("Open a note to insert a template into");
+            return self.cannot("insert a template", "no note is open");
         };
         let Some(ops) = self.need_ops("insert a template") else {
             return;
@@ -316,11 +316,11 @@ impl App {
     /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
     pub fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
-            return self.toast("Open a note to put a sketch in");
+            return self.cannot("add a sketch", "no note is open");
         };
         let rel = tab.rel();
         if doc::is_loose_key(&rel) || self.vault().is_some_and(|v| v.is_remote()) {
-            return self.toast("A sketch needs a note in a local vault");
+            return self.needs_vault("add a sketch");
         }
         let Some(vault) = self.vault() else { return };
         // Beside the note, numbered from one: there is no attachments directory to put it in, and
@@ -342,14 +342,14 @@ impl App {
 
         let bytes = match accent_core::pdf::blank_pdf() {
             Ok(bytes) => bytes,
-            Err(e) => return self.toast(&format!("Cannot make a sketch: {e:#}")),
+            Err(e) => return self.cannot("make a sketch", e),
         };
         let path = match vault.resolve(&key) {
             Ok(path) => path,
-            Err(e) => return self.toast(&format!("Cannot make a sketch: {e}")),
+            Err(e) => return self.cannot("make a sketch", e),
         };
         if let Err(e) = accent_core::fs::write_bytes(&path, &bytes, None) {
-            return self.toast(&format!("Cannot write {key}: {e}"));
+            return self.cannot(&format!("write {key}"), e);
         }
 
         tab.buffer.insert_at_cursor(&format!("![[{key}]]"));
@@ -368,7 +368,7 @@ impl App {
         let Some(pdf) = self.active_pdf() else { return };
         if showing && !self.pdf_is_writable(&pdf) {
             self.drawing_button.set_active(false);
-            return self.toast("Drawing needs a local vault");
+            return self.needs_vault("draw on a PDF");
         }
         self.drawing.set(showing);
         self.drawing_button.set_active(showing);
@@ -386,7 +386,7 @@ impl App {
     pub fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
         let Some(pdf) = self.active_pdf() else { return };
         if !self.pdf_is_writable(&pdf) {
-            return self.toast("Drawing needs a local vault");
+            return self.needs_vault("draw on a PDF");
         }
         let wanted = match pdf.mode() == mode {
             true => pdfview::Mode::Select,
@@ -440,7 +440,7 @@ impl App {
     pub fn export_highlights(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
         if !self.pdf_is_writable(&pdf) {
-            return self.toast("Exporting highlights needs a local vault");
+            return self.needs_vault("export highlights");
         }
         pdf.export_highlights(theme::accent_rgb());
     }
@@ -448,7 +448,7 @@ impl App {
     /// What an export came back with.
     fn exported(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>, result: Result<usize, String>) {
         match result {
-            Err(e) => self.toast(&format!("Cannot export: {e}")),
+            Err(e) => self.cannot("export", e),
             Ok(0) => self.toast("Nothing new to export"),
             Ok(n) => {
                 let name = doc::file_name(&pdf.key()).to_string();
@@ -722,7 +722,7 @@ impl App {
                             unsaved,
                         ));
                     }
-                    Ok(Err(e)) => app.toast(&format!("Cannot replace: {e:#}")),
+                    Ok(Err(e)) => app.cannot("replace", e),
                     Err(_) => tracing::warn!("the replace worker panicked"),
                 }
             }
@@ -746,7 +746,7 @@ impl App {
                 self.show_pdf_anchor(&rel, anchor);
             }
             Ok(None) => self.toast(&format!("No note called {target}")),
-            Err(e) => self.toast(&format!("Cannot resolve {target}: {e:#}")),
+            Err(e) => self.cannot(&format!("resolve {target}"), e),
         }
     }
 

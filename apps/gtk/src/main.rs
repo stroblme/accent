@@ -309,13 +309,20 @@ impl App {
         self.connection.set_revealed(false);
     }
 
-    /// Say why something needs a folder open, for the actions that do.
+    /// Say why something needs a folder open, for the actions that do — a folder on this machine,
+    /// for the few that write next to a file rather than through the vault.
     fn needs_vault(&self, what: &str) {
-        self.toast(&format!("Open a folder to {what}"));
+        self.toast(&format!("Open a local folder to {what}"));
     }
 
     fn toast(&self, text: &str) {
         self.toasts.add_toast(adw::Toast::new(text));
+    }
+
+    /// A failure, in the one shape every failure toast takes: "Cannot <what>: <why>". A reason
+    /// that runs to several lines is a dialog's, not a toast's.
+    fn cannot(&self, what: &str, why: impl std::fmt::Display) {
+        self.toast(&format!("Cannot {what}: {why:#}"));
     }
 
     /// The file operations the tree, the tab menus and the palette share. `None` without a vault:
