@@ -184,14 +184,27 @@ impl Client {
         }
     }
 
-    /// Let go of the writing end, which is what tells `serve` to stop, then wait for the reader
-    /// thread to notice the far end has closed.
-    pub fn shutdown(&self) {
-        // Replacing the writer drops the pipe, and `serve` reads EOF on its stdin.
+    /// Let go of the writing end, which is what tells `serve` to stop.
+    ///
+    /// Replacing the writer drops the pipe, and `serve` reads EOF on its stdin. Separate from
+    /// [`join`](Self::join) because the caller owning the process in between has to be able to
+    /// kill it: the reader thread ends when that process's output closes, and a wedged one would
+    /// never close it.
+    pub fn close(&self) {
         *locked(&self.out) = Box::new(std::io::sink());
+    }
+
+    /// Wait for the reader thread to notice the far end has closed.
+    pub fn join(&self) {
         if let Some(handle) = locked(&self.reader).take() {
             let _ = handle.join();
         }
+    }
+
+    /// Both, for a caller with no process of its own to reap.
+    pub fn shutdown(&self) {
+        self.close();
+        self.join();
     }
 }
 

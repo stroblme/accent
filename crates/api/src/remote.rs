@@ -343,6 +343,9 @@ impl Remote {
     }
 
     fn connect(&self) -> Result<(), String> {
+        // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
+        // so without this a retry would leak an ssh child and a reader thread every time.
+        self.teardown();
         self.say(&format!("Connecting to {}", self.url.host));
         if let Some(dir) = self.ctl.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -458,20 +461,23 @@ impl Remote {
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
         m.read().unwrap_or_else(|e| e.into_inner())
     }
-}
 
-impl Drop for Remote {
-    /// Close the server, reap the ssh process, then take the master down with it.
+    /// Let go of the server this connection had: the rpc client, and the ssh process carrying it.
     ///
-    /// The order matters and so does the `wait`: a `Child` that is never waited for is the zombie
-    /// this phase exists to avoid, and `-O exit` is what takes the shells and the port forwards
-    /// with it rather than leaving them behind on the host.
-    fn drop(&mut self) {
-        if let Some(client) = self.locked(&self.client).take() {
-            client.shutdown();
+    /// Both the window closing and a reconnect come through here, which is what stops a retry
+    /// leaving a zombie ssh and a reader thread behind for every attempt.
+    ///
+    /// The order is what keeps a window closable. The writer goes first, so `serve` sees EOF and
+    /// exits of its own accord; the child is given a second to follow and killed if it does not —
+    /// a `Child` that is never waited for being the zombie this phase exists to avoid. Only then
+    /// is the reader thread joined, because it ends when ssh's stdout closes, and a wedged ssh
+    /// would otherwise hold the join for the fifteen seconds of a ServerAlive timeout, or forever.
+    fn teardown(&self) {
+        let client = self.locked(&self.client).take();
+        if let Some(client) = &client {
+            client.close();
         }
         if let Some(mut child) = self.locked(&self.child).take() {
-            // ssh exits on its own once the server sees EOF; kill it if it does not.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
             loop {
                 match child.try_wait() {
@@ -487,6 +493,19 @@ impl Drop for Remote {
                 }
             }
         }
+        if let Some(client) = &client {
+            client.join();
+        }
+    }
+}
+
+impl Drop for Remote {
+    /// Close the server, reap the ssh process, then take the master down with it.
+    ///
+    /// `-O exit` is what takes the shells and the port forwards with it rather than leaving them
+    /// behind on the host, so it goes last and only here: a reconnect wants the master kept.
+    fn drop(&mut self) {
+        self.teardown();
         let _ = self
             .ssh(&ssh::exit(&self.url, &self.ctl))
             .stdin(Stdio::null())
