@@ -595,7 +595,15 @@ fn free_slot(lanes: &mut Vec<Option<String>>) -> usize {
 
 // ----------------------------------------------------------------- submodules
 
+/// The submodules of `repo`, as `git submodule status` reports them.
+///
+/// A repository with no `.gitmodules` has none, and that is a stat rather than a process: the
+/// command costs about as much as `git status` (30 ms on a 40 000-file repository) and the Git
+/// pane asks on every refresh, so the common case must not pay for it.
 pub fn submodules(repo: &Repo) -> Result<Vec<Submodule>, Error> {
+    if !repo.root.join(".gitmodules").exists() {
+        return Ok(Vec::new());
+    }
     let out = run(&repo.root, &["submodule", "status"], None, true)?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
