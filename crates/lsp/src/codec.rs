@@ -7,6 +7,14 @@
 
 use std::io;
 
+/// The most a single message may announce. A server that says it is about to send a gigabyte has
+/// either lost framing or is not a language server, and either way the allocation is the damage:
+/// the length is read from the wire before a byte of the body is.
+///
+/// Four times [`accent_core::fs::MAX_TEXT`], which is the largest document accent will open at
+/// all, so a `didChange` carrying one whole and JSON-escaped still fits.
+const MAX_FRAME: usize = 64 * 1024 * 1024;
+
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};
 
 /// Read one message body, or `None` when the stream ends between messages.
@@ -42,6 +50,12 @@ pub async fn read(r: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Option<Vec<
 
     let len = len
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "a message without a length"))?;
+    if len > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("a message announcing {len} bytes"),
+        ));
+    }
     let mut body = vec![0; len];
     r.read_exact(&mut body).await?;
     Ok(Some(body))
@@ -97,5 +111,15 @@ mod tests {
     #[test]
     fn an_empty_stream_is_not_an_error() {
         assert_eq!(read_all(b""), vec![None]);
+    }
+
+    /// The length is read before the body, so an absurd one must be refused rather than allocated.
+    #[test]
+    fn a_length_nobody_could_mean_is_refused() {
+        let input = format!("Content-Length: {}\r\n\r\n", MAX_FRAME + 1).into_bytes();
+        let e = runtime()
+            .block_on(async { read(&mut tokio::io::BufReader::new(&input[..])).await })
+            .expect_err("an unreadable length is an error, not an allocation");
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
     }
 }
