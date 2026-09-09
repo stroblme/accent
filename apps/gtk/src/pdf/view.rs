@@ -154,6 +154,7 @@ impl PdfView {
     /// wanted rather than how they are drawn.
     pub fn set_dark(&self, dark: bool) {
         if self.imp().dark.replace(dark) != dark {
+            self.imp().paper.set(None);
             self.queue_draw();
         }
     }
@@ -216,6 +217,8 @@ impl PdfView {
     pub fn forget_textures(&self) {
         self.cache().borrow_mut().clear();
         self.imp().asked.borrow_mut().clear();
+        // A palette this dark that is not the palette it was: the paper moved with it.
+        self.imp().paper.set(None);
         self.queue_draw();
     }
 
@@ -895,6 +898,9 @@ mod imp {
         /// without it the page keeps painting its blurry stand-in and never asks again.
         pub asked_for: Cell<(u32, bool)>,
         pub page: Cell<usize>,
+        /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
+        /// the same for every page of every frame until the theme changes.
+        pub paper: Cell<Option<gdk::RGBA>>,
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
@@ -942,6 +948,7 @@ mod imp {
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
                 page: Cell::new(0),
+                paper: Cell::new(None),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
@@ -994,6 +1001,17 @@ mod imp {
                 self.adj_handlers.borrow_mut()[slot] = Some(id);
             }
             self.obj().queue_allocate();
+        }
+
+        /// The colour a page's paper is drawn in before its tiles arrive, matching what the
+        /// renderer will produce so nothing flashes when they do.
+        fn paper(&self) -> gdk::RGBA {
+            if let Some(colour) = self.paper.get() {
+                return colour;
+            }
+            let colour = super::paper(self.dark.get());
+            self.paper.set(Some(colour));
+            colour
         }
 
         /// Report the page being read when it changes, for the header and the thumbnail frame.
@@ -1225,7 +1243,9 @@ mod imp {
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
-            let layout = self.layout.borrow().clone();
+            // Borrowed rather than cloned: the clone was a `Vec` of every page in the document,
+            // allocated and dropped once a frame. Nothing under here lays out again.
+            let layout = self.layout.borrow();
             if layout.pages.is_empty() {
                 return;
             }
@@ -1257,7 +1277,7 @@ mod imp {
             for (index, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
                 let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
                 // The page's own paper, so a tile that has not arrived is not a hole.
-                snapshot.append_color(&paper(dark), &bounds);
+                snapshot.append_color(&self.paper(), &bounds);
 
                 let page = index as u32;
                 let low = cache.borrow_mut().lowres(page, dark);
