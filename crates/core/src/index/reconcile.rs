@@ -1,5 +1,6 @@
 //! Disk to rows: the full walk and the watcher's single-file path share one `upsert`.
 
+use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
 use crate::walk::{self, FileKind, ScanOptions};
@@ -70,6 +71,10 @@ impl Index {
             }
         }
 
+        // Nothing to compare against: the cold build, which resolves its links in one pass at
+        // the end rather than file by file.
+        let cold = existing.is_empty();
+
         let mut jobs: Vec<Job> = Vec::new();
         for (idx, f) in scan.files.iter().enumerate() {
             match existing.remove(&f.rel_path) {
@@ -105,10 +110,16 @@ impl Index {
         }
 
         let mut done = 0usize;
+        // The files whose content really changed: a touched one kept its links and its keys.
+        let mut changed: Vec<usize> = Vec::new();
         for chunk in jobs.chunks(BATCH) {
             let tx = self.write_tx()?;
             for job in chunk {
+                let touched = stats.touched;
                 upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
+                if stats.touched == touched {
+                    changed.push(job.idx);
+                }
                 done += 1;
             }
             tx.commit()?;
@@ -132,10 +143,19 @@ impl Index {
             }
             tx.commit()?;
         }
-        // A touched file kept its links, so a Syncthing pass that rewrote every note with the
-        // same bytes has nothing for the resolver to see.
-        if stats.added + stats.updated + stats.removed > 0 {
+        // A removed file re-pointed its incoming links as it went; what is left is the changed
+        // files' own links and the links their names answer to. A Syncthing pass that rewrote
+        // every note with the same bytes changed nothing and resolves nothing.
+        if cold {
             self.resolve_links()?;
+        } else if !changed.is_empty() {
+            let tx = self.write_tx()?;
+            for idx in &changed {
+                resolve_links_of(&tx, &scan.files[*idx].rel_path)?;
+            }
+            tx.commit()?;
+        }
+        if cold || !changed.is_empty() {
             on_progress(Progress {
                 phase: Phase::Resolve,
                 done: total,
@@ -157,13 +177,11 @@ impl Index {
     /// the next full reconcile collapses them. Aliases are rare and never wrong, only duplicated.
     pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
         let change = self.update_file_batched(root, rel)?;
-        // A new note can resolve links written long before it existed, and a removed one can
-        // hand its incoming links to a namesake deeper in the vault.
-        if matches!(
-            change,
-            Change::Added(_) | Change::Updated(_) | Change::Removed
-        ) {
-            self.resolve_links()?;
+        // The file's own links were just written unresolved, and a new note can be what a link
+        // written long before it existed was waiting for — or a shorter path for one that
+        // resolved deeper. Both are the links its keys name, and nothing else moved.
+        if matches!(change, Change::Added(_) | Change::Updated(_)) {
+            self.resolve_links_of(rel)?;
         }
         Ok(change)
     }
@@ -207,17 +225,16 @@ impl Index {
 
     /// Drop `rel` and everything below it. A directory removal arrives as one event, so the
     /// subtree has to go with it. Returns how many rows went.
+    ///
+    /// The links that pointed into the subtree are re-resolved as each row goes
+    /// ([`delete_file_rows`]), so there is nothing left for a batch caller to defer:
+    /// [`remove_file_batched`](Self::remove_file_batched) is the same call, kept for symmetry
+    /// with [`update_file_batched`](Self::update_file_batched).
     pub fn remove_file(&mut self, rel: &str) -> Result<usize> {
-        let removed = self.remove_file_batched(rel)?;
-        if removed > 0 {
-            // Links into the removed subtree are NULL again; some may now match a shallower file.
-            self.resolve_links()?;
-        }
-        Ok(removed)
+        self.remove_file_batched(rel)
     }
 
-    /// [`remove_file`](Self::remove_file) without the link resolution; see
-    /// [`update_file_batched`](Self::update_file_batched).
+    /// See [`remove_file`](Self::remove_file).
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
         let (lo, hi) = path::subtree_range(rel);
         let ids: Vec<i64> = {
@@ -355,6 +372,17 @@ fn upsert(
         stats.added += 1;
     }
 
+    // The names a link reaches this file by. A directory is not a link target. Rewritten rather
+    // than kept because a row can change kind under the same path.
+    tx.prepare_cached("DELETE FROM file_keys WHERE file_id = ?1")?
+        .execute([id])?;
+    if f.kind != FileKind::Dir {
+        for key in markdown::path_keys(&f.rel_path) {
+            tx.prepare_cached("INSERT INTO file_keys(file_id, key) VALUES(?1, ?2)")?
+                .execute(params![id, key])?;
+        }
+    }
+
     if let Some(a) = analysis.as_ref() {
         for l in &a.links {
             // A wikilink names a note from the vault root; a markdown link names it from the
@@ -367,12 +395,13 @@ fn upsert(
                 _ => l.target.clone(),
             };
             tx.prepare_cached(
-                "INSERT INTO links(src_file, target, resolved_file, kind, anchor, alias, byte_start, byte_end)
-                 VALUES(?1,?2,NULL,?3,?4,?5,?6,?7)",
+                "INSERT INTO links(src_file, target, key, resolved_file, kind, anchor, alias, byte_start, byte_end)
+                 VALUES(?1,?2,?3,NULL,?4,?5,?6,?7,?8)",
             )?
             .execute(params![
                 id,
                 target,
+                markdown::link_key(&target),
                 link_kind_i64(l.kind),
                 l.anchor,
                 l.alias,
@@ -415,12 +444,18 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     Ok(())
 }
 
-fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
+/// Every row of one file, and the links that pointed at it re-resolved: with its keys gone they
+/// find the next candidate — a namesake deeper in the vault — or dangle.
+pub(super) fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     clear_derived(tx, id)?;
     tx.prepare_cached("DELETE FROM aliases WHERE file_id = ?1")?
         .execute([id])?;
-    tx.prepare_cached("UPDATE links SET resolved_file = NULL WHERE resolved_file = ?1")?
+    tx.prepare_cached("DELETE FROM file_keys WHERE file_id = ?1")?
         .execute([id])?;
+    tx.prepare_cached(&format!(
+        "UPDATE links SET resolved_file = {BEST_FILE} WHERE resolved_file = ?1"
+    ))?
+    .execute([id])?;
     tx.prepare_cached("DELETE FROM files WHERE id = ?1")?
         .execute([id])?;
     Ok(())
