@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +81,16 @@ impl Status {
             .iter()
             .filter(|e| !e.unmerged && (e.y != '.' || e.x == '?'))
     }
+
+    /// Whether the repository has work that is not committed — anything `git status` had
+    /// something to say about, untracked files included.
+    ///
+    /// Deliberately the whole of `entries` rather than a sum of the three lists above: it is the
+    /// same set the Git pane's changes list is drawn from, so a dot elsewhere in the window and
+    /// that list can never disagree. Ignored paths are their own field and do not count.
+    pub fn dirty(&self) -> bool {
+        !self.entries.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,21 +158,7 @@ fn output(
     stdin: Option<&[u8]>,
     readonly: bool,
 ) -> Result<Output, Error> {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(root)
-        .args(["-c", "color.ui=never"])
-        .args(args)
-        // Nothing here can answer a prompt, so a repository needing a password must fail rather
-        // than hang; `LC_ALL=C` is what lets the callers below match on git's own wording.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("LC_ALL", "C")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if readonly {
-        cmd.env("GIT_OPTIONAL_LOCKS", "0");
-    }
-
+    let mut cmd = command(root, args, readonly);
     let out = match stdin {
         Some(bytes) => {
             let mut child = cmd.stdin(Stdio::piped()).spawn()?;
@@ -176,6 +173,31 @@ fn output(
         }
         None => cmd.stdin(Stdio::null()).output()?,
     };
+    checked(out)
+}
+
+/// The command every call here runs, configured but not spawned. Its own function because
+/// [`fetch`] has to wait on the child itself rather than let `Command` wait forever.
+fn command(root: &Path, args: &[&str], readonly: bool) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(root)
+        .args(["-c", "color.ui=never"])
+        .args(args)
+        // Nothing here can answer a prompt, so a repository needing a password must fail rather
+        // than hang; `LC_ALL=C` is what lets the callers below match on git's own wording.
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("LC_ALL", "C")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if readonly {
+        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    }
+    cmd
+}
+
+/// A refusal is whatever git put on stderr, which is the only thing worth reporting.
+fn checked(out: Output) -> Result<Output, Error> {
     if !out.status.success() {
         return Err(Error::Git(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
@@ -374,6 +396,67 @@ fn entry(line: &str, fields: usize) -> Option<Entry> {
         // `<sub>` is `N...` for a file and `S<c><m><u>` when the entry is a submodule commit.
         submodule: parts[2].starts_with('S'),
     })
+}
+
+// ------------------------------------------------------------------ the remote
+
+/// How long a fetch may run before it is killed.
+///
+/// Fetching is the one call here that talks to a network, and `GIT_TERMINAL_PROMPT=0` only stops
+/// it hanging on a *prompt*: a host that accepts the connection and then says nothing holds the
+/// thread it runs on for as long as ssh's own timeout, which is minutes. A background fetch is a
+/// convenience, so it is bounded and its answer is allowed to be "not this time". Kept under the
+/// ten seconds `accent-api`'s RPC layer waits for an answer, so a fetch on a remote vault still
+/// comes back while its caller is listening.
+pub const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How often the wait below looks at the child. Short enough that a quick fetch is not padded,
+/// long enough that a slow one costs nothing to wait for.
+const POLL: Duration = Duration::from_millis(50);
+
+/// Bring the remote-tracking refs up to date, and nothing else.
+///
+/// Nothing is merged and nothing in the worktree moves, so this is safe to run on a timer: it is
+/// what makes [`Status`]' `behind` count and the upstream-only commits [`log`] lists mean
+/// anything at all. Only this repository's configured remotes, because the caller is showing one
+/// repository and a vault may hold several.
+///
+/// The wait is ours rather than `Command`'s: a fetch that never finishes must be killed, or the
+/// thread it is on is gone for the life of the process (see [`FETCH_TIMEOUT`]).
+pub fn fetch(repo: &Repo) -> Result<String, Error> {
+    let mut child = command(&repo.root, &["fetch"], false)
+        .stdin(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + FETCH_TIMEOUT;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Git(format!(
+                "the fetch did not finish within {} seconds",
+                FETCH_TIMEOUT.as_secs()
+            )));
+        }
+        std::thread::sleep(POLL);
+    }
+    // `try_wait` has already reaped the child and cached its status, so this only drains the two
+    // pipes. They hold a ref summary at most: git prints progress only to a terminal.
+    Ok(transcribe(checked(child.wait_with_output()?)?))
+}
+
+/// The commits the upstream has and HEAD does not: exactly what a pull would bring in.
+///
+/// The oids alone, so a history already on screen can mark the rows a fetch found without asking
+/// git about each one. `HEAD..@{upstream}` is git's own spelling for the range, which means this
+/// refuses — rather than answers emptily — on a detached HEAD, a branch with no upstream and a
+/// repository with no commits. The caller knows which of those it is from [`Branch`] and asks
+/// only when `behind` says there is something to list.
+pub fn incoming(repo: &Repo) -> Result<Vec<String>, Error> {
+    let out = run(&repo.root, &["rev-list", "HEAD..@{upstream}"], None, true)?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .map(str::to_string)
+        .collect())
 }
 
 // ------------------------------------------------------------------- history
@@ -762,20 +845,73 @@ pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
 }
 
 pub fn push(repo: &Repo) -> Result<String, Error> {
-    transcript(repo, "push")
+    transcript(repo, &["push"])
 }
 
 pub fn pull(repo: &Repo) -> Result<String, Error> {
-    transcript(repo, "pull")
+    transcript(repo, &["pull"])
+}
+
+/// Where the current branch's upstream is, if it has one. `None` covers a detached HEAD and a
+/// repository with no commits as well: neither has an upstream to sync with.
+fn upstream(repo: &Repo) -> Option<String> {
+    let out = run(
+        &repo.root,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+        None,
+        true,
+    )
+    .ok()?;
+    let name = String::from_utf8_lossy(&out).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The remote a branch with no upstream should be published to, decided the way git itself decides
+/// it: the only remote when there is exactly one, and `origin` when there are several.
+///
+/// Several remotes and no `origin` is a choice, not a default, so this refuses and names them
+/// rather than picking one — pushing a branch to the wrong host is not something an automatic
+/// guess should be allowed to do.
+fn default_remote(repo: &Repo) -> Result<String, Error> {
+    let out = run(&repo.root, &["remote"], None, true)?;
+    let text = String::from_utf8_lossy(&out);
+    let remotes: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .collect();
+    match remotes.as_slice() {
+        [] => Err(Error::Git(
+            "this repository has no remote, so there is nowhere to publish the branch".to_string(),
+        )),
+        [only] => Ok(only.to_string()),
+        many if many.contains(&"origin") => Ok("origin".to_string()),
+        many => Err(Error::Git(format!(
+            "this branch has no upstream and there are several remotes ({}) with no `origin`: \
+             push it to the one you mean with `git push -u <remote> HEAD`",
+            many.join(", ")
+        ))),
+    }
 }
 
 /// Pull, then push, as one operation with one transcript.
 ///
-/// Both halves run every time. Nothing in accent fetches on its own, so the `behind` count is
-/// only ever as fresh as the last sync and cannot decide whether the pull is worth running. A
-/// failed pull stops there — pushing onto a history the remote has moved past would only be
-/// refused — and its error is the whole answer.
+/// Both halves run every time: the `behind` count a background [`fetch`] keeps current is a
+/// readout and not a decision — it can be a whole fetch interval old — and the pull is also what
+/// keeps the push from landing on a history the remote has moved past. A failed pull stops there,
+/// and its error is the whole answer.
+///
+/// A branch that has never been pushed is the one case that is not a pull and a push: there is no
+/// upstream to pull from and no ref to push onto, so the whole of a sync there is publishing it.
 pub fn sync(repo: &Repo) -> Result<String, Error> {
+    if upstream(repo).is_none() {
+        return publish(repo);
+    }
     let pulled = pull(repo)?;
     let pushed = push(repo)?;
     let both = [pulled, pushed];
@@ -787,14 +923,29 @@ pub fn sync(repo: &Repo) -> Result<String, Error> {
         .join("\n"))
 }
 
+/// Push a branch that has no upstream and record the remote copy as its upstream, so that the
+/// next sync is an ordinary pull and push. VS Code calls this Publish Branch and reaches it from
+/// the same control.
+///
+/// `HEAD` rather than the branch name so nothing here has to parse one: git resolves it to the
+/// branch it is on, and refuses if it is on none.
+fn publish(repo: &Repo) -> Result<String, Error> {
+    let remote = default_remote(repo)?;
+    transcript(repo, &["push", "--set-upstream", &remote, "HEAD"])
+}
+
 /// There is nothing worth parsing in what a transfer prints, and plenty worth reading, so the UI
 /// gets the transcript as the terminal would show it — including stderr, where git puts the ref
 /// summary that says what actually moved.
-fn transcript(repo: &Repo, verb: &str) -> Result<String, Error> {
-    let out = output(&repo.root, &[verb], None, false)?;
+fn transcript(repo: &Repo, args: &[&str]) -> Result<String, Error> {
+    Ok(transcribe(output(&repo.root, args, None, false)?))
+}
+
+/// Both streams in the order a terminal would have shown them.
+fn transcribe(out: Output) -> String {
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Ok(text.trim().to_string())
+    text.trim().to_string()
 }
 
 #[cfg(test)]
@@ -922,6 +1073,15 @@ mod tests {
         assert_eq!(paths(st.staged()), ["b.md"]);
         assert_eq!(paths(st.changes()), ["a.md", "c d.md"]);
         assert_eq!(st.conflicts().count(), 0);
+        assert!(st.dirty());
+
+        // Untracked alone still counts: the dot and the changes list read the same set.
+        ok(dir, &["stash", "-q", "--include-untracked"]);
+        let clean = status(&open(dir)).unwrap();
+        assert!(!clean.dirty(), "an ignored tree is not uncommitted work");
+        assert_eq!(clean.ignored, ["build/"]);
+        write_file(dir, "new.md", "new\n");
+        assert!(status(&open(dir)).unwrap().dirty());
     }
 
     #[test]
@@ -1002,6 +1162,80 @@ mod tests {
         assert!(push(&repo).is_ok());
         assert_eq!(status(&repo).unwrap().branch.ahead, 0);
         assert!(pull(&repo).is_ok());
+    }
+
+    // ------------------------------------------------------------- the remote
+
+    /// A clone, a commit pushed into its origin by somebody else, and the two things that only a
+    /// fetch can tell us: how far behind we are, and which commits those are.
+    #[test]
+    fn a_fetch_is_what_makes_behind_and_incoming_true() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        init(&source);
+        write_file(&source, "a.md", "one\n");
+        commit_all(&source, "first");
+        ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+        for clone in ["work", "other"] {
+            ok(tmp.path(), &["clone", "-q", "origin", clone]);
+            configure(&tmp.path().join(clone));
+        }
+
+        let other = tmp.path().join("other");
+        write_file(&other, "theirs.md", "theirs\n");
+        commit_all(&other, "theirs");
+        ok(&other, &["push", "-q"]);
+        let theirs = head(&other);
+
+        let work = tmp.path().join("work");
+        let repo = open(&work);
+        let st = status(&repo).unwrap();
+        assert_eq!(
+            (st.branch.ahead, st.branch.behind),
+            (0, 0),
+            "the remote moved, but nothing has looked yet"
+        );
+        assert_eq!(
+            incoming(&repo).unwrap(),
+            Vec::<String>::new(),
+            "and the range is empty for the same reason"
+        );
+
+        fetch(&repo).unwrap();
+        assert_eq!(
+            status(&repo).unwrap().branch.behind,
+            1,
+            "the fetch found it"
+        );
+        assert_eq!(incoming(&repo).unwrap(), std::slice::from_ref(&theirs));
+        // A fetch merges nothing: the commit is in the history without being in the worktree.
+        assert!(!work.join("theirs.md").exists());
+        assert!(
+            log(&repo, 0, 50).unwrap().iter().any(|c| c.id == theirs),
+            "`log --all` lists it, which is what the pane marks as not pulled"
+        );
+
+        pull(&repo).unwrap();
+        assert!(
+            incoming(&repo).unwrap().is_empty(),
+            "and nothing after a pull"
+        );
+    }
+
+    #[test]
+    fn incoming_refuses_where_there_is_no_upstream() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "first");
+        assert!(incoming(&open(dir)).is_err());
     }
 
     // ----------------------------------------------------------------- history
@@ -1574,6 +1808,68 @@ mod tests {
         assert!(work.join("theirs.md").exists(), "the pull brought theirs");
         ok(&other, &["pull", "-q"]);
         assert!(other.join("mine.md").exists(), "the push sent mine");
+    }
+
+    #[test]
+    fn a_sync_without_an_upstream_publishes_the_branch() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        init(&source);
+        write_file(&source, "a.md", "one\n");
+        commit_all(&source, "first");
+        ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+        ok(tmp.path(), &["clone", "-q", "origin", "work"]);
+
+        let work = tmp.path().join("work");
+        configure(&work);
+        // A branch made locally, which is the shape that has no upstream: pushing it is the whole
+        // of a sync there.
+        ok(&work, &["checkout", "-q", "-b", "side"]);
+        write_file(&work, "b.md", "b\n");
+        commit_all(&work, "second");
+        let repo = open(&work);
+        assert_eq!(status(&repo).unwrap().branch.upstream, None);
+
+        sync(&repo).unwrap();
+        let st = status(&repo).unwrap();
+        assert_eq!(st.branch.upstream.as_deref(), Some("origin/side"));
+        assert_eq!((st.branch.ahead, st.branch.behind), (0, 0));
+        // And the next sync is an ordinary one, which is the point of tracking it.
+        sync(&repo).unwrap();
+    }
+
+    #[test]
+    fn publishing_refuses_to_pick_between_remotes() {
+        if !have_git() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init(dir);
+        write_file(dir, "a.md", "one\n");
+        commit_all(dir, "first");
+        let repo = open(dir);
+
+        assert!(
+            matches!(default_remote(&repo), Err(Error::Git(msg)) if msg.contains("no remote")),
+            "nowhere to publish to"
+        );
+        ok(dir, &["remote", "add", "upstream", "../elsewhere"]);
+        assert_eq!(default_remote(&repo).unwrap(), "upstream", "the only one");
+        ok(dir, &["remote", "add", "fork", "../fork"]);
+        assert!(
+            matches!(default_remote(&repo), Err(Error::Git(msg)) if msg.contains("fork")),
+            "two remotes and no origin is the user's choice, not ours"
+        );
+        ok(dir, &["remote", "add", "origin", "../origin"]);
+        assert_eq!(
+            default_remote(&repo).unwrap(),
+            "origin",
+            "git's own default"
+        );
     }
 
     #[test]

@@ -61,12 +61,28 @@ enum Request {
         points: Vec<(f32, f32)>,
         style: pdf::InkStyle,
     },
-    /// Take off whichever stroke passes within [`ERASE_RADIUS`] of this point.
+    /// One shape, drawn the way the pen draws.
+    Shape {
+        page: usize,
+        shape: pdf::Shape,
+        style: pdf::InkStyle,
+    },
+    /// Take off whichever stroke passes within `radius` page points of this point. Whole
+    /// strokes, never part of one.
     Erase {
         page: usize,
         at: (f32, f32),
+        radius: f32,
     },
-    /// Undo the last stroke drawn in this session.
+    /// Every ink stroke of a page with its box and style, for the Adjust tool.
+    Inks(usize),
+    /// Move or resize one stroke; it comes back at the end of the page's `/Annots`.
+    Transform {
+        page: usize,
+        index: usize,
+        matrix: pdf::Matrix,
+    },
+    /// Undo the last stroke drawn or move made in this session.
     Undo,
     /// Write the drawn-on document out, if anything was drawn since the last time. The channel,
     /// where there is one, is told when that is done — which is what the window close waits on.
@@ -74,49 +90,100 @@ enum Request {
     Reload,
 }
 
-/// How close the eraser has to pass to a stroke to take it. Whole strokes, never part of one.
-const ERASE_RADIUS: f32 = 4.0;
-
 /// How long after the last stroke the document is written out.
 const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// What the render thread knows about the ink it has drawn, so that Undo can reach this session's
-/// strokes and nothing else.
+/// One step of this session's drawing, for `Ctrl+Z`: a stroke to take off, or a move to make
+/// backwards. Each names its annotation by an id rather than an index, because every erase and
+/// every move shuffles the indices.
+#[derive(Debug, Clone, Copy)]
+enum Step {
+    Stroke {
+        page: usize,
+        id: u32,
+    },
+    Moved {
+        page: usize,
+        id: u32,
+        inverse: pdf::Matrix,
+    },
+}
+
+impl Step {
+    fn id(&self) -> u32 {
+        match *self {
+            Step::Stroke { id, .. } | Step::Moved { id, .. } => id,
+        }
+    }
+
+    fn page(&self) -> usize {
+        match *self {
+            Step::Stroke { page, .. } | Step::Moved { page, .. } => page,
+        }
+    }
+}
+
+/// What the render thread knows about the ink it has touched, so that Undo can reach this
+/// session's work and nothing else.
 ///
-/// `base` is how many annotations a page carried before we touched it — they come first in
-/// `/Annots`, so an erase below that line moves it. `added` is the pages drawn on, in order.
+/// `ids` mirrors a page's `/Annots` from the moment we first touch it: `None` is one the
+/// document already had, `Some` one we drew or moved. `steps` is the undo list, newest last.
 #[derive(Default)]
 struct Ink {
-    base: HashMap<usize, usize>,
-    added: Vec<usize>,
+    ids: HashMap<usize, Vec<Option<u32>>>,
+    steps: Vec<Step>,
+    next: u32,
     dirty: bool,
 }
 
 impl Ink {
-    /// A page is about to be drawn on: remember what was on it before, once.
+    /// A page is about to be touched: remember what was on it before, once.
     fn note(&mut self, page: usize, count: usize) {
-        self.base.entry(page).or_insert(count);
+        self.ids.entry(page).or_insert_with(|| vec![None; count]);
     }
 
-    /// An annotation at `index` was removed from `page`.
-    ///
-    /// Below the line it was one the document already had, so the line moves down with it; above
-    /// it, it was one of ours and there is one fewer stroke left to undo.
+    fn fresh(&mut self) -> u32 {
+        self.next += 1;
+        self.next
+    }
+
+    /// A stroke of ours went onto the end of `page`'s `/Annots`.
+    fn added(&mut self, page: usize) {
+        let id = self.fresh();
+        self.ids.entry(page).or_default().push(Some(id));
+        self.steps.push(Step::Stroke { page, id });
+    }
+
+    /// The annotation at `index` was removed from `page`, and with it every step that named it.
     fn erased(&mut self, page: usize, index: usize) {
-        match self.base.get_mut(&page) {
-            Some(base) if index < *base => *base -= 1,
-            _ => {
-                if let Some(at) = self.added.iter().rposition(|at| *at == page) {
-                    self.added.remove(at);
-                }
-            }
+        let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
+        if let Some(id) = slots.and_then(|s| s.remove(index)) {
+            self.steps.retain(|step| step.id() != id);
         }
     }
 
-    /// Which annotation of `page` Undo should delete, given how many it now has.
-    fn undo_target(&self, page: usize, count: usize) -> Option<usize> {
-        let base = self.base.get(&page).copied().unwrap_or(count);
-        (count > base).then(|| count - 1)
+    /// The annotation at `index` was drawn again at the end of `page`'s `/Annots`, keeping its
+    /// identity — given one, if it was the document's own. Which id it has now.
+    fn requeued(&mut self, page: usize, index: usize) -> u32 {
+        let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
+        let had = slots.and_then(|s| s.remove(index));
+        let id = had.unwrap_or_else(|| self.fresh());
+        self.ids.entry(page).or_default().push(Some(id));
+        id
+    }
+
+    /// A move of the annotation at `index`, undone by `inverse`.
+    fn moved(&mut self, page: usize, index: usize, inverse: pdf::Matrix) {
+        let id = self.requeued(page, index);
+        self.steps.push(Step::Moved { page, id, inverse });
+    }
+
+    /// Where the annotation with this id sits in `page`'s `/Annots` today.
+    fn index_of(&self, page: usize, id: u32) -> Option<usize> {
+        self.ids
+            .get(&page)?
+            .iter()
+            .position(|slot| *slot == Some(id))
     }
 }
 
@@ -128,6 +195,8 @@ type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
 type NoteHook = RefCell<Option<Rc<dyn Fn(&str, usize)>>>;
 /// An export finished, with what it wrote or why it could not.
 type ExportHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, Result<usize, String>)>>>;
+/// A width or a colour was picked on the ring for a tool.
+type ChoiceHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
 
 /// The Ctrl-hover link preview currently on screen.
@@ -214,6 +283,7 @@ pub struct PdfTab {
     on_mode: Hook,
     on_note: NoteHook,
     on_export: ExportHook,
+    on_choice: ChoiceHook,
 }
 
 /// Open `path` in a new tab of `tabs`. Never fails: a document that will not open is a tab
@@ -301,6 +371,7 @@ pub fn open(
         on_mode: RefCell::new(None),
         on_note: RefCell::new(None),
         on_export: RefCell::new(None),
+        on_choice: RefCell::new(None),
     });
 
     tab.view.set_zoom(place.zoom);
@@ -339,6 +410,12 @@ impl PdfTab {
 
     pub fn page_count(&self) -> usize {
         self.view.page_count()
+    }
+
+    /// The widget a reader's keys have to reach: the reading view, which is where [`Self::wire_keys`]
+    /// puts them. What a window hands the keyboard to when it moves this tab into another pane.
+    pub fn key_target(&self) -> gtk::Widget {
+        self.view.clone().upcast()
     }
 
     pub fn place(&self) -> Place {
@@ -425,6 +502,20 @@ impl PdfTab {
         self.view.goto_page(page, None);
     }
 
+    /// Page from a key, through `win.pdf-next-page` / `win.pdf-previous-page`.
+    ///
+    /// The keys are dispatched here rather than from the window's accelerator table — a bare
+    /// `space` or arrow there would be taken from every entry in the app — but the *command* is
+    /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
+    /// place the keys and the palette meet.
+    fn page(&self, forward: bool) {
+        let action = match forward {
+            true => "win.pdf-next-page",
+            false => "win.pdf-previous-page",
+        };
+        let _ = self.view.activate_action(action, None);
+    }
+
     pub fn next_page(&self) {
         self.show_page((self.view.current_page() + 1).min(self.page_count().saturating_sub(1)));
     }
@@ -441,6 +532,13 @@ impl PdfTab {
 
     pub fn scroll_to(&self, anchor: Anchor) {
         self.view.scroll_to(anchor);
+    }
+
+    /// The reading view's geometry, for `ACCENT_BENCH_PDF` and nothing else: the headless image
+    /// has no pointer and no window manager, so the numbers a fit produced are the only way to
+    /// see that it fitted.
+    pub fn geometry(&self) -> String {
+        self.view.geometry()
     }
 
     /// Put the selected text on the clipboard. Nothing selected is not an error: Ctrl+C on a
@@ -567,7 +665,27 @@ impl PdfTab {
         if mode == pdfview::Mode::Select {
             self.flush();
         }
+        if mode == pdfview::Mode::Adjust {
+            self.ask_inks();
+        }
         self.emit(&self.on_mode);
+    }
+
+    /// Give the Adjust tool the page under the reader and its neighbours.
+    ///
+    // ponytail: three pages, so a fourth that is partly on screen waits until it is current.
+    fn ask_inks(&self) {
+        let page = self.view.current_page();
+        let last = self.view.page_count().saturating_sub(1);
+        for p in page.saturating_sub(1)..=(page + 1).min(last) {
+            self.ask(Request::Inks(p));
+        }
+    }
+
+    /// What the preferences say about the tools.
+    pub fn set_drawing_config(&self, config: accent_core::config::DrawingConfig) {
+        self.ring.set_config(&config);
+        self.view.set_drawing_config(config);
     }
 
     /// Show or hide the ring of tools.
@@ -587,6 +705,10 @@ impl PdfTab {
             pdfview::Mode::Pen => Some("Pen"),
             pdfview::Mode::Highlighter => Some("Highlighter"),
             pdfview::Mode::Eraser => Some("Eraser"),
+            pdfview::Mode::Line => Some("Line"),
+            pdfview::Mode::Rect => Some("Rectangle"),
+            pdfview::Mode::Circle => Some("Circle"),
+            pdfview::Mode::Adjust => Some("Adjust"),
         }
     }
 
@@ -641,6 +763,10 @@ impl PdfTab {
     }
 
     /// Called when an export finishes, with what it wrote or why it could not.
+    pub fn connect_choice(&self, f: impl Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice) + 'static) {
+        *self.on_choice.borrow_mut() = Some(Rc::new(f));
+    }
+
     pub fn connect_export(&self, f: impl Fn(&Rc<PdfTab>, Result<usize, String>) + 'static) {
         *self.on_export.borrow_mut() = Some(Rc::new(f));
     }
@@ -867,6 +993,9 @@ impl PdfTab {
                     tab.ask(Request::Links(page));
                 }
                 tab.thumbs.queue_draw();
+                if tab.mode() == pdfview::Mode::Adjust {
+                    tab.ask_inks();
+                }
                 tab.emit(&tab.on_page);
             }
         ));
@@ -889,18 +1018,49 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |page, points| {
-                let style = tab.view.mode().ink(crate::theme::accent_rgb());
-                tab.ask(Request::Ink {
-                    page,
-                    points,
-                    style,
-                });
+                let mode = tab.view.mode();
+                let style = tab.view.ink_style(mode);
+                match (mode.shapes(), points.as_slice()) {
+                    (true, &[a, b]) => {
+                        if let Some(shape) = pdfview::shape_of(mode, a, b) {
+                            tab.ask(Request::Shape { page, shape, style });
+                        }
+                    }
+                    (true, _) => {}
+                    (false, _) => tab.ask(Request::Ink {
+                        page,
+                        points,
+                        style,
+                    }),
+                }
             }
         ));
         view.connect_erase(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, at| tab.ask(Request::Erase { page, at })
+            move |page, at| {
+                let radius = tab.view.drawing_config().eraser_radius;
+                tab.ask(Request::Erase { page, at, radius });
+            }
+        ));
+        self.ring.connect_choice(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |tool, choice| {
+                let hook = tab.on_choice.borrow().clone();
+                if let Some(f) = hook {
+                    f(&tab, tool, choice);
+                }
+            }
+        ));
+        view.connect_transform(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page, index, matrix| tab.ask(Request::Transform {
+                page,
+                index,
+                matrix
+            })
         ));
         view.connect_select(glib::clone!(
             #[weak(rename_to = tab)]
@@ -1161,7 +1321,9 @@ impl PdfTab {
         popover.popup();
     }
 
-    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own.
+    /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;
+    /// the arrows are not — it binds a scroll step to `Ctrl+Up`/`Ctrl+Down` and leaves the bare
+    /// arrow keys to move the focus off the page — so they are wired here.
     fn wire_keys(self: &Rc<Self>) {
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
@@ -1189,11 +1351,24 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
+                // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
+                // scroller's own step: only the bare key reads the document.
+                let bare = !state.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                );
                 match key {
-                    gtk::gdk::Key::space if shift => tab.previous_page(),
-                    gtk::gdk::Key::space => tab.next_page(),
-                    gtk::gdk::Key::n => tab.next_page(),
-                    gtk::gdk::Key::p => tab.previous_page(),
+                    gtk::gdk::Key::space if shift => tab.page(false),
+                    gtk::gdk::Key::space => tab.page(true),
+                    gtk::gdk::Key::n => tab.page(true),
+                    gtk::gdk::Key::p => tab.page(false),
+                    // A page back and a page forth whatever the zoom: horizontal movement is
+                    // Shift and the wheel, and one key cannot mean two things.
+                    gtk::gdk::Key::Left if bare => tab.page(false),
+                    gtk::gdk::Key::Right if bare => tab.page(true),
+                    gtk::gdk::Key::Up if bare => tab.view.scroll_step(false),
+                    gtk::gdk::Key::Down if bare => tab.view.scroll_step(true),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -1430,8 +1605,12 @@ impl PdfTab {
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page);
                 self.thumbs.queue_draw();
+                if self.mode() == pdfview::Mode::Adjust {
+                    self.ask_inks();
+                }
                 self.save_soon();
             }
+            Reply::Inks { page, inks } => self.view.set_inks(page, inks),
             Reply::Saved(etag) => self.saved.set(Some(etag)),
             Reply::Reloaded(sizes) => {
                 // The anchor is taken now rather than when the reload was asked for: the reader
@@ -1439,6 +1618,7 @@ impl PdfTab {
                 let anchor = self.view.anchor().clamped(sizes.len());
                 self.view.forget_textures();
                 self.thumbs.forget_textures();
+                self.view.clear_inks();
                 self.links.borrow_mut().clear();
                 // The glyphs and anything made of them are of the old document: an export or a
                 // rebuild moves the text, and a stale index would paint the selection elsewhere.
@@ -1706,18 +1886,51 @@ fn render_loop(
                     match doc.add_ink(page, &points, style) {
                         Ok(()) => {
                             ink.note(page, before);
-                            ink.added.push(page);
+                            ink.added(page);
                             ink.dirty = true;
                             send(&view, Reply::PageChanged(page));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
                 }
-                Request::Erase { page, at } => {
+                Request::Shape { page, shape, style } => {
+                    let before = doc.annotation_count(page).unwrap_or(0);
+                    match doc.add_shape(page, shape, style) {
+                        Ok(()) => {
+                            ink.note(page, before);
+                            ink.added(page);
+                            ink.dirty = true;
+                            send(&view, Reply::PageChanged(page));
+                        }
+                        Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                    }
+                }
+                Request::Inks(page) => send(
+                    &view,
+                    Reply::Inks {
+                        page,
+                        inks: doc.inks(page).unwrap_or_default(),
+                    },
+                ),
+                Request::Transform {
+                    page,
+                    index,
+                    matrix,
+                } => {
+                    let before = doc.annotation_count(page).unwrap_or(0);
+                    ink.note(page, before);
+                    match doc.transform_ink(page, index, matrix) {
+                        Ok(()) => {
+                            ink.moved(page, index, pdf::invert(matrix));
+                            ink.dirty = true;
+                            send(&view, Reply::PageChanged(page));
+                        }
+                        Err(e) => tracing::warn!("moving a stroke on page {page}: {e:#}"),
+                    }
+                }
+                Request::Erase { page, at, radius } => {
                     let hit = doc.ink_paths(page).unwrap_or_default();
-                    let found = hit
-                        .iter()
-                        .find(|(_, points)| pdf::hit(points, at, ERASE_RADIUS));
+                    let found = hit.iter().find(|(_, points)| pdf::hit(points, at, radius));
                     if let Some((index, _)) = found {
                         let before = doc.annotation_count(page).unwrap_or(0);
                         ink.note(page, before);
@@ -1731,12 +1944,23 @@ fn render_loop(
                     }
                 }
                 Request::Undo => {
-                    while let Some(page) = ink.added.pop() {
-                        let count = doc.annotation_count(page).unwrap_or(0);
-                        let Some(index) = ink.undo_target(page, count) else {
+                    // One step per `Ctrl+Z`; a step whose annotation was erased since is skipped.
+                    while let Some(step) = ink.steps.pop() {
+                        let Some(index) = ink.index_of(step.page(), step.id()) else {
                             continue;
                         };
-                        match doc.delete_annotation(page, index) {
+                        let page = step.page();
+                        let done = match step {
+                            Step::Stroke { .. } => doc.delete_annotation(page, index).map(|()| {
+                                ink.erased(page, index);
+                            }),
+                            Step::Moved { inverse, .. } => {
+                                doc.transform_ink(page, index, inverse).map(|()| {
+                                    ink.requeued(page, index);
+                                })
+                            }
+                        };
+                        match done {
                             Ok(()) => {
                                 ink.dirty = true;
                                 send(&view, Reply::PageChanged(page));
@@ -1925,7 +2149,7 @@ fn send(view: &glib::SendWeakRef<PdfView>, reply: Reply) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, Ink, Request, band_offset, interrupt, link_with_alias};
+    use super::{BAND, Ink, Request, Step, band_offset, interrupt, link_with_alias};
 
     /// Undo takes back this session's strokes and stops at whatever the document already had,
     /// however the eraser moved the line in between.
@@ -1934,27 +2158,46 @@ mod tests {
         let mut ink = Ink::default();
         // A page that already carried three annotations, then two strokes of ours.
         ink.note(0, 3);
-        ink.added.push(0);
-        ink.added.push(0);
-        assert_eq!(ink.undo_target(0, 5), Some(4));
+        ink.added(0);
+        ink.added(0);
+        let newest = ink.steps[1].id();
+        assert_eq!(ink.index_of(0, newest), Some(4));
 
-        // The reader erases one of the document's own: the line moves down, ours are still ours.
+        // The reader erases one of the document's own: ours move down and stay ours.
         ink.erased(0, 1);
-        assert_eq!(ink.undo_target(0, 4), Some(3));
-        assert_eq!(ink.added.len(), 2);
+        assert_eq!(ink.index_of(0, newest), Some(3));
+        assert_eq!(ink.steps.len(), 2);
 
         // Erasing one of ours leaves one stroke to undo, and then nothing.
         ink.erased(0, 3);
-        assert_eq!(ink.added.len(), 1);
-        assert_eq!(ink.undo_target(0, 3), Some(2));
-        assert_eq!(
-            ink.undo_target(0, 2),
-            None,
-            "the document's own are not ours"
-        );
+        assert_eq!(ink.steps.len(), 1);
+        assert_eq!(ink.index_of(0, ink.steps[0].id()), Some(2));
+        ink.erased(0, 2);
+        assert!(ink.steps.is_empty(), "the document's own are not ours");
 
         // A page never drawn on has nothing to undo, whatever it carries.
-        assert_eq!(ink.undo_target(9, 7), None);
+        assert_eq!(ink.index_of(9, newest), None);
+    }
+
+    /// A moved annotation is found by what it is, not where it was: after a move it sits at
+    /// the end, a stroke can come after it, and erasing it drops its step.
+    #[test]
+    fn undo_of_a_move_finds_the_annotation_wherever_it_went() {
+        let mut ink = Ink::default();
+        ink.note(0, 2);
+        ink.moved(0, 0, accent_core::pdf::IDENTITY);
+        ink.added(0);
+        let Step::Moved { id, .. } = ink.steps[0] else {
+            panic!("the move comes first");
+        };
+        assert_eq!(ink.index_of(0, id), Some(1), "{:?}", ink.ids);
+        assert_eq!(ink.index_of(0, ink.steps[1].id()), Some(2));
+        // Undone: it is drawn again at the end, keeping its id.
+        ink.requeued(0, 1);
+        assert_eq!(ink.index_of(0, id), Some(2));
+        ink.erased(0, 2);
+        assert_eq!(ink.steps.len(), 1);
+        assert!(matches!(ink.steps[0], Step::Stroke { .. }));
     }
 
     #[test]

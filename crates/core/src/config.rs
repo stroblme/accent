@@ -32,6 +32,13 @@ theme = "solarized"
 [search]
 exclude = ["Archive", "Code/vendor"]
 
+[drawing]
+mouse = false
+pen_width = 2.0
+highlighter_width = 14.0
+highlighter_color = [0, 0, 0]
+eraser_radius = 4.0
+
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
@@ -87,6 +94,7 @@ pub struct Config {
     /// list means the action is deliberately unbound.
     pub shortcuts: BTreeMap<String, Vec<String>>,
     pub search: SearchConfig,
+    pub drawing: DrawingConfig,
     /// Keyed by canonical vault path.
     pub vaults: BTreeMap<String, VaultConfig>,
 }
@@ -111,6 +119,41 @@ pub struct SearchConfig {
     pub exclude: Vec<String>,
 }
 
+/// How the PDF drawing tools behave. Global rather than per vault: a pen is a property of the
+/// machine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DrawingConfig {
+    /// Draw with the mouse or touchpad even while a pen is attached. Off, the hand selects text
+    /// and only the pen draws — until no pen is attached at all, when the hand draws again.
+    pub mouse: bool,
+    /// Stroke widths in page points; the shapes draw in the pen's.
+    pub pen_width: f32,
+    pub highlighter_width: f32,
+    /// `None` is the system accent, resolved when a stroke is written so the tool keeps following
+    /// it; a colour picked on the ring is kept as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pen_color: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlighter_color: Option<[u8; 3]>,
+    /// How close the eraser has to pass to a stroke to take it, in page points.
+    pub eraser_radius: f32,
+}
+
+impl Default for DrawingConfig {
+    fn default() -> Self {
+        DrawingConfig {
+            mouse: false,
+            pen_width: 2.0,
+            // A line of text, near enough.
+            highlighter_width: 14.0,
+            pen_color: None,
+            highlighter_color: None,
+            eraser_radius: 4.0,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -125,6 +168,7 @@ impl Default for Config {
             theme: Theme::System,
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
+            drawing: DrawingConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -225,13 +269,29 @@ impl Default for Session {
 impl Config {
     /// Never fails: a missing or broken file logs and yields the defaults, because a typo in a
     /// hand-edited config must not keep the app from starting.
+    ///
+    /// A file that exists but does not parse is moved to `config.toml.broken` first. The
+    /// defaults are what [`save`](Self::save) writes next, and writing them over the user's
+    /// recent vaults, shortcuts and exclusions because of one typo is the one thing this must
+    /// not do; the copy is theirs to fix and move back.
     pub fn load() -> Config {
         let path = config_path();
         match Config::read(&path) {
             Ok(c) => c,
             Err(e) => {
                 if path.exists() {
-                    tracing::warn!("{}: {e:#}, using defaults", path.display());
+                    let aside = path.with_extension("toml.broken");
+                    match std::fs::rename(&path, &aside) {
+                        Ok(()) => tracing::warn!(
+                            "{}: {e:#}; using defaults, the file is kept as {}",
+                            path.display(),
+                            aside.display()
+                        ),
+                        Err(re) => tracing::warn!(
+                            "{}: {e:#}; using defaults, and could not move it aside: {re}",
+                            path.display()
+                        ),
+                    }
                 }
                 Config::default()
             }
@@ -241,7 +301,15 @@ impl Config {
     pub fn read(path: &Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let table: toml::Table = text
+            .parse()
+            .with_context(|| format!("parsing {}", path.display()))?;
+        for key in unknown_keys(&table) {
+            tracing::warn!("{}: unknown key `{key}` is ignored", path.display());
+        }
+        table
+            .try_into()
+            .with_context(|| format!("parsing {}", path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -274,12 +342,18 @@ impl Config {
 }
 
 impl Session {
-    /// Missing or broken state is not an error: the window simply opens empty.
+    /// Missing or broken state is not an error: the window simply opens empty. A broken file is
+    /// only worth a warning, because the next close rewrites it and nothing in it is the user's
+    /// own work.
     pub fn load(root: &Path) -> Session {
-        std::fs::read_to_string(state_path(root))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let path = state_path(root);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Session::default();
+        };
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            tracing::warn!("{}: {e}, opening empty", path.display());
+            Session::default()
+        })
     }
 
     pub fn save(&self, root: &Path) -> Result<()> {
@@ -308,26 +382,58 @@ pub fn rename_in(list: &mut [String], from: &str, to: &str) {
     }
 }
 
+/// Keys in `config.toml` that nothing reads: a typo, or a setting that was retired. Serde drops
+/// an unknown field before anything can see it, so the file is compared against the known names
+/// as a plain table first. Checked at the top level and inside each vault table, where the
+/// `daily_*` keys are left to [`daily_keys`], which explains them properly.
+fn unknown_keys(table: &toml::Table) -> Vec<String> {
+    // The struct's own field names, read off a serialised value rather than kept as a second
+    // list. `editor_font` is skipped when `None`, so it is filled in to be seen.
+    fn names<T: Serialize>(v: T) -> Vec<String> {
+        toml::Value::try_from(v)
+            .ok()
+            .and_then(|v| v.as_table().map(|t| t.keys().cloned().collect()))
+            .unwrap_or_default()
+    }
+    let top = names(Config {
+        editor_font: Some(String::new()),
+        ..Config::default()
+    });
+    let vault = names(VaultConfig::default());
+    let mut out: Vec<String> = table.keys().filter(|k| !top.contains(k)).cloned().collect();
+    if let Some(vaults) = table.get("vaults").and_then(toml::Value::as_table) {
+        for (name, v) in vaults {
+            let Some(v) = v.as_table() else { continue };
+            out.extend(
+                v.keys()
+                    .filter(|k| !vault.contains(k) && !k.starts_with("daily_"))
+                    .map(|k| format!("vaults.{name}.{k}")),
+            );
+        }
+    }
+    out
+}
+
 /// Write `bytes` where `path` is, atomically: a torn config or state file is read back as the
 /// defaults, which is the difference between losing one edit and losing every preference. Same
 /// temp-in-the-same-directory-then-rename shape as [`crate::fs::write_note`], minus the etag gate
 /// and the ownership dance a vault file needs.
 fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // A unique temp name: the GUI and `accent-cli`, or two windows, may write at once, and a
+    // fixed `<name>.tmp` would have them tear each other's file.
     let write = || -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".accent-")
+            .tempfile_in(dir)?;
+        tmp.write_all(bytes)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
     };
-    write().with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    write().with_context(|| format!("writing {}", path.display()))
 }
 
 /// `$XDG_<var>` when set and absolute, else `$HOME/<fallback>`, else the temp dir.
@@ -479,6 +585,11 @@ daily_template = "DailyNote.md"
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
         assert!(c.shortcuts["win.about"].is_empty());
         assert_eq!(c.search.exclude, ["Archive", "Code/vendor"]);
+        assert!(!c.drawing.mouse);
+        assert_eq!(c.drawing.pen_width, 2.0);
+        assert_eq!(c.drawing.pen_color, None);
+        assert_eq!(c.drawing.highlighter_color, Some([0, 0, 0]));
+        assert_eq!(c.drawing.eraser_radius, 4.0);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
@@ -488,6 +599,7 @@ daily_template = "DailyNote.md"
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
+        assert_eq!(again.drawing, c.drawing);
     }
 
     #[test]
@@ -532,17 +644,45 @@ daily_template = "DailyNote.md"
         assert!(!config_path_exists(tmp.path()));
     }
 
+    /// The `!BUG`: a typo in `config.toml` used to load as the defaults, and the next save wrote
+    /// those defaults over everything the user had set.
     #[test]
-    fn broken_config_file_is_default() {
+    fn broken_config_file_is_default_and_kept_aside_for_the_next_save() {
         let tmp = tempfile::tempdir().unwrap();
         let c = with_xdg(tmp.path(), || {
             let p = config_path();
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, "recent_vaults = [ oops").unwrap();
-            Config::load()
+            let c = Config::load();
+            c.save().unwrap();
+            c
         });
         assert!(c.spellcheck);
         assert!(c.recent_vaults.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("accent/config.toml.broken")).unwrap(),
+            "recent_vaults = [ oops",
+            "the user's file survives the save that follows"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_named_at_both_levels() {
+        let table: toml::Table = r#"
+spellcheck = true
+new_note_dir = "Inbox"
+[vaults."/v"]
+new_note_dir = "Inbox"
+new_file_dir = "Inbox"
+daily_dir = "Daily"
+"#
+        .parse()
+        .unwrap();
+        assert_eq!(
+            unknown_keys(&table),
+            ["new_note_dir", "vaults./v.new_note_dir"]
+        );
+        assert!(unknown_keys(&EXAMPLE.parse().unwrap()).is_empty());
     }
 
     fn config_path_exists(base: &Path) -> bool {

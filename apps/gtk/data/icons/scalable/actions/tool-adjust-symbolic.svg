@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Drawn for accent on the 16 px symbolic grid; strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path d="M 12 2 l 3 3 h -2 v 6 h 6 v -2 l 3 3 -3 3 v -2 h -6 v 6 h 2 l -3 3 -3 -3 h 2 v -6 h -6 v 2 l -3 -3 3 -3 v 2 h 6 v -6 h -2 z" fill="currentColor"/>
+</svg>

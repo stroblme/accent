@@ -278,7 +278,7 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
 /// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
 /// disagree about which paths the index holds. The vault root is the user's own choice and is
 /// never refused.
-pub fn is_unindexed(root: &Path, rel: &str) -> bool {
+fn is_unindexed(root: &Path, rel: &str) -> bool {
     if rel.is_empty() {
         return false;
     }
@@ -433,10 +433,9 @@ fn walk_passes(
     on_file: &(dyn Fn(FileMeta) -> WalkState + Send + Sync),
 ) -> Vec<Skipped> {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    // ponytail: a Mutex around the accepted-symlink-target list. There are a handful of dir
-    // symlinks in a real vault, so contention is nil; the race (two threads accepting
-    // overlapping targets simultaneously) would only cost a duplicate walk, and `scan`'s
-    // (dev, ino) dedup cleans that up anyway.
+    // A Mutex around the accepted-symlink-target list: `admit_symlink` holds it across the
+    // overlap check and the push, so two threads cannot accept overlapping targets. A handful of
+    // directory symlinks in a real vault means contention is nil.
     let followed: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     // `ignore` stops the pass that quit, and nothing tells us it did: the flag is what keeps a
     // symlink target from being walked after the caller has said it has enough.
@@ -643,7 +642,9 @@ fn admit_symlink(
     if target.starts_with(canonical_root) {
         return Err(SkipReason::TargetInsideVault);
     }
-    let mut followed = followed.lock().unwrap();
+    let mut followed = followed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if followed.iter().any(|t| target.starts_with(t)) {
         return Err(SkipReason::TargetOverlapsSymlink);
     }

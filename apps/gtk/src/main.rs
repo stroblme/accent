@@ -212,6 +212,15 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.back", "Back", &["<Alt>Left"]),
     ("win.forward", "Forward", &["<Alt>Right"]),
     // The PDF reader. The rest live in the palette, found by name rather than by chord.
+    //
+    // Paging carries no chord here, and cannot: a reader pages with `Space`, `Shift+Space`, `n`,
+    // `p` and the arrows, and an application accelerator is dispatched at the window ahead of
+    // whatever has the keyboard — a bare `space` in this table would stop the editor, the
+    // terminal and every entry in the app from taking one. Those keys stay on the PDF tab's own
+    // controller (`PdfTab::wire_keys`), which fires these two actions rather than paging itself,
+    // so the palette lists the commands and anything that can activate an action can page.
+    ("win.pdf-next-page", "Next Page", &[]),
+    ("win.pdf-previous-page", "Previous Page", &[]),
     ("win.pdf-fit-width", "Fit Width", &[]),
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
@@ -222,6 +231,10 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-pen", "Pen", &[]),
     ("win.pdf-highlighter", "Highlighter", &[]),
     ("win.pdf-eraser", "Eraser", &[]),
+    ("win.pdf-line", "Line", &[]),
+    ("win.pdf-rect", "Rectangle", &[]),
+    ("win.pdf-circle", "Circle", &[]),
+    ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     (
         "win.pane-references",
@@ -251,6 +264,7 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
         "New from Template…",
         &["<Control><Shift>d"],
     ),
+    ("win.insert-template", "Insert Template…", &[]),
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
     ("win.preferences", "Preferences", &["<Control>comma"]),
@@ -1343,6 +1357,9 @@ impl App {
         }
         let pane = self.split_beside(at, side);
         from.tabs.transfer_page(page, &pane.tabs, 0);
+        // The page is the new pane's only one, so it is selected already; what it has not got is
+        // the keyboard. This is also where `move_tab` lands in a window with nowhere to move to.
+        self.focus_document(&pane);
     }
 
     /// The tab context menu's Split Right and friends: the page that was right-clicked, split off
@@ -1392,6 +1409,7 @@ impl App {
         // Selecting it is what makes the destination the active pane, retargets its find bar and
         // saves the session, all through the `selected-page` handler the pane already has.
         to.tabs.set_selected_page(&page);
+        self.focus_document(to);
     }
 
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
@@ -1442,6 +1460,36 @@ impl App {
         }
         *self.active_pane.borrow_mut() = pane.clone();
         true
+    }
+
+    /// Give the keyboard to what `pane` is showing, so a document moved into it takes the caret
+    /// with it.
+    ///
+    /// Without this the focus stays behind: the pane the tab came from selects its survivor while
+    /// the moved child still holds the keyboard, so libadwaita hands it to *that* document, and a
+    /// transfer that empties the pane drops the focus altogether. Everything a focused view draws
+    /// — the caret, GtkSourceView's current-line highlight — is then in the pane the reader has
+    /// just left, and the next keystroke goes there too.
+    ///
+    /// The document's own widget rather than the page's child: `grab_focus` on a container takes
+    /// the first thing in it that will have it, which for a note is whatever its banner is showing
+    /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image, a
+    /// status page and a two-blob comparison have no keys of their own and are left alone.
+    fn focus_document(&self, pane: &Pane) {
+        let widget: gtk::Widget = match self.doc_of(pane) {
+            Some(Doc::Text(tab)) => tab.view.clone().upcast(),
+            Some(Doc::Terminal(term)) => term.view.clone().upcast(),
+            Some(Doc::Pdf(pdf)) => pdf.key_target(),
+            _ => return,
+        };
+        // From an idle, as a new terminal's own focus is (see [`Self::open_terminal_at`]): the
+        // page has only just been attached, and a widget still mid-reparenting is not one GTK
+        // hands the keyboard to — measured, the grab does nothing and `GtkPaned` complains about
+        // a focus child that is not its child. The idle also runs after the pane the tab left has
+        // closed itself, that close being queued first.
+        glib::idle_add_local_once(move || {
+            widget.grab_focus();
+        });
     }
 
     /// What changes when a pane appears or goes: whether the tab bars may hide themselves, and
@@ -1523,9 +1571,32 @@ impl App {
         self.doc_of(pane)?.pdf().cloned()
     }
 
-    /// Point a pane's find bar at whatever it is showing now.
+    /// Point a pane's find bar at whatever it is showing now, and put it away where that is a
+    /// shell: there is no buffer to point at, so the bar would sit over a terminal holding a
+    /// query nothing answers. It comes back the way any other tab gets it, with the chord.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane));
+        if self.shows_shell(pane) {
+            pane.find.close();
+        }
+    }
+
+    /// Whether what `pane` is showing is a shell, which is the one document neither find nor go
+    /// to line can address: vte keeps its own scrollback and counts no lines of ours.
+    fn shows_shell(&self, pane: &Pane) -> bool {
+        self.doc_of(pane)
+            .is_some_and(|doc| doc.terminal().is_some())
+    }
+
+    /// `Ctrl+F` and its two neighbours. The bar belongs to the pane, so the chord opens the one in
+    /// the pane the reader is in and leaves the other pane's query and open state alone — and
+    /// over a shell it opens nothing at all, there being nothing of ours to search there.
+    fn open_find(&self, mode: find::Mode) {
+        let pane = self.pane();
+        if self.shows_shell(&pane) {
+            return;
+        }
+        pane.find.open(mode);
     }
 
     fn doc_for_page(&self, page: &adw::TabPage) -> Option<Doc> {
@@ -1732,6 +1803,7 @@ impl App {
             &self.tabs(),
             place,
         );
+        pdf.set_drawing_config(self.config.borrow().drawing.clone());
         pdf.connect_zoom(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1791,6 +1863,11 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
+        pdf.connect_choice(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, tool, choice| app.pdf_choice(tool, choice)
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -1835,6 +1912,26 @@ impl App {
     ///
     /// A one-page PDF and not a format of our own: a sketch is then a document every reader on
     /// the machine can open, and the pen that draws on it is the one that draws on any other PDF.
+    /// Insert Template…: a template's text at the caret of the active note, whose stem is what
+    /// the template's `{{title}}` means.
+    fn insert_template(self: &Rc<Self>) {
+        let Some(tab) = self.active() else {
+            return self.toast("Open a note to insert a template into");
+        };
+        let Some(ops) = self.need_ops("insert a template") else {
+            return;
+        };
+        let title = Path::new(&tab.rel())
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        fileops::insert_template(
+            ops,
+            &title,
+            Box::new(move |text, stops| tab.insert_stops(text, stops)),
+        );
+    }
+
     fn insert_sketch(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return self.toast("Open a note to put a sketch in");
@@ -1925,6 +2022,20 @@ impl App {
         }
         pdf.set_mode(wanted);
         self.sync_status();
+    }
+
+    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
+    fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
+        choice.apply(tool, &mut self.config.borrow_mut().drawing);
+        let config = self.config.borrow().clone();
+        if let Err(e) = config.save() {
+            tracing::warn!("saving config: {e:#}");
+        }
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.set_drawing_config(config.drawing.clone());
+            }
+        }
     }
 
     /// Put the active PDF's tools where this window last had them, and take the position back
@@ -2175,8 +2286,8 @@ impl App {
         }
     }
 
-    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a followed
-    /// link, or the `{{cursor}}` a template just placed in a note it created.
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
+    /// followed link.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
         self.on_tab(rel.to_string(), move |tab| {
             if let Some(chars) = char_range(&tab.text(), at.clone()) {
@@ -2489,8 +2600,12 @@ impl App {
             self.refresh_references();
             // The bar speaks for the tab in front, so with none it says nothing: the last
             // document's "Markdown · 2 words" used to stay under an empty document column,
-            // because this path returned before either readout was asked again.
+            // because this path returned before either readout was asked again. The Outline
+            // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
+            // strip in the sidebar, and `sync_outline` already says "No Outline" for no
+            // document at all.
             self.sync_status();
+            self.sync_outline();
             self.refresh_zoom();
             return;
         };
@@ -3739,11 +3854,9 @@ impl App {
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
-            // The bar belongs to the pane, so the chord opens the one in the pane the reader is
-            // in and leaves the other pane's query and open state alone.
-            "find" => self.pane().find.open(find::Mode::Find),
-            "replace" => self.pane().find.open(find::Mode::Replace),
-            "goto-line" => self.pane().find.open(find::Mode::Goto),
+            "find" => self.open_find(find::Mode::Find),
+            "replace" => self.open_find(find::Mode::Replace),
+            "goto-line" => self.open_find(find::Mode::Goto),
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
             "duplicate-line" => {
@@ -3813,11 +3926,23 @@ impl App {
                     pdf.copy_link();
                 }
             }
+            "pdf-next-page" | "pdf-previous-page" => {
+                if let Some(pdf) = self.active_pdf() {
+                    match name {
+                        "pdf-next-page" => pdf.next_page(),
+                        _ => pdf.previous_page(),
+                    }
+                }
+            }
             "pdf-export-highlights" => self.export_highlights(),
             "pdf-draw" => self.set_drawing(!self.drawing.get()),
             "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
             "pdf-highlighter" => self.pdf_mode(pdfview::Mode::Highlighter),
             "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),
+            "pdf-line" => self.pdf_mode(pdfview::Mode::Line),
+            "pdf-rect" => self.pdf_mode(pdfview::Mode::Rect),
+            "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
+            "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
             "pdf-fit-width" | "pdf-fit-page" => {
                 if let Some(pdf) = self.active_pdf() {
@@ -3937,6 +4062,7 @@ impl App {
                     fileops::new_from_template(ops);
                 }
             }
+            "insert-template" => self.insert_template(),
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
@@ -4537,6 +4663,15 @@ impl App {
                     None => Vec::new(),
                 }
             }),
+            // The start screen's own removal, so one list is written one way.
+            on_forget: Box::new({
+                let app = Rc::downgrade(self);
+                move |key: &str| {
+                    if let Some(app) = app.upgrade() {
+                        start::forget_vault(&app.config, Path::new(key));
+                    }
+                }
+            }),
         };
         drop(config);
         drop(used);
@@ -4641,6 +4776,7 @@ impl App {
         for doc in self.docs() {
             if let Some(pdf) = doc.pdf() {
                 pdf.restyle();
+                pdf.set_drawing_config(config.drawing.clone());
             }
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
@@ -5620,11 +5756,12 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 app.toast(message);
             }
         }),
-        open: Box::new(move |rel, at| {
+        open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
             app.open_path(rel);
-            if let Some(at) = at {
-                app.select_when_open(rel, at..at);
+            if !stops.is_empty() {
+                let stops = stops.to_vec();
+                app.on_tab(rel.to_string(), move |tab| tab.place_stops(&stops));
             }
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
@@ -6668,7 +6805,9 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
-/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than times.
+/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
+/// times, plus the branch readout and how many history rows a background fetch marked as not
+/// pulled yet.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
@@ -6679,6 +6818,15 @@ fn start_events(app: &Rc<App>, events: Receiver<Event>) {
 /// what the panes hold and whether their rows line up.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
+/// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
+/// and prints the layout either side of it. Point it at a document of several pages: a one-page
+/// PDF is wholly on screen whatever the scroll offset was.
+/// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
+/// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
+/// switch and the last tab's close leave behind.
+/// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
+/// highlight made of each selection, plus the two match colours and the priorities of the tags
+/// they are painted with.
 fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -6691,11 +6839,17 @@ fn install_bench_hooks(app: &Rc<App>) {
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
+    let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
+    let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
+    let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
         && compare.is_none()
+        && pdf.is_none()
+        && tabs.is_none()
+        && occur.is_none()
         && !git
         && !keys
         && !chrome
@@ -6713,6 +6867,15 @@ fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = compare {
             return bench_compare(&app, &rel);
+        }
+        if let Some(rel) = pdf {
+            return bench_pdf(&app, &rel);
+        }
+        if let Some(rels) = tabs {
+            return bench_tabs(&app, &rels);
+        }
+        if let Some(rel) = occur {
+            return bench_occurrences(&app, &rel);
         }
         if shell_keys {
             return bench_shell_keys(&app);
@@ -6818,6 +6981,9 @@ fn bench_git(app: &Rc<App>) {
         let Some(git) = app.git.get() else {
             return bench_quit(&app);
         };
+        // Again: the session restore runs in the post-present idle and deliberately puts Files
+        // back, so the pane this hook is about is not the one on screen by the time it reads it.
+        app.show_pane("git");
         println!(
             "bench git_changes tree={} {}",
             git.tree(),
@@ -6830,6 +6996,15 @@ fn bench_git(app: &Rc<App>) {
             git.changes_rows()
         );
         println!("bench git_rows {}", git.log_rows());
+        // What the fetch on opening the vault bought: the branch readout the status bar shows —
+        // the dot in front of it means uncommitted work — and how many history rows are drawn as
+        // not pulled yet, which only a fetch can have found.
+        println!(
+            "bench git_branch {}",
+            git.branch_label(None).unwrap_or_default()
+        );
+        println!("bench git_not_pulled {}", git.not_pulled_rows());
+        println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
         git.activate_last_log_row();
         let app = app.clone();
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
@@ -7085,6 +7260,11 @@ fn bench_panes(app: &Rc<App>, rels: &str) {
         let Some(page) = app.tabs().selected_page() else {
             return bench_quit(&app);
         };
+        // Staged by hand, because nothing headless clicks into a view: the reader is typing in
+        // this pane, which is what makes "does the keyboard go with the tab" a question at all.
+        if let Some(tab) = app.active() {
+            tab.view.grab_focus();
+        }
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, 0);
     });
@@ -7112,16 +7292,92 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
     });
 }
 
-/// How many panes there are, and where in the window the one holding `page` sits.
+/// How many panes there are, and where in the window three things sit: the pane holding `page`,
+/// the pane a note would open into, and the pane holding the keyboard. All three have to name the
+/// same pane after a move, or the window says the tab went somewhere the caret did not.
 fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
     println!("bench panes {}", app.panes.borrow().len());
     let root = app.window.clone().upcast::<gtk::Widget>();
-    match app.pane_of(page) {
+    let at = |what: &str, pane: Option<&Rc<Pane>>| match pane {
         Some(pane) => {
-            let r = pane_rect(&pane, &root);
-            println!("bench tab_at x={} y={}", r.x().round(), r.y().round());
+            let r = pane_rect(pane, &root);
+            println!("bench {what} x={} y={}", r.x().round(), r.y().round());
         }
-        None => println!("bench tab_at none"),
+        None => println!("bench {what} none"),
+    };
+    at("tab_at", app.pane_of(page).as_ref());
+    at("active_at", Some(&app.pane()));
+    let focused = gtk::prelude::GtkWindowExt::focus(&app.window).and_then(|w| {
+        app.panes
+            .borrow()
+            .iter()
+            .find(|pane| w.is_ancestor(pane.widget()))
+            .cloned()
+    });
+    at("focus_at", focused.as_ref());
+}
+
+/// The find bar and the Outline pane across a tab switch and a close: a note with the bar open, a
+/// shell in front of it, the chord over that shell, back to the note, then a PDF, then every tab
+/// closed. One line per step, so what a switch and the last close leave behind is a printout
+/// rather than an argument.
+fn bench_tabs(app: &Rc<App>, rels: &str) {
+    let Some((note, pdf)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (note, pdf) = (note.to_string(), pdf.to_string());
+    app.open_path(&note);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        println!("bench find_over_note {}", app.pane().find.is_open());
+        app.open_terminal();
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            println!("bench find_over_shell {}", app.pane().find.is_open());
+            let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            println!("bench find_chord_over_shell {}", app.pane().find.is_open());
+            // Back to the note: the bar belongs to the pane, so this says whether it comes back
+            // on its own or wants the chord again.
+            if let Some(tab) = app.tab_for(&note) {
+                app.reveal_page(&tab.page);
+            }
+            println!("bench find_back_on_note {}", app.pane().find.is_open());
+            // And the chord still opens it: closing the bar over a shell must not leave it dead
+            // for the tab the reader comes back to.
+            let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            println!(
+                "bench find_chord_back_on_note {}",
+                app.pane().find.is_open()
+            );
+            app.open_path(&pdf);
+            // Long enough for the render thread to open the document: an outline read before that
+            // says "Opening…" whatever else is wrong.
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                println!("bench outline_pdf {}", bench_outline(&app));
+                for doc in app.docs() {
+                    app.close_page(doc.page());
+                }
+                glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                    println!("bench outline_closed {}", bench_outline(&app));
+                    bench_quit(&app);
+                });
+            });
+        });
+    });
+}
+
+/// What the Outline pane holds, by widget type — or by title where that is one of its status
+/// pages, "No Outline" being the empty state a closed document has to leave behind.
+fn bench_outline(app: &Rc<App>) -> String {
+    let Some(sidebar) = app.sidebar.get() else {
+        return "no sidebar".to_string();
+    };
+    match sidebar.outline_child() {
+        Some(child) => match child.downcast::<adw::StatusPage>() {
+            Ok(page) => format!("status {}", page.title()),
+            Err(child) => child.type_().name().to_string(),
+        },
+        None => "nothing".to_string(),
     }
 }
 
@@ -7204,6 +7460,127 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
     tab.buffer
         .iter_at_line(line)
         .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// Select things in the note at `rel` and print what the muted occurrence highlight made of each:
+/// the query it took and the character ranges it painted. Then open the find bar on the same word,
+/// so the last lines say what happens where a find-bar match and a muted occurrence land on the
+/// same text: both tags are on it, and the find bar's is the higher priority of the two.
+///
+/// The buffer is filled with text of its own first: the ranges are the point, and they have to be
+/// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
+/// well inside the one-second autosave.
+fn bench_occurrences(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        // ASCII throughout, so the byte offset `find` gives is also the character offset the
+        // buffer counts in.
+        let text = "Alpha beta alpha\ngamma ALPHA delta\nx y\n";
+        tab.set_text(text);
+        let (find_colour, muted_colour) = tab.match_colours();
+        println!("bench occur colours find={find_colour:?} muted={muted_colour:?}");
+
+        for (label, selected) in [
+            // Two characters, and the three occurrences differ in case: the shortest selection
+            // that highlights anything, matched the way the find bar matches.
+            ("two_chars", "al"),
+            ("word", "beta"),
+            // A selection whose own case is the odd one out still finds the other two.
+            ("cased", "ALPHA"),
+            // Neither of these highlights anything.
+            ("one_char", "x"),
+            ("multi_line", "alpha\ngamma"),
+        ] {
+            let at = text.find(selected).expect("bench needle") as i32;
+            tab.buffer.select_range(
+                &tab.buffer.iter_at_offset(at),
+                &tab.buffer
+                    .iter_at_offset(at + selected.chars().count() as i32),
+            );
+            let (query, tag) = tab.occurrence_highlight();
+            println!(
+                "bench occur case={label} select={selected:?} query={query:?} at={:?}",
+                bench_tag_ranges(&tab, &tag)
+            );
+        }
+
+        // Both highlights on the same word. The find bar's tag has to be the higher priority of
+        // the two, or the muted hint would paint over the match the user is stepping through —
+        // and it has to stay that way across an edit, which is when gtksourceview re-raises its
+        // own tag.
+        tab.set_query("al");
+        tab.set_highlight(true);
+        bench_pump();
+        let at = text.find("al").expect("bench needle") as i32;
+        tab.buffer.select_range(
+            &tab.buffer.iter_at_offset(at),
+            &tab.buffer.iter_at_offset(at + 2),
+        );
+        let (_, muted) = tab.occurrence_highlight();
+        let find = bench_search_tag(&tab, find_colour.as_deref());
+        println!(
+            "bench occur overlap find={:?} muted={:?}",
+            find.as_ref()
+                .map(|tag| bench_tag_ranges(&tab, tag))
+                .unwrap_or_default(),
+            bench_tag_ranges(&tab, &muted)
+        );
+        for what in ["unedited", "edited"] {
+            println!(
+                "bench occur priority {what} find={:?} muted={}",
+                bench_search_tag(&tab, find_colour.as_deref()).map(|tag| tag.priority()),
+                muted.priority()
+            );
+            tab.buffer.insert(&mut tab.buffer.end_iter(), "al\n");
+            bench_pump();
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Turn the main loop until it has nothing left to dispatch. The find bar's own highlight is
+/// scanned on an idle, so its tag is on nothing at all the instant its query is set.
+fn bench_pump() {
+    let context = glib::MainContext::default();
+    for _ in 0..10_000 {
+        if !context.iteration(false) {
+            return;
+        }
+    }
+}
+
+/// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps
+/// that tag to itself, and the scheme's `search-match` background is what it was given.
+fn bench_search_tag(tab: &Rc<Tab>, colour: Option<&str>) -> Option<gtk::TextTag> {
+    let wanted = gdk::RGBA::parse(colour?).ok()?;
+    let mut found = None;
+    tab.buffer.tag_table().foreach(|tag| {
+        if found.is_none() && tag.is_background_set() && tag.background_rgba() == Some(wanted) {
+            found = Some(tag.clone());
+        }
+    });
+    found
+}
+
+/// Where `tag` is on, as character offsets.
+fn bench_tag_ranges(tab: &Rc<Tab>, tag: &gtk::TextTag) -> Vec<(i32, i32)> {
+    let mut ranges = Vec::new();
+    let mut iter = tab.buffer.start_iter();
+    loop {
+        if !iter.starts_tag(Some(tag)) && !iter.forward_to_tag_toggle(Some(tag)) {
+            return ranges;
+        }
+        let start = iter.offset();
+        if !iter.forward_to_tag_toggle(Some(tag)) {
+            ranges.push((start, tab.buffer.end_iter().offset()));
+            return ranges;
+        }
+        ranges.push((start, iter.offset()));
+    }
 }
 
 /// A shell focused in a window that does not have the keyboard must not narrow the application's
@@ -7348,6 +7725,38 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
         "rows={rows} hunks={hunks} hidden={hidden} buttons={buttons} misaligned={}",
         compare.misaligned()
     )
+}
+
+/// Open a PDF, leave the reader halfway down its second page, and fit the page from there.
+///
+/// Fit Page is fired as the window action the status bar's menu and the palette both fire, so a
+/// route that never reaches the tab shows up here as a zoom that did not change.
+fn bench_pdf(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    // The pages are measured on the render thread, so nothing about the layout is known until it
+    // has reported back.
+    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+        let Some(pdf) = app.active_pdf() else {
+            println!("bench pdf no_tab");
+            return bench_quit(&app);
+        };
+        println!("bench pdf pages={} {}", pdf.page_count(), pdf.geometry());
+        let page = 1.min(pdf.page_count().saturating_sub(1));
+        pdf.scroll_to(pdfview::Anchor {
+            page,
+            u: 0.0,
+            v: 0.5,
+        });
+        println!("bench pdf mid_page {}", pdf.geometry());
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-fit-page", None);
+        println!(
+            "bench pdf fit_page {} label={:?}",
+            pdf.geometry(),
+            pdf.zoom_label()
+        );
+        bench_quit(&app);
+    });
 }
 
 fn bench_quit(app: &Rc<App>) {
@@ -7944,6 +8353,23 @@ mod tests {
             assert!(
                 !NEVER_BIND.contains(&accel),
                 "AdwTabView holds {accel} for {what}, which the never-bind list reserves"
+            );
+        }
+    }
+
+    /// The two paging commands are in the table so they list in the palette, and carry no
+    /// accelerator there on purpose: a reader pages with `Space`, `n`, `p` and the arrows, and an
+    /// application accelerator is dispatched at the window ahead of whatever has the keyboard, so
+    /// a bare `space` in the table would stop the editor, the terminal and every entry in the app
+    /// from taking one. The keys stay on the PDF tab's own controller, which fires these.
+    #[test]
+    fn the_paging_commands_are_listed_and_carry_no_accelerator() {
+        for action in ["win.pdf-next-page", "win.pdf-previous-page"] {
+            let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
+            let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));
+            assert!(
+                accels.is_empty(),
+                "{action} would be a window-wide accelerator over every typing key"
             );
         }
     }

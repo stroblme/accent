@@ -36,6 +36,12 @@ const INSTANT: i32 = 16 * 1024;
 const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
+/// How much of the find bar's match colour an occurrence of the selection keeps.
+const OCCURRENCE_WEIGHT: f32 = 0.35;
+/// Occurrences past this many are left unpainted. A selection with more than this in one note is
+/// a word too common for the hint to say anything about, and tagging every one of them is the
+/// tag churn a full re-style is already dominated by.
+const OCCURRENCE_CAP: usize = 500;
 /// Monospace by default, so code fences, tables and wikilinks line up. GNOME ships it with the
 /// interface fonts, and `Reset` in preferences comes back here.
 const DEFAULT_FAMILY: &str = "Adwaita Mono";
@@ -239,6 +245,17 @@ pub struct Tab {
     /// the rest wait rather than being overwritten.
     alerts: RefCell<Vec<Alert>>,
     context: sourceview5::SearchContext,
+    /// Every other occurrence of what is selected, muted.
+    ///
+    /// A tag of our own rather than a second `SearchContext` fed the selection, which is the
+    /// shorter way to write it: two search contexts on one buffer each keep their tag at the top
+    /// of the tag table and re-raise it as they rescan, so which of the two colours paints an
+    /// overlap is a race. Measured under `ACCENT_BENCH_OCCUR`, the find bar lost it — every match
+    /// rendered in the muted colour with the bar open on the selected word. An ordinary tag made
+    /// before the context stays under it whatever either of them does.
+    occurrence_tag: gtk::TextTag,
+    /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
+    occurrence_query: RefCell<Option<String>>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     links: RefCell<Vec<Link>>,
     /// What the language server last said about this file, and the provider that shows the loud
@@ -454,6 +471,12 @@ pub fn open(
     document.append(&map);
 
     let banner = adw::Banner::new("");
+    // Made before the find bar's search context, so it stays under the tag that context paints
+    // with: a tag added later to the table outranks an earlier one, and gtksourceview only ever
+    // raises its own. See [`Tab::occurrence_tag`].
+    let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
+    buffer.tag_table().add(&occurrence_tag);
+    mute(&buffer, &occurrence_tag);
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
@@ -498,6 +521,8 @@ pub fn open(
         disk_changed: Cell::new(false),
         alerts: RefCell::new(Vec::new()),
         context,
+        occurrence_tag,
+        occurrence_query: RefCell::new(None),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
         diagnostics: RefCell::new(Vec::new()),
@@ -629,6 +654,18 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_cursor_moved()
+    ));
+    // `mark-set` rather than `notify::cursor-position`: a drag that ends where the caret already
+    // was moves only the other end of the selection, and both ends make a selection anyway.
+    buffer.connect_mark_set(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, _, mark| {
+            let moved = mark.name();
+            if matches!(moved.as_deref(), Some("insert" | "selection_bound")) {
+                tab.highlight_occurrences();
+            }
+        }
     ));
     banner.connect_button_clicked(glib::clone!(
         #[weak(rename_to = tab)]
@@ -829,6 +866,20 @@ pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
+}
+
+/// Paint `tag` in the muted twin of the scheme's own `search-match` colour: the same hue at a
+/// third of its weight, so an occurrence of the selection reads as a hint while a find-bar match
+/// still reads as a hit. Derived rather than named, so the pair keeps its order in every scheme.
+fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
+    let found = buffer
+        .style_scheme()
+        .and_then(|scheme| scheme.style("search-match"))
+        .and_then(|style| style.background())
+        .and_then(|colour| gdk::RGBA::parse(&colour).ok());
+    let Some(mut colour) = found else { return };
+    colour.set_alpha(colour.alpha() * OCCURRENCE_WEIGHT);
+    tag.set_background_rgba(Some(&colour));
 }
 
 fn title_of(rel: &str) -> &str {
@@ -1235,6 +1286,8 @@ impl Tab {
     pub fn restyle(&self) {
         // The scheme is what recolours code, and it is also what a note's own tags sit on.
         sync_scheme(&self.buffer);
+        // Derived from the scheme that just changed, so it has to be derived again.
+        mute(&self.buffer, &self.occurrence_tag);
         match self.flavour {
             Flavour::Note => {
                 highlight::restyle(&self.buffer, &self.view);
@@ -1905,6 +1958,71 @@ impl Tab {
         self.context.set_highlight(on);
     }
 
+    /// The selection, when it is worth showing every other occurrence of: two or more characters
+    /// on one line. One character is in almost every line, and a selection that spans lines is a
+    /// block being moved rather than a word being looked at.
+    fn selected_occurrence(&self) -> Option<String> {
+        let (start, end) = self.buffer.selection_bounds()?;
+        let selected = self.buffer.text(&start, &end, false).to_string();
+        (selected.chars().count() >= 2 && !selected.contains('\n')).then_some(selected)
+    }
+
+    /// Point the muted highlight at what is selected now: every other occurrence of it in this
+    /// note, matched the way the find bar matches — without regard to case — and capped at
+    /// [`OCCURRENCE_CAP`]. The selected range is tagged too, and never seen: the view paints the
+    /// selection over it.
+    ///
+    /// Nothing is re-tagged when the selection says what it said last time, which is what makes
+    /// this cheap enough to run on every caret move.
+    fn highlight_occurrences(&self) {
+        let query = self.selected_occurrence();
+        if *self.occurrence_query.borrow() == query {
+            return;
+        }
+        *self.occurrence_query.borrow_mut() = query.clone();
+        self.buffer.remove_tag(
+            &self.occurrence_tag,
+            &self.buffer.start_iter(),
+            &self.buffer.end_iter(),
+        );
+        let Some(query) = query else { return };
+        let mut at = self.buffer.start_iter();
+        for _ in 0..OCCURRENCE_CAP {
+            let found = at.forward_search(&query, gtk::TextSearchFlags::CASE_INSENSITIVE, None);
+            let Some((from, to)) = found else {
+                break;
+            };
+            self.buffer.apply_tag(&self.occurrence_tag, &from, &to);
+            at = to;
+        }
+    }
+
+    /// What the muted highlight is showing, and the tag it paints it with. Only
+    /// `ACCENT_BENCH_OCCUR` reads them.
+    pub fn occurrence_highlight(&self) -> (Option<String>, gtk::TextTag) {
+        (
+            self.occurrence_query.borrow().clone(),
+            self.occurrence_tag.clone(),
+        )
+    }
+
+    /// The two match backgrounds, the find bar's first: what `ACCENT_BENCH_OCCUR` prints to show
+    /// the hint really is the weaker of the pair. The find bar's context has no match style of
+    /// its own, so its colour is the scheme's `search-match`.
+    pub fn match_colours(&self) -> (Option<String>, Option<String>) {
+        let find = self
+            .buffer
+            .style_scheme()
+            .and_then(|scheme| scheme.style("search-match"))
+            .and_then(|style| style.background())
+            .and_then(|colour| gdk::RGBA::parse(&colour).ok());
+        let text = |colour: gdk::RGBA| colour.to_str().to_string();
+        (
+            find.map(text),
+            self.occurrence_tag.background_rgba().map(text),
+        )
+    }
+
     /// A one-line selection, which is what the find bar prefills itself from.
     pub fn selected_query(&self) -> Option<String> {
         let (s, e) = self.buffer.selection_bounds()?;
@@ -2032,6 +2150,43 @@ impl Tab {
         self.buffer.select_range(&start, &end);
         self.set_query(&self.buffer.text(&start, &end, false));
         self.set_highlight(true);
+    }
+
+    /// Put the caret on a template's first `{{cursor}}` and make the rest Tab stops.
+    ///
+    /// GtkSourceView can only walk stops through text a snippet inserted, so with more than one
+    /// the note's text is put back through a snippet: the same bytes, not undoable and not dirty,
+    /// because nothing about the file changed. `byte` offsets, as the template renderer counts.
+    pub fn place_stops(&self, stops: &[usize]) {
+        let text = self.text();
+        match stops {
+            [] => {}
+            [only] => {
+                let at = text.get(..*only).map_or(0, |s| s.chars().count());
+                self.goto_range(at..at);
+            }
+            _ => {
+                let (mut start, mut end) = self.buffer.bounds();
+                self.loading.set(true);
+                self.buffer.begin_irreversible_action();
+                self.buffer.delete(&mut start, &mut end);
+                self.view
+                    .push_snippet(&snippet(&text, stops), Some(&mut self.buffer.start_iter()));
+                self.buffer.end_irreversible_action();
+                self.loading.set(false);
+                self.buffer.set_modified(false);
+                self.analyse();
+            }
+        }
+    }
+
+    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk.
+    pub fn insert_stops(&self, text: &str, stops: &[usize]) {
+        let mut at = self.buffer.iter_at_mark(&self.buffer.get_insert());
+        match stops.is_empty() {
+            true => self.buffer.insert(&mut at, text),
+            false => self.view.push_snippet(&snippet(text, stops), Some(&mut at)),
+        }
     }
 
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
@@ -2243,9 +2398,57 @@ impl Drop for Tab {
     }
 }
 
+/// `text` as a snippet whose stops are the byte offsets `stops`, in Tab order.
+fn snippet(text: &str, stops: &[usize]) -> sourceview5::Snippet {
+    let snippet = sourceview5::Snippet::new(None, None);
+    for (piece, focus) in chunks(text, stops) {
+        let chunk = sourceview5::SnippetChunk::new();
+        chunk.set_text(piece);
+        chunk.set_text_set(true);
+        chunk.set_focus_position(focus);
+        snippet.add_chunk(&chunk);
+    }
+    snippet
+}
+
+/// The text between the stops, then each stop as an empty chunk numbered from one; plain text
+/// carries -1, which is what GtkSourceView reads as "not a stop". A stop off a character
+/// boundary, which the renderer never produces, is skipped rather than trusted.
+fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
+    let mut out = Vec::new();
+    let mut byte = 0;
+    let mut focus = 0;
+    for &stop in stops {
+        let Some(piece) = text.get(byte..stop) else {
+            continue;
+        };
+        if !piece.is_empty() {
+            out.push((piece, -1));
+        }
+        focus += 1;
+        out.push(("", focus));
+        byte = stop;
+    }
+    if byte < text.len() {
+        out.push((&text[byte..], -1));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunks_split_the_text_at_its_stops_in_order() {
+        assert_eq!(
+            chunks("ab: \ncd: \n", &[4, 9]),
+            [("ab: ", -1), ("", 1), ("\ncd: ", -1), ("", 2), ("\n", -1)]
+        );
+        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1)]);
+        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1)]);
+        assert_eq!(chunks("ab", &[0, 0]), [("", 1), ("", 2), ("ab", -1)]);
+    }
 
     #[test]
     fn leading_indent_is_the_spaces_and_tabs_a_line_opens_with() {

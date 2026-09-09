@@ -183,8 +183,26 @@ pub fn pdf_colours(dark: bool) -> Option<([u8; 3], [u8; 3])> {
 /// colour is.
 pub fn accent_rgb() -> [u8; 3] {
     let c = adw::StyleManager::default().accent_color_rgba();
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     [byte(c.red()), byte(c.green()), byte(c.blue())]
+}
+
+/// The six colours the ring offers for ink: the accent — `None`, resolved when a stroke is
+/// written, so a tool left on it follows the system — four hues around the wheel from it on the
+/// CSV columns' rule (DESIGN.md, Colour), and black, the one literal, which is why this lives
+/// here.
+pub fn swatches() -> [Option<[u8; 3]>; 6] {
+    let c = adw::StyleManager::default().accent_color_rgba();
+    let hsv = gtk::rgb_to_hsv(c.red(), c.green(), c.blue());
+    let hue = |column: usize| {
+        let (h, s, v) = crate::highlight::rotate(hsv, column);
+        let (r, g, b) = gtk::hsv_to_rgb(h, s, v);
+        Some([byte(r), byte(g), byte(b)])
+    };
+    [None, hue(1), hue(2), hue(3), hue(4), Some(rgb("#000000"))]
+}
+
+fn byte(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// One of this module's own `#rrggbb` constants as bytes. Nothing else parses colours: this file

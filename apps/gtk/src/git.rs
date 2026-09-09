@@ -38,6 +38,17 @@ const MENU_GROUP: &str = "gitlog";
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How often the selected repository's remote is fetched while the window has the focus. VS
+/// Code's `git.autofetchPeriod` default, and for its reason: it is often enough that a colleague's
+/// push shows up in the history within a coffee break, and rare enough that a laptop on a phone
+/// tether is not woken by us. Only while the window is focused, so a window left open behind
+/// others stops talking to the network at all.
+const AUTOFETCH: Duration = Duration::from_secs(300);
+
+/// How far a commit the remote has and HEAD does not is faded. Enough to read as "this is not
+/// here yet" beside a commit that is, and not so far that the summary stops being legible.
+const NOT_PULLED_DIM: f64 = 0.55;
+
 /// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
 /// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
 /// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
@@ -161,6 +172,9 @@ struct State {
     commits: Vec<Commit>,
     /// The selected repository's local branches, which is what the branch chooser lists.
     branches: Vec<String>,
+    /// The oids the selected repository's upstream has and HEAD does not: the rows the history
+    /// draws as not pulled yet. Empty unless a fetch has found something.
+    incoming: HashSet<String>,
     submodules: Vec<Submodule>,
     /// Ignored paths across every repository, vault-relative, directories keeping their slash.
     ignored: HashSet<String>,
@@ -218,6 +232,15 @@ pub struct Panel {
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
     /// filled: this is the transfer the status bar spins for.
     sync_busy: Cell<bool>,
+    /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
+    /// than stacked.
+    fetch_busy: Cell<bool>,
+    /// Whether the vault's repositories have been fetched since the window opened them. The first
+    /// fetch waits for the first refresh, because until then there is no repository to fetch.
+    fetched_once: Cell<bool>,
+    /// A timer tick was skipped because the window did not have the focus. Run as soon as it
+    /// does, so coming back to a window that has been aside for an hour is not another wait.
+    missed_fetch: Cell<bool>,
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh closes them all.
     expanded: RefCell<Option<String>>,
@@ -290,10 +313,11 @@ impl Panel {
         let counts = gtk::Label::new(None);
         counts.add_css_class("dim-label");
         counts.add_css_class("numeric");
-        // One button, both halves, and the counts inside it: nothing in the app fetches, so a
-        // behind count is only as fresh as the last sync and cannot decide whether to pull.
-        // Three buttons was also what stopped the sidebar shrinking — the branch row measured
-        // 186 px of minimum width with them and 105 with one.
+        // One button, both halves, and the counts inside it, which is the pane's whole answer to
+        // "is there anything to pull": a background fetch keeps them current, so `↓2` inside the
+        // Sync button is what says a pull would bring something. Three buttons was also what
+        // stopped the sidebar shrinking — the branch row measured 186 px of minimum width with
+        // them and 105 with one.
         let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         arrows.append(&counts);
         arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
@@ -451,11 +475,15 @@ impl Panel {
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
+            fetch_busy: Cell::new(false),
+            fetched_once: Cell::new(false),
+            missed_fetch: Cell::new(false),
             expanded: RefCell::new(None),
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
         panel.wire_header(&check, &create);
+        panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
         panel.wire_log(&log_view);
@@ -520,6 +548,82 @@ impl Panel {
             panel.refresh();
         });
         self.pending.replace(Some(id));
+    }
+
+    // --- the background fetch -----------------------------------------------------------------
+
+    /// Fetch the selected repository's remote, off the main thread, and refresh once it lands.
+    ///
+    /// The selected repository only. `git::discover` finds every repository a vault touches and
+    /// fetching all of them would put one network round trip per repository on a timer, for rows
+    /// nobody is looking at; this is the one the pane and the status bar are speaking for.
+    ///
+    /// A failure is logged and nothing else — no toast, no dialog, no badge. A fetch nobody asked
+    /// for that fails every five minutes because the laptop is on a train would otherwise be a
+    /// notification every five minutes, and the honest consequence of a failed fetch is already
+    /// on screen: the counts stay as stale as they were.
+    fn autofetch(self: &Rc<Self>) {
+        if self.fetch_busy.get() {
+            return;
+        }
+        let Some(repo) = ({
+            let state = self.state.borrow();
+            state.repos.get(state.selected).cloned()
+        }) else {
+            return;
+        };
+        self.fetch_busy.set(true);
+        let vault = self.hooks.vault.clone();
+        let panel = self.clone();
+        glib::spawn_future_local(async move {
+            let fetched = gio::spawn_blocking(move || vault.git_fetch(&repo)).await;
+            panel.fetch_busy.set(false);
+            match fetched {
+                // A fetch that brought nothing prints nothing, so this is quiet in the common case.
+                Ok(Ok(transcript)) => {
+                    if !transcript.is_empty() {
+                        tracing::debug!("git fetch: {transcript}");
+                    }
+                }
+                Ok(Err(e)) => return tracing::debug!("git fetch: {e:#}"),
+                Err(_) => return tracing::warn!("the git worker panicked"),
+            }
+            // `.git/refs/remotes` is not among the paths the vault watches, so what a fetch moved
+            // is only seen because we ask.
+            panel.schedule_refresh();
+        });
+    }
+
+    /// Start the timer that keeps the remote-tracking refs current.
+    ///
+    /// The tick is gated on the window having the focus rather than started and stopped, because
+    /// a `GSource` removed and re-added would also restart its five minutes; what a skipped tick
+    /// leaves behind is a flag the next focus-in reads.
+    fn wire_autofetch(self: &Rc<Self>) {
+        let (weak, window) = (Rc::downgrade(self), self.hooks.window.downgrade());
+        glib::timeout_add_local(AUTOFETCH, move || {
+            let (Some(panel), Some(window)) = (weak.upgrade(), window.upgrade()) else {
+                return glib::ControlFlow::Break;
+            };
+            match window.is_active() {
+                true => panel.autofetch(),
+                false => panel.missed_fetch.set(true),
+            }
+            glib::ControlFlow::Continue
+        });
+        // Weak both ways: the window owns the sidebar that owns this pane, and the pane holds the
+        // window through its hooks, so a strong capture here is a cycle neither side can break.
+        let weak = Rc::downgrade(self);
+        self.hooks
+            .window
+            .connect_notify_local(Some("is-active"), move |window, _| {
+                if let Some(panel) = weak.upgrade()
+                    && window.is_active()
+                    && panel.missed_fetch.replace(false)
+                {
+                    panel.autofetch();
+                }
+            });
     }
 
     // --- wiring -------------------------------------------------------------------------------
@@ -634,9 +738,10 @@ impl Panel {
                 item.set_child(Some(&log_row(item, &weak)));
             }
         });
-        factory.connect_bind(|_, item| {
+        let weak = Rc::downgrade(self);
+        factory.connect_bind(move |_, item| {
             if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                bind_log(item);
+                bind_log(item, &weak);
             }
         });
         view.set_factory(Some(&factory));
@@ -730,22 +835,24 @@ impl Panel {
             .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
         let (names, at) = branch_model(head.map(|(name, _)| name), &fetched.branches);
         self.set_branches(&names, at);
-        // Without an upstream every click answers "There is no tracking information", so the
-        // button says so up front instead.
-        let upstream = fetched
-            .statuses
-            .get(selected)
-            .and_then(|s| s.branch.upstream.clone());
-        self.sync.set_sensitive(upstream.is_some());
-        self.sync.set_tooltip_text(Some(&match &upstream {
-            Some(name) => format!("Sync with {name}"),
-            None => "This branch has no upstream to sync with".to_string(),
-        }));
+        // What a Sync would do, in words, beside the counts it already shows. A branch with no
+        // upstream is not a dead end any more: syncing it publishes it (`git::sync`), so the
+        // button stays live and says which of the two it will be.
+        let branch = fetched.statuses.get(selected).map(|s| &s.branch);
+        self.sync.set_sensitive(branch.is_some());
+        self.sync
+            .set_tooltip_text(branch.map(sync_hint).as_deref().or(Some("Sync")));
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
         // has not moved also leaves whatever Load More added below it alone.
-        let moved = !same_head(&self.state.borrow().commits, &fetched.commits);
+        // The incoming set is part of what a row draws, and pulling a fast-forward leaves the
+        // commit list from `--all` exactly as it was — same oids, same order — so without this
+        // the marks would survive the pull that cleared them.
+        let moved = {
+            let state = self.state.borrow();
+            !same_head(&state.commits, &fetched.commits) || state.incoming != fetched.incoming
+        };
         let page = moved.then(|| fetched.commits.clone());
 
         {
@@ -760,7 +867,13 @@ impl Panel {
             }
             state.branches = fetched.branches;
             state.submodules = fetched.submodules;
+            state.incoming = fetched.incoming;
             state.selected = selected;
+        }
+        // git has answered for the first time since the window opened this vault, so there is a
+        // repository to fetch at last. Everything after this is the timer's.
+        if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
+            self.autofetch();
         }
         // After the state is written: the changes list is drawn from it, so that the tree toggle
         // and a folder's chevron redraw the same rows without a `git status` of their own.
@@ -1600,7 +1713,25 @@ impl Panel {
         let index = key
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
-        branch_text(&state.statuses.get(index)?.branch)
+        branch_line(state.statuses.get(index)?)
+    }
+
+    /// How many history rows are drawn as not pulled yet. `ACCENT_BENCH_GIT` and nothing else:
+    /// the marking is otherwise only visible as a faded row.
+    pub fn not_pulled_rows(&self) -> usize {
+        let incoming = &self.state.borrow().incoming;
+        (0..self.log.n_items())
+            .filter(|i| {
+                matches!(log_at_index(&self.log, *i),
+                    Some(LogItem::Commit(row)) if incoming.contains(&row.commit.id))
+            })
+            .count()
+    }
+
+    /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
+    /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
+    pub fn sync_hint(&self) -> Option<String> {
+        self.sync.tooltip_text().map(|t| t.to_string())
     }
 
     /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
@@ -1756,11 +1887,14 @@ struct Fetched {
     commits: Vec<Commit>,
     branches: Vec<String>,
     submodules: Vec<Submodule>,
+    /// The commits a pull would bring in, which is what marks the history's rows. Asked for only
+    /// where the branch says there are any, so an up-to-date repository pays nothing for it.
+    incoming: HashSet<String>,
 }
 
 fn fetch(vault: &Vault, selected: usize) -> Fetched {
     let repos = vault.repos();
-    let statuses = repos
+    let statuses: Vec<Status> = repos
         .iter()
         .map(|repo| match vault.git_status(repo) {
             Ok(status) => status,
@@ -1772,7 +1906,8 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
             }
         })
         .collect();
-    let (commits, branches, submodules) = match repos.get(clamp(selected, repos.len())) {
+    let at = clamp(selected, repos.len());
+    let (commits, branches, submodules) = match repos.get(at) {
         Some(repo) => (
             vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
                 tracing::debug!("git log: {e}");
@@ -1783,12 +1918,28 @@ fn fetch(vault: &Vault, selected: usize) -> Fetched {
         ),
         None => (Vec::new(), Vec::new(), Vec::new()),
     };
+    // `behind` is the count and this is the same set by oid, so one implies the other: nothing to
+    // pull means no `rev-list` at all, which is what keeps a refresh on every save as cheap as it
+    // was. A non-zero count also means there is an upstream, which the range needs.
+    let behind = statuses.get(at).is_some_and(|s| s.branch.behind > 0);
+    let incoming = match repos.get(at).filter(|_| behind) {
+        Some(repo) => vault
+            .git_incoming(repo)
+            .unwrap_or_else(|e| {
+                tracing::debug!("git rev-list HEAD..@{{u}}: {e}");
+                Vec::new()
+            })
+            .into_iter()
+            .collect(),
+        None => HashSet::new(),
+    };
     Fetched {
         repos,
         statuses,
         commits,
         branches,
         submodules,
+        incoming,
     }
 }
 
@@ -2121,7 +2272,14 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .hexpand(true)
         .ellipsize(pango::EllipsizeMode::End)
         .build();
+    // The same arrow the branch readout's `↓2` uses, so one symbol means "the remote has this and
+    // we do not" in both places. Leading, where a dirty tab and the status bar put their dot.
+    let not_pulled = gtk::Label::new(Some("↓"));
+    for class in ["caption", "dim-label", "numeric"] {
+        not_pulled.add_css_class(class);
+    }
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    line.append(&not_pulled);
     line.append(&refs);
     line.append(&summary);
 
@@ -2205,7 +2363,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     stack
 }
 
-fn bind_log(item: &gtk::ListItem) {
+fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let (Some(stack), Some(item_row)) = (item.child().and_downcast::<gtk::Stack>(), log_of(item))
     else {
         return;
@@ -2257,10 +2415,13 @@ fn bind_log(item: &gtk::ListItem) {
     ) else {
         return;
     };
-    let (Some(refs), Some(summary)) = (
+    let (Some(not_pulled), Some(summary)) = (
         line.first_child().and_downcast::<gtk::Label>(),
         line.last_child().and_downcast::<gtk::Label>(),
     ) else {
+        return;
+    };
+    let Some(refs) = not_pulled.next_sibling().and_downcast::<gtk::Label>() else {
         return;
     };
 
@@ -2274,7 +2435,23 @@ fn bind_log(item: &gtk::ListItem) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
-    stack.set_tooltip_text(Some(&commit_tooltip(&row.commit)));
+    // Read off the last refresh's answer rather than stored on the row: `git rev-list HEAD..@{u}`
+    // is what decides this, and a row that has since been pulled is marked by the refresh that
+    // noticed, not by whatever was true when it was spliced in.
+    let waiting = panel
+        .upgrade()
+        .is_some_and(|panel| panel.state.borrow().incoming.contains(&row.commit.id));
+    not_pulled.set_visible(waiting);
+    // The text alone, so the graph the drawing area beside it paints stays at full strength and a
+    // lane still joins the rows above and below.
+    text.set_opacity(match waiting {
+        true => NOT_PULLED_DIM,
+        false => 1.0,
+    });
+    stack.set_tooltip_text(Some(&match waiting {
+        true => format!("Not pulled yet\n\n{}", commit_tooltip(&row.commit)),
+        false => commit_tooltip(&row.commit),
+    }));
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -2656,6 +2833,41 @@ fn branch_text(b: &Branch) -> Option<String> {
     })
 }
 
+/// The whole branch readout the status bar shows: the branch, its ahead and behind counts, and
+/// the dot in front when the repository has work that is not committed.
+///
+/// The dot leads and is the very character a dirty tab wears, so one symbol means "there is
+/// something here that is not written down" wherever it appears. What it counts is every record
+/// `git status` produced, untracked files included ([`Status::dirty`]), so it and the Git pane's
+/// changes list are the same answer.
+fn branch_line(status: &Status) -> Option<String> {
+    let text = branch_text(&status.branch)?;
+    Some(match status.dirty() {
+        true => format!("• {text}"),
+        false => text,
+    })
+}
+
+/// What a Sync will do, for the Sync button's tooltip.
+///
+/// Words beside the arrows the button already shows, because `↓2 ↑1` is a readout and a tooltip
+/// is where it is spelled out. A branch with no upstream reads as Publish: that is what syncing
+/// one does now, and the tooltip is the only place that can say so before it happens.
+fn sync_hint(b: &Branch) -> String {
+    let Some(upstream) = &b.upstream else {
+        return "Publish this branch to its remote and track it".to_string();
+    };
+    let moving: Vec<String> = [(b.behind, "to pull"), (b.ahead, "to push")]
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, what)| format!("{count} {what}"))
+        .collect();
+    match moving.is_empty() {
+        true => format!("Sync with {upstream}"),
+        false => format!("Sync with {upstream}: {}", moving.join(", ")),
+    }
+}
+
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
 ///
 /// `key` turns a repository-relative path into the key the rest of the app uses; the tests pass
@@ -2839,6 +3051,47 @@ mod tests {
 
     fn identity(path: &str) -> String {
         path.to_string()
+    }
+
+    fn on_main(upstream: Option<&str>, ahead: u32, behind: u32) -> Branch {
+        Branch {
+            oid: Some("0123456789abcdef".to_string()),
+            head: Some("main".to_string()),
+            upstream: upstream.map(str::to_string),
+            ahead,
+            behind,
+        }
+    }
+
+    #[test]
+    fn the_branch_readout_wears_the_dot_when_anything_is_uncommitted() {
+        let clean = Status {
+            branch: on_main(Some("origin/main"), 1, 2),
+            entries: Vec::new(),
+            ignored: vec!["build/".to_string()],
+        };
+        assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
+
+        // Untracked on its own is enough: the dot counts what the changes list shows.
+        let dirty = Status {
+            entries: vec![entry("new.md", '?', '?')],
+            ..clean.clone()
+        };
+        assert_eq!(branch_line(&dirty).as_deref(), Some("• main ↑1 ↓2"));
+        assert_eq!(branch_line(&Status::default()), None, "git said nothing");
+    }
+
+    #[test]
+    fn the_sync_tooltip_says_which_way_the_work_would_move() {
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 0, 0)),
+            "Sync with origin/main"
+        );
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 1, 2)),
+            "Sync with origin/main: 2 to pull, 1 to push"
+        );
+        assert!(sync_hint(&on_main(None, 0, 0)).starts_with("Publish"));
     }
 
     #[test]

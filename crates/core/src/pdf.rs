@@ -186,6 +186,59 @@ pub struct InkStyle {
 /// points of the path it draws.
 pub type InkPath = (usize, Vec<(f32, f32)>);
 
+/// A shape drawn in one drag, in top-left page points.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shape {
+    Line { a: (f32, f32), b: (f32, f32) },
+    Rect(Rect),
+    Circle { centre: (f32, f32), radius: f32 },
+}
+
+/// One `/Ink` annotation as the Adjust tool sees it: its place in `/Annots`, its path flattened
+/// to a polyline, its `/Rect`, and how it is drawn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InkShape {
+    pub index: usize,
+    pub points: Vec<(f32, f32)>,
+    pub bounds: Rect,
+    pub style: InkStyle,
+}
+
+/// An affine map `[a, b, c, d, e, f]` in the PDF convention: `x' = a·x + c·y + e`,
+/// `y' = b·x + d·y + f`.
+pub type Matrix = [f32; 6];
+
+pub const IDENTITY: Matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
+pub fn apply(m: Matrix, (x, y): (f32, f32)) -> (f32, f32) {
+    (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
+}
+
+/// The map that undoes `m`. Undefined for a map that flattens the plane, which no drag makes.
+pub fn invert(m: Matrix) -> Matrix {
+    let [a, b, c, d, e, f] = m;
+    let det = a * d - b * c;
+    [
+        d / det,
+        -b / det,
+        -c / det,
+        a / det,
+        (c * f - d * e) / det,
+        (b * e - a * f) / det,
+    ]
+}
+
+/// One segment of an appearance path, in top-left page points: what every ink writer hands
+/// [`PdfDoc::put_ink`], and what [`read_ink`] gives back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Seg {
+    Move((f32, f32)),
+    Line((f32, f32)),
+    /// Two control points, then the end.
+    Bezier((f32, f32), (f32, f32), (f32, f32)),
+    Close,
+}
+
 /// A rendered page. `data` is tightly packed RGBA8, `width * height * 4` bytes.
 pub struct RgbaImage {
     pub width: u32,
@@ -600,24 +653,58 @@ impl PdfDoc {
     // appearance stream, so this draws correctly everywhere; what it costs is an editor that
     // wants to reshape the stroke, which would need `/InkList`. Raw bindings are the upgrade.
     pub fn add_ink(&mut self, page: usize, points: &[(f32, f32)], style: InkStyle) -> Result<()> {
+        let thinned = thin(points, 1.5);
+        let Some(&first) = thinned.first() else {
+            return Ok(());
+        };
+        let mut segs = vec![Seg::Move(first)];
+        match thinned.len() {
+            // A stroke that never moved: a zero-length segment, which the round cap draws as the
+            // dot the reader meant.
+            1 => segs.push(Seg::Line(first)),
+            _ => segs.extend(
+                catmull_rom(&thinned)
+                    .into_iter()
+                    .map(|[c1, c2, end]| Seg::Bezier(c1, c2, end)),
+            ),
+        }
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        self.put_ink(&mut p, &segs, style)
+    }
+
+    /// Draw a line, a rectangle or a circle as an `/Ink` annotation, exactly as the pen draws.
+    ///
+    // ponytail: an `/Ink` rather than a `/Line`, `/Square` or `/Circle`: pdfium-render has no
+    // line annotation at all, no circle constructor, and only ink and stamp annotations take a
+    // path object, so a real `/Square` would be stuck at pdfium's generated 1 pt border. Every
+    // viewer renders the appearance stream; what it costs is another editor's shape palette
+    // seeing a stroke.
+    pub fn add_shape(&mut self, page: usize, shape: Shape, style: InkStyle) -> Result<()> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        self.put_ink(&mut p, &segments_of(shape), style)
+    }
+
+    /// The tail every ink writer shares: the path, then the annotation around it. The caller
+    /// holds the lock, and `segs` starts with a `Move`.
+    fn put_ink(&self, p: &mut PdfPage<'_>, segs: &[Seg], style: InkStyle) -> Result<()> {
         let InkStyle {
             width,
             rgba,
             multiply,
         } = style;
-        let thinned = thin(points, 1.5);
-        let Some(&first) = thinned.first() else {
-            return Ok(());
+        let Some(&Seg::Move(first)) = segs.first() else {
+            return Err(anyhow!("an ink path starts with a move"));
         };
-        let _guard = lock();
-        let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
         let height = p.height().value;
         let y = |v: f32| PdfPoints::new(height - v);
         let colour = PdfColor::new(rgba[0], rgba[1], rgba[2], rgba[3]);
 
-        let bounds = thinned
-            .iter()
+        // Control points included: a Bézier stays inside its control polygon, so this box holds
+        // the curve without evaluating it.
+        let bounds = points_of(segs)
             .fold(
                 Rect {
                     left: first.0,
@@ -625,7 +712,7 @@ impl PdfDoc {
                     right: first.0,
                     bottom: first.1,
                 },
-                |r, &(x, y)| {
+                |r, (x, y)| {
                     r.union(Rect {
                         left: x,
                         top: y,
@@ -653,25 +740,21 @@ impl PdfDoc {
             path.set_blend_mode(PdfPageObjectBlendMode::Multiply)
                 .context("ink blend mode")?;
         }
-        match thinned.len() {
-            // A stroke that never moved: a zero-length segment, which the round cap draws as the
-            // dot the reader meant.
-            1 => path
-                .line_to(PdfPoints::new(first.0), y(first.1))
-                .context("ink dot")?,
-            _ => {
-                for [c1, c2, end] in catmull_rom(&thinned) {
-                    path.bezier_to(
-                        PdfPoints::new(end.0),
-                        y(end.1),
-                        PdfPoints::new(c1.0),
-                        y(c1.1),
-                        PdfPoints::new(c2.0),
-                        y(c2.1),
-                    )
-                    .context("ink segment")?;
-                }
+        for seg in &segs[1..] {
+            match *seg {
+                Seg::Move((x, v)) => path.move_to(PdfPoints::new(x), y(v)),
+                Seg::Line((x, v)) => path.line_to(PdfPoints::new(x), y(v)),
+                Seg::Bezier(c1, c2, end) => path.bezier_to(
+                    PdfPoints::new(end.0),
+                    y(end.1),
+                    PdfPoints::new(c1.0),
+                    y(c1.1),
+                    PdfPoints::new(c2.0),
+                    y(c2.1),
+                ),
+                Seg::Close => path.close_path(),
             }
+            .context("ink segment")?;
         }
 
         let mut ink = p
@@ -716,36 +799,68 @@ impl PdfDoc {
 
     /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
     /// aim at. The index is the annotation's place in `/Annots`, which is what deletes it.
+    pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
+        Ok(self
+            .inks(page)?
+            .into_iter()
+            .map(|ink| (ink.index, ink.points))
+            .collect())
+    }
+
+    /// Every `/Ink` annotation on a page, flattened, with its box and style: what the Adjust tool
+    /// takes hold of. Curves are sampled, so a circle's rim answers to the pointer and not the
+    /// control polygon around it.
     ///
     // ponytail: the points are read straight out of the appearance path, so a stroke drawn by
     // another editor whose appearance stream carries a `/Matrix` is hit-tested in form space and
     // may not answer to the pointer. Ours never do; a transform-aware read is the upgrade.
-    pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
+    pub fn inks(&self, page: usize) -> Result<Vec<InkShape>> {
         let _guard = lock();
         let p = self.page(page)?;
         let height = p.height().value;
         Ok(p.annotations()
             .iter()
             .enumerate()
-            .filter(|(_, a)| a.annotation_type() == PdfPageAnnotationType::Ink)
-            .map(|(i, a)| {
-                let points = a
-                    .objects()
-                    .iter()
-                    .filter_map(|o| {
-                        Some(
-                            o.as_path_object()?
-                                .segments()
-                                .iter()
-                                .map(|s| (s.x().value, height - s.y().value))
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .flatten()
-                    .collect();
-                (i, points)
+            .filter_map(|(index, a)| {
+                let (segs, style) = read_ink(&a, height)?;
+                let bounds = Rect::from_pdf(a.bounds().ok()?, height);
+                Some(InkShape {
+                    index,
+                    points: flatten(&segs),
+                    bounds,
+                    style,
+                })
             })
             .collect())
+    }
+
+    /// Move or resize one `/Ink` annotation by an affine map over its page. The annotation is
+    /// deleted and drawn again, so it comes back at the end of `/Annots`.
+    ///
+    // ponytail: deleted and re-created rather than transformed in place, because pdfium only
+    // ever grows an appearance stream's `/BBox` when `/Rect` changes: shrinking a box scales
+    // what was drawn into it instead of moving it.
+    pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<()> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let height = p.height().value;
+        let (segs, style) = {
+            let a = p
+                .annotations()
+                .get(index as PdfPageAnnotationIndex)
+                .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+            read_ink(&a, height)
+                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?
+        };
+        let a = p
+            .annotations_mut()
+            .get(index as PdfPageAnnotationIndex)
+            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+        p.annotations_mut()
+            .delete_annotation(a)
+            .context("delete annotation")?;
+        self.put_ink(&mut p, &transformed(&segs, m), style)
     }
 
     /// The document as it now stands, annotations included.
@@ -1148,6 +1263,145 @@ pub fn catmull_rom(points: &[(f32, f32)]) -> Vec<[(f32, f32); 3]> {
         .collect()
 }
 
+/// The path a shape draws, starting with a move.
+fn segments_of(shape: Shape) -> Vec<Seg> {
+    match shape {
+        Shape::Line { a, b } => vec![Seg::Move(a), Seg::Line(b)],
+        Shape::Rect(r) => vec![
+            Seg::Move((r.left, r.top)),
+            Seg::Line((r.right, r.top)),
+            Seg::Line((r.right, r.bottom)),
+            Seg::Line((r.left, r.bottom)),
+            Seg::Close,
+        ],
+        Shape::Circle {
+            centre: (cx, cy),
+            radius: r,
+        } => {
+            // Four quarter arcs, with the control distance that puts a cubic closest to a circle.
+            let k = r * 0.551_915;
+            vec![
+                Seg::Move((cx - r, cy)),
+                Seg::Bezier((cx - r, cy - k), (cx - k, cy - r), (cx, cy - r)),
+                Seg::Bezier((cx + k, cy - r), (cx + r, cy - k), (cx + r, cy)),
+                Seg::Bezier((cx + r, cy + k), (cx + k, cy + r), (cx, cy + r)),
+                Seg::Bezier((cx - k, cy + r), (cx - r, cy + k), (cx - r, cy)),
+                Seg::Close,
+            ]
+        }
+    }
+}
+
+/// The same path under `m`. Control points go with the rest: a Bézier is affine-invariant.
+fn transformed(segs: &[Seg], m: Matrix) -> Vec<Seg> {
+    segs.iter()
+        .map(|seg| match *seg {
+            Seg::Move(p) => Seg::Move(apply(m, p)),
+            Seg::Line(p) => Seg::Line(apply(m, p)),
+            Seg::Bezier(c1, c2, end) => Seg::Bezier(apply(m, c1), apply(m, c2), apply(m, end)),
+            Seg::Close => Seg::Close,
+        })
+        .collect()
+}
+
+/// Every point a path names, control points included.
+fn points_of(segs: &[Seg]) -> impl Iterator<Item = (f32, f32)> + '_ {
+    segs.iter().flat_map(|seg| match *seg {
+        Seg::Move(p) | Seg::Line(p) => vec![p],
+        Seg::Bezier(c1, c2, end) => vec![c1, c2, end],
+        Seg::Close => vec![],
+    })
+}
+
+/// The path as one polyline for [`hit`]: a curve is sampled at three points before its end, and
+/// a close goes back to where the sub-path began.
+///
+// ponytail: one polyline, so a second sub-path is joined to the first by a segment nobody drew.
+// Our paths have one sub-path; another editor's multi-stroke `/Ink` gains a false edge.
+fn flatten(segs: &[Seg]) -> Vec<(f32, f32)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    let mut last = (0.0, 0.0);
+    for seg in segs {
+        match *seg {
+            Seg::Move(p) => {
+                start = Some(p);
+                last = p;
+                out.push(p);
+            }
+            Seg::Line(p) => {
+                last = p;
+                out.push(p);
+            }
+            Seg::Bezier(c1, c2, end) => {
+                out.extend([0.25, 0.5, 0.75].map(|t| cubic(last, c1, c2, end, t)));
+                last = end;
+                out.push(end);
+            }
+            Seg::Close => {
+                if let Some(p) = start {
+                    last = p;
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A point on a cubic Bézier.
+fn cubic(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+    let u = 1.0 - t;
+    let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+    (
+        w[0] * p0.0 + w[1] * p1.0 + w[2] * p2.0 + w[3] * p3.0,
+        w[0] * p0.1 + w[1] * p1.1 + w[2] * p2.1 + w[3] * p3.1,
+    )
+}
+
+/// An `/Ink` annotation's path and style, read back out of its appearance stream; `None` for
+/// any other annotation, or one without a path. pdfium reports a cubic as three consecutive
+/// Bézier points — two controls, then the end.
+fn read_ink(a: &PdfPageAnnotation<'_>, height: f32) -> Option<(Vec<Seg>, InkStyle)> {
+    if a.annotation_type() != PdfPageAnnotationType::Ink {
+        return None;
+    }
+    a.objects().iter().find_map(|o| {
+        let path = o.as_path_object()?;
+        let mut segs = Vec::new();
+        let mut controls = Vec::new();
+        for s in path.segments().iter() {
+            let p = (s.x().value, height - s.y().value);
+            match s.segment_type() {
+                PdfPathSegmentType::MoveTo => segs.push(Seg::Move(p)),
+                PdfPathSegmentType::LineTo => segs.push(Seg::Line(p)),
+                PdfPathSegmentType::BezierTo => {
+                    controls.push(p);
+                    if let [c1, c2, end] = controls[..] {
+                        segs.push(Seg::Bezier(c1, c2, end));
+                        controls.clear();
+                    }
+                }
+                PdfPathSegmentType::Unknown => {}
+            }
+            if s.is_close() {
+                segs.push(Seg::Close);
+            }
+        }
+        // The page-object getters, never the annotation's own: those cast the handle into a
+        // page object once an appearance stream exists (see `annotation_color`).
+        let c = path.stroke_color().ok()?;
+        let style = InkStyle {
+            width: path.stroke_width().ok()?.value,
+            rgba: [c.red(), c.green(), c.blue(), c.alpha()],
+            // ponytail: pdfium-render has no blend-mode getter, and a translucent stroke of ours
+            // is the highlighter, so alpha stands in for `/Multiply`.
+            multiply: c.alpha() < 255,
+        };
+        Some((segs, style))
+    })
+}
+
 /// Whether `at` lies within `radius` of the polyline through `points` — the eraser's hit test.
 pub fn hit(points: &[(f32, f32)], at: (f32, f32), radius: f32) -> bool {
     let near = |a: (f32, f32), b: (f32, f32)| {
@@ -1423,6 +1677,133 @@ mod tests {
         back.delete_annotation(0, strokes[0].0).unwrap();
         assert_eq!(back.annotation_count(0).unwrap(), before);
         assert!(back.ink_paths(0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shape_round_trips_through_save() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let before = doc.annotation_count(0).unwrap();
+        let red = InkStyle {
+            width: 4.0,
+            rgba: [255, 0, 0, 255],
+            multiply: false,
+        };
+        let rect = Rect {
+            left: 20.0,
+            top: 20.0,
+            right: 80.0,
+            bottom: 60.0,
+        };
+        doc.add_shape(0, Shape::Rect(rect), red).unwrap();
+        assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
+        let inks = doc.inks(0).unwrap();
+        assert_eq!(inks.len(), 1, "{inks:?}");
+        let near = |a: f32, b: f32| (a - b).abs() < 0.5;
+        assert!(near(inks[0].points[0].0, 20.0) && near(inks[0].points[0].1, 20.0));
+        // The closing edge is walked too, so the left side answers to the eraser.
+        assert!(hit(&inks[0].points, (20.0, 40.0), 1.0));
+        let b = inks[0].bounds;
+        assert!(
+            near(b.left, 17.0) && near(b.top, 17.0) && near(b.right, 83.0) && near(b.bottom, 63.0),
+            "{b:?}"
+        );
+        assert_eq!(inks[0].style, red);
+
+        let back = reopen(&dir, &doc);
+        assert_eq!(back.ink_paths(0).unwrap().len(), 1);
+        let img = back.render_page(0, 1.0, Theme::Plain).unwrap();
+        let red = img
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[0] > 200 && px[1] < 100 && px[2] < 100);
+        assert!(red, "the shape is drawn");
+    }
+
+    #[test]
+    fn transform_ink_moves_the_bounds_and_undoes_itself() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let style = InkStyle {
+            width: 2.0,
+            rgba: [0, 0, 255, 255],
+            multiply: false,
+        };
+        let line = Shape::Line {
+            a: (20.0, 20.0),
+            b: (60.0, 20.0),
+        };
+        doc.add_shape(0, line, style).unwrap();
+        let before = doc.inks(0).unwrap().remove(0);
+        let m = [1.0, 0.0, 0.0, 1.0, 10.0, 5.0];
+        doc.transform_ink(0, before.index, m).unwrap();
+        let inks = doc.inks(0).unwrap();
+        assert_eq!(inks.len(), 1);
+        let moved = &inks[0];
+        assert_eq!(moved.index, doc.annotation_count(0).unwrap() - 1);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.05;
+        assert!(near(moved.bounds.left, before.bounds.left + 10.0));
+        assert!(near(moved.bounds.top, before.bounds.top + 5.0));
+        assert!(near(moved.points[0].0, 30.0) && near(moved.points[0].1, 25.0));
+        assert_eq!(moved.style, style);
+
+        doc.transform_ink(0, moved.index, invert(m)).unwrap();
+        let back = doc.inks(0).unwrap().remove(0);
+        assert!(
+            near(back.bounds.left, before.bounds.left) && near(back.bounds.top, before.bounds.top)
+        );
+        assert!(
+            near(back.bounds.right, before.bounds.right)
+                && near(back.bounds.bottom, before.bounds.bottom)
+        );
+    }
+
+    #[test]
+    fn flattened_ink_hits_a_circles_rim() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let style = InkStyle {
+            width: 2.0,
+            rgba: [0, 0, 0, 255],
+            multiply: false,
+        };
+        let circle = Shape::Circle {
+            centre: (100.0, 50.0),
+            radius: 30.0,
+        };
+        doc.add_shape(0, circle, style).unwrap();
+        let (_, points) = doc.ink_paths(0).unwrap().remove(0);
+        // The rim at 45°, the control polygon's corner 4 pt outside it, and the centre.
+        assert!(hit(&points, (121.2, 28.8), 1.0));
+        assert!(!hit(&points, (83.4, 20.0), 3.0));
+        assert!(!hit(&points, (100.0, 50.0), 25.0));
+    }
+
+    #[test]
+    fn flatten_samples_a_bezier_and_a_matrix_inverts() {
+        let segs = [
+            Seg::Move((0.0, 0.0)),
+            Seg::Bezier((0.0, 0.0), (10.0, 0.0), (10.0, 0.0)),
+            Seg::Close,
+        ];
+        let flat = flatten(&segs);
+        assert_eq!(flat.len(), 6, "{flat:?}");
+        assert!(flat.iter().all(|p| p.1 == 0.0));
+        assert_eq!(flat[4], (10.0, 0.0));
+        assert_eq!(flat[5], (0.0, 0.0));
+
+        let s = [2.0, 0.0, 0.0, 0.5, 3.0, 4.0];
+        let p = (7.0, -2.0);
+        let back = apply(invert(s), apply(s, p));
+        assert!(
+            (back.0 - p.0).abs() < 1e-5 && (back.1 - p.1).abs() < 1e-5,
+            "{back:?}"
+        );
     }
 
     #[test]

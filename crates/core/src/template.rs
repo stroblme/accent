@@ -3,14 +3,14 @@
 use chrono::NaiveDateTime;
 use chrono::format::StrftimeItems;
 
-/// Expand a template. Returns the text and, when the template had a `{{cursor}}`, the byte offset
-/// where the caret belongs.
+/// Expand a template. Returns the text and the byte offset of every `{{cursor}}`, in order: the
+/// first is where the caret belongs, and the rest are the stops Tab walks after it.
 ///
 /// A placeholder accent does not know, or one with a format string chrono rejects, is copied out
 /// verbatim: a typo in a template should be visible in the new note, not destroy its text.
-pub fn render(text: &str, title: &str, now: NaiveDateTime) -> (String, Option<usize>) {
+pub fn render(text: &str, title: &str, now: NaiveDateTime) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(text.len());
-    let mut cursor = None;
+    let mut cursors = Vec::new();
     let mut rest = text;
 
     while let Some(open) = rest.find("{{") {
@@ -21,28 +21,37 @@ pub fn render(text: &str, title: &str, now: NaiveDateTime) -> (String, Option<us
         out.push_str(&rest[..open]);
         match expand(name, title, now) {
             Some(value) => out.push_str(&value),
-            // The marker itself never reaches the note; only the first one places the caret.
-            None if name == "cursor" => {
-                cursor.get_or_insert(out.len());
-            }
+            // The marker itself never reaches the note.
+            None if name == "cursor" => cursors.push(out.len()),
             None => out.push_str(&rest[open..open + 2 + close + 2]),
         }
         rest = &rest[open + 2 + close + 2..];
     }
     out.push_str(rest);
-    (out, cursor)
+    (out, cursors)
 }
 
+/// `title`, `time`, `date`, each with an optional `:format`; and `date` with a signed day offset
+/// before the colon, so `{{date-1}}` is yesterday and `{{date+3:%A}}` the weekday in three days.
 fn expand(name: &str, title: &str, now: NaiveDateTime) -> Option<String> {
-    match name {
-        "date" => strftime("%Y-%m-%d", now),
-        "time" => strftime("%H:%M", now),
-        "title" => Some(title.to_string()),
-        _ => match name.split_once(':') {
-            Some(("date" | "time", fmt)) => strftime(fmt, now),
-            _ => None,
-        },
+    let (key, fmt) = name
+        .split_once(':')
+        .map_or((name, None), |(k, f)| (k, Some(f)));
+    match key {
+        "title" => return Some(title.to_string()),
+        "time" => return strftime(fmt.unwrap_or("%H:%M"), now),
+        _ => {}
     }
+    let (key, days) = match key.find(['+', '-']) {
+        Some(at) => (&key[..at], key[at..].parse::<i64>().ok()?),
+        None => (key, 0),
+    };
+    (key == "date").then(|| {
+        strftime(
+            fmt.unwrap_or("%Y-%m-%d"),
+            now + chrono::Duration::days(days),
+        )
+    })?
 }
 
 /// The front-matter key a template says its destination with.
@@ -145,7 +154,13 @@ mod tests {
             now(),
         );
         assert_eq!(out, "# Weekly sync\n\ndate: 2026-09-03 time: 14:05\n");
-        assert_eq!(cursor, None);
+        assert!(cursor.is_empty());
+    }
+
+    #[test]
+    fn render_offsets_a_date_by_days() {
+        let (out, _) = render("{{date-1}} {{date+3:%A}} {{date+x}} {{date1}}", "x", now());
+        assert_eq!(out, "2026-09-02 Sunday {{date+x}} {{date1}}");
     }
 
     #[test]
@@ -155,19 +170,19 @@ mod tests {
     }
 
     #[test]
-    fn render_reports_cursor_offset_after_substitution() {
-        let (out, cursor) = render("{{date}} log\n- {{cursor}}done", "x", now());
-        assert_eq!(out, "2026-09-03 log\n- done");
+    fn render_reports_every_cursor_offset_after_substitution() {
+        let (out, cursors) = render("{{date}} log\n- {{cursor}}done {{cursor}}", "x", now());
+        assert_eq!(out, "2026-09-03 log\n- done ");
         // Not 15: `{{date}}` is two bytes shorter than the date it expands to.
-        assert_eq!(cursor, Some(17));
-        assert_eq!(&out[17..], "done");
+        assert_eq!(cursors, [17, 22]);
+        assert_eq!(&out[17..], "done ");
     }
 
     #[test]
     fn render_leaves_unknown_and_invalid_placeholders_verbatim() {
         let (out, cursor) = render("{{nope}} {{date:%Q}} {{title}} {{", "Note", now());
         assert_eq!(out, "{{nope}} {{date:%Q}} Note {{");
-        assert_eq!(cursor, None);
+        assert!(cursor.is_empty());
     }
 
     #[test]

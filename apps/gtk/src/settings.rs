@@ -63,6 +63,7 @@ fn page(
     page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
     page.add(&git_group(&config, &save));
+    page.add(&pdf_group(&config, &save));
     if let Some(root) = &root {
         page.add(&vault_group(&config, root, &save));
     }
@@ -294,6 +295,28 @@ fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Preferen
         }
     });
     group.add(&tree);
+
+    group
+}
+
+// -------------------------------------------------------------------------------------- pdf
+
+fn pdf_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("PDF").build();
+
+    let mouse = adw::SwitchRow::builder()
+        .title("Draw with the Mouse")
+        .subtitle("Even when a pen is attached")
+        .active(config.borrow().drawing.mouse)
+        .build();
+    mouse.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().drawing.mouse = r.is_active();
+            save();
+        }
+    });
+    group.add(&mouse);
 
     group
 }
