@@ -240,20 +240,6 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj().clone();
 
-            // Capture, so the keys we mirror never reach the view's own bindings. The window's
-            // capture-phase controller runs first and takes the caret and scroll chords with it,
-            // so those never arrive here either.
-            let keys = gtk::EventControllerKey::new();
-            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-            keys.connect_key_pressed(glib::clone!(
-                #[weak]
-                obj,
-                #[upgrade_or]
-                glib::Propagation::Proceed,
-                move |_, key, _, state| obj.press(key, state)
-            ));
-            obj.add_controller(keys);
-
             // The buffer arrives after construction. Every `mark-set` on it that we did not
             // cause is the user moving the primary caret — a click, a selection, a find-bar
             // jump — so this one hook covers all of them without a gesture of its own.
@@ -469,9 +455,8 @@ impl View {
         }
     }
 
-    /// Whether a key press is going to be replayed at more than one caret. `typing.rs` asks
-    /// before it acts: its controller sits on the same widget in the same phase, so the order
-    /// GTK runs the two in is not something to depend on.
+    /// Whether a key press is going to be replayed at more than one caret, which is what
+    /// `editor::keys` asks before offering a press to anything below the carets in its chain.
     pub fn has_carets(&self) -> bool {
         !self.imp().carets.borrow().is_empty()
     }
@@ -589,8 +574,9 @@ impl View {
         self.scroll_mark_onscreen(&insert);
     }
 
-    /// One key press, at every caret. `pub(crate)` so a headless check can drive the carets the
-    /// way the key controller does, which is the only way to see them without a screen.
+    /// One key press, at every caret. Called by `editor::keys`, and by the headless check that
+    /// drives the carets the way that dispatcher does, which is the only way to see them without
+    /// a screen.
     pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
         if self.imp().carets.borrow().is_empty() {
             return glib::Propagation::Proceed;

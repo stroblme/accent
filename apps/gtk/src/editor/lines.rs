@@ -243,8 +243,7 @@ impl Tab {
                 self.loading.set(true);
                 self.buffer.begin_irreversible_action();
                 self.buffer.delete(&mut start, &mut end);
-                self.view
-                    .push_snippet(&snippet(&text, stops), Some(&mut self.buffer.start_iter()));
+                self.push_snippet(&snippet(&text, stops), &mut self.buffer.start_iter());
                 self.buffer.end_irreversible_action();
                 self.loading.set(false);
                 self.buffer.set_modified(false);
@@ -258,7 +257,7 @@ impl Tab {
         let mut at = caret(&self.buffer);
         match stops.is_empty() {
             true => self.buffer.insert(&mut at, text),
-            false => self.view.push_snippet(&snippet(text, stops), Some(&mut at)),
+            false => self.push_snippet(&snippet(text, stops), &mut at),
         }
     }
 }

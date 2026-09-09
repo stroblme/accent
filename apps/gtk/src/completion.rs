@@ -343,7 +343,10 @@ mod provider_imp {
                 // accepting. A snippet the parser refuses goes in as the text it is, which is
                 // wrong in a small way rather than losing the acceptance altogether.
                 true => match sourceview5::Snippet::new_parsed(&item.insert) {
-                    Ok(snippet) => view.push_snippet(&snippet, Some(&mut start)),
+                    Ok(snippet) => match self.tab() {
+                        Some(tab) => tab.push_snippet(&snippet, &mut start),
+                        None => view.push_snippet(&snippet, Some(&mut start)),
+                    },
                     Err(e) => {
                         tracing::debug!("cannot parse the snippet {:?}: {e}", item.insert);
                         buffer.insert(&mut start, &item.insert);

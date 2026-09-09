@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{diagnostics, diff, fold, highlight, lang, multicaret, typing};
+use crate::{diagnostics, diff, fold, highlight, lang, multicaret};
 use accent_api::{Diagnostic, Fold};
 use accent_core::fs::{self, Etag};
 use accent_core::markdown::Link;
@@ -23,6 +23,7 @@ use std::time::Duration;
 
 mod banner;
 mod compare;
+mod keys;
 mod lines;
 mod page;
 mod search;
@@ -189,6 +190,12 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
+    /// Whether the completion popup is up. Read by every step of [`keys`]'s chain: while the
+    /// popup is showing it owns the keyboard, and nothing else in the view may answer a key.
+    pub(crate) popup_shown: Cell<bool>,
+    /// The last template pushed into the view, kept only to ask whether its stops are still being
+    /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
+    snippet: RefCell<Option<sourceview5::Snippet>>,
     debounce: RefCell<Option<glib::SourceId>>,
     autosave: RefCell<Option<glib::SourceId>>,
     cursor: RefCell<Option<glib::SourceId>>,
@@ -309,13 +316,6 @@ pub fn open(
     // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
     // does nothing is one that makes the user select the line first.
     line_clipboard(&view);
-    // Markdown behaviour: continuing a list or a fence on Return, and closing a bracket as it is
-    // typed. In a Python file both would be wrong rather than merely unused. Completion is not
-    // here: every flavour has it now, and `lang::attach` installs it once there is a vault to ask.
-    if flavour.is_note() {
-        typing::install(&view);
-    }
-
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
     // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
@@ -448,6 +448,8 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
+        popup_shown: Cell::new(false),
+        snippet: RefCell::new(None),
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
         cursor: RefCell::new(None),
@@ -458,6 +460,9 @@ pub fn open(
         on_follow: RefCell::new(None),
         lang: lang::State::default(),
     });
+    // One controller for the keys the popup, the signature, the ghost text, the extra carets and
+    // the markdown helpers all want; `keys` is where their order is written down.
+    keys::install(&tab);
     tab.set_font(prefs.font.as_deref(), zoom);
     tab.set_spellcheck(prefs.spellcheck);
     tab.set_minimap(prefs.minimap);
@@ -996,6 +1001,22 @@ impl Tab {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
             view.add_caret(below);
         }
+    }
+
+    /// Park `snippet` in the view at `at` and remember it, so a Tab pressed while its stops are
+    /// still being walked goes to the template rather than to a suggestion.
+    pub(crate) fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter) {
+        self.view.push_snippet(snippet, Some(at));
+        *self.snippet.borrow_mut() = Some(snippet.clone());
+    }
+
+    /// Whether a template's stops are still being walked. A snippet lets its buffer go when it
+    /// finishes, which is the only thing GtkSourceView 5.20 says about it from the outside.
+    pub(crate) fn snippet_active(&self) -> bool {
+        self.snippet
+            .borrow()
+            .as_ref()
+            .is_some_and(|snippet| snippet.buffer().is_some())
     }
 
     /// The view as the subclass that paints ghost text and holds the extra carets.
