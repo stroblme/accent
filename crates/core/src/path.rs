@@ -26,6 +26,26 @@ pub fn stem(rel: &str) -> String {
     markdown::strip_ext(basename(rel))
 }
 
+/// Where a link written inside the note at `dir` points, as a vault-relative path: `../a.md`
+/// from `sub/deep` is `sub/a.md`, `./a.md` from `sub` is `sub/a.md`. A `..` past the root is
+/// dropped rather than kept, and a leading `/` means the root, the way a site-absolute link does.
+pub fn resolve(dir: &str, target: &str) -> String {
+    let mut parts: Vec<&str> = match target.strip_prefix('/') {
+        Some(_) => Vec::new(),
+        None => dir.split('/').filter(|s| !s.is_empty()).collect(),
+    };
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
 /// The half-open `rel_path` range that is exactly the descendants of `rel`: `[rel/, rel0)`,
 /// because `'0'` is the byte after `'/'`. Keeps a subtree query on the `rel_path` index where a
 /// `LIKE` would fall back to a scan.
@@ -47,5 +67,15 @@ mod tests {
         assert_eq!(stem("sub/Rev 1.2.md"), "Rev 1.2");
         assert_eq!(stem("Makefile"), "Makefile");
         assert_eq!(subtree_range("a/b"), ("a/b/".into(), "a/b0".into()));
+    }
+
+    #[test]
+    fn resolves_a_link_against_the_note_that_holds_it() {
+        assert_eq!(resolve("sub/deep", "../a.md"), "sub/a.md");
+        assert_eq!(resolve("sub", "./a.md"), "sub/a.md");
+        assert_eq!(resolve("sub", "a.md"), "sub/a.md");
+        assert_eq!(resolve("", "a.md"), "a.md");
+        assert_eq!(resolve("sub", "../../a.md"), "a.md");
+        assert_eq!(resolve("sub", "/a.md"), "a.md");
     }
 }

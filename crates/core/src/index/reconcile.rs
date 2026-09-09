@@ -353,13 +353,22 @@ fn upsert(
 
     if let Some(a) = analysis.as_ref() {
         for l in &a.links {
+            // A wikilink names a note from the vault root; a markdown link names it from the
+            // note's own directory, so it is turned into a vault path here, where that
+            // directory is known, and resolves by the same rules as everything else.
+            let target = match l.kind {
+                markdown::LinkKind::Markdown => {
+                    path::resolve(path::parent_dir(&f.rel_path), &l.target)
+                }
+                _ => l.target.clone(),
+            };
             tx.prepare_cached(
                 "INSERT INTO links(src_file, target, resolved_file, kind, anchor, alias, byte_start, byte_end)
                  VALUES(?1,?2,NULL,?3,?4,?5,?6,?7)",
             )?
             .execute(params![
                 id,
-                l.target,
+                target,
                 link_kind_i64(l.kind),
                 l.anchor,
                 l.alias,
@@ -471,6 +480,34 @@ mod tests {
         assert_eq!(
             &buffer.text[from_crlf.byte_start as usize..from_crlf.byte_end as usize],
             "[[Beta]]"
+        );
+    }
+
+    /// A markdown link is relative to the note that holds it, so `../a.md` in `sub/` is `a.md`.
+    #[test]
+    fn a_relative_markdown_link_resolves_from_the_notes_directory() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("sub/Beta.md"),
+            "# Beta\n[up](../a.md) [near](Beta.md) [dot](./c.pdf)\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let from_beta = |rel: &str| {
+            ix.backlinks(rel)
+                .unwrap()
+                .iter()
+                .filter(|b| b.src_rel_path == "sub/Beta.md")
+                .count()
+        };
+        assert_eq!(from_beta("a.md"), 1);
+        assert_eq!(from_beta("sub/Beta.md"), 1, "a plain name is a sibling");
+        assert_eq!(
+            ix.unresolved_links().unwrap(),
+            vec![("sub/Beta.md".to_string(), "sub/c.pdf".to_string())],
+            "the dangling target is reported as the vault path it names"
         );
     }
 
