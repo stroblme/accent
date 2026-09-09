@@ -134,6 +134,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-page", "Fit Page", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
     ("win.pdf-copy", "Copy Selection", &[]),
+    // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
+    // note is GtkSourceView's own undo, and an application accelerator would take it from every
+    // text view in the window. The PDF tab's key controller fires this one.
+    ("win.pdf-undo", "Undo Drawing", &[]),
     ("win.pdf-copy-link", "Copy Link to Selection", &[]),
     ("win.pdf-export-highlights", "Export Highlights to PDF", &[]),
     ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),
@@ -273,6 +277,7 @@ impl App {
             "forward" => self.navigate(true),
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
             "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
+            "pdf-undo" => self.with_pdf(|pdf| pdf.undo()),
             "pdf-copy-link" => self.with_pdf(|pdf| pdf.copy_link()),
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
@@ -944,14 +949,15 @@ mod tests {
         }
     }
 
-    /// The two paging commands are in the table so they list in the palette, and carry no
-    /// accelerator there on purpose: a reader pages with `Space`, `n`, `p` and the arrows, and an
-    /// application accelerator is dispatched at the window ahead of whatever has the keyboard, so
-    /// a bare `space` in the table would stop the editor, the terminal and every entry in the app
-    /// from taking one. The keys stay on the PDF tab's own controller, which fires these.
+    /// The reader's own keys are in the table so they list in the palette, and carry no
+    /// accelerator there on purpose: a reader pages with `Space`, `n`, `p` and the arrows and
+    /// undoes a stroke with `Ctrl+Z`, and an application accelerator is dispatched at the window
+    /// ahead of whatever has the keyboard — so a bare `space` in the table would stop the editor,
+    /// the terminal and every entry in the app from taking one, and `<Control>z` would take undo
+    /// from every text view. The keys stay on the PDF tab's own controller, which fires these.
     #[test]
     fn the_paging_commands_are_listed_and_carry_no_accelerator() {
-        for action in ["win.pdf-next-page", "win.pdf-previous-page"] {
+        for action in ["win.pdf-next-page", "win.pdf-previous-page", "win.pdf-undo"] {
             let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
             let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));
             assert!(

@@ -347,10 +347,15 @@ impl PdfTab {
     /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
     /// place the keys and the palette meet.
     fn page(&self, forward: bool) {
-        let action = match forward {
+        self.run(match forward {
             true => "win.pdf-next-page",
             false => "win.pdf-previous-page",
-        };
+        });
+    }
+
+    /// Fire one of the window's commands from the page. What a key over a PDF does is a command
+    /// like any other, so it lists in the palette and can be rebound.
+    fn run(&self, action: &str) {
         let _ = self.view.activate_action(action, None);
     }
 
@@ -384,6 +389,11 @@ impl PdfTab {
     pub fn set_note_links(self: &Rc<Self>, links: Vec<PdfLink>) {
         *self.notes.borrow_mut() = links.clone();
         self.ask(Request::Highlights(links));
+    }
+
+    /// Whether any note links into this document, which is whether there is anything to export.
+    pub fn has_note_links(&self) -> bool {
+        !self.notes.borrow().is_empty()
     }
 
     /// Write those highlights into the file itself, as `/Highlight` annotations in `color`.
@@ -509,6 +519,15 @@ impl PdfTab {
         self.view.mode().action().map(crate::actions::label_of)
     }
 
+    /// Take back the last stroke drawn or move made in this tab, through `win.pdf-undo`.
+    ///
+    // ponytail: no redo. The ledger is a list of steps to walk backwards, and a redo wants the
+    // step that was undone kept with the geometry to put it back — which for a stroke means
+    // holding its path after the annotation is gone.
+    pub fn undo(self: &Rc<Self>) {
+        self.ask(Request::Undo);
+    }
+
     /// Called when the pen is picked up or put down.
     pub fn connect_mode(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
         *self.on_mode.borrow_mut() = Some(Rc::new(f));
@@ -599,13 +618,14 @@ impl PdfTab {
         self.current.set(None);
         self.view.set_marks(std::collections::HashMap::new());
         self.query.set(self.query.get() + 1);
-        if !text.is_empty() {
-            self.ask(Request::Search {
-                query: self.query.get(),
-                text: text.to_string(),
-                from: 0,
-            });
-        }
+        // Sent even when there is nothing to look for: a query of the same kind takes over from
+        // the one running, so this is what stops a search the reader has cleared or closed the
+        // bar on, which used to finish the whole document into replies nobody reads.
+        self.ask(Request::Search {
+            query: self.query.get(),
+            text: text.to_string(),
+            from: 0,
+        });
         self.emit(&self.on_matches);
     }
 
@@ -942,8 +962,11 @@ impl PdfTab {
             glib::Propagation::Proceed,
             move |_, key, _, state| {
                 let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                // Through the window's actions, not past them: the key is on the tab because
+                // `Ctrl+C` and `Ctrl+Z` belong to whatever has the keyboard, but what they do is
+                // the command the palette and the menus name.
                 if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-                    tab.copy_selection();
+                    tab.run("win.pdf-copy");
                     return glib::Propagation::Stop;
                 }
                 // The pen's own two keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
@@ -952,7 +975,7 @@ impl PdfTab {
                     if key == gtk::gdk::Key::z
                         && state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                     {
-                        tab.ask(Request::Undo);
+                        tab.run("win.pdf-undo");
                         return glib::Propagation::Stop;
                     }
                     if key == gtk::gdk::Key::Escape {
@@ -960,6 +983,11 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
+                // `Space`, `n`, `p` and the arrows stay bare keys here rather than joining the
+                // table: an application accelerator is dispatched at the window ahead of whatever
+                // has the keyboard, so a bare `space` in it would stop every entry in the app
+                // from taking one. Paging still goes through the window's own commands below.
+                //
                 // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
                 // scroller's own step: only the bare key reads the document.
                 let bare = !state.intersects(
@@ -1034,21 +1062,21 @@ impl PdfTab {
                 if query != self.query.get() {
                     return;
                 }
+                let found: Vec<pdf::Rect> = hits
+                    .iter()
+                    .filter_map(|hit| hit.iter().copied().reduce(pdf::Rect::union))
+                    .collect();
+                if found.is_empty() {
+                    return;
+                }
+                // Page order is the order a reader steps through them, and the thread walks the
+                // document forwards — so this page's matches go after the ones already found,
+                // which a binary search places without sorting the list again per reply.
                 let mut matches = self.matches.borrow_mut();
-                for hit in &hits {
-                    if let Some(rect) = hit.iter().copied().reduce(pdf::Rect::union) {
-                        matches.push((page, rect));
-                    }
-                }
-                // Kept in page order, which is the order a reader steps through them.
-                matches.sort_by_key(|(page, _)| *page);
-                let mut marks: std::collections::HashMap<usize, Vec<pdf::Rect>> =
-                    std::collections::HashMap::new();
-                for (page, rect) in matches.iter() {
-                    marks.entry(*page).or_default().push(*rect);
-                }
+                let at = matches.partition_point(|(seen, _)| *seen <= page);
+                matches.splice(at..at, found.iter().map(|rect| (page, *rect)));
                 drop(matches);
-                self.view.set_marks(marks);
+                self.view.add_marks(page, found);
                 self.emit(&self.on_matches);
             }
             Reply::Highlights(map) => self.view.set_highlights(map),

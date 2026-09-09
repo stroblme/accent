@@ -439,6 +439,7 @@ impl App {
                 false => pdfview::Mode::Select,
             });
         }
+        self.sync_export();
         // Only a PDF can be drawn on, so the button goes with the tab.
         self.drawing_button.set_visible(self.active_pdf().is_some());
         self.drawing_button.set_active(self.drawing.get());
@@ -480,6 +481,23 @@ impl App {
         match vault.pdf_links(&key) {
             Ok(links) => pdf.set_note_links(links),
             Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
+        }
+        self.sync_export();
+    }
+
+    /// Export Highlights is offered only where there is a highlight to export: over a PDF no note
+    /// links to, the command greys out in the page's menu and in the palette rather than being
+    /// offered and answering "Nothing new to export".
+    pub fn sync_export(&self) {
+        let offered = self
+            .active_pdf()
+            .is_some_and(|pdf| pdf.has_note_links() && self.pdf_is_writable(&pdf));
+        if let Some(action) = self
+            .window
+            .lookup_action("pdf-export-highlights")
+            .and_downcast::<gio::SimpleAction>()
+        {
+            action.set_enabled(offered);
         }
     }
 

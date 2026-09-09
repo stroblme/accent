@@ -3,7 +3,7 @@
 //! Nothing here knows about `App`: the window takes the shared config and two callbacks and hands
 //! itself back, so the caller opens the vault and closes this window on its own terms.
 
-use crate::fileops;
+use crate::pathfield;
 use accent_api::ssh;
 use accent_core::config::Config;
 use adw::prelude::*;
@@ -333,7 +333,7 @@ pub(crate) fn connect_dialog(
     // The folders come from the host itself, over a connection this dialog makes quietly and
     // gives up on without saying anything. `Probe` is where every rule about that lives.
     let probe = Rc::new(Probe::default());
-    let path_row = fileops::path_field(&path, "Folders on the host", {
+    let path_row = pathfield::path_field(&path, "Folders on the host", {
         // Weak on the entry: it owns this closure through its own handler.
         let (probe, host, asked) = (probe.clone(), host.clone(), path.downgrade());
         move |typed| {
@@ -342,7 +342,7 @@ pub(crate) fn connect_dialog(
             };
             // The keyboard has to be in this field: typing a host name is not asking for a
             // connection to whatever the half-typed name happens to resolve to.
-            if !fileops::typing_here(&entry) {
+            if !pathfield::typing_here(&entry) {
                 return Vec::new();
             }
             let Ok(url) = ssh::parse(&format!("ssh://{}/", host.text().trim())) else {
@@ -354,7 +354,7 @@ pub(crate) fn connect_dialog(
             };
             probe
                 .folders(&dir, &entry)
-                .map_or_else(Vec::new, |folders| fileops::completions(typed, &folders))
+                .map_or_else(Vec::new, |folders| pathfield::completions(typed, &folders))
         }
     });
 
@@ -367,12 +367,7 @@ pub(crate) fn connect_dialog(
     form.append(&path_row);
     form.append(&why);
 
-    let dialog = adw::AlertDialog::new(Some("Open Remote Vault"), None);
-    dialog.set_extra_child(Some(&form));
-    dialog.add_responses(&[("cancel", "Cancel"), (CONNECT, "Connect")]);
-    dialog.set_response_appearance(CONNECT, adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some(CONNECT));
-    dialog.set_close_response("cancel");
+    let dialog = crate::dialogs::name_dialog_with("Open Remote Vault", CONNECT, "Connect", &form);
     // Enter in either field activates the default response, which is this one, so an empty form
     // has to leave it unusable rather than merely dim.
     dialog.set_response_enabled(CONNECT, false);
@@ -499,7 +494,7 @@ impl Probe {
                 }
             }
             if let Some(entry) = asked.upgrade() {
-                fileops::look_again(&entry);
+                pathfield::look_again(&entry);
             }
         });
         None

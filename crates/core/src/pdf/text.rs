@@ -112,6 +112,17 @@ pub fn selection_quads(glyphs: &[Glyph], sel: [usize; 4]) -> Option<(Range<usize
     Some((start..end, quads_between(glyphs, &lines, start, end)))
 }
 
+/// The top of the `line`-th visual line of a page, in page points.
+///
+/// What a selection link's first number means. A link whose numbers no longer fit the document
+/// is re-anchored by searching the text it quotes, and that number is all there is to say which
+/// of several identical phrases on the page was meant.
+pub fn line_top(glyphs: &[Glyph], line: usize) -> Option<f32> {
+    let lines = line_groups(glyphs);
+    let range = lines.get(line)?.clone();
+    glyphs[range].iter().map(|g| g.rect.top).reduce(f32::min)
+}
+
 /// Whether two quad lists cover the same place, to half a point.
 ///
 /// What tells an exported highlight from the note link it came from, so a second export writes

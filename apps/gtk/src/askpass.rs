@@ -9,6 +9,7 @@
 //! ssh sets when the answer it wants is `yes` or `no` — an unknown host key — rather than a secret:
 //! answering that one with a password field hands ssh a passphrase where it waits for a word.
 
+use crate::dialogs::alert;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
@@ -123,23 +124,31 @@ fn present(
 
 /// The unknown host key. ssh accepts `yes`, and reads anything else as a refusal.
 fn confirm_dialog(prompt: &str) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(Some("Continue Connecting?"), Some(prompt));
-    dialog.add_responses(&[("cancel", "Cancel"), (CONFIRM, "Continue")]);
-    dialog.set_response_appearance(CONFIRM, adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some(CONFIRM));
-    dialog.set_close_response("cancel");
+    let dialog = alert(
+        "Continue Connecting?",
+        prompt,
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            (CONFIRM, "Continue", adw::ResponseAppearance::Suggested),
+        ],
+        CONFIRM,
+    );
     dialog.set_title(TITLE);
     dialog
 }
 
 /// A passphrase, a password or a one-time code — whatever ssh's prompt asks for, typed once.
 fn secret_dialog(prompt: &str, entry: &gtk::PasswordEntry) -> adw::AlertDialog {
-    let dialog = adw::AlertDialog::new(Some("Authentication Required"), Some(prompt));
+    let dialog = alert(
+        "Authentication Required",
+        prompt,
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            (CONFIRM, "Unlock", adw::ResponseAppearance::Suggested),
+        ],
+        CONFIRM,
+    );
     dialog.set_extra_child(Some(entry));
-    dialog.add_responses(&[("cancel", "Cancel"), (CONFIRM, "Unlock")]);
-    dialog.set_response_appearance(CONFIRM, adw::ResponseAppearance::Suggested);
-    dialog.set_default_response(Some(CONFIRM));
-    dialog.set_close_response("cancel");
     // There is one thing to do here, so the keyboard starts in the field rather than on a button.
     dialog.set_focus(Some(entry));
     dialog.set_title(TITLE);

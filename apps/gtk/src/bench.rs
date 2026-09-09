@@ -329,7 +329,7 @@ fn bench_keys(app: &Rc<App>) {
 /// beats `GtkText`'s own binding is still a claim only a real session can settle.
 fn bench_paths(app: &Rc<App>) {
     let entry = gtk::Entry::new();
-    let field = fileops::path_field(&entry, "bench", |_| {
+    let field = crate::pathfield::path_field(&entry, "bench", |_| {
         ["Archive/", "Attachments/", "Notes/"]
             .iter()
             .map(|name| (*name).to_string())

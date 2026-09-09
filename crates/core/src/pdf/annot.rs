@@ -1,5 +1,8 @@
 //! Annotations: reading and writing `/Highlight` and `/Ink`, and the colour trap around both.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
@@ -36,18 +39,29 @@ impl PdfDoc {
     pub fn add_highlights(&mut self, highlights: &[Highlight]) -> Result<usize> {
         let _guard = lock();
         let mut added = 0;
+        // What each page already carries, read once for that page and kept up to date as this
+        // call adds to it. Asking the page again per highlight walked its `/Annots` array for
+        // every one of them, which on a page with many is quadratic.
+        let mut known: HashMap<usize, Vec<Vec<Rect>>> = HashMap::new();
         for h in highlights {
             let mut p = self.page(h.page)?;
             // Manual: under the default every annotation added re-serialises the *page's* content
             // stream, which we never touch. The annotation's own appearance stream is written by
             // pdfium either way.
             p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-            if highlights_of(h.page, &p)
-                .iter()
-                .any(|e| same_quads(&e.quads, &h.quads))
-            {
+            let existing = match known.entry(h.page) {
+                Entry::Occupied(found) => found.into_mut(),
+                Entry::Vacant(slot) => slot.insert(
+                    highlights_of(h.page, &p)
+                        .into_iter()
+                        .map(|e| e.quads)
+                        .collect(),
+                ),
+            };
+            if existing.iter().any(|quads| same_quads(quads, &h.quads)) {
                 continue;
             }
+            existing.push(h.quads.clone());
             let height = p.height().value;
             let bounds = h
                 .quads

@@ -66,6 +66,29 @@ pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
         .collect()
 }
 
+/// Line diff of two texts without the word-level refinement [`lines`] does: the same rows in the
+/// same order, every `emphasis` empty.
+///
+/// What a gutter needs — which lines changed, and how — for a fraction of the cost:
+/// `iter_inline_changes` re-diffs each hunk word by word under a 500 ms budget, and a change bar
+/// three pixels wide has nowhere to put the answer.
+pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
+    TextDiff::from_lines(old, new)
+        .iter_all_changes()
+        .map(|c| DiffLine {
+            op: match c.tag() {
+                ChangeTag::Equal => Op::Equal,
+                ChangeTag::Delete => Op::Delete,
+                ChangeTag::Insert => Op::Insert,
+            },
+            old_line: c.old_index().map(|i| i + 1),
+            new_line: c.new_index().map(|i| i + 1),
+            text: c.value().trim_end_matches(['\r', '\n']).to_string(),
+            emphasis: Vec::new(),
+        })
+        .collect()
+}
+
 /// One row of a side-by-side view: indices into the `DiffLine` list, `None` where a side has no
 /// line and shows a filler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +229,24 @@ mod tests {
                 line(Op::Insert, None, Some(2), "bravo two", Some(5..9)),
                 line(Op::Equal, Some(3), Some(3), "charlie", None),
             ]
+        );
+    }
+
+    #[test]
+    fn line_ops_is_the_same_diff_without_the_word_level_pass() {
+        let (old, new) = ("alpha\nbravo\ncharlie\n", "alpha\nbravo two\ncharlie\n");
+        let refined = lines(old, new);
+        let plain = line_ops(old, new);
+        assert!(plain.iter().all(|l| l.emphasis.is_empty()));
+        assert_eq!(
+            plain,
+            refined
+                .into_iter()
+                .map(|l| DiffLine {
+                    emphasis: Vec::new(),
+                    ..l
+                })
+                .collect::<Vec<_>>()
         );
     }
 

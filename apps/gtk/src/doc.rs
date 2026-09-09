@@ -140,7 +140,7 @@ pub fn is_loose_key(key: &str) -> bool {
 
 /// The last path segment, which is what a tab is titled with.
 pub fn file_name(key: &str) -> &str {
-    key.rsplit('/').next().unwrap_or(key)
+    accent_core::path::basename(key)
 }
 
 /// What a path opens as, decided by its name alone. Whether a `Text` file really is text is a

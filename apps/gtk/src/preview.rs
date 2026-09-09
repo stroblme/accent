@@ -9,6 +9,8 @@
 //! stylesheet. Editor and preview therefore agree by construction, in every theme and accent.
 
 use crate::theme;
+use accent_core::markdown::percent_decode;
+use accent_core::path::parent_dir;
 use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::path::{Component, Path, PathBuf};
@@ -716,46 +718,16 @@ fn accent_uri(uri: &str) -> Option<(&str, String)> {
     Some((host, percent_decode(path)))
 }
 
-/// Percent-decode a URI component. A malformed escape is left as written.
-fn percent_decode(s: &str) -> String {
-    if !s.contains('%') {
-        return s.to_string();
-    }
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let pair = (i + 2 < bytes.len())
-            .then(|| Some(hex(bytes[i + 1])? * 16 + hex(bytes[i + 2])?))
-            .flatten();
-        match pair {
-            Some(byte) if bytes[i] == b'%' => {
-                out.push(byte);
-                i += 3;
-            }
-            _ => {
-                out.push(bytes[i]);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn hex(c: u8) -> Option<u8> {
-    (c as char).to_digit(16).map(|d| d as u8)
-}
-
 // -------------------------------------------------------------------------------------- document
 
 /// Where relative links in `rel`'s markdown resolve from: the note's own directory.
 fn base_uri(rel: &str) -> String {
-    match rel.rsplit_once('/') {
-        Some((dir, _)) if !dir.is_empty() => format!(
+    match parent_dir(rel) {
+        "" => "accent://file/".to_string(),
+        dir => format!(
             "accent://file/{}/",
             glib::Uri::escape_string(dir, Some("/"), false)
         ),
-        _ => "accent://file/".to_string(),
     }
 }
 
