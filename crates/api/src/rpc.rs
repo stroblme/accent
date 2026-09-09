@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 /// when the answer arrives and dropped wholesale when the connection dies.
 type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value, RpcError>>>>>;
 
-use crate::{Event, Local};
+use crate::{Event, Local, locked};
 
 use accent_core::fs::{Etag, SaveError};
 
@@ -132,7 +132,7 @@ impl Client {
                     // EOF: the server is gone. Everyone still waiting is told at once by having
                     // their sender dropped, rather than each of them spending the full deadline.
                     dead.store(true, Ordering::SeqCst);
-                    pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    locked(&pending).clear();
                 }
             })
             .ok();
@@ -163,17 +163,11 @@ impl Client {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, tx);
+        locked(&self.pending).insert(id, tx);
 
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(e) = self.write(&line) {
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
+        if let Err(e) = emit(&self.out, &line) {
+            locked(&self.pending).remove(&id);
             return Err(RpcError::failed(format!("cannot reach the server: {e}")));
         }
 
@@ -184,31 +178,18 @@ impl Client {
                 Err(RpcError::failed("the connection closed"))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&id);
+                locked(&self.pending).remove(&id);
                 Err(RpcError::failed(format!("{method} timed out")))
             }
         }
-    }
-
-    fn write(&self, line: &Value) -> std::io::Result<()> {
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::to_writer(&mut *out, line)?;
-        out.write_all(b"\n")?;
-        out.flush()
     }
 
     /// Let go of the writing end, which is what tells `serve` to stop, then wait for the reader
     /// thread to notice the far end has closed.
     pub fn shutdown(&self) {
         // Replacing the writer drops the pipe, and `serve` reads EOF on its stdin.
-        {
-            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-            *out = Box::new(std::io::sink());
-        }
-        if let Some(handle) = self.reader.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        *locked(&self.out) = Box::new(std::io::sink());
+        if let Some(handle) = locked(&self.reader).take() {
             let _ = handle.join();
         }
     }
@@ -229,11 +210,7 @@ fn route(msg: Value, pending: &Waiting, events: &Sender<Event>) {
             }),
             None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
         };
-        if let Some(tx) = pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id)
-        {
+        if let Some(tx) = locked(pending).remove(&id) {
             let _ = tx.send(answer);
         }
         return;
@@ -349,7 +326,7 @@ pub(crate) fn serve_local(
 }
 
 fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &Value) -> std::io::Result<()> {
-    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = locked(out);
     serde_json::to_writer(&mut *out, line)?;
     out.write_all(b"\n")?;
     out.flush()

@@ -154,20 +154,12 @@ impl Remote {
             }
         }
         if let State::Disconnected(why) = &*state {
-            return Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: why.clone(),
-                data: None,
-            });
+            return Err(RpcError::failed(why));
         }
         drop(state);
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
-            None => Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: "not connected".to_string(),
-                data: None,
-            }),
+            None => Err(RpcError::failed("not connected")),
         }
     }
 
@@ -460,7 +452,7 @@ impl Remote {
     }
 
     fn locked<'a, T>(&self, m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
-        m.lock().unwrap_or_else(|e| e.into_inner())
+        crate::locked(m)
     }
 
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {
