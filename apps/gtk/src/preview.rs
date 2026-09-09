@@ -6,7 +6,8 @@
 //!
 //! WebKit cannot read GTK's CSS variables, so the stylesheet is generated in Rust from the same
 //! three sources `highlight.rs` uses — foreground, background, accent — and injected as a user
-//! stylesheet. Editor and preview therefore agree by construction, in every theme and accent.
+//! stylesheet. The font comes from `editor::default_font` for the same reason. Editor and preview
+//! therefore agree by construction, in every theme, accent and font.
 
 use crate::theme;
 use accent_core::markdown::percent_decode;
@@ -431,11 +432,15 @@ impl Preview {
         // WebKit cannot resolve `var(--view-bg-color)`, so `theme` hands out the literal the
         // rest of the window resolves to under the current theme (DESIGN.md, Colour).
         let bg = theme::view_bg(style.is_dark());
-        let font = pango::FontDescription::from_string(&style.document_font_name());
+        // The editor's own font, not the GNOME document font: DESIGN.md's Typography section
+        // gives prose Adwaita Mono at the *size* of the document font, and the two panes are
+        // meant to agree by construction. Asked of `editor::default_font`, which is where that
+        // decision is made, so a change there reaches the preview without a second edit.
+        let font = pango::FontDescription::from_string(&crate::editor::default_font());
         let family = font
             .family()
             .map(|f| f.to_string())
-            .unwrap_or_else(|| "Cantarell".to_string());
+            .unwrap_or_else(|| "Adwaita Mono".to_string());
         let size = match font.size() as f64 / pango::SCALE as f64 {
             pt if pt > 0.0 => pt,
             _ => 11.0,
