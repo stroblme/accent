@@ -532,11 +532,8 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             let Some(app) = set_tree.upgrade() else {
                 return;
             };
-            let mut config = app.config.borrow_mut();
-            config.git_tree = on;
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
+            app.config.borrow_mut().git_tree = on;
+            settings::save(&app.config.borrow());
         }),
     })
 }

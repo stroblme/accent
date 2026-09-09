@@ -532,10 +532,8 @@ impl App {
                 Some(accels) => config.shortcuts.insert(action.to_string(), accels),
                 None => config.shortcuts.remove(action),
             };
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
         }
+        settings::save(&self.config.borrow());
         self.apply_accels();
         accels_for(&self.config.borrow(), action)
     }

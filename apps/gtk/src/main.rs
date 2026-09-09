@@ -807,11 +807,9 @@ impl App {
         let on = {
             let mut config = self.config.borrow_mut();
             config.minimap = !config.minimap;
-            if let Err(e) = config.save() {
-                tracing::warn!("saving config: {e:#}");
-            }
             config.minimap
         };
+        settings::save(&self.config.borrow());
         for tab in self.open_tabs() {
             tab.set_minimap(on);
         }

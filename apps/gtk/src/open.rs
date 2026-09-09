@@ -409,10 +409,8 @@ impl App {
     /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
     fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
-        let config = self.config.borrow().clone();
-        if let Err(e) = config.save() {
-            tracing::warn!("saving config: {e:#}");
-        }
+        let config = self.config.borrow();
+        settings::save(&config);
         for doc in self.docs() {
             if let Some(pdf) = doc.pdf() {
                 pdf.set_drawing_config(config.drawing.clone());

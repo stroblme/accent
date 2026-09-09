@@ -224,11 +224,8 @@ fn recent_row(
 /// list is the only thing that remembers a vault. Shared with the Open Recent picker, which offers
 /// the same removal from its own rows.
 pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
-    let mut cfg = config.borrow_mut();
-    cfg.recent_vaults.retain(|p| p != path);
-    if let Err(e) = cfg.save() {
-        tracing::warn!("saving config: {e:#}");
-    }
+    config.borrow_mut().recent_vaults.retain(|p| p != path);
+    crate::settings::save(&config.borrow());
 }
 
 /// What a recent row says about a vault: it is named by its folder and placed by its path, on
