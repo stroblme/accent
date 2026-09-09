@@ -131,6 +131,10 @@ impl Index {
                 .execute(params![a.rel_path, a.target_rel_path])?;
             }
             tx.commit()?;
+        }
+        // A touched file kept its links, so a Syncthing pass that rewrote every note with the
+        // same bytes has nothing for the resolver to see.
+        if stats.added + stats.updated + stats.removed > 0 {
             self.resolve_links()?;
             on_progress(Progress {
                 phase: Phase::Resolve,
