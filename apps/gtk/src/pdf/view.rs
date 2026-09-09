@@ -1226,13 +1226,12 @@ mod imp {
             let strokes = self.strokes.borrow();
             let adjust = self.adjust.borrow();
             let selection = self.selection.borrow();
-            for (index, rect) in layout.pages.iter().enumerate() {
-                // One viewport of prefetch above and below, so scrolling meets ready tiles.
-                let visible =
-                    f64::from(rect.y + rect.h) >= oy - vh && f64::from(rect.y) <= oy + vh + vh;
-                if !visible {
-                    continue;
-                }
+            // One viewport of prefetch above and below, so scrolling meets ready tiles. The
+            // ends of that range are two binary searches; the pages outside it are not looked at
+            // at all, which at 1 554 pages is the difference between a frame and a scan.
+            let first = page_at(&layout, oy - vh);
+            let last = page_at(&layout, oy + vh + vh);
+            for (index, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
                 let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
                 // The page's own paper, so a tile that has not arrived is not a hole.
                 snapshot.append_color(&paper(dark), &bounds);
