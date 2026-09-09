@@ -240,9 +240,16 @@ impl Ring {
                 button.set_active(wanted);
             }
         };
+        // The nearest of the three rather than an exact match: a hand-edited config, or one
+        // written before these three widths were, would otherwise show no width selected at all.
+        let nearest = widths.map(|w| {
+            let distance = |i: &usize| (w[*i] - width).abs();
+            (0..w.len())
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+                .unwrap_or(0)
+        });
         for (i, button) in self.widths.iter().enumerate() {
-            let wanted = widths.is_some_and(|w| (w[i] - width).abs() < 0.01);
-            check(button, widths.is_some(), wanted);
+            check(button, widths.is_some(), nearest == Some(i));
         }
         let swatches = crate::theme::swatches();
         let shown = widths.is_some() && colour.is_some();
