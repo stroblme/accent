@@ -730,17 +730,13 @@ impl Panel {
             .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
         let (names, at) = branch_model(head.map(|(name, _)| name), &fetched.branches);
         self.set_branches(&names, at);
-        // Without an upstream every click answers "There is no tracking information", so the
-        // button says so up front instead.
-        let upstream = fetched
-            .statuses
-            .get(selected)
-            .and_then(|s| s.branch.upstream.clone());
-        self.sync.set_sensitive(upstream.is_some());
-        self.sync.set_tooltip_text(Some(&match &upstream {
-            Some(name) => format!("Sync with {name}"),
-            None => "This branch has no upstream to sync with".to_string(),
-        }));
+        // What a Sync would do, in words, beside the counts it already shows. A branch with no
+        // upstream is not a dead end any more: syncing it publishes it (`git::sync`), so the
+        // button stays live and says which of the two it will be.
+        let branch = fetched.statuses.get(selected).map(|s| &s.branch);
+        self.sync.set_sensitive(branch.is_some());
+        self.sync
+            .set_tooltip_text(branch.map(sync_hint).as_deref().or(Some("Sync")));
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -1601,6 +1597,12 @@ impl Panel {
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
         branch_text(&state.statuses.get(index)?.branch)
+    }
+
+    /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
+    /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
+    pub fn sync_hint(&self) -> Option<String> {
+        self.sync.tooltip_text().map(|t| t.to_string())
     }
 
     /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
@@ -2656,6 +2658,26 @@ fn branch_text(b: &Branch) -> Option<String> {
     })
 }
 
+/// What a Sync will do, for the Sync button's tooltip.
+///
+/// Words beside the arrows the button already shows, because `↓2 ↑1` is a readout and a tooltip
+/// is where it is spelled out. A branch with no upstream reads as Publish: that is what syncing
+/// one does now, and the tooltip is the only place that can say so before it happens.
+fn sync_hint(b: &Branch) -> String {
+    let Some(upstream) = &b.upstream else {
+        return "Publish this branch to its remote and track it".to_string();
+    };
+    let moving: Vec<String> = [(b.behind, "to pull"), (b.ahead, "to push")]
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, what)| format!("{count} {what}"))
+        .collect();
+    match moving.is_empty() {
+        true => format!("Sync with {upstream}"),
+        false => format!("Sync with {upstream}: {}", moving.join(", ")),
+    }
+}
+
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
 ///
 /// `key` turns a repository-relative path into the key the rest of the app uses; the tests pass
@@ -2839,6 +2861,29 @@ mod tests {
 
     fn identity(path: &str) -> String {
         path.to_string()
+    }
+
+    fn on_main(upstream: Option<&str>, ahead: u32, behind: u32) -> Branch {
+        Branch {
+            oid: Some("0123456789abcdef".to_string()),
+            head: Some("main".to_string()),
+            upstream: upstream.map(str::to_string),
+            ahead,
+            behind,
+        }
+    }
+
+    #[test]
+    fn the_sync_tooltip_says_which_way_the_work_would_move() {
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 0, 0)),
+            "Sync with origin/main"
+        );
+        assert_eq!(
+            sync_hint(&on_main(Some("origin/main"), 1, 2)),
+            "Sync with origin/main: 2 to pull, 1 to push"
+        );
+        assert!(sync_hint(&on_main(None, 0, 0)).starts_with("Publish"));
     }
 
     #[test]

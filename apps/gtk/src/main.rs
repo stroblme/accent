@@ -6962,6 +6962,7 @@ fn bench_git(app: &Rc<App>) {
             git.changes_rows()
         );
         println!("bench git_rows {}", git.log_rows());
+        println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
         git.activate_last_log_row();
         let app = app.clone();
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
