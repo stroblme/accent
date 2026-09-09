@@ -1863,6 +1863,11 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
+        pdf.connect_choice(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, tool, choice| app.pdf_choice(tool, choice)
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -2017,6 +2022,20 @@ impl App {
         }
         pdf.set_mode(wanted);
         self.sync_status();
+    }
+
+    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
+    fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
+        choice.apply(tool, &mut self.config.borrow_mut().drawing);
+        let config = self.config.borrow().clone();
+        if let Err(e) = config.save() {
+            tracing::warn!("saving config: {e:#}");
+        }
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.set_drawing_config(config.drawing.clone());
+            }
+        }
     }
 
     /// Put the active PDF's tools where this window last had them, and take the position back

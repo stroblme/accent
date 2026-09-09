@@ -1,20 +1,68 @@
 //! The drawing tools, as a ring that floats over the page.
 //!
-//! Round buttons orbiting a hub, dragged around the pane by that hub. It is an overlay
-//! child of the PDF tab rather than a bar in the chrome, because the reader puts it wherever the
-//! part of the page they are working on is not.
+//! Round buttons orbiting a hub, dragged around the pane by that hub, with the tool in hand's
+//! widths and colours on a second orbit outside them. It is an overlay child of the PDF tab
+//! rather than a bar in the chrome, because the reader puts it wherever the part of the page they
+//! are working on is not.
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib};
+use std::cell::{Cell, RefCell};
+
+use accent_core::config::DrawingConfig;
 
 use crate::pdfview::Mode;
 
 /// The distance from the hub to a tool button, in pixels.
 const ORBIT: f64 = 60.0;
-/// The whole ring's box, wide enough for the orbit plus a button either side of it.
-const SIZE: i32 = 160;
+/// The distance from the hub to an option button.
+const OPTIONS: f64 = 96.0;
+/// The whole ring's box, wide enough for the outer orbit plus a button either side of it.
+const SIZE: i32 = 220;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
+
+/// Three widths per tool, in page points — fine, the default, bold — and the eraser's reach.
+const WIDTHS: [(Mode, [f32; 3]); 3] = [
+    (Mode::Pen, [1.0, 2.0, 4.0]),
+    (Mode::Highlighter, [8.0, 14.0, 24.0]),
+    (Mode::Eraser, [4.0, 8.0, 16.0]),
+];
+
+/// Told which tool was in hand and what was picked for it.
+type OnChoice = Box<dyn Fn(Mode, Choice)>;
+
+/// What an option button picks for the tool in hand.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Choice {
+    Width(f32),
+    /// `None` is the accent.
+    Colour(Option<[u8; 3]>),
+}
+
+impl Choice {
+    /// Write the choice for `tool` into the config. The shapes share the pen's style, and the
+    /// eraser's width is its reach.
+    pub fn apply(self, tool: Mode, config: &mut DrawingConfig) {
+        match (styled(tool), self) {
+            (Mode::Eraser, Choice::Width(w)) => config.eraser_radius = w,
+            (Mode::Eraser, Choice::Colour(_)) => {}
+            (Mode::Highlighter, Choice::Width(w)) => config.highlighter_width = w,
+            (Mode::Highlighter, Choice::Colour(c)) => config.highlighter_color = c,
+            (_, Choice::Width(w)) => config.pen_width = w,
+            (_, Choice::Colour(c)) => config.pen_color = c,
+        }
+    }
+}
+
+/// Whose style a tool draws in: its own for the highlighter and the eraser, the pen's for the
+/// pen and every shape.
+fn styled(tool: Mode) -> Mode {
+    match tool {
+        Mode::Highlighter | Mode::Eraser => tool,
+        _ => Mode::Pen,
+    }
+}
 
 /// The tools, in the order they sit on the ring: pen at the top, then clockwise.
 const TOOLS: [(Mode, &str, &str); 7] = [
@@ -33,8 +81,14 @@ const TOOLS: [(Mode, &str, &str); 7] = [
 
 /// A ring of tool buttons, and the hub that moves it.
 pub struct Ring {
-    root: gtk::Fixed,
+    root: RingBox,
     buttons: Vec<(Mode, gtk::ToggleButton)>,
+    /// The outer orbit: three widths, then six colours, shown for the tool in hand.
+    widths: Vec<gtk::ToggleButton>,
+    swatches: Vec<gtk::ToggleButton>,
+    tool: Cell<Mode>,
+    config: RefCell<DrawingConfig>,
+    on_choice: RefCell<Option<OnChoice>>,
     /// Where the ring's top-left corner sits in the pane, which is what the overlay's margins are
     /// set from.
     at: std::cell::Cell<(f64, f64)>,
@@ -47,12 +101,12 @@ pub struct Ring {
 impl Ring {
     /// Build the ring. It is hidden until the window says otherwise.
     pub fn new() -> std::rc::Rc<Ring> {
-        let root = gtk::Fixed::builder()
-            .width_request(SIZE)
-            .height_request(SIZE)
-            .halign(gtk::Align::Start)
-            .valign(gtk::Align::Start)
-            .visible(false)
+        let root: RingBox = glib::Object::builder()
+            .property("width-request", SIZE)
+            .property("height-request", SIZE)
+            .property("halign", gtk::Align::Start)
+            .property("valign", gtk::Align::Start)
+            .property("visible", false)
             .build();
 
         let centre = f64::from(SIZE) / 2.0;
@@ -64,7 +118,7 @@ impl Ring {
         hub.add_css_class("circular");
         hub.add_css_class("osd");
         hub.add_css_class("accent-ring-hub");
-        place(&root, &hub, centre, centre);
+        place(&root, &hub, centre, centre, BUTTON);
 
         let mut buttons = Vec::new();
         for (i, (mode, action, icon)) in TOOLS.iter().enumerate() {
@@ -77,18 +131,137 @@ impl Ring {
             button.add_css_class("circular");
             button.add_css_class("osd");
             button.add_css_class("accent-ring-tool");
-            place(&root, &button, centre + dx, centre + dy);
+            place(&root, &button, centre + dx, centre + dy, BUTTON);
             buttons.push((*mode, button));
         }
+
+        // Nine slots outside the tools: the widths at the top, the colours after them.
+        let slots = 3 + crate::theme::swatches().len();
+        let option = |i: usize, dot: gtk::DrawingArea| {
+            let button = gtk::ToggleButton::new();
+            button.set_child(Some(&dot));
+            button.add_css_class("circular");
+            button.add_css_class("osd");
+            button.add_css_class("accent-ring-tool");
+            let (dx, dy) = orbit(i, slots, OPTIONS);
+            place(&root, &button, centre + dx, centre + dy, OPTION);
+            button
+        };
+        let widths: Vec<_> = [5.0, 8.0, 12.0]
+            .into_iter()
+            .enumerate()
+            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color())))
+            .collect();
+        let swatches: Vec<_> = (0..crate::theme::swatches().len())
+            .map(|i| {
+                option(
+                    3 + i,
+                    dot(14.0, move |_| match crate::theme::swatches()[i] {
+                        Some([r, g, b]) => gdk::RGBA::new(
+                            f32::from(r) / 255.0,
+                            f32::from(g) / 255.0,
+                            f32::from(b) / 255.0,
+                            1.0,
+                        ),
+                        None => adw::StyleManager::default().accent_color_rgba(),
+                    }),
+                )
+            })
+            .collect();
 
         let ring = std::rc::Rc::new(Ring {
             root,
             buttons,
+            widths,
+            swatches,
+            tool: Cell::new(Mode::Select),
+            config: RefCell::new(DrawingConfig::default()),
+            on_choice: RefCell::new(None),
             at: std::cell::Cell::new((INSET, INSET)),
             moved: std::cell::Cell::new(false),
         });
         ring.wire_drag(&hub);
+        ring.wire_options();
         ring
+    }
+
+    /// An option button picks for whichever tool is in hand when it is pressed. The buttons are
+    /// toggles only to wear the checked look; which one is checked is the config's say, through
+    /// [`Ring::set_config`], not the click's.
+    fn wire_options(self: &std::rc::Rc<Self>) {
+        for (i, button) in self.widths.iter().enumerate() {
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = ring)]
+                self,
+                move |_| {
+                    let tool = ring.tool.get();
+                    if let Some((_, widths)) = WIDTHS.iter().find(|(m, _)| *m == styled(tool)) {
+                        ring.choose(tool, Choice::Width(widths[i]));
+                    }
+                }
+            ));
+        }
+        for (i, button) in self.swatches.iter().enumerate() {
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = ring)]
+                self,
+                move |_| {
+                    let tool = ring.tool.get();
+                    ring.choose(tool, Choice::Colour(crate::theme::swatches()[i]));
+                }
+            ));
+        }
+    }
+
+    fn choose(&self, tool: Mode, choice: Choice) {
+        if let Some(f) = self.on_choice.borrow().as_ref() {
+            f(tool, choice);
+        }
+        // Whatever the config comes back as, the button the hand is on stops looking toggled
+        // by the click alone.
+        self.sync_options();
+    }
+
+    /// Called with the tool in hand and what was picked for it.
+    pub fn connect_choice(&self, f: impl Fn(Mode, Choice) + 'static) {
+        *self.on_choice.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// What the preferences say about the tools, which is what the options show as checked.
+    pub fn set_config(&self, config: &DrawingConfig) {
+        *self.config.borrow_mut() = config.clone();
+        self.sync_options();
+    }
+
+    /// Show the tool in hand's options, checked as the config has them, and nothing for a tool
+    /// with none.
+    fn sync_options(&self) {
+        let tool = styled(self.tool.get());
+        let config = self.config.borrow();
+        let widths = match self.tool.get() {
+            Mode::Select | Mode::Adjust => None,
+            _ => WIDTHS.iter().find(|(m, _)| *m == tool).map(|(_, w)| *w),
+        };
+        let (width, colour) = match tool {
+            Mode::Eraser => (config.eraser_radius, None),
+            Mode::Highlighter => (config.highlighter_width, Some(config.highlighter_color)),
+            _ => (config.pen_width, Some(config.pen_color)),
+        };
+        let check = |button: &gtk::ToggleButton, shown: bool, wanted: bool| {
+            button.set_visible(shown);
+            if button.is_active() != wanted {
+                button.set_active(wanted);
+            }
+        };
+        for (i, button) in self.widths.iter().enumerate() {
+            let wanted = widths.is_some_and(|w| (w[i] - width).abs() < 0.01);
+            check(button, widths.is_some(), wanted);
+        }
+        let swatches = crate::theme::swatches();
+        let shown = widths.is_some() && colour.is_some();
+        for (i, button) in self.swatches.iter().enumerate() {
+            check(button, shown, shown && colour == Some(swatches[i]));
+        }
     }
 
     /// Dragging the hub moves the whole ring, which is an overlay child positioned by its margins.
@@ -173,7 +346,70 @@ impl Ring {
                 button.set_active(wanted);
             }
         }
+        self.tool.set(mode);
+        self.sync_options();
     }
+}
+
+/// A filled circle of `diameter` pixels in whatever colour `colour` says when it is drawn.
+fn dot(
+    diameter: f64,
+    colour: impl Fn(&gtk::DrawingArea) -> gdk::RGBA + 'static,
+) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_size_request(OPTION - 8, OPTION - 8);
+    area.set_draw_func(move |area, cr, w, h| {
+        let c = colour(area);
+        cr.set_source_rgba(
+            f64::from(c.red()),
+            f64::from(c.green()),
+            f64::from(c.blue()),
+            f64::from(c.alpha()),
+        );
+        cr.arc(
+            f64::from(w) / 2.0,
+            f64::from(h) / 2.0,
+            diameter / 2.0,
+            0.0,
+            std::f64::consts::TAU,
+        );
+        let _ = cr.fill();
+    });
+    area
+}
+
+mod imp {
+    use gtk::glib;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct RingBox;
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for RingBox {
+        const NAME: &'static str = "AccentRingBox";
+        type Type = super::RingBox;
+        type ParentType = gtk::Fixed;
+    }
+
+    impl ObjectImpl for RingBox {}
+
+    impl WidgetImpl for RingBox {
+        /// Only the buttons are the ring; the box around them is the page. GTK picks the
+        /// children before it asks the parent, so this only decides the space between them.
+        fn contains(&self, _x: f64, _y: f64) -> bool {
+            false
+        }
+    }
+
+    impl FixedImpl for RingBox {}
+}
+
+glib::wrapper! {
+    /// A `gtk::Fixed` that a press between its buttons falls through.
+    pub struct RingBox(ObjectSubclass<imp::RingBox>)
+        @extends gtk::Fixed, gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
 /// Where slot `i` of `n` sits on an orbit of this radius, relative to the hub: the first at the
@@ -185,21 +421,24 @@ pub(crate) fn orbit(i: usize, n: usize, radius: f64) -> (f64, f64) {
 
 /// Put a round button on the ring by its centre rather than its corner, which is how the
 /// positions above are worked out.
-fn place(root: &gtk::Fixed, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64) {
+fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size: i32) {
     let button = button.as_ref();
     // The buttons are square and sized by their CSS, so the size request is what centres them.
-    let size = f64::from(BUTTON);
-    button.set_size_request(BUTTON, BUTTON);
-    root.put(button, cx - size / 2.0, cy - size / 2.0);
+    button.set_size_request(size, size);
+    let half = f64::from(size) / 2.0;
+    root.put(button, cx - half, cy - half);
 }
 
 /// A tool button's diameter. Big enough to hit while drawing, small enough to leave the page
 /// visible around the ring.
 const BUTTON: i32 = 38;
+/// An option button's: a dot, not a glyph, so it can be smaller.
+const OPTION: i32 = 24;
 
 #[cfg(test)]
 mod tests {
-    use super::{BUTTON, ORBIT, TOOLS, orbit};
+    use super::{BUTTON, Choice, OPTION, OPTIONS, ORBIT, TOOLS, orbit};
+    use crate::pdfview::Mode;
 
     #[test]
     fn tools_start_at_the_top_and_sit_a_button_apart() {
@@ -214,5 +453,28 @@ mod tests {
                 "slots {i} and next are {gap} px apart"
             );
         }
+        for i in 0..9 {
+            let a = orbit(i, 9, OPTIONS);
+            let b = orbit((i + 1) % 9, 9, OPTIONS);
+            let gap = (a.0 - b.0).hypot(a.1 - b.1);
+            assert!(
+                gap >= f64::from(OPTION),
+                "options {i} and next are {gap} px apart"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_lands_in_the_right_tool() {
+        let mut config = accent_core::config::DrawingConfig::default();
+        Choice::Width(4.0).apply(Mode::Line, &mut config);
+        assert_eq!(config.pen_width, 4.0, "a shape draws in the pen's width");
+        Choice::Width(8.0).apply(Mode::Eraser, &mut config);
+        assert_eq!(config.eraser_radius, 8.0);
+        Choice::Colour(Some([0, 0, 0])).apply(Mode::Highlighter, &mut config);
+        assert_eq!(config.highlighter_color, Some([0, 0, 0]));
+        assert_eq!(config.pen_color, None);
+        Choice::Colour(Some([1, 2, 3])).apply(Mode::Eraser, &mut config);
+        assert_eq!(config.pen_color, None, "the eraser has no colour");
     }
 }

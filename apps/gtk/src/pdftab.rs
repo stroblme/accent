@@ -67,10 +67,12 @@ enum Request {
         shape: pdf::Shape,
         style: pdf::InkStyle,
     },
-    /// Take off whichever stroke passes within [`ERASE_RADIUS`] of this point.
+    /// Take off whichever stroke passes within `radius` page points of this point. Whole
+    /// strokes, never part of one.
     Erase {
         page: usize,
         at: (f32, f32),
+        radius: f32,
     },
     /// Every ink stroke of a page with its box and style, for the Adjust tool.
     Inks(usize),
@@ -87,9 +89,6 @@ enum Request {
     Save(Option<Sender<()>>),
     Reload,
 }
-
-/// How close the eraser has to pass to a stroke to take it. Whole strokes, never part of one.
-const ERASE_RADIUS: f32 = 4.0;
 
 /// How long after the last stroke the document is written out.
 const INK_SAVE: std::time::Duration = std::time::Duration::from_secs(1);
@@ -196,6 +195,8 @@ type Hook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>)>>>;
 type NoteHook = RefCell<Option<Rc<dyn Fn(&str, usize)>>>;
 /// An export finished, with what it wrote or why it could not.
 type ExportHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, Result<usize, String>)>>>;
+/// A width or a colour was picked on the ring for a tool.
+type ChoiceHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
 
 /// The Ctrl-hover link preview currently on screen.
@@ -282,6 +283,7 @@ pub struct PdfTab {
     on_mode: Hook,
     on_note: NoteHook,
     on_export: ExportHook,
+    on_choice: ChoiceHook,
 }
 
 /// Open `path` in a new tab of `tabs`. Never fails: a document that will not open is a tab
@@ -369,6 +371,7 @@ pub fn open(
         on_mode: RefCell::new(None),
         on_note: RefCell::new(None),
         on_export: RefCell::new(None),
+        on_choice: RefCell::new(None),
     });
 
     tab.view.set_zoom(place.zoom);
@@ -681,6 +684,7 @@ impl PdfTab {
 
     /// What the preferences say about the tools.
     pub fn set_drawing_config(&self, config: accent_core::config::DrawingConfig) {
+        self.ring.set_config(&config);
         self.view.set_drawing_config(config);
     }
 
@@ -759,6 +763,10 @@ impl PdfTab {
     }
 
     /// Called when an export finishes, with what it wrote or why it could not.
+    pub fn connect_choice(&self, f: impl Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice) + 'static) {
+        *self.on_choice.borrow_mut() = Some(Rc::new(f));
+    }
+
     pub fn connect_export(&self, f: impl Fn(&Rc<PdfTab>, Result<usize, String>) + 'static) {
         *self.on_export.borrow_mut() = Some(Rc::new(f));
     }
@@ -1011,7 +1019,7 @@ impl PdfTab {
             self,
             move |page, points| {
                 let mode = tab.view.mode();
-                let style = mode.ink(crate::theme::accent_rgb());
+                let style = tab.view.ink_style(mode);
                 match (mode.shapes(), points.as_slice()) {
                     (true, &[a, b]) => {
                         if let Some(shape) = pdfview::shape_of(mode, a, b) {
@@ -1030,7 +1038,20 @@ impl PdfTab {
         view.connect_erase(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, at| tab.ask(Request::Erase { page, at })
+            move |page, at| {
+                let radius = tab.view.drawing_config().eraser_radius;
+                tab.ask(Request::Erase { page, at, radius });
+            }
+        ));
+        self.ring.connect_choice(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |tool, choice| {
+                let hook = tab.on_choice.borrow().clone();
+                if let Some(f) = hook {
+                    f(&tab, tool, choice);
+                }
+            }
         ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
@@ -1907,11 +1928,9 @@ fn render_loop(
                         Err(e) => tracing::warn!("moving a stroke on page {page}: {e:#}"),
                     }
                 }
-                Request::Erase { page, at } => {
+                Request::Erase { page, at, radius } => {
                     let hit = doc.ink_paths(page).unwrap_or_default();
-                    let found = hit
-                        .iter()
-                        .find(|(_, points)| pdf::hit(points, at, ERASE_RADIUS));
+                    let found = hit.iter().find(|(_, points)| pdf::hit(points, at, radius));
                     if let Some((index, _)) = found {
                         let before = doc.annotation_count(page).unwrap_or(0);
                         ink.note(page, before);

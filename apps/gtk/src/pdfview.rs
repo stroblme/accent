@@ -42,16 +42,6 @@ const PT_TO_PX: f32 = 96.0 / 72.0;
 
 /// What a page may be zoomed between, and what an image tab borrows: 10 % is a letter page
 /// about 80 px wide, and past 800 % one page is more tiles than the budget holds.
-/// How wide a stroke is, in page points. One width per tool: a stylus reports pressure and this
-/// ignores it.
-///
-// ponytail: uniform width because varying it means storing a width per point and drawing the
-// stroke as a filled outline rather than a stroked path. A `GestureStylus` reading pressure and
-// the eraser tip is the upgrade; `GestureDrag` already receives a stylus as an ordinary pointer,
-// which is why there is no second controller here. The ring is where a width *setting* will go.
-pub const PEN_WIDTH: f32 = 2.0;
-/// A highlighter is the width of a line of text, near enough.
-pub const HIGHLIGHTER_WIDTH: f32 = 14.0;
 /// How much of the page a highlighter lets through. It also multiplies rather than covers, so
 /// this is about how strong the colour is, not about whether the text survives.
 pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
@@ -91,23 +81,6 @@ impl Mode {
     /// Whether a drag is a shape: two points, the press and the release, rather than a path.
     pub fn shapes(self) -> bool {
         matches!(self, Mode::Line | Mode::Rect | Mode::Circle)
-    }
-
-    /// How this tool's stroke is drawn, given the accent it is drawn in.
-    pub fn ink(self, accent: [u8; 3]) -> accent_core::pdf::InkStyle {
-        let [r, g, b] = accent;
-        match self {
-            Mode::Highlighter => accent_core::pdf::InkStyle {
-                width: HIGHLIGHTER_WIDTH,
-                rgba: [r, g, b, (HIGHLIGHTER_ALPHA * 255.0) as u8],
-                multiply: true,
-            },
-            _ => accent_core::pdf::InkStyle {
-                width: PEN_WIDTH,
-                rgba: [r, g, b, 255],
-                multiply: false,
-            },
-        }
     }
 }
 
@@ -938,6 +911,32 @@ impl PdfView {
 
     pub fn drawing_config(&self) -> accent_core::config::DrawingConfig {
         self.imp().style.borrow().clone()
+    }
+
+    /// How a tool's stroke is drawn, from the preferences: the highlighter in its own width and
+    /// colour, wide and translucent; everything else — the pen and the shapes — in the pen's.
+    /// One width per stroke: a stylus reports pressure and this ignores it.
+    ///
+    // ponytail: uniform width because varying it means storing a width per point and drawing
+    // the stroke as a filled outline rather than a stroked path. A `GestureStylus` reading
+    // pressure is the upgrade.
+    pub fn ink_style(&self, mode: Mode) -> accent_core::pdf::InkStyle {
+        let c = self.imp().style.borrow();
+        let (width, colour, alpha, multiply) = match mode {
+            Mode::Highlighter => (
+                c.highlighter_width,
+                c.highlighter_color,
+                HIGHLIGHTER_ALPHA,
+                true,
+            ),
+            _ => (c.pen_width, c.pen_color, 1.0, false),
+        };
+        let [r, g, b] = colour.unwrap_or_else(crate::theme::accent_rgb);
+        accent_core::pdf::InkStyle {
+            width,
+            rgba: [r, g, b, (alpha * 255.0) as u8],
+            multiply,
+        }
     }
 
     /// The tool a press really means. The mode itself while nothing but a mouse is plugged in;
@@ -2002,17 +2001,13 @@ mod imp {
                             }
                         }
                     }
-                    // The tool's own width and alpha, so what the hand sees is what the render
-                    // puts on the page. The blend mode is not reproduced here: over paper at this
-                    // alpha it reads the same, and only the render is kept.
-                    let (width, alpha) = match stroke.tool {
-                        super::Mode::Highlighter => {
-                            (super::HIGHLIGHTER_WIDTH, super::HIGHLIGHTER_ALPHA)
-                        }
-                        _ => (super::PEN_WIDTH, 1.0),
-                    };
-                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
-                    let stroke_style = gsk::Stroke::new(width * layout.scale);
+                    // The tool's own style, so what the hand sees is what the render puts on
+                    // the page. The blend mode is not reproduced here: over paper at this alpha
+                    // it reads the same, and only the render is kept.
+                    let style = obj.ink_style(stroke.tool);
+                    let [r, g, b, a] = style.rgba.map(|v| f32::from(v) / 255.0);
+                    let colour = gdk::RGBA::new(r, g, b, a);
+                    let stroke_style = gsk::Stroke::new(style.width * layout.scale);
                     stroke_style.set_line_cap(gsk::LineCap::Round);
                     stroke_style.set_line_join(gsk::LineJoin::Round);
                     snapshot.append_stroke(&builder.to_path(), &stroke_style, &colour);

@@ -34,6 +34,10 @@ exclude = ["Archive", "Code/vendor"]
 
 [drawing]
 mouse = false
+pen_width = 2.0
+highlighter_width = 14.0
+highlighter_color = [0, 0, 0]
+eraser_radius = 4.0
 
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
@@ -117,12 +121,37 @@ pub struct SearchConfig {
 
 /// How the PDF drawing tools behave. Global rather than per vault: a pen is a property of the
 /// machine.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DrawingConfig {
     /// Draw with the mouse or touchpad even while a pen is attached. Off, the hand selects text
     /// and only the pen draws — until no pen is attached at all, when the hand draws again.
     pub mouse: bool,
+    /// Stroke widths in page points; the shapes draw in the pen's.
+    pub pen_width: f32,
+    pub highlighter_width: f32,
+    /// `None` is the system accent, resolved when a stroke is written so the tool keeps following
+    /// it; a colour picked on the ring is kept as it was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pen_color: Option<[u8; 3]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub highlighter_color: Option<[u8; 3]>,
+    /// How close the eraser has to pass to a stroke to take it, in page points.
+    pub eraser_radius: f32,
+}
+
+impl Default for DrawingConfig {
+    fn default() -> Self {
+        DrawingConfig {
+            mouse: false,
+            pen_width: 2.0,
+            // A line of text, near enough.
+            highlighter_width: 14.0,
+            pen_color: None,
+            highlighter_color: None,
+            eraser_radius: 4.0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -495,6 +524,10 @@ daily_template = "DailyNote.md"
         assert!(c.shortcuts["win.about"].is_empty());
         assert_eq!(c.search.exclude, ["Archive", "Code/vendor"]);
         assert!(!c.drawing.mouse);
+        assert_eq!(c.drawing.pen_width, 2.0);
+        assert_eq!(c.drawing.pen_color, None);
+        assert_eq!(c.drawing.highlighter_color, Some([0, 0, 0]));
+        assert_eq!(c.drawing.eraser_radius, 4.0);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();

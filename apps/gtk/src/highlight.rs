@@ -442,7 +442,7 @@ pub fn lane_colour(column: usize) -> gdk::RGBA {
 /// The accent's hue moved `column` sixths of a turn around the wheel, saturation and value
 /// untouched. Column 0 is the accent itself, which is what makes the six read as one family
 /// rather than as a second palette.
-fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
+pub(crate) fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
     let (h, s, v) = hsv;
     ((h + column as f32 / CSV_COLUMNS as f32).fract(), s, v)
 }
