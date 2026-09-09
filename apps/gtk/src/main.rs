@@ -16,6 +16,7 @@ mod diagnostics;
 mod diff;
 mod doc;
 mod editor;
+mod events;
 mod fileops;
 mod find;
 mod fold;
@@ -62,6 +63,7 @@ use adw::prelude::*;
 use build::{build_window, install_document_font};
 use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
+use events::start_events;
 use gtk::{gdk, gio, glib, graphene};
 use layout::{Mode, Presenting};
 use open::Opened;
@@ -93,8 +95,6 @@ const SEARCH_LIMIT: usize = 100;
 const RENDER: Duration = Duration::from_millis(300);
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
 const SESSION: Duration = Duration::from_secs(1);
-/// The vault worker is polled instead of woken; 120 ms is below what a progress label needs.
-const POLL: Duration = Duration::from_millis(120);
 /// A jump into a file that is not open yet waits for the read: how often it looks for the tab,
 /// and how many times before it gives up. 300 ms in all, which is five times the ~60 ms a read
 /// from the remote vault this was developed against costs.
@@ -655,195 +655,6 @@ impl App {
             sidebar.set_references(&reference_rows(found, false), references_empty(None));
         }
         self.show_pane("references");
-    }
-
-    // --- vault events --------------------------------------------------------------------
-
-    fn on_event(self: &Rc<Self>, event: Event) {
-        // Anything that touched a file may have changed what git says about it. The pane
-        // debounces, so a burst of watcher events still costs one `git status`.
-        if matches!(
-            event,
-            Event::Reconciled(_)
-                | Event::DirsChanged(_)
-                | Event::FileChanged(_)
-                | Event::FileRemoved(_)
-                | Event::FileRenamed { .. }
-        ) {
-            if let Some(git) = self.git.get() {
-                git.schedule_refresh();
-            }
-            // The same events mean a note may have gained or lost a link into an open PDF.
-            self.sync_pdf_links_soon();
-        }
-        match event {
-            Event::Progress(p) => {
-                self.statusbar.set_progress(Some(&match p.total {
-                    0 => "Indexing…".to_string(),
-                    total => format!("Indexing… {}/{total} files", p.done),
-                }));
-                // The indexer commits rows in batches and the walk hands it files depth-first,
-                // so the root level is queryable long before the reconcile ends. Without this the
-                // tree of a cold vault stays empty for the whole two seconds. Throttled, and
-                // deliberately not marking the tags pane dirty: that is a whole-pane rebuild and
-                // it can wait for `Reconciled`.
-                let now = glib::monotonic_time();
-                if p.phase == Phase::Index && now - self.tree_painted.get() >= TREE_REPAINT {
-                    self.tree_painted.set(now);
-                    if let Some(tree) = self.tree.get() {
-                        tree.refresh();
-                        tracing::debug!(t_ms = ms(), rows = tree.model().n_items(), "tree painted");
-                    }
-                }
-            }
-            Event::Busy { what, busy } => {
-                self.statusbar
-                    .set_provider_busy(busy.then_some(what.as_str()));
-            }
-            Event::Reconciled(stats) => {
-                tracing::debug!(
-                    t_ms = ms(),
-                    scanned = stats.scanned,
-                    unchanged = stats.unchanged,
-                    "reconcile done"
-                );
-                self.statusbar.set_progress(None);
-                self.reconciled.set(true);
-                if let Some(tree) = self.tree.get() {
-                    tree.refresh();
-                }
-                if let Some(sidebar) = self.sidebar.get() {
-                    sidebar.mark_tags_dirty();
-                }
-                self.refresh_corpus();
-                self.sync_active();
-                // Conflicts on notes nobody has open have no banner to appear on, so the toast
-                // that is already there says how many are waiting in the vault.
-                let mut message = format!(
-                    "Indexed {} files ({} new, {} updated)",
-                    stats.scanned, stats.added, stats.updated
-                );
-                match self
-                    .vault()
-                    .and_then(|v| v.conflicts().ok())
-                    .unwrap_or_default()
-                    .len()
-                {
-                    0 => {}
-                    n => message.push_str(&format!(", {n} with sync conflicts")),
-                }
-                self.toast(&message);
-            }
-            Event::DirsChanged(dirs) => {
-                if let Some(tree) = self.tree.get() {
-                    tree.invalidate(&dirs);
-                }
-                if let Some(sidebar) = self.sidebar.get() {
-                    sidebar.mark_tags_dirty();
-                }
-            }
-            Event::FileChanged(rel) => {
-                let Some(doc) = self.doc_for(&rel) else {
-                    return;
-                };
-                match &doc {
-                    Doc::Text(tab) => {
-                        self.file_changed(tab);
-                        if self.is_active(tab) {
-                            self.sync_active();
-                        }
-                    }
-                    // Re-point the picture at the same file: the texture it holds is of the old
-                    // contents, so redrawing alone would show them again.
-                    Doc::Image(_) => {
-                        if let Some(picture) = picture_of(doc.page()) {
-                            picture.set_file(gio::File::NONE);
-                            picture.set_filename(Some(self.root().join(&rel)));
-                        }
-                    }
-                    // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
-                    // rather than sending the reader back to page one.
-                    Doc::Pdf(pdf) => pdf.refresh(),
-                    // Neither a diff nor a shell is keyed by a path, so a file changing under one
-                    // reaches none of these.
-                    Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}
-                }
-            }
-            Event::FileRemoved(rel) => {
-                // A conflict copy is never a tab of its own; what its removal changes is the
-                // banner on the note it was a copy of.
-                if let Some(original) = accent_api::conflict_original_rel(&rel) {
-                    self.sync_conflict_banner(&original, None);
-                }
-                // A trashed folder arrives as one removal, so everything under it goes too:
-                // a tab whose file is inside a folder that no longer exists has nothing left.
-                let prefix = format!("{rel}/");
-                for doc in self.docs() {
-                    let key = doc.key();
-                    if key != rel && !key.starts_with(&prefix) {
-                        continue;
-                    }
-                    // Only a buffer holds work the file no longer does; everything else has
-                    // nothing left to show, so its tab goes with the file.
-                    match doc.tab().filter(|tab| tab.modified.get()) {
-                        Some(tab) => {
-                            tab.disk_changed.set(true);
-                            tab.show_alert(Alert::Restore);
-                        }
-                        None => self.close_page(doc.page()),
-                    }
-                }
-            }
-            Event::FileRenamed { from, to } => {
-                let prefix = format!("{from}/");
-                for doc in self.docs() {
-                    let key = doc.key();
-                    if key == from {
-                        doc.retarget(&self.root(), &to);
-                    } else if let Some(rest) = key.strip_prefix(&prefix) {
-                        doc.retarget(&self.root(), &format!("{to}/{rest}"));
-                    }
-                }
-                accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
-                self.sync_active();
-            }
-            Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
-            // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
-            // asks git what changed; nothing else in the window is affected.
-            Event::GitChanged => {
-                if let Some(git) = self.git.get() {
-                    git.schedule_refresh();
-                }
-            }
-            // A remote vault is still coming up. It reads as the same wait as indexing, because
-            // that is what it is: the window is open and the files are not there yet.
-            // The bar carries the one step that can measure itself, the upload, and pulses
-            // through the rest; the text says which step it is.
-            Event::Connecting { what, fraction } => {
-                self.statusbar.set_progress(Some(&format!("{what}…")));
-                self.connect.show(fraction);
-            }
-            Event::Connected => {
-                self.statusbar.set_progress(None);
-                self.connect.hide();
-                self.hide_connection_banner();
-            }
-            Event::Disconnected(why) => {
-                self.statusbar.set_progress(None);
-                self.connect.hide();
-                self.show_connection_banner(&why);
-            }
-            Event::Error(message) => self.toast(&message),
-            Event::Diagnostics { rel, items } => {
-                if let Some(tab) = self.tab_for(&rel) {
-                    tab.set_diagnostics(items);
-                    // The count lives in the status bar, which only speaks for the active tab.
-                    if self.is_active(&tab) {
-                        self.sync_status();
-                    }
-                }
-            }
-        }
     }
 
     /// Show the header's progress bar while the active tab is a PDF still being opened.
@@ -1601,30 +1412,6 @@ fn sidebar_width(stored: i32) -> i32 {
         true => stored,
         false => Session::default().sidebar_width,
     }
-}
-
-// ---------------------------------------------------------------------------------- indexing
-
-/// Drain whatever the vault worker has said since the last tick.
-///
-/// This source is also what *owns* the window's state: every other closure holds `App` weakly, so
-/// that a closed tab, a finished dialog or a dropped controller cannot keep it alive by accident.
-///
-/// ponytail: a 120 ms poll instead of wiring an `async-channel` into the GLib context. One timeout
-/// source, no extra dependency, and the latency is below what a progress label needs.
-fn start_events(app: &Rc<App>, events: Receiver<Event>) {
-    // Weak, and the source ends with the window: `Shell.windows` holds the only strong `App`, so
-    // closing a window drops it along with its vault, its worker thread and its WebKit process.
-    let app = Rc::downgrade(app);
-    glib::timeout_add_local(POLL, move || {
-        let Some(app) = app.upgrade() else {
-            return glib::ControlFlow::Break;
-        };
-        for event in events.try_iter() {
-            app.on_event(event);
-        }
-        glib::ControlFlow::Continue
-    });
 }
 
 /// The References pane's rows: `path:line`, one-based, in the order the server answered.
