@@ -41,6 +41,9 @@ pub const CHANGED_ON_DISK: i64 = -32001;
 pub const IO: i64 = -32002;
 /// Everything else, already formatted for a human.
 pub const FAILED: i64 = -32000;
+/// There is no link: it went away, or it was never made. Nothing was asked of anything, which is
+/// what tells a failed save apart from one the disk refused.
+pub const DISCONNECTED: i64 = -32004;
 /// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
 /// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
 pub const CONNECTING: i64 = -32003;
@@ -75,8 +78,25 @@ impl RpcError {
         }
     }
 
+    /// Nothing reached the far end, because there is no far end to reach.
+    pub(crate) fn disconnected(message: impl std::fmt::Display) -> RpcError {
+        RpcError {
+            code: DISCONNECTED,
+            message: message.to_string(),
+            data: None,
+        }
+    }
+
+    /// Whether the link, rather than the call, is what failed.
+    pub fn is_offline(&self) -> bool {
+        matches!(self.code, DISCONNECTED | CONNECTING)
+    }
+
     /// The `SaveError` this stands for, so a remote save fails exactly as a local one does.
     pub fn save_error(self) -> SaveError {
+        if self.is_offline() {
+            return SaveError::Offline;
+        }
         if self.code == CHANGED_ON_DISK
             && let Some(data) = self.data.clone()
             && let Ok(current) = serde_json::from_value::<Etag>(data)
@@ -208,7 +228,7 @@ impl Client {
 
     fn call_value(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         if self.is_dead() {
-            return Err(RpcError::failed("not connected"));
+            return Err(RpcError::disconnected("not connected"));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
@@ -217,14 +237,16 @@ impl Client {
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         if let Err(e) = emit(&self.out, &line) {
             locked(&self.pending).remove(&id);
-            return Err(RpcError::failed(format!("cannot reach the server: {e}")));
+            return Err(RpcError::disconnected(format!(
+                "cannot reach the server: {e}"
+            )));
         }
 
         match rx.recv_timeout(DEADLINE) {
             Ok(answer) => answer,
             // The sender was dropped: the reader thread saw EOF and cleared the map.
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(RpcError::failed("the connection closed"))
+                Err(RpcError::disconnected("the connection closed"))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 locked(&self.pending).remove(&id);
@@ -468,6 +490,8 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
                 data: serde_json::to_value(current).ok(),
             }),
             Err(SaveError::Io(e)) => Err(io_failure(&e)),
+            // The server is the far end; it has a disk, so it is never the one that is offline.
+            Err(SaveError::Offline) => Err(RpcError::disconnected("the vault is not connected")),
         },
         "create_note" => any(vault.create_note(
             &arg::<String>(p, 0)?,
