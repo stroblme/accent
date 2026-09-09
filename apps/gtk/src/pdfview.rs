@@ -68,12 +68,29 @@ pub enum Mode {
     Highlighter,
     /// Take a stroke off it.
     Eraser,
+    /// A straight line, snapped to the axis it is close to.
+    Line,
+    /// A rectangle between the press and the release.
+    Rect,
+    /// A circle grown from the press outwards.
+    Circle,
+    /// Take hold of a stroke: drag its middle to move it, an edge to stretch it, a corner to
+    /// scale it.
+    Adjust,
 }
 
 impl Mode {
-    /// Whether a drag draws, which is the pen and the highlighter but not the eraser.
+    /// Whether a drag draws — everything but selecting, erasing and adjusting.
     pub fn draws(self) -> bool {
-        matches!(self, Mode::Pen | Mode::Highlighter)
+        matches!(
+            self,
+            Mode::Pen | Mode::Highlighter | Mode::Line | Mode::Rect | Mode::Circle
+        )
+    }
+
+    /// Whether a drag is a shape: two points, the press and the release, rather than a path.
+    pub fn shapes(self) -> bool {
+        matches!(self, Mode::Line | Mode::Rect | Mode::Circle)
     }
 
     /// How this tool's stroke is drawn, given the accent it is drawn in.
@@ -330,6 +347,164 @@ impl Want {
     }
 }
 
+/// How close to an axis, in degrees, a line has to be to snap onto it.
+const SNAP_DEG: f32 = 7.0;
+/// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.
+const ADJUST_RADIUS: f32 = 4.0;
+/// The side of an Adjust handle, in pixels.
+const HANDLE: f32 = 8.0;
+
+/// A line's end pulled onto the axis through its start when it is within [`SNAP_DEG`] of one.
+pub fn snap(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let angle = dy.abs().atan2(dx.abs()).to_degrees();
+    if angle < SNAP_DEG {
+        (b.0, a.1)
+    } else if angle > 90.0 - SNAP_DEG {
+        (a.0, b.1)
+    } else {
+        b
+    }
+}
+
+/// The shape a drag from `a` to `b` means under `mode`, or nothing for a drag too short to be
+/// one — a click in a shape mode draws nothing — and for any other mode.
+pub fn shape_of(mode: Mode, a: (f32, f32), b: (f32, f32)) -> Option<accent_core::pdf::Shape> {
+    use accent_core::pdf::Shape;
+    let radius = (b.0 - a.0).hypot(b.1 - a.1);
+    if radius < 1.0 {
+        return None;
+    }
+    match mode {
+        Mode::Line => Some(Shape::Line { a, b }),
+        Mode::Rect => Some(Shape::Rect(accent_core::pdf::Rect {
+            left: a.0.min(b.0),
+            top: a.1.min(b.1),
+            right: a.0.max(b.0),
+            bottom: a.1.max(b.1),
+        })),
+        Mode::Circle => Some(Shape::Circle { centre: a, radius }),
+        _ => None,
+    }
+}
+
+/// Where on a selected stroke's box the Adjust tool took hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    Move,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Which part of `bounds` is under `at`: a corner within `grip` of it, else an edge, else the
+/// middle, else nothing.
+pub fn handle_at(bounds: accent_core::pdf::Rect, at: (f32, f32), grip: f32) -> Option<Handle> {
+    let near = |v: f32, edge: f32| (v - edge).abs() <= grip;
+    let inside = at.0 >= bounds.left - grip
+        && at.0 <= bounds.right + grip
+        && at.1 >= bounds.top - grip
+        && at.1 <= bounds.bottom + grip;
+    if !inside {
+        return None;
+    }
+    let (l, r) = (near(at.0, bounds.left), near(at.0, bounds.right));
+    let (t, b) = (near(at.1, bounds.top), near(at.1, bounds.bottom));
+    Some(match (l, r, t, b) {
+        (true, _, true, _) => Handle::TopLeft,
+        (_, true, true, _) => Handle::TopRight,
+        (true, _, _, true) => Handle::BottomLeft,
+        (_, true, _, true) => Handle::BottomRight,
+        (true, ..) => Handle::Left,
+        (_, true, ..) => Handle::Right,
+        (_, _, true, _) => Handle::Top,
+        (_, _, _, true) => Handle::Bottom,
+        _ => Handle::Move,
+    })
+}
+
+/// The map a drag of `handle` by `(dx, dy)` page points applies to a stroke with this box.
+///
+/// The middle translates. An edge stretches its axis about the opposite edge. A corner scales
+/// both axes alike, by the drag's projection onto the diagonal, about the opposite corner. A
+/// scale never drops below 0.05, and an axis with no extent — a horizontal line's height — is
+/// left alone rather than divided by.
+pub fn drag_matrix(
+    handle: Handle,
+    b: accent_core::pdf::Rect,
+    dx: f32,
+    dy: f32,
+) -> accent_core::pdf::Matrix {
+    let (w, h) = (b.width(), b.height());
+    let factor = |delta: f32, extent: f32| match extent > f32::EPSILON {
+        true => (1.0 + delta / extent).max(0.05),
+        false => 1.0,
+    };
+    let diagonal = |dx: f32, dy: f32| match w * w + h * h {
+        d2 if d2 > f32::EPSILON => (1.0 + (dx * w + dy * h) / d2).max(0.05),
+        _ => 1.0,
+    };
+    // Scaling about a fixed line: x' = s·x + (1 − s)·fixed.
+    let about =
+        |sx: f32, sy: f32, fx: f32, fy: f32| [sx, 0.0, 0.0, sy, (1.0 - sx) * fx, (1.0 - sy) * fy];
+    match handle {
+        Handle::Move => [1.0, 0.0, 0.0, 1.0, dx, dy],
+        Handle::Right => about(factor(dx, w), 1.0, b.left, 0.0),
+        Handle::Left => about(factor(-dx, w), 1.0, b.right, 0.0),
+        Handle::Bottom => about(1.0, factor(dy, h), 0.0, b.top),
+        Handle::Top => about(1.0, factor(-dy, h), 0.0, b.bottom),
+        Handle::BottomRight => {
+            let s = diagonal(dx, dy);
+            about(s, s, b.left, b.top)
+        }
+        Handle::TopRight => {
+            let s = diagonal(dx, -dy);
+            about(s, s, b.left, b.bottom)
+        }
+        Handle::BottomLeft => {
+            let s = diagonal(-dx, dy);
+            about(s, s, b.right, b.top)
+        }
+        Handle::TopLeft => {
+            let s = diagonal(-dx, -dy);
+            about(s, s, b.right, b.bottom)
+        }
+    }
+}
+
+/// A box under a map, normalised. Exact for the axis-aligned maps a drag makes.
+fn mapped(r: accent_core::pdf::Rect, m: accent_core::pdf::Matrix) -> accent_core::pdf::Rect {
+    let (a, b) = (
+        accent_core::pdf::apply(m, (r.left, r.top)),
+        accent_core::pdf::apply(m, (r.right, r.bottom)),
+    );
+    accent_core::pdf::Rect {
+        left: a.0.min(b.0),
+        top: a.1.min(b.1),
+        right: a.0.max(b.0),
+        bottom: a.1.max(b.1),
+    }
+}
+
+/// The stroke the Adjust tool has hold of, and the drag being applied to it.
+pub struct Selected {
+    pub page: usize,
+    /// Its place in the page's `/Annots` as of the last [`Reply::Inks`].
+    pub index: usize,
+    pub points: Vec<(f32, f32)>,
+    pub bounds: accent_core::pdf::Rect,
+    pub style: accent_core::pdf::InkStyle,
+    /// Where the hand is holding it, while it is.
+    pub handle: Option<Handle>,
+    /// What the drag so far amounts to, painted over the page until the hand lets go.
+    pub matrix: accent_core::pdf::Matrix,
+}
+
 /// A stroke as the widget holds it while it is being drawn.
 pub struct Stroke {
     pub page: usize,
@@ -372,6 +547,11 @@ pub enum Reply {
     Highlights(Highlights),
     /// An export finished: how many annotations it wrote, or why it could not.
     Exported(Result<usize, String>),
+    /// Every ink stroke of one page with its box and style, for the Adjust tool to take hold of.
+    Inks {
+        page: usize,
+        inks: Vec<accent_core::pdf::InkShape>,
+    },
     /// This page's annotations changed, so what is cached of it is of the old page.
     PageChanged(usize),
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
@@ -738,6 +918,9 @@ impl PdfView {
 
     pub fn set_mode(&self, mode: Mode) {
         self.imp().mode.set(mode);
+        if mode != Mode::Adjust {
+            self.clear_inks();
+        }
         // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
         // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
         // exactly the thing that will not happen.
@@ -786,6 +969,124 @@ impl PdfView {
     /// Called with a point the eraser passed over.
     pub fn connect_erase(&self, f: impl Fn(usize, (f32, f32)) + 'static) {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with a page, the index of a stroke on it and the map to move it by.
+    pub fn connect_transform(&self, f: impl Fn(usize, usize, accent_core::pdf::Matrix) + 'static) {
+        *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// What one page holds for the Adjust tool. A selection on that page follows its stroke
+    /// to the fresh list, or to the list's end after a move, or goes if the stroke did.
+    pub fn set_inks(&self, page: usize, inks: Vec<accent_core::pdf::InkShape>) {
+        {
+            let mut adjust = self.imp().adjust.borrow_mut();
+            if let Some(a) = adjust.as_ref()
+                && a.page == page
+            {
+                let fresh = match self.imp().reselect.replace(false) {
+                    true => inks.last(),
+                    false => inks.iter().find(|i| i.index == a.index),
+                };
+                *adjust = fresh.map(|i| Selected {
+                    page,
+                    index: i.index,
+                    points: i.points.clone(),
+                    bounds: i.bounds,
+                    style: i.style,
+                    handle: a.handle,
+                    matrix: a.matrix,
+                });
+            }
+        }
+        self.imp().inks.borrow_mut().insert(page, inks);
+        self.queue_draw();
+    }
+
+    /// Forget every stroke the Adjust tool knew: the document changed under it.
+    pub fn clear_inks(&self) {
+        self.imp().inks.borrow_mut().clear();
+        *self.imp().adjust.borrow_mut() = None;
+        self.queue_draw();
+    }
+
+    /// The Adjust tool's press: a handle of the stroke already held, else whichever stroke is
+    /// under the pointer, else nothing. Whether the press took hold of anything.
+    fn adjust_press(&self, x: f64, y: f64) -> bool {
+        let Some((page, at)) = self.nearest_page_point(x, y) else {
+            return false;
+        };
+        let grip = HANDLE / self.imp().layout.borrow().scale;
+        let mut adjust = self.imp().adjust.borrow_mut();
+        if let Some(a) = adjust.as_mut()
+            && a.page == page
+            && let Some(handle) = handle_at(a.bounds, at, grip)
+        {
+            a.handle = Some(handle);
+            return true;
+        }
+        // The stroke under the pointer first, then the first whose box it is inside: a thin
+        // line wants the pointer on it, a circle's empty middle still belongs to the circle.
+        let inks = self.imp().inks.borrow();
+        let found = inks.get(&page).and_then(|inks| {
+            inks.iter()
+                .find(|i| accent_core::pdf::hit(&i.points, at, ADJUST_RADIUS))
+                .or_else(|| {
+                    inks.iter()
+                        .find(|i| handle_at(i.bounds, at, grip).is_some())
+                })
+        });
+        *adjust = found.map(|i| Selected {
+            page,
+            index: i.index,
+            points: i.points.clone(),
+            bounds: i.bounds,
+            style: i.style,
+            handle: Some(Handle::Move),
+            matrix: accent_core::pdf::IDENTITY,
+        });
+        let held = adjust.is_some();
+        drop(adjust);
+        self.queue_draw();
+        held
+    }
+
+    fn adjust_drag(&self, dx: f64, dy: f64) {
+        let scale = self.imp().layout.borrow().scale;
+        if let Some(a) = self.imp().adjust.borrow_mut().as_mut()
+            && let Some(handle) = a.handle
+        {
+            a.matrix = drag_matrix(handle, a.bounds, dx as f32 / scale, dy as f32 / scale);
+        }
+        self.queue_draw();
+    }
+
+    /// The hand let go: what the drag amounted to goes to the tab, and the selection keeps
+    /// painting where the stroke will be until the fresh list confirms it.
+    fn adjust_release(&self) {
+        let sent = {
+            let mut adjust = self.imp().adjust.borrow_mut();
+            let Some(a) = adjust.as_mut() else {
+                return;
+            };
+            a.handle = None;
+            let m = std::mem::replace(&mut a.matrix, accent_core::pdf::IDENTITY);
+            if m == accent_core::pdf::IDENTITY {
+                return;
+            }
+            a.points = a
+                .points
+                .iter()
+                .map(|&p| accent_core::pdf::apply(m, p))
+                .collect();
+            a.bounds = mapped(a.bounds, m);
+            (a.page, a.index, m)
+        };
+        self.imp().reselect.set(true);
+        if let Some(f) = self.imp().on_transform.borrow().as_ref() {
+            f(sent.0, sent.1, sent.2);
+        }
+        self.queue_draw();
     }
 
     /// Tell the tab the eraser passed over this point of whichever page is under it.
@@ -1092,6 +1393,7 @@ mod imp {
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
     type At = Box<dyn Fn(usize, (f32, f32))>;
+    type Transform = Box<dyn Fn(usize, usize, accent_core::pdf::Matrix)>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -1142,6 +1444,12 @@ mod imp {
         // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
         // a stroke with no render to replace it is one that still has to be painted.
         pub strokes: RefCell<Vec<super::Stroke>>,
+        /// What the Adjust tool can take hold of, per page it has been told about.
+        pub inks: RefCell<HashMap<usize, Vec<accent_core::pdf::InkShape>>>,
+        pub adjust: RefCell<Option<super::Selected>>,
+        /// A move went out: the stroke comes back at the end of its page's `/Annots`, so the
+        /// next list of that page selects its last entry.
+        pub reselect: Cell<bool>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -1162,6 +1470,7 @@ mod imp {
         pub on_clicked: RefCell<Option<Coords>>,
         pub on_ink: RefCell<Option<Stroke>>,
         pub on_erase: RefCell<Option<At>>,
+        pub on_transform: RefCell<Option<Transform>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
         pub on_zoom: RefCell<Option<Zoomed>>,
@@ -1193,6 +1502,9 @@ mod imp {
                 stale_pages: RefCell::new(HashSet::new()),
                 stale_tiles: RefCell::new(HashSet::new()),
                 strokes: RefCell::new(Vec::new()),
+                inks: RefCell::new(HashMap::new()),
+                adjust: RefCell::new(None),
+                reselect: Cell::new(false),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
@@ -1207,6 +1519,7 @@ mod imp {
                 on_clicked: RefCell::new(None),
                 on_ink: RefCell::new(None),
                 on_erase: RefCell::new(None),
+                on_transform: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -1357,6 +1670,11 @@ mod imp {
                                 done: false,
                             });
                         }
+                        super::Mode::Adjust => {
+                            if obj.adjust_press(x, y) {
+                                gesture.set_state(gtk::EventSequenceState::Claimed);
+                            }
+                        }
                         _ => {
                             gesture.set_state(gtk::EventSequenceState::Claimed);
                             obj.erase_at(x, y);
@@ -1392,10 +1710,21 @@ mod imp {
                             if let Some(stroke) = obj.imp().strokes.borrow_mut().last_mut()
                                 && !stroke.done
                             {
-                                stroke.points.push(at);
+                                // A shape is its two ends, the press and wherever the hand is.
+                                if mode.shapes() {
+                                    let anchor = stroke.points[0];
+                                    stroke.points.truncate(1);
+                                    stroke.points.push(match mode {
+                                        super::Mode::Line => super::snap(anchor, at),
+                                        _ => at,
+                                    });
+                                } else {
+                                    stroke.points.push(at);
+                                }
                             }
                             obj.queue_draw();
                         }
+                        super::Mode::Adjust => obj.adjust_drag(dx, dy),
                         _ => obj.erase_at(x + dx, y + dy),
                     }
                 }
@@ -1405,16 +1734,29 @@ mod imp {
                 obj,
                 move |_, dx, dy| {
                     let from = obj.imp().drag_from.replace(None);
-                    if obj.imp().drag_mode.get().draws() {
+                    let mode = obj.imp().drag_mode.get();
+                    if mode == super::Mode::Adjust {
+                        return obj.adjust_release();
+                    }
+                    if mode.draws() {
+                        let mut strokes = obj.imp().strokes.borrow_mut();
+                        // A click in a shape mode is no shape, and leaves nothing behind waiting
+                        // for a tile that will never carry it.
+                        let click = matches!(strokes.last(), Some(s) if !s.done && mode.shapes()
+                            && super::shape_of(mode, s.points[0], s.points[s.points.len() - 1]).is_none());
+                        if click {
+                            strokes.pop();
+                        }
                         // The stroke stays painted until a tile carries it, so the page never
                         // blinks between the hand letting go and pdfium answering.
-                        let finished = match obj.imp().strokes.borrow_mut().last_mut() {
+                        let finished = match strokes.last_mut() {
                             Some(stroke) if !stroke.done => {
                                 stroke.done = true;
                                 Some((stroke.page, stroke.points.clone()))
                             }
                             _ => None,
                         };
+                        drop(strokes);
                         if let Some((page, points)) = finished
                             && let Some(f) = obj.imp().on_ink.borrow().as_ref()
                         {
@@ -1503,6 +1845,7 @@ mod imp {
             let marks = self.marks.borrow();
             let highlights = self.highlights.borrow();
             let strokes = self.strokes.borrow();
+            let adjust = self.adjust.borrow();
             let selection = self.selection.borrow();
             for (index, rect) in layout.pages.iter().enumerate() {
                 // One viewport of prefetch above and below, so scrolling meets ready tiles.
@@ -1631,15 +1974,32 @@ mod imp {
                         graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
                     };
                     let points = &stroke.points;
-                    if let Some(first) = points.first() {
-                        builder.move_to(point(first).x(), point(first).y());
-                        for p in &points[1..] {
-                            builder.line_to(point(p).x(), point(p).y());
+                    match (stroke.tool, points.as_slice()) {
+                        (super::Mode::Rect, &[a, b]) => {
+                            let (p, q) = (point(&a), point(&b));
+                            builder.add_rect(&graphene::Rect::new(
+                                p.x().min(q.x()),
+                                p.y().min(q.y()),
+                                (p.x() - q.x()).abs(),
+                                (p.y() - q.y()).abs(),
+                            ));
                         }
-                        // A stroke of one point is a dot, which a round cap draws from a
-                        // zero-length line.
-                        if points.len() == 1 {
-                            builder.line_to(point(first).x(), point(first).y());
+                        (super::Mode::Circle, &[a, b]) => {
+                            let radius = (b.0 - a.0).hypot(b.1 - a.1) * layout.scale;
+                            builder.add_circle(&point(&a), radius);
+                        }
+                        _ => {
+                            if let Some(first) = points.first() {
+                                builder.move_to(point(first).x(), point(first).y());
+                                for p in &points[1..] {
+                                    builder.line_to(point(p).x(), point(p).y());
+                                }
+                                // A stroke of one point is a dot, which a round cap draws from
+                                // a zero-length line.
+                                if points.len() == 1 {
+                                    builder.line_to(point(first).x(), point(first).y());
+                                }
+                            }
                         }
                     }
                     // The tool's own width and alpha, so what the hand sees is what the render
@@ -1656,6 +2016,65 @@ mod imp {
                     stroke_style.set_line_cap(gsk::LineCap::Round);
                     stroke_style.set_line_join(gsk::LineJoin::Round);
                     snapshot.append_stroke(&builder.to_path(), &stroke_style, &colour);
+                }
+                // The stroke the Adjust tool holds: its box with eight handles, and while the
+                // hand is on it, a ghost of the stroke where the drag has taken it.
+                if let Some(a) = adjust.as_ref().filter(|a| a.page == index) {
+                    let point = |p: (f32, f32)| {
+                        let (x, y) = accent_core::pdf::apply(a.matrix, p);
+                        graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
+                    };
+                    if a.handle.is_some()
+                        && let Some(first) = a.points.first()
+                    {
+                        let builder = gsk::PathBuilder::new();
+                        builder.move_to(point(*first).x(), point(*first).y());
+                        for &p in &a.points[1..] {
+                            builder.line_to(point(p).x(), point(p).y());
+                        }
+                        let [r, g, b, _] = a.style.rgba;
+                        let colour = gdk::RGBA::new(
+                            f32::from(r) / 255.0,
+                            f32::from(g) / 255.0,
+                            f32::from(b) / 255.0,
+                            0.6,
+                        );
+                        let ghost = gsk::Stroke::new(a.style.width * layout.scale);
+                        ghost.set_line_cap(gsk::LineCap::Round);
+                        ghost.set_line_join(gsk::LineJoin::Round);
+                        snapshot.append_stroke(&builder.to_path(), &ghost, &colour);
+                    }
+                    let (tl, br) = (
+                        point((a.bounds.left, a.bounds.top)),
+                        point((a.bounds.right, a.bounds.bottom)),
+                    );
+                    let (l, t) = (tl.x().min(br.x()), tl.y().min(br.y()));
+                    let (r, b) = (tl.x().max(br.x()), tl.y().max(br.y()));
+                    let frame = graphene::Rect::new(l, t, r - l, b - t);
+                    snapshot.append_border(
+                        &gsk::RoundedRect::from_rect(frame, 0.0),
+                        &[1.0; 4],
+                        &[accent; 4],
+                    );
+                    let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+                    for (hx, hy) in [
+                        (l, t),
+                        (cx, t),
+                        (r, t),
+                        (l, cy),
+                        (r, cy),
+                        (l, b),
+                        (cx, b),
+                        (r, b),
+                    ] {
+                        let square = graphene::Rect::new(
+                            hx - super::HANDLE / 2.0,
+                            hy - super::HANDLE / 2.0,
+                            super::HANDLE,
+                            super::HANDLE,
+                        );
+                        snapshot.append_color(&accent, &square);
+                    }
                 }
                 if let Some(page_marks) = marks.get(&index) {
                     for (n, mark) in page_marks.iter().enumerate() {
@@ -1876,6 +2295,73 @@ mod tests {
         };
         assert_eq!(anchor.clamped(4).page, 3);
         assert_eq!(anchor.clamped(4).v, 0.25);
+    }
+
+    #[test]
+    fn a_line_snaps_to_the_axis_within_seven_degrees() {
+        assert_eq!(snap((0.0, 0.0), (100.0, 10.0)), (100.0, 0.0));
+        assert_eq!(snap((0.0, 0.0), (100.0, 20.0)), (100.0, 20.0));
+        assert_eq!(snap((0.0, 0.0), (5.0, 100.0)), (0.0, 100.0));
+    }
+
+    #[test]
+    fn a_shape_is_normalised_and_a_click_is_not_one() {
+        use accent_core::pdf::{Rect, Shape};
+        let rect = shape_of(Mode::Rect, (50.0, 50.0), (10.0, 20.0));
+        assert_eq!(
+            rect,
+            Some(Shape::Rect(Rect {
+                left: 10.0,
+                top: 20.0,
+                right: 50.0,
+                bottom: 50.0
+            }))
+        );
+        let circle = shape_of(Mode::Circle, (0.0, 0.0), (3.0, 4.0));
+        assert_eq!(
+            circle,
+            Some(Shape::Circle {
+                centre: (0.0, 0.0),
+                radius: 5.0
+            })
+        );
+        assert_eq!(shape_of(Mode::Rect, (7.0, 7.0), (7.0, 7.5)), None);
+        assert_eq!(shape_of(Mode::Pen, (0.0, 0.0), (9.0, 9.0)), None);
+    }
+
+    #[test]
+    fn handles_map_to_matrices() {
+        use accent_core::pdf::{Rect, apply};
+        let b = Rect {
+            left: 10.0,
+            top: 20.0,
+            right: 50.0,
+            bottom: 60.0,
+        };
+        assert_eq!(handle_at(b, (50.0, 60.0), 3.0), Some(Handle::BottomRight));
+        assert_eq!(handle_at(b, (30.0, 20.0), 3.0), Some(Handle::Top));
+        assert_eq!(handle_at(b, (30.0, 40.0), 3.0), Some(Handle::Move));
+        assert_eq!(handle_at(b, (100.0, 100.0), 3.0), None);
+
+        let m = drag_matrix(Handle::Right, b, 40.0, 0.0);
+        assert_eq!(apply(m, (50.0, 33.0)), (90.0, 33.0));
+        assert_eq!(apply(m, (10.0, 33.0)), (10.0, 33.0));
+        let m = drag_matrix(Handle::BottomRight, b, 40.0, 40.0);
+        assert_eq!(apply(m, (50.0, 60.0)), (90.0, 100.0));
+        assert_eq!(apply(m, (10.0, 20.0)), (10.0, 20.0));
+        let m = drag_matrix(Handle::Move, b, 3.0, 4.0);
+        assert_eq!(apply(m, (10.0, 20.0)), (13.0, 24.0));
+        // A horizontal line has no height to stretch, and its edge drag leaves it a line.
+        let flat = Rect {
+            left: 0.0,
+            top: 5.0,
+            right: 10.0,
+            bottom: 5.0,
+        };
+        assert_eq!(
+            drag_matrix(Handle::Bottom, flat, 0.0, 9.0),
+            accent_core::pdf::IDENTITY
+        );
     }
 
     /// Ten entries of 10 bytes against a budget of 100: nothing goes until the eleventh, and then

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Drawn for accent on the 16 px symbolic grid; strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M 12 2.9 A 9.1 9.1 0 1 1 11.999 2.9 Z M 12 5.1 A 6.9 6.9 0 1 0 12.001 5.1 Z" fill="currentColor"/>
+</svg>

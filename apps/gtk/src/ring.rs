@@ -1,6 +1,6 @@
 //! The drawing tools, as a ring that floats over the page.
 //!
-//! Three round buttons orbiting a hub, dragged around the pane by that hub. It is an overlay
+//! Round buttons orbiting a hub, dragged around the pane by that hub. It is an overlay
 //! child of the PDF tab rather than a bar in the chrome, because the reader puts it wherever the
 //! part of the page they are working on is not.
 
@@ -10,21 +10,25 @@ use gtk::glib;
 use crate::pdfview::Mode;
 
 /// The distance from the hub to a tool button, in pixels.
-const ORBIT: f64 = 52.0;
+const ORBIT: f64 = 60.0;
 /// The whole ring's box, wide enough for the orbit plus a button either side of it.
-const SIZE: i32 = 144;
+const SIZE: i32 = 160;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 
-/// The three tools, in the order they sit on the ring: pen at the top, then clockwise.
-const TOOLS: [(Mode, &str, &str); 3] = [
+/// The tools, in the order they sit on the ring: pen at the top, then clockwise.
+const TOOLS: [(Mode, &str, &str); 7] = [
     (Mode::Pen, "win.pdf-pen", "tool-pen-symbolic"),
-    (Mode::Eraser, "win.pdf-eraser", "tool-eraser-symbolic"),
     (
         Mode::Highlighter,
         "win.pdf-highlighter",
         "tool-highlighter-symbolic",
     ),
+    (Mode::Eraser, "win.pdf-eraser", "tool-eraser-symbolic"),
+    (Mode::Line, "win.pdf-line", "tool-line-symbolic"),
+    (Mode::Rect, "win.pdf-rect", "tool-rect-symbolic"),
+    (Mode::Circle, "win.pdf-circle", "tool-circle-symbolic"),
+    (Mode::Adjust, "win.pdf-adjust", "tool-adjust-symbolic"),
 ];
 
 /// A ring of tool buttons, and the hub that moves it.
@@ -64,9 +68,7 @@ impl Ring {
 
         let mut buttons = Vec::new();
         for (i, (mode, action, icon)) in TOOLS.iter().enumerate() {
-            // Pen at the top, the other two at the foot of the ring, so the three sit on the
-            // points of a triangle rather than crowding one side.
-            let angle = std::f64::consts::PI * (-0.5 + i as f64 * 2.0 / 3.0);
+            let (dx, dy) = orbit(i, TOOLS.len(), ORBIT);
             let button = gtk::ToggleButton::builder()
                 .icon_name(*icon)
                 .tooltip_text(crate::label_of(action))
@@ -75,12 +77,7 @@ impl Ring {
             button.add_css_class("circular");
             button.add_css_class("osd");
             button.add_css_class("accent-ring-tool");
-            place(
-                &root,
-                &button,
-                centre + ORBIT * angle.cos(),
-                centre + ORBIT * angle.sin(),
-            );
+            place(&root, &button, centre + dx, centre + dy);
             buttons.push((*mode, button));
         }
 
@@ -179,6 +176,13 @@ impl Ring {
     }
 }
 
+/// Where slot `i` of `n` sits on an orbit of this radius, relative to the hub: the first at the
+/// top, the rest clockwise.
+pub(crate) fn orbit(i: usize, n: usize, radius: f64) -> (f64, f64) {
+    let angle = std::f64::consts::PI * (-0.5 + i as f64 * 2.0 / n as f64);
+    (radius * angle.cos(), radius * angle.sin())
+}
+
 /// Put a round button on the ring by its centre rather than its corner, which is how the
 /// positions above are worked out.
 fn place(root: &gtk::Fixed, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64) {
@@ -192,3 +196,23 @@ fn place(root: &gtk::Fixed, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64) {
 /// A tool button's diameter. Big enough to hit while drawing, small enough to leave the page
 /// visible around the ring.
 const BUTTON: i32 = 38;
+
+#[cfg(test)]
+mod tests {
+    use super::{BUTTON, ORBIT, TOOLS, orbit};
+
+    #[test]
+    fn tools_start_at_the_top_and_sit_a_button_apart() {
+        let (dx, dy) = orbit(0, TOOLS.len(), ORBIT);
+        assert!(dx.abs() < 1e-9 && (dy + ORBIT).abs() < 1e-9);
+        for i in 0..TOOLS.len() {
+            let a = orbit(i, TOOLS.len(), ORBIT);
+            let b = orbit((i + 1) % TOOLS.len(), TOOLS.len(), ORBIT);
+            let gap = (a.0 - b.0).hypot(a.1 - b.1);
+            assert!(
+                gap >= f64::from(BUTTON),
+                "slots {i} and next are {gap} px apart"
+            );
+        }
+    }
+}
