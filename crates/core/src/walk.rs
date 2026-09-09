@@ -278,7 +278,7 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
 /// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
 /// disagree about which paths the index holds. The vault root is the user's own choice and is
 /// never refused.
-pub fn is_unindexed(root: &Path, rel: &str) -> bool {
+fn is_unindexed(root: &Path, rel: &str) -> bool {
     if rel.is_empty() {
         return false;
     }

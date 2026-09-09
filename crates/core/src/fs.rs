@@ -267,31 +267,6 @@ pub fn conflict_original(name: &str) -> Option<String> {
     })
 }
 
-/// Conflict copies sitting next to `path`. Accepts either the original or one of the copies.
-pub fn conflict_siblings(path: &Path) -> io::Result<Vec<PathBuf>> {
-    let dir = match path.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-        return Ok(Vec::new());
-    };
-    let original = conflict_original(name).unwrap_or_else(|| name.to_string());
-
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let Some(entry_name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        if conflict_original(&entry_name).as_deref() == Some(original.as_str()) {
-            out.push(entry.path());
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,33 +484,5 @@ mod tests {
             Some("README")
         );
         assert_eq!(conflict_original("Note.md"), None);
-    }
-
-    #[test]
-    fn conflict_siblings_finds_copies() {
-        let dir = tempfile::tempdir().unwrap();
-        let note = dir.path().join("Note.md");
-        let a = dir
-            .path()
-            .join("Note.sync-conflict-20260903-101500-AAAAAAA.md");
-        let b = dir
-            .path()
-            .join("Note.sync-conflict-20260903-101600-BBBBBBB.md");
-        for p in [&note, &a, &b] {
-            std::fs::write(p, "x").unwrap();
-        }
-        std::fs::write(
-            dir.path()
-                .join("Other.sync-conflict-20260903-101500-CCCCCCC.md"),
-            "x",
-        )
-        .unwrap();
-
-        assert_eq!(
-            conflict_siblings(&note).unwrap(),
-            vec![a.clone(), b.clone()]
-        );
-        // Asking with a conflict copy in hand finds the whole set, including itself.
-        assert_eq!(conflict_siblings(&a).unwrap(), vec![a, b]);
     }
 }

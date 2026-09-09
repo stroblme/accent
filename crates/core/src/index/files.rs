@@ -1,6 +1,6 @@
 //! Listing what the index holds: the lazy tree, the switcher's paths, tags, stats, exclusions.
 
-use super::{FileRow, HeadingRow, Index, Stats};
+use super::{FileRow, Index, Stats};
 use crate::path;
 use crate::walk::FileKind;
 use anyhow::Result;
@@ -47,23 +47,6 @@ impl Index {
         Ok(())
     }
 
-    /// Headings of one note in document order: the outline pane and heading-scoped edits.
-    pub fn headings(&self, rel: &str) -> Result<Vec<HeadingRow>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT h.level, h.text, h.byte_start FROM headings h
-             JOIN files f ON f.id = h.file_id
-             WHERE f.rel_path = ?1 ORDER BY h.byte_start",
-        )?;
-        let rows = st.query_map([rel], |r| {
-            Ok(HeadingRow {
-                level: r.get::<_, i64>(0)? as u8,
-                text: r.get(1)?,
-                byte_start: r.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// Every `*.sync-conflict-*` copy in the vault, for the resolve UI.
     pub fn conflicts(&self) -> Result<Vec<String>> {
         let mut st = self
@@ -87,26 +70,6 @@ impl Index {
         let mut out = Vec::new();
         for rel in rows {
             out.push(root.join(rel?));
-        }
-        Ok(out)
-    }
-
-    /// `(canonical target, rel_path of the link)` for every directory symlink pointing out of the
-    /// vault. The watch set above reaches these through the link, so this is what maps an event
-    /// path that arrives canonical anyway back into the vault.
-    pub fn symlink_dirs(&self, root: &Path) -> Result<Vec<(std::path::PathBuf, String)>> {
-        let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        let mut st = self
-            .conn
-            .prepare_cached("SELECT canonical, rel_path FROM files WHERE kind = 0")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (canonical, rel) = row?;
-            let canonical = std::path::PathBuf::from(canonical);
-            if !canonical.starts_with(&canonical_root) && root.join(&rel).is_symlink() {
-                out.push((canonical, rel));
-            }
         }
         Ok(out)
     }
@@ -261,24 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn headings_read_back() {
-        let (vault, db) = fixture();
-        fs::write(vault.path().join("h.md"), "# One\ntext\n\n## Two\n").unwrap();
-        let mut ix = open(&db);
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-
-        let hs = ix.headings("h.md").unwrap();
-        assert_eq!(
-            hs.iter()
-                .map(|h| (h.level, h.text.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(1, "One"), (2, "Two")]
-        );
-        assert_eq!(hs[0].byte_start, 0);
-        assert!(ix.headings("nope.md").unwrap().is_empty());
-    }
-
-    #[test]
     fn conflicts_lists_conflict_copies() {
         let (vault, db) = fixture();
         let mut ix = open(&db);
@@ -290,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn symlink_dirs_lists_external_targets() {
+    fn dirs_lists_a_linked_directory_beside_a_plain_one() {
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("ext.md"), "ext").unwrap();
         let vault = tempfile::tempdir().unwrap();
@@ -300,14 +245,9 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        // Only the link is listed here; the plain directory is an ordinary member of the watch set.
         assert_eq!(
             ix.dirs(vault.path()).unwrap(),
             vec![vault.path().join("linked"), vault.path().join("plain")]
-        );
-        assert_eq!(
-            ix.symlink_dirs(vault.path()).unwrap(),
-            vec![(outside.path().canonicalize().unwrap(), "linked".to_string())]
         );
         assert_eq!(ix.stats().unwrap().dirs, 2);
     }
