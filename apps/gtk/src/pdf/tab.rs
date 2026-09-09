@@ -391,6 +391,11 @@ impl PdfTab {
         self.ask(Request::Highlights(links));
     }
 
+    /// Whether any note links into this document, which is whether there is anything to export.
+    pub fn has_note_links(&self) -> bool {
+        !self.notes.borrow().is_empty()
+    }
+
     /// Write those highlights into the file itself, as `/Highlight` annotations in `color`.
     pub fn export_highlights(self: &Rc<Self>, color: [u8; 3]) {
         let links = self.notes.borrow().clone();
