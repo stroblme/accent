@@ -105,7 +105,7 @@ mod provider_imp {
 
     use super::{Proposal, ordered};
     use crate::editor::Tab;
-    use crate::{diagnostics, hover, lang};
+    use crate::{hover, lang};
 
     #[derive(Default)]
     pub struct Provider {
@@ -145,8 +145,8 @@ mod provider_imp {
             let Some(buffer) = context.buffer() else {
                 return String::new();
             };
-            let start = diagnostics::iter_at(&buffer, item.replace.start);
-            let caret = buffer.iter_at_mark(&buffer.get_insert());
+            let start = lang::iter_at(&buffer, item.replace.start);
+            let caret = crate::editor::caret(&buffer);
             match start <= caret {
                 true => buffer.text(&start, &caret, true).to_string(),
                 false => String::new(),
@@ -188,7 +188,7 @@ mod provider_imp {
                 let (Some(vault), Some(buffer)) = (tab.lang.vault(), context.buffer()) else {
                     return gio::ListStore::new::<Proposal>();
                 };
-                let caret = buffer.iter_at_mark(&buffer.get_insert());
+                let caret = crate::editor::caret(&buffer);
                 let (pos, trigger) = (lang::pos_of(&caret), trigger_before(&tab, &caret));
                 lang::flush(tab.clone()).await;
                 let rel = tab.rel();
@@ -332,10 +332,10 @@ mod provider_imp {
             // One user action, so Ctrl+Z takes the whole acceptance back: the replaced range, the
             // inserted text and whatever import the item brought with it.
             buffer.begin_user_action();
-            let caret = lang::pos_of(&buffer.iter_at_mark(&buffer.get_insert()));
+            let caret = lang::pos_of(&crate::editor::caret(&buffer));
             let replace = super::grown(item.replace, caret);
-            let mut start = diagnostics::iter_at(&buffer, replace.start);
-            let mut end = diagnostics::iter_at(&buffer, replace.end);
+            let mut start = lang::iter_at(&buffer, replace.start);
+            let mut end = lang::iter_at(&buffer, replace.end);
             buffer.delete(&mut start, &mut end);
             // `delete` leaves both iters at the deletion point, so this writes exactly there.
             match item.is_snippet {
@@ -355,8 +355,8 @@ mod provider_imp {
             // before the caret in practice — an import at the top of the file — which is why
             // they can be applied after the insert at all.
             for edit in ordered(item.extra_edits) {
-                let mut from = diagnostics::iter_at(&buffer, edit.range.start);
-                let mut to = diagnostics::iter_at(&buffer, edit.range.end);
+                let mut from = lang::iter_at(&buffer, edit.range.start);
+                let mut to = lang::iter_at(&buffer, edit.range.end);
                 buffer.delete(&mut from, &mut to);
                 buffer.insert(&mut from, &edit.text);
             }

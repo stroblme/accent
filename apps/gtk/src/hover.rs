@@ -17,9 +17,9 @@ use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
 use std::rc::Rc;
 
-/// How wide the label is let grow before it wraps. A signature is the longest thing in a hover
-/// and 80 characters is where one stops being read left to right.
-const WIDTH: i32 = 80;
+/// How wide a hover or a signature is let grow before it wraps. A signature is the longest thing
+/// in either and 80 characters is where one stops being read left to right.
+pub const WIDTH: i32 = 80;
 
 /// `md` as Pango markup. Every run of text is escaped, so a C++ signature full of `<` and `&`
 /// cannot turn the label into a parse error and blank the hover.

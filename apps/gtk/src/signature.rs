@@ -9,17 +9,14 @@
 //! the moment it stops being about what the caret is inside: an answer of `None`, Escape, the
 //! caret leaving the line, the focus leaving the view, or the tab being switched away from.
 
-use crate::editor::Tab;
+use crate::editor::{Tab, caret};
+use crate::hover::WIDTH;
 use crate::lang;
 use accent_api::Signature;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-
-/// How wide the signature is let grow before it wraps, in characters. The same measure the hover
-/// uses, for the same reason.
-const WIDTH: i32 = 80;
 
 /// The signature popover of one tab, and the request that would fill it.
 #[derive(Default)]
@@ -121,7 +118,7 @@ pub fn install(tab: &Rc<Tab>) {
         #[weak(rename_to = tab)]
         tab,
         move |buffer| {
-            let line = buffer.iter_at_mark(&buffer.get_insert()).line();
+            let line = caret(buffer).line();
             if tab.lang.signature.is_shown() && line != tab.lang.signature.line.get() {
                 tab.lang.signature.dismiss();
             }
@@ -157,7 +154,7 @@ pub fn request(tab: &Rc<Tab>) {
         let Some(tab) = weak.upgrade() else { return };
         lang::flush(tab.clone()).await;
         // Read after the flush, not before: the edit that asked for this may have moved it.
-        let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+        let caret = caret(&tab.buffer);
         let answer = vault.signature_help(&tab.rel(), lang::pos_of(&caret)).await;
         tracing::debug!(
             "signature for {}: {:?}",
@@ -206,7 +203,7 @@ fn show(tab: &Rc<Tab>, sig: &Signature) {
         .child(&content)
         .build();
     popover.set_parent(&tab.view);
-    let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+    let caret = caret(&tab.buffer);
     let at = tab.view.iter_location(&caret);
     let (x, y) = tab
         .view

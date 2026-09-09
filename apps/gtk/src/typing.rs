@@ -11,6 +11,7 @@
 //! and the whole controller stands down while there are secondary carets or a completion popup:
 //! both own Return, and neither wants a list marker inserted underneath them.
 
+use crate::editor::{caret, line_prefix};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
@@ -277,10 +278,10 @@ fn on_return(view: &sourceview5::View) -> glib::Propagation {
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
     }
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let caret = caret(&buffer);
     let mut start = caret;
     start.set_line_offset(0);
-    let line = buffer.text(&start, &caret, true).to_string();
+    let line = line_prefix(&buffer, &caret).to_string();
 
     // The fence rule runs before the code-block guard on purpose: by the time Return arrives the
     // opening line is usually already tagged as the block it opened.
@@ -335,7 +336,7 @@ fn on_backspace(view: &sourceview5::View) -> glib::Propagation {
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
     }
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let caret = caret(&buffer);
     let mut before = caret;
     if !before.backward_char() || !deletes_pair(before.char(), char_at(&caret)) {
         return glib::Propagation::Proceed;
@@ -354,13 +355,13 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
     }
     let buffer = view.buffer();
     let selection = buffer.selection_bounds();
-    let caret = buffer.iter_at_mark(&buffer.get_insert());
+    let at = caret(&buffer);
     // Code and frontmatter are verbatim: a bracket there is data, not markup.
-    if selection.is_none() && verbatim(&buffer, &caret) {
+    if selection.is_none() && verbatim(&buffer, &at) {
         return glib::Propagation::Proceed;
     }
 
-    match pair(ch, char_at(&caret), selection.is_some()) {
+    match pair(ch, char_at(&at), selection.is_some()) {
         Pair::Wrap(open, close) => {
             let Some((s, e)) = selection else {
                 return glib::Propagation::Proceed;
@@ -382,11 +383,11 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             buffer.delete_mark(&to);
         }
         Pair::Insert(open, close) => {
-            let mut at = caret;
+            let mut at = at;
             buffer.begin_user_action();
             buffer.insert(&mut at, &format!("{open}{close}"));
             buffer.end_user_action();
-            let mut back = buffer.iter_at_mark(&buffer.get_insert());
+            let mut back = caret(&buffer);
             back.backward_char();
             buffer.place_cursor(&back);
             // The pair lands as one two-character insert, and GtkSourceCompletion only asks
@@ -398,7 +399,7 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
             }
         }
         Pair::StepOver => {
-            let mut at = caret;
+            let mut at = at;
             at.forward_char();
             buffer.place_cursor(&at);
         }
@@ -415,7 +416,7 @@ fn char_at(iter: &gtk::TextIter) -> Option<char> {
 
 /// Whether `iter` is inside a code block or the frontmatter, where none of this applies.
 fn verbatim(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
-    ["codeblock", "frontmatter"]
+    [crate::highlight::CODEBLOCK, "frontmatter"]
         .iter()
         .filter_map(|name| buffer.tag_table().lookup(name))
         .any(|tag| iter.has_tag(&tag))

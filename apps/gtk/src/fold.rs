@@ -76,13 +76,9 @@ pub fn fold(buffer: &gtk::TextBuffer, f: Fold) {
     }
     // A caret inside the block would be invisible and would type into text nobody can see, so it
     // comes out to the header line first.
-    let insert = buffer.iter_at_mark(&buffer.get_insert());
+    let insert = crate::editor::caret(buffer);
     if insert >= start && insert < end {
-        let mut header = line_start(buffer, f.start_line as i32);
-        if !header.ends_line() {
-            header.forward_to_line_end();
-        }
-        buffer.place_cursor(&header);
+        buffer.place_cursor(&crate::editor::line_end(buffer, f.start_line as i32));
     }
     buffer.apply_tag(&tag, &start, &end);
 }
@@ -207,7 +203,7 @@ impl Renderer {
         let fg = view.as_ref().color();
         self.imp()
             .colour
-            .set(gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), ALPHA));
+            .set(crate::highlight::with_alpha(fg, ALPHA));
         if let Some(display) = gdk::Display::default() {
             let theme = gtk::IconTheme::for_display(&display);
             let look = |name| {

@@ -29,7 +29,7 @@ use std::rc::Rc;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
-use crate::editor::Tab;
+use crate::editor::{Tab, caret};
 use crate::lang;
 
 /// What this tab knows about its ghost text. The suggestion itself lives on the view, which is
@@ -86,7 +86,7 @@ pub fn install(tab: &Rc<Tab>) {
                 .ghost_view()
                 .and_then(|v| v.ghost())
                 .filter(|_| !tab.lang.ghost.popup.get())
-                .filter(|_| at.offset() == caret_of(&tab).offset());
+                .filter(|_| at.offset() == caret(&tab.buffer).offset());
             *tab.lang.ghost.typed.borrow_mut() = showing.and_then(|ghost| {
                 let rest = remainder(&ghost, text)?.to_string();
                 Some((rest, at.offset() + text.chars().count() as i32))
@@ -182,7 +182,7 @@ fn remainder<'a>(ghost: &'a str, typed: &str) -> Option<&'a str> {
 fn settle(tab: &Tab) {
     let typed = tab.lang.ghost.typed.borrow().clone();
     match typed {
-        Some((rest, at)) if at == caret_of(tab).offset() => {
+        Some((rest, at)) if at == caret(&tab.buffer).offset() => {
             if let Some(view) = tab.ghost_view() {
                 view.set_ghost((!rest.is_empty()).then_some(rest));
             }
@@ -218,30 +218,26 @@ pub async fn request(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
-    let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+    let at = caret(&tab.buffer);
     // Mid-line, a selection, or a column of carets: not a place a suggestion can be drawn.
-    if !caret.ends_line()
+    if !at.ends_line()
         || tab.buffer.has_selection()
         || tab.ghost_view().is_some_and(|v| v.has_carets())
     {
         return;
     }
-    let (rel, pos) = (tab.rel(), lang::pos_of(&caret));
+    let (rel, pos) = (tab.rel(), lang::pos_of(&at));
     match vault.inline_completion(&rel, pos).await {
         Ok(Some(text)) => {
             tracing::debug!("ghost for {rel} at {pos:?}: {text:?}");
             // The answer took a round trip; the caret may have moved on since.
-            if tab.lang.ghost.armed(tab) && lang::pos_of(&caret_of(tab)) == pos {
+            if tab.lang.ghost.armed(tab) && lang::pos_of(&caret(&tab.buffer)) == pos {
                 set(tab, Some(text));
             }
         }
         Ok(None) => clear(tab),
         Err(e) => tracing::debug!("ghost for {rel}: {e:#}"),
     }
-}
-
-fn caret_of(tab: &Tab) -> gtk::TextIter {
-    tab.buffer.iter_at_mark(&tab.buffer.get_insert())
 }
 
 #[cfg(test)]
