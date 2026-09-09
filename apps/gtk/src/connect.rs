@@ -13,10 +13,8 @@
 //! goes. A local vault is connected from the moment it opens, so it never gets the widget at all
 //! and does not even reserve its height.
 
-use gtk::glib;
+use crate::widgets::Pulse;
 use gtk::prelude::*;
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::Duration;
 
 /// One step of the bar while it is showing a wait of unknown length. Same value and the same
@@ -25,23 +23,15 @@ const PULSE: Duration = Duration::from_millis(80);
 
 pub struct Bar {
     bar: gtk::ProgressBar,
-    /// The timer pulsing [`Bar::bar`], shared with the timer's own closure so it can clear the
-    /// slot when it stops itself.
-    pulse: Rc<Cell<Option<glib::SourceId>>>,
-}
-
-impl Drop for Bar {
-    /// A window that goes away takes its pulse timer with it, as the search pane does.
-    fn drop(&mut self) {
-        self.stop();
-    }
+    pulse: Pulse,
 }
 
 impl Bar {
     pub fn new() -> Bar {
+        let bar = gtk::ProgressBar::builder().opacity(0.0).build();
         Bar {
-            bar: gtk::ProgressBar::builder().opacity(0.0).build(),
-            pulse: Rc::new(Cell::new(None)),
+            pulse: Pulse::new(&bar),
+            bar,
         }
     }
 
@@ -55,48 +45,19 @@ impl Bar {
         self.bar.set_opacity(1.0);
         match fraction {
             Some(f) => {
-                self.stop();
+                self.pulse.stop();
                 self.bar.set_fraction(f.clamp(0.0, 1.0));
             }
-            // Already pulsing: leave the timer alone rather than restarting it on every message,
-            // which would hold the bar at the start of its trough.
-            None if self.pulsing() => {}
-            None => self.start(),
+            // Already pulsing leaves the timer alone rather than restarting it on every
+            // message, which would hold the bar at the start of its trough.
+            None => self.pulse.start(PULSE, 0),
         }
     }
 
     /// The connection is over, however it ended.
     pub fn hide(&self) {
-        self.stop();
+        self.pulse.stop();
         self.bar.set_opacity(0.0);
         self.bar.set_fraction(0.0);
-    }
-
-    fn pulsing(&self) -> bool {
-        let id = self.pulse.take();
-        let running = id.is_some();
-        self.pulse.set(id);
-        running
-    }
-
-    fn start(&self) {
-        let (bar, slot) = (self.bar.clone(), self.pulse.clone());
-        self.pulse.set(Some(glib::timeout_add_local(PULSE, move || {
-            // `Bar` lives in the `App`, which the window's own handlers keep alive, so `Drop` is
-            // not guaranteed to run. An unrooted bar means the window closed mid-connection; that
-            // is the timer's cue to stop on its own.
-            if bar.root().is_none() {
-                slot.set(None);
-                return glib::ControlFlow::Break;
-            }
-            bar.pulse();
-            glib::ControlFlow::Continue
-        })));
-    }
-
-    fn stop(&self) {
-        if let Some(id) = self.pulse.take() {
-            id.remove();
-        }
     }
 }

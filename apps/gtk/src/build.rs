@@ -376,6 +376,24 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let _ = app.tree.set(tree);
 
     let data = sidebar::Data {
+        search: search_data(app, vault),
+        tags: tags_data(vault),
+        ports: ports_data(vault),
+    };
+    let git = build_git(app, vault);
+    adopt_sidebar(
+        app,
+        Some((files, data, git.widget().clone(), git.divider().clone())),
+    );
+    let _ = app.git.set(git);
+    if let Some(git) = app.git.get() {
+        git.schedule_refresh(git::Depth::Discover);
+    }
+}
+
+/// What the Search pane asks of the index.
+fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
+    sidebar::SearchData {
         // The one closure the sidebar calls off the main loop, which is why the vault is an `Arc`.
         search: Arc::new({
             let vault = vault.clone();
@@ -404,8 +422,45 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         }),
-        // Port forwarding is ssh's, over the master that is already open: nothing is spawned and
-        // nothing is kept but the list the pane shows.
+        replace_all: Box::new(glib::clone!(
+            #[weak]
+            app,
+            move |query: String,
+                  options: accent_api::Options,
+                  replacement: String,
+                  literal: bool,
+                  done: Box<dyn FnOnce()>| {
+                app.replace_in_notes(query, options, replacement, literal, done)
+            }
+        )),
+    }
+}
+
+/// What the Tags pane asks of the index.
+fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
+    sidebar::TagsData {
+        tags: Box::new({
+            let vault = vault.clone();
+            move || vault.tags().unwrap_or_default()
+        }),
+        files_with_tag: Box::new({
+            let vault = vault.clone();
+            move |tag| {
+                vault
+                    .files_with_tag(tag)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| f.rel_path)
+                    .collect()
+            }
+        }),
+    }
+}
+
+/// Port forwarding is ssh's, over the master that is already open: nothing is spawned and nothing
+/// is kept but the list the pane shows.
+fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
+    sidebar::PortsData {
         add_forward: Box::new({
             let vault = vault.clone();
             move |local, remote| match vault.remote() {
@@ -423,41 +478,6 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         }),
-        replace_all: Box::new(glib::clone!(
-            #[weak]
-            app,
-            move |query: String,
-                  options: accent_api::Options,
-                  replacement: String,
-                  literal: bool,
-                  done: Box<dyn FnOnce()>| {
-                app.replace_in_notes(query, options, replacement, literal, done)
-            }
-        )),
-        tags: Box::new({
-            let vault = vault.clone();
-            move || vault.tags().unwrap_or_default()
-        }),
-        files_with_tag: Box::new({
-            let vault = vault.clone();
-            move |tag| {
-                vault
-                    .files_with_tag(tag)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|f| f.rel_path)
-                    .collect()
-            }
-        }),
-    };
-    let git = build_git(app, vault);
-    adopt_sidebar(
-        app,
-        Some((files, data, git.widget().clone(), git.divider().clone())),
-    );
-    let _ = app.git.set(git);
-    if let Some(git) = app.git.get() {
-        git.schedule_refresh(git::Depth::Discover);
     }
 }
 

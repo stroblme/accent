@@ -12,6 +12,8 @@
 //! per character.
 
 use crate::start;
+use crate::widgets::{Debounce, status_page};
+use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::{gdk, gio, pango};
@@ -141,15 +143,6 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
     }
 }
 
-/// A note row reads as basename first, directory after: a vault full of `index.md` files is
-/// unreadable the other way round.
-fn split_note(rel: &str) -> (&str, &str) {
-    match rel.rfind('/') {
-        Some(i) => (&rel[i + 1..], &rel[..i]),
-        None => (rel, ""),
-    }
-}
-
 /// Indices of `haystacks` that match `query`, best first, capped at [`MAX_RESULTS`].
 ///
 /// This is `Pattern::match_list` with the index kept instead of the string, so the caller can map a
@@ -179,7 +172,7 @@ fn rank(
         .enumerate()
         .filter_map(|(i, h)| {
             let path = pattern.score(Utf32Str::new(h, &mut buf), matcher)?;
-            let name = &h[h.rfind('/').map_or(0, |at| at + 1)..];
+            let name = basename(h);
             // Scoring the whole path again when it has no folder in it would give the same number.
             let base = match name.len() == h.len() {
                 true => Some(path),
@@ -366,10 +359,11 @@ fn row_factory(
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         match &*entry {
+            // A note row reads as basename first, directory after: a vault full of `index.md`
+            // files is unreadable the other way round.
             Item::File(rel) => {
-                let (base, parent) = split_note(rel);
-                name.set_text(base);
-                dir.set_text(parent);
+                name.set_text(basename(rel));
+                dir.set_text(parent_dir(rel));
             }
             Item::Command {
                 action,
@@ -559,12 +553,11 @@ pub fn present(
 
     // DESIGN.md: an empty result set is an AdwStatusPage, not a blank list. `.compact` keeps it
     // inside a 560x420 dialog.
-    let empty = adw::StatusPage::builder()
-        .icon_name("system-search-symbolic")
-        .title("No Results")
-        .description("Try a different search.")
-        .css_classes(["compact"])
-        .build();
+    let empty = status_page(
+        "system-search-symbolic",
+        "No Results",
+        "Try a different search.",
+    );
     let stack = gtk::Stack::builder().vexpand(true).build();
     stack.add_named(&scroller, Some("list"));
     stack.add_named(&empty, Some("empty"));
@@ -787,14 +780,13 @@ pub fn present(
 
     refresh("");
 
-    // Debounce: one pending source at a time, replaced on every keystroke and dropped with the
-    // dialog so a late timeout cannot touch a closed window.
-    let pending: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    // Dropped with the dialog, so a late timeout cannot touch a closed window.
+    let debounce = Rc::new(Debounce::new(DEBOUNCE));
     // What the list is already showing, so a `search-changed` that carries no new text cannot put
     // the selection back on row 0 under the user's fingers.
     let shown = Rc::new(RefCell::new(String::new()));
     entry.connect_search_changed({
-        let (refresh, pending, shown) = (refresh.clone(), pending.clone(), shown.clone());
+        let (refresh, debounce, shown) = (refresh.clone(), debounce.clone(), shown.clone());
         let weak_dialog = dialog.downgrade();
         move |e| {
             let query = e.text().to_string();
@@ -802,23 +794,16 @@ pub fn present(
                 return;
             }
             *shown.borrow_mut() = query.clone();
-            if let Some(id) = pending.borrow_mut().take() {
-                id.remove();
-            }
             // The chrome tracks a typed `>` or `#` immediately; only the matching waits.
             let typed = parse_query(&query, mode).0;
             e.set_placeholder_text(Some(typed.placeholder()));
             if let Some(dialog) = weak_dialog.upgrade() {
                 dialog.set_title(typed.title());
             }
-            let id = glib::timeout_add_local_once(DEBOUNCE, {
-                let (refresh, pending) = (refresh.clone(), pending.clone());
-                move || {
-                    *pending.borrow_mut() = None;
-                    refresh(&query);
-                }
+            debounce.call({
+                let refresh = refresh.clone();
+                move || refresh(&query)
             });
-            *pending.borrow_mut() = Some(id);
         }
     });
     // libadwaita does not close a floating dialog when the click lands outside it: its dimming
@@ -853,11 +838,9 @@ pub fn present(
     });
 
     dialog.connect_closed({
-        let pending = pending.clone();
+        let debounce = debounce.clone();
         move |_| {
-            if let Some(id) = pending.borrow_mut().take() {
-                id.remove();
-            }
+            debounce.cancel();
             if let Some((root, gesture)) = &outside {
                 root.remove_controller(gesture);
             }
@@ -967,16 +950,6 @@ mod tests {
         // A prefix still switches, whichever mode it started in.
         assert_eq!(parse_query("#area", Mode::Commands), (Mode::Tags, "area"));
         assert_eq!(parse_query(">save", Mode::Tags), (Mode::Commands, "save"));
-    }
-
-    #[test]
-    fn split_note_puts_the_basename_first() {
-        assert_eq!(
-            split_note("areas/work/index.md"),
-            ("index.md", "areas/work")
-        );
-        assert_eq!(split_note("index.md"), ("index.md", ""));
-        assert_eq!(split_note("a/b.md"), ("b.md", "a"));
     }
 
     #[test]
