@@ -422,10 +422,8 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
             }
             // The process ends when this returns, and a drawn-on PDF's write lives on the
             // render thread, so it is waited for rather than left to be killed.
-            for doc in app.docs() {
-                if let Doc::Pdf(pdf) = doc {
-                    pdf.flush_blocking();
-                }
+            for pdf in app.pdfs() {
+                pdf.flush_blocking();
             }
             app.save_session();
             glib::Propagation::Proceed
@@ -543,10 +541,8 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     }
                     // A PDF is rendered light or dark rather than recoloured, so the theme
                     // change is a re-render of whatever is on screen.
-                    for doc in app.docs() {
-                        if let Some(pdf) = doc.pdf() {
-                            pdf.restyle();
-                        }
+                    for pdf in app.pdfs() {
+                        pdf.restyle();
                     }
                     if let Some(preview) = app.preview.borrow().as_ref() {
                         preview.restyle();
@@ -561,10 +557,8 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         #[weak]
         app,
         move |_| {
-            for doc in app.docs() {
-                if let Some(term) = doc.terminal() {
-                    term.refont();
-                }
+            for term in app.terminals() {
+                term.refont();
             }
         }
     ));

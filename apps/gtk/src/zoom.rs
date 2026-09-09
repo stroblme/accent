@@ -35,10 +35,8 @@ impl App {
         for tab in self.open_tabs() {
             tab.set_font(font.as_deref(), zoom);
         }
-        for doc in self.docs() {
-            if let Some(diff) = doc.diff() {
-                diff.set_font(font.as_deref(), zoom);
-            }
+        for diff in self.diffs() {
+            diff.set_font(font.as_deref(), zoom);
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);

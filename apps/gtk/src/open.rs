@@ -411,10 +411,8 @@ impl App {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
         let config = self.config.borrow();
         settings::save(&config);
-        for doc in self.docs() {
-            if let Some(pdf) = doc.pdf() {
-                pdf.set_drawing_config(config.drawing.clone());
-            }
+        for pdf in self.pdfs() {
+            pdf.set_drawing_config(config.drawing.clone());
         }
     }
 
@@ -487,7 +485,7 @@ impl App {
     // is a highlight that appears a third of a second after the note is written; an
     // `Event::Indexed` from the worker is the upgrade.
     pub fn sync_pdf_links_soon(self: &Rc<Self>) {
-        if !self.docs().iter().any(|d| matches!(d, Doc::Pdf(_))) {
+        if self.pdfs().is_empty() {
             return;
         }
         // One timer, restarted: a burst of watcher events is one query per PDF, not one per event.
@@ -510,10 +508,8 @@ impl App {
 
     /// The same for every open PDF, after something changed the notes.
     fn sync_all_pdf_links(&self) {
-        for doc in self.docs() {
-            if let Doc::Pdf(pdf) = doc {
-                self.sync_pdf_links(&pdf);
-            }
+        for pdf in self.pdfs() {
+            self.sync_pdf_links(&pdf);
         }
     }
 

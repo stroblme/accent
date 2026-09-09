@@ -220,10 +220,8 @@ impl App {
             // it was left at, which is the whole point of remembering it.
             pdf: {
                 let mut places = self.vault().map(|v| v.session().pdf).unwrap_or_default();
-                for doc in self.docs() {
-                    if let Some(pdf) = doc.pdf() {
-                        places.insert(doc.key(), pdf.place());
-                    }
+                for pdf in self.pdfs() {
+                    places.insert(pdf.key(), pdf.place());
                 }
                 places
             },

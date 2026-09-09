@@ -436,6 +436,31 @@ impl App {
         self.docs.borrow().clone()
     }
 
+    /// The open documents of one kind, cloned out likewise.
+    fn pdfs(&self) -> Vec<Rc<pdftab::PdfTab>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.pdf().cloned())
+            .collect()
+    }
+
+    fn diffs(&self) -> Vec<Rc<diff::DiffTab>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.diff().cloned())
+            .collect()
+    }
+
+    fn terminals(&self) -> Vec<Rc<terminal::Term>> {
+        self.docs
+            .borrow()
+            .iter()
+            .filter_map(|d| d.terminal().cloned())
+            .collect()
+    }
+
     /// Keep the window subtitle, the References pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.retarget_find(&self.pane());
@@ -637,10 +662,8 @@ impl App {
     }
 
     fn restyle_terminals(&self) {
-        for doc in self.docs() {
-            if let Some(term) = doc.terminal() {
-                term.restyle();
-            }
+        for term in self.terminals() {
+            term.restyle();
         }
     }
 
@@ -915,19 +938,15 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.restyle();
         }
-        for doc in self.docs() {
-            if let Some(diff) = doc.diff() {
-                diff.set_font(config.editor_font.as_deref(), self.zoom.get());
-                diff.restyle();
-            }
+        for diff in self.diffs() {
+            diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+            diff.restyle();
         }
         // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
         // though the system's dark state, and with it the notify handler, never moved.
-        for doc in self.docs() {
-            if let Some(pdf) = doc.pdf() {
-                pdf.restyle();
-                pdf.set_drawing_config(config.drawing.clone());
-            }
+        for pdf in self.pdfs() {
+            pdf.restyle();
+            pdf.set_drawing_config(config.drawing.clone());
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.restyle();
