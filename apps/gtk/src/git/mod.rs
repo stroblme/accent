@@ -36,6 +36,23 @@ mod log;
 use compare::Watch;
 use log::same_head;
 
+/// How much of git one refresh asks for.
+///
+/// A save moved the working tree and nothing else, so it costs a `git status` per repository. A
+/// write inside `.git` — a commit, a checkout, a fetch — moved the repository, so the history,
+/// the branches and the submodules are read again with it. Only a walk that found or lost
+/// directories is a reason to go looking for repositories, which is a `git rev-parse` per indexed
+/// directory carrying a `.git`. The order is what a coalesced burst takes the maximum of.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Depth {
+    /// `git status`, and nothing else.
+    Status,
+    /// The selected repository's history, branches, submodules and incoming commits as well.
+    Everything,
+    /// Which repositories the vault touches, first of all.
+    Discover,
+}
+
 /// The changes list gets the top half of the pane, the log the bottom.
 pub const GIT_SHARE: (i32, i32) = (1, 2);
 
@@ -152,8 +169,11 @@ pub struct Panel {
     /// The debounce timer, replaced rather than stacked.
     pending: RefCell<Option<glib::SourceId>>,
     busy: Cell<bool>,
-    /// Something asked for a refresh while one was in flight; run once more when it lands.
-    again: Cell<bool>,
+    /// Something asked for a refresh while one was in flight; run once more when it lands, for
+    /// the deepest of whatever asked.
+    again: Cell<Option<Depth>>,
+    /// What the debounced refresh has been asked for so far, taken when its timer fires.
+    pending_depth: Cell<Option<Depth>>,
     /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
     /// snapshot. Weak, so a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
@@ -407,7 +427,8 @@ impl Panel {
             state: RefCell::new(State::default()),
             pending: RefCell::new(None),
             busy: Cell::new(false),
-            again: Cell::new(false),
+            again: Cell::new(None),
+            pending_depth: Cell::new(None),
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
@@ -474,22 +495,26 @@ impl Panel {
         }
     }
 
-    /// Ask git again, once, in [`DEBOUNCE`]. Calling this ten times in a row is one query.
-    pub fn schedule_refresh(self: &Rc<Self>) {
+    /// Ask git again, once, in [`DEBOUNCE`], for at least `depth`. Calling this ten times in a
+    /// row is one query, and the deepest of the ten is what it asks for.
+    pub fn schedule_refresh(self: &Rc<Self>, depth: Depth) {
+        self.pending_depth
+            .set(self.pending_depth.get().max(Some(depth)));
         if let Some(id) = self.pending.borrow_mut().take() {
             id.remove();
         }
         let panel = self.clone();
         let id = glib::timeout_add_local_once(DEBOUNCE, move || {
             panel.pending.replace(None);
-            panel.refresh();
+            let depth = panel.pending_depth.take().unwrap_or(Depth::Status);
+            panel.refresh(depth);
         });
         self.pending.replace(Some(id));
     }
 
     fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
-        on_click(self, check, |panel| panel.refresh());
+        on_click(self, check, |panel| panel.refresh(Depth::Discover));
         on_click(self, create, |panel| panel.create_branch());
 
         let weak = Rc::downgrade(self);
@@ -502,7 +527,7 @@ impl Panel {
                 return;
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
-            panel.refresh();
+            panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
             // this the user's choice rather than a timer's: nobody cycles a chooser for fun.
@@ -566,25 +591,30 @@ impl Panel {
         });
     }
 
-    /// Ask git everything the pane shows, off the main thread, and put the answers on screen.
-    fn refresh(self: &Rc<Self>) {
+    /// Ask git what `depth` says the pane needs, off the main thread, and put the answers on
+    /// screen. Whatever it did not ask for, the pane keeps.
+    pub(super) fn refresh(self: &Rc<Self>, depth: Depth) {
         if self.busy.get() {
-            self.again.set(true);
+            self.again.set(self.again.get().max(Some(depth)));
             return;
         }
         self.busy.set(true);
         let vault = self.hooks.vault.clone();
-        let selected = self.state.borrow().selected;
+        let (selected, known) = {
+            let state = self.state.borrow();
+            (state.selected, state.repos.clone())
+        };
         let panel = self.clone();
         glib::spawn_future_local(async move {
-            let fetched = gio::spawn_blocking(move || fetch::fetch(&vault, selected)).await;
+            let fetched =
+                gio::spawn_blocking(move || fetch::fetch(&vault, selected, depth, known)).await;
             panel.busy.set(false);
             match fetched {
                 Ok(fetched) => panel.apply(fetched),
                 Err(_) => tracing::warn!("the git worker panicked"),
             }
-            if panel.again.replace(false) {
-                panel.refresh();
+            if let Some(depth) = panel.again.take() {
+                panel.refresh(depth);
             }
         });
     }
@@ -652,11 +682,19 @@ impl Panel {
         // The incoming set is part of what a row draws, and pulling a fast-forward leaves the
         // commit list from `--all` exactly as it was — same oids, same order — so without this
         // the marks would survive the pull that cleared them.
-        let moved = {
-            let state = self.state.borrow();
-            !same_head(&state.commits, &fetched.commits) || state.incoming != fetched.incoming
+        // A refresh that did not read the history has nothing to say about it.
+        let moved = match &fetched.commits {
+            Some(commits) => {
+                let state = self.state.borrow();
+                !same_head(&state.commits, commits)
+                    || fetched
+                        .incoming
+                        .as_ref()
+                        .is_some_and(|i| state.incoming != *i)
+            }
+            None => false,
         };
-        let page = moved.then(|| fetched.commits.clone());
+        let page = moved.then(|| fetched.commits.clone().unwrap_or_default());
 
         {
             let mut state = self.state.borrow_mut();
@@ -665,14 +703,16 @@ impl Panel {
             state.ignored = ignored;
             state.repos = repos;
             state.statuses = fetched.statuses;
-            if moved {
-                state.commits = fetched.commits;
+            if let (true, Some(commits)) = (moved, fetched.commits) {
+                state.commits = commits;
             }
             state.branches = branches;
             if let Some(submodules) = fetched.submodules {
                 state.submodules = submodules;
             }
-            state.incoming = fetched.incoming;
+            if let Some(incoming) = fetched.incoming {
+                state.incoming = incoming;
+            }
             state.selected = selected;
         }
         self.sync_state();

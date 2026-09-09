@@ -52,7 +52,7 @@ impl Panel {
             }
             // `.git/refs/remotes` is not among the paths the vault watches, so what a fetch moved
             // is only seen because we ask.
-            panel.schedule_refresh();
+            panel.schedule_refresh(Depth::Everything);
         });
     }
 
@@ -103,19 +103,22 @@ pub(super) struct Fetched {
     pub(super) selected: usize,
     pub(super) repos: Option<Vec<Repo>>,
     pub(super) statuses: Vec<Status>,
-    pub(super) commits: Vec<Commit>,
+    pub(super) commits: Option<Vec<Commit>>,
     pub(super) branches: Option<Vec<String>>,
     pub(super) submodules: Option<Vec<Submodule>>,
     /// The commits a pull would bring in, which is what marks the history's rows. Asked for only
     /// where the branch says there are any, so an up-to-date repository pays nothing for it.
-    pub(super) incoming: HashSet<String>,
+    pub(super) incoming: Option<HashSet<String>>,
 }
 
-pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
+/// Read what `depth` asks for. `known` is the repositories the pane already holds, which is what
+/// a refresh below [`Depth::Discover`] runs against rather than looking for them again.
+pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Repo>) -> Fetched {
     // `Vault::repos` cannot fail today; when it can, its `Err` belongs here as `None` and the
     // pane keeps the repositories it had.
-    let repos = vault.repos();
-    let statuses: Vec<Status> = repos
+    let repos = (depth >= Depth::Discover).then(|| vault.repos());
+    let against: &[Repo] = repos.as_deref().unwrap_or(&known);
+    let statuses: Vec<Status> = against
         .iter()
         .map(|repo| match vault.git_status(repo) {
             Ok(status) => status,
@@ -127,15 +130,20 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
             }
         })
         .collect();
-    let at = clamp(selected, repos.len());
-    let (commits, branches, submodules) = match repos.get(at) {
+    let at = clamp(selected, against.len());
+    // Everything below is about the repository itself rather than the working tree, so a save
+    // does not pay for it: five to seven processes per keystroke were what this cost before.
+    let head = (depth >= Depth::Everything)
+        .then(|| against.get(at))
+        .flatten();
+    let (commits, branches, submodules) = match head {
         Some(repo) => (
-            vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
+            Some(vault.git_log(repo, 0, PAGE).unwrap_or_else(|e| {
                 // An empty page reads as "the history has not moved" in `apply`, so a refused log
                 // leaves the rows that are on screen where they are.
                 tracing::debug!("git log: {e}");
                 Vec::new()
-            }),
+            })),
             vault
                 .git_branches(repo)
                 .inspect_err(|e| tracing::debug!("git for-each-ref: {e}"))
@@ -145,14 +153,14 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
                 .inspect_err(|e| tracing::debug!("git submodule status: {e}"))
                 .ok(),
         ),
-        None => (Vec::new(), Some(Vec::new()), Some(Vec::new())),
+        None => (None, None, None),
     };
     // `behind` is the count and this is the same set by oid, so one implies the other: nothing to
     // pull means no `rev-list` at all, which is what keeps a refresh on every save as cheap as it
     // was. A non-zero count also means there is an upstream, which the range needs.
     let behind = statuses.get(at).is_some_and(|s| s.branch.behind > 0);
-    let incoming = match repos.get(at).filter(|_| behind) {
-        Some(repo) => vault
+    let incoming = head.map(|repo| match behind {
+        true => vault
             .git_incoming(repo)
             .unwrap_or_else(|e| {
                 tracing::debug!("git rev-list HEAD..@{{u}}: {e}");
@@ -160,11 +168,11 @@ pub(super) fn fetch(vault: &Vault, selected: usize) -> Fetched {
             })
             .into_iter()
             .collect(),
-        None => HashSet::new(),
-    };
+        false => HashSet::new(),
+    });
     Fetched {
         selected,
-        repos: Some(repos),
+        repos,
         statuses,
         commits,
         branches,

@@ -8,17 +8,19 @@ const POLL: Duration = Duration::from_millis(120);
 impl App {
     fn on_event(self: &Rc<Self>, event: Event) {
         // Anything that touched a file may have changed what git says about it. The pane
-        // debounces, so a burst of watcher events still costs one `git status`.
-        if matches!(
-            event,
-            Event::Reconciled(_)
-                | Event::DirsChanged(_)
-                | Event::FileChanged(_)
-                | Event::FileRemoved(_)
-                | Event::FileRenamed { .. }
-        ) {
+        // debounces, so a burst of watcher events still costs one `git status` — and only a walk
+        // that found or lost directories is a reason to go looking for repositories again, which
+        // is a `git rev-parse` per indexed directory holding a `.git`.
+        let depth = match event {
+            Event::Reconciled(_) | Event::DirsChanged(_) => Some(git::Depth::Discover),
+            Event::FileChanged(_) | Event::FileRemoved(_) | Event::FileRenamed { .. } => {
+                Some(git::Depth::Status)
+            }
+            _ => None,
+        };
+        if let Some(depth) = depth {
             if let Some(git) = self.git.get() {
-                git.schedule_refresh();
+                git.schedule_refresh(depth);
             }
             // The same events mean a note may have gained or lost a link into an open PDF.
             self.sync_pdf_links_soon();
@@ -159,7 +161,7 @@ impl App {
             // asks git what changed; nothing else in the window is affected.
             Event::GitChanged => {
                 if let Some(git) = self.git.get() {
-                    git.schedule_refresh();
+                    git.schedule_refresh(git::Depth::Everything);
                 }
             }
             // A remote vault is still coming up. It reads as the same wait as indexing, because

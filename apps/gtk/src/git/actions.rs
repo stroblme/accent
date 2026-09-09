@@ -85,7 +85,7 @@ impl Panel {
             // Straight away, not through the debounce: the user asked for this and is watching
             // the row it moves. The debounce is there to fold a burst of watcher events into one
             // query, and the `.git` write this just made will schedule one of those anyway.
-            panel.refresh();
+            panel.refresh(Depth::Everything);
         });
     }
 
@@ -374,7 +374,7 @@ impl Panel {
                 match untracked {
                     true => {
                         (panel.hooks.trash)(&key);
-                        panel.schedule_refresh();
+                        panel.schedule_refresh(Depth::Status);
                     }
                     false => panel.write("discard", vec![path], move |vault, repo, paths| {
                         vault

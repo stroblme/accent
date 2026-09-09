@@ -457,7 +457,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     );
     let _ = app.git.set(git);
     if let Some(git) = app.git.get() {
-        git.schedule_refresh();
+        git.schedule_refresh(git::Depth::Discover);
     }
 }
 
