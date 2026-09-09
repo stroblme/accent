@@ -2,7 +2,9 @@
 //!
 //! Search runs off the main loop. [`Data::search`] is called on a worker thread, so a full-vault
 //! query never costs a keystroke; a bar pulsing above the results says one is running and the
-//! previous results stay on screen until the new ones arrive.
+//! previous results stay on screen until the new ones arrive. A query cannot be called back once
+//! it is out, so a newer one simply supersedes it: each carries the number it was asked under,
+//! and an answer arriving under a newer number is dropped rather than painted.
 
 use super::OnOpen;
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
@@ -198,9 +200,17 @@ struct Search {
     pulse: Pulse,
     body: gtk::Stack,
     results: gio::ListStore,
-    /// A query is on a worker thread. Only one runs at a time; the rest of the box is read again
-    /// when it lands.
-    busy: Cell<bool>,
+    /// Which question the rows on screen are meant to answer. Every query takes the next number
+    /// before it starts, so an answer arriving under a newer one is dropped instead of painted:
+    /// a slow first query — a remote vault, or an All walk — used to hold every keystroke typed
+    /// after it until it landed.
+    generation: Cell<u64>,
+    /// How many queries are on worker threads. A query cannot be called back, so the count comes
+    /// down as each one lands, whether its answer was wanted or not.
+    running: Cell<usize>,
+    /// A Replace All is rewriting the vault. It writes the very files a query would read, so the
+    /// pane asks nothing else until it is over.
+    replacing: Cell<bool>,
 }
 
 impl Search {
@@ -240,23 +250,38 @@ impl Search {
     /// down a few pixels the moment a query starts. And it is shown late rather than at once,
     /// because a bar that appears and goes in the same breath reads as a flash, not as progress.
     fn set_busy(&self, busy: bool) {
-        self.progress.set_opacity(0.0);
-        self.pulse.stop();
-        if busy {
-            self.pulse.start(PULSE, SHOW_AFTER);
+        match busy {
+            // A pulse already running is left where it is: restarting it on every keystroke —
+            // which an empty or unparseable one used to do — blinked the bar off for a step in
+            // the middle of a query that was still going.
+            true => self.pulse.start(PULSE, SHOW_AFTER),
+            false => {
+                self.pulse.stop();
+                self.progress.set_opacity(0.0);
+            }
         }
     }
 
-    /// Run what the box currently asks for, or note that the running query has to be redone.
+    /// Whether anything of this pane's is still on a worker thread.
+    fn busy(&self) -> bool {
+        self.running.get() > 0 || self.replacing.get()
+    }
+
+    /// Run what the box currently asks for. Whatever was already running is superseded rather
+    /// than waited for: its answer is dropped when it lands.
     fn start(self: &Rc<Self>) {
         let key = self.key();
-        // The bar tracks `busy` in every branch: a query still on a worker thread keeps it
-        // pulsing, and the one that lands after the box was cleared takes it down through here.
+        // Taken before anything else, so the branches that paint without asking the vault also
+        // put the answer of a query still in flight out of date.
+        let mine = self.generation.get() + 1;
+        self.generation.set(mine);
+        // The bar tracks what is running in every branch: a query still on a worker thread keeps
+        // it pulsing, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
             self.entry.remove_css_class("error");
             self.results.remove_all();
             self.body.set_visible_child_name("prompt");
-            self.set_busy(self.busy.get());
+            self.set_busy(self.busy());
             self.set_total(0);
             return;
         }
@@ -268,16 +293,17 @@ impl Search {
                 tracing::debug!("invalid search pattern {:?}: {e}", key.text);
                 self.entry.add_css_class("error");
                 self.body.set_visible_child_name("invalid");
-                self.set_busy(self.busy.get());
+                self.set_busy(self.busy());
                 self.set_total(0);
                 return;
             }
         };
         self.entry.remove_css_class("error");
-        if self.busy.get() {
+        // A rewrite is the one thing worth waiting for: it is writing the files the query reads.
+        if self.replacing.get() {
             return;
         }
-        self.busy.set(true);
+        self.running.set(self.running.get() + 1);
         self.set_busy(true);
         self.apply.set_sensitive(false);
 
@@ -286,9 +312,9 @@ impl Search {
             let run = search.data.search.clone();
             let t0 = Instant::now();
             let answer = gio::spawn_blocking(move || run(query)).await;
-            search.busy.set(false);
+            search.running.set(search.running.get() - 1);
             let Ok(answer) = answer else {
-                search.set_busy(false);
+                search.set_busy(search.busy());
                 return tracing::warn!("the search worker panicked");
             };
             tracing::debug!(
@@ -297,14 +323,12 @@ impl Search {
                 ms = t0.elapsed().as_secs_f64() * 1e3,
                 "sidebar query"
             );
-            // The box may have moved on while this ran; then its answer is stale and the current
-            // question is asked instead. Old results stay on screen until one of them is current.
-            if search.key() == key {
+            // The box has moved on since this was asked, so a newer query is already on its way
+            // with the answer that belongs on screen. Old results stay up until it lands.
+            if search.generation.get() == mine {
                 search.show(&key, answer);
-                search.set_busy(false);
-            } else {
-                search.start();
             }
+            search.set_busy(search.busy());
         });
     }
 
@@ -367,10 +391,10 @@ impl Search {
         let (Ok(_), Some(replacement)) = (compile_regex(&key), self.replacement()) else {
             return;
         };
-        if self.busy.get() {
+        if self.busy() {
             return;
         }
-        self.busy.set(true);
+        self.replacing.set(true);
         self.set_busy(true);
         self.apply.set_sensitive(false);
         let search = self.clone();
@@ -380,7 +404,7 @@ impl Search {
             replacement,
             !key.options.regex,
             Box::new(move || {
-                search.busy.set(false);
+                search.replacing.set(false);
                 search.start();
             }),
         );
@@ -680,7 +704,9 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         pulse: Pulse::new(&progress),
         body: body.clone(),
         results,
-        busy: Cell::new(false),
+        generation: Cell::new(0),
+        running: Cell::new(0),
+        replacing: Cell::new(false),
     });
 
     // A toggle is a click rather than a burst, so only what is typed is debounced.

@@ -53,8 +53,9 @@ pub struct Ops {
     /// Whether the first reconcile has finished, i.e. whether the index can be trusted to know
     /// which notes link to which.
     pub reconciled: Box<dyn Fn() -> bool>,
-    /// Save any dirty tab for these paths before the file moves under them, and reload the ones
-    /// listed afterwards. Called with the notes a rename is about to rewrite.
+    /// Save any dirty tab at or under these paths before the file moves under them, and reload
+    /// the ones listed afterwards. Called with the notes a rename is about to rewrite, and with
+    /// the folder a trash or a move is about to take: a path here is a subtree, not only a key.
     pub flush: Box<dyn Fn(&[String])>,
     /// Reload these paths' tabs from disk, returning how many were left alone because their
     /// buffer still holds unsaved edits (those get the changed-on-disk banner instead).
@@ -148,7 +149,9 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         let rel = child_path(&dir, &name);
         // `create_dir_all` is happy to find the directory already there, so the collision the
         // user cares about has to be asked about before the call rather than read off its error.
-        if ops.vault.root().join(&rel).exists() {
+        // Asked of the vault and not of this disk: `root()` is a path on the *remote* host, so
+        // the local `exists` there was always false and every clash went through as "Created".
+        if ops.vault.exists(&rel) {
             return (ops.toast)(&format!("{name} already exists"));
         }
         match ops.vault.create_dir(&rel) {
@@ -348,6 +351,10 @@ pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
 }
 
 /// Ask the vault what the move would touch, then either do it or confirm the link rewrites first.
+///
+/// The question is index reads and, on a remote vault, a round trip, so it is asked on a worker
+/// thread the way [`download`] and [`upload`] send their bytes: a rename must not freeze the
+/// window for as long as the host takes to answer.
 fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
     // `plan_rename` reads the backlinks out of the index, so during the first reconcile it finds
     // none — and an empty rewrite list is also what skips the confirmation dialog, so the rename
@@ -356,11 +363,17 @@ fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
     if !(ops.reconciled)() {
         return (ops.toast)("Still indexing, try again in a moment");
     }
-    match ops.vault.plan_rename(from, to) {
-        Ok(plan) if plan.rewrites.is_empty() => apply(ops, &plan, false, verb),
-        Ok(plan) => confirm_links(ops, plan, verb),
-        Err(e) => (ops.toast)(&format!("Cannot rename: {e:#}")),
-    }
+    let (vault, from, to) = (ops.vault.clone(), from.to_string(), to.to_string());
+    let ops = ops.clone();
+    glib::spawn_future_local(async move {
+        let planned = gio::spawn_blocking(move || vault.plan_rename(&from, &to)).await;
+        match planned {
+            Ok(Ok(plan)) if plan.rewrites.is_empty() => apply(&ops, plan, false, verb),
+            Ok(Ok(plan)) => confirm_links(&ops, plan, verb),
+            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename: {e:#}")),
+            Err(_) => (ops.toast)("Cannot rename"),
+        }
+    });
 }
 
 /// Rewriting other people's notes is a data-losing choice, so it is an `AlertDialog` and the
@@ -382,8 +395,8 @@ fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
         Some(&window),
         gio::Cancellable::NONE,
         move |response| match response.as_str() {
-            "keep" => apply(&ops, &plan, false, verb),
-            "update" => apply(&ops, &plan, true, verb),
+            "keep" => apply(&ops, plan, false, verb),
+            "update" => apply(&ops, plan, true, verb),
             _ => {}
         },
     );
@@ -409,7 +422,7 @@ fn link_body(rewrites: &[String]) -> String {
 
 /// Move the file, then report. A partly rewritten vault is a real outcome, so the notes that
 /// could not be updated are said out loud instead of being logged and forgotten.
-fn apply(ops: &Rc<Ops>, plan: &RenamePlan, update_links: bool, verb: &str) {
+fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str) {
     // Rename is the keyboard's move and a typed path may name folders that are not there yet, so
     // they are made here — after the confirmation, so nothing exists until the move really
     // happens. A dropped row never reaches it: every destination the tree offers is a row that is
@@ -423,18 +436,20 @@ fn apply(ops: &Rc<Ops>, plan: &RenamePlan, update_links: bool, verb: &str) {
     dirty.push(plan.from.clone());
     (ops.flush)(&dirty);
 
-    match ops.vault.rename(plan, update_links) {
-        Ok(report) => {
-            let unsaved = (ops.reload)(&report.rewritten);
-            (ops.toast)(&rename_message(
-                verb,
-                &plan.to,
-                report.failed.len(),
-                unsaved,
-            ));
+    // The write itself is N notes rewritten, one fsync each, and on a remote vault a round trip
+    // per note: the same worker thread the plan was made on.
+    let (vault, to, ops) = (ops.vault.clone(), plan.to.clone(), ops.clone());
+    glib::spawn_future_local(async move {
+        let done = gio::spawn_blocking(move || vault.rename(&plan, update_links)).await;
+        match done {
+            Ok(Ok(report)) => {
+                let unsaved = (ops.reload)(&report.rewritten);
+                (ops.toast)(&rename_message(verb, &to, report.failed.len(), unsaved));
+            }
+            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename: {e:#}")),
+            Err(_) => (ops.toast)("Cannot rename"),
         }
-        Err(e) => (ops.toast)(&format!("Cannot rename: {e:#}")),
-    }
+    });
 }
 
 /// What the toast says after a rename: where it went, what could not be rewritten, and what is
@@ -464,8 +479,9 @@ pub fn trash(ops: &Rc<Ops>, rel: &str) {
     let path = ops.vault.root().join(rel);
     let name = basename(rel).to_string();
     let (ops, rel) = (ops.clone(), rel.to_string());
-    // What lands in the trash should be what the user last saw, so a dirty tab is written out
-    // before the file moves. Whatever cannot be written stays visible in its tab's banner.
+    // What lands in the trash should be what the user last saw, so every dirty tab under it is
+    // written out before the file moves — a folder takes the notes inside it, and their unsaved
+    // edits used to go with it in silence. Whatever cannot be written stays in its tab's banner.
     (ops.flush)(std::slice::from_ref(&rel));
     // A vault on another machine has no session bus to ask and no trash to ask it about, so the
     // only delete there is is the permanent one — which is exactly the case this already has a

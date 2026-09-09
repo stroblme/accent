@@ -439,11 +439,11 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
 /// What the Tags pane asks of the index.
 fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     sidebar::TagsData {
-        tags: Box::new({
+        tags: Arc::new({
             let vault = vault.clone();
             move || vault.tags().unwrap_or_default()
         }),
-        files_with_tag: Box::new({
+        files_with_tag: Arc::new({
             let vault = vault.clone();
             move |tag| {
                 vault
@@ -461,7 +461,7 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
 /// is kept but the list the pane shows.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
-        add_forward: Box::new({
+        add_forward: Arc::new({
             let vault = vault.clone();
             move |local, remote| match vault.remote() {
                 Some(r) => r.forward(local, remote),
@@ -655,8 +655,14 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {
             let Some(app) = flush.upgrade() else { return };
-            for rel in rels {
-                if let Some(tab) = app.tab_for(rel).filter(|tab| tab.modified.get()) {
+            // Each path is a subtree and not only a key: a folder on its way to the trash or into
+            // another folder takes every note under it, and their buffers have to be written out
+            // before the file moves. `trashed_with` is the same "is under" the close path asks.
+            for tab in app.open_tabs() {
+                let under = rels
+                    .iter()
+                    .any(|rel| fileops::trashed_with(rel, &tab.rel()));
+                if under && tab.modified.get() {
                     app.save_tab(&tab, false);
                 }
             }

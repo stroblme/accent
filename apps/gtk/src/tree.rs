@@ -244,14 +244,30 @@ impl Tree {
                 .collect()
         };
         for (dir, store) in stores {
-            // A directory that is gone keeps no model: a same-named one created later must be
-            // listed afresh instead of re-expanding into the files this one used to hold. Asked
-            // of the index rather than of the disk, which on a remote vault is not here at all.
-            if !dir.is_empty() && !self.vault.exists(dir) {
-                self.cache.borrow_mut().remove(dir);
+            if dir.is_empty() {
+                fill(&store, &self.vault, dir);
                 continue;
             }
-            fill(&store, &self.vault, dir);
+            // A directory that is gone keeps no model: a same-named one created later must be
+            // listed afresh instead of re-expanding into the files this one used to hold. Asked
+            // of the index rather than of the disk, which on a remote vault is not here at all —
+            // and asked on a worker thread, because on that vault it is one round trip per
+            // invalidated directory and a reindex invalidates a handful at a time.
+            let (vault, cache, dir) = (self.vault.clone(), self.cache.clone(), dir.clone());
+            glib::spawn_future_local(async move {
+                let there = gio::spawn_blocking({
+                    let (vault, dir) = (vault.clone(), dir.clone());
+                    move || vault.exists(&dir)
+                })
+                .await;
+                match there {
+                    Ok(true) => fill(&store, &vault, &dir),
+                    Ok(false) => {
+                        cache.borrow_mut().remove(&dir);
+                    }
+                    Err(_) => tracing::warn!("the tree worker panicked"),
+                }
+            });
         }
     }
 
