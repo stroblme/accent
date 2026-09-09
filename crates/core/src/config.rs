@@ -420,20 +420,20 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
 /// and the ownership dance a vault file needs.
 fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let tmp = path.with_file_name(format!(
-        "{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // A unique temp name: the GUI and `accent-cli`, or two windows, may write at once, and a
+    // fixed `<name>.tmp` would have them tear each other's file.
     let write = || -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".accent-")
+            .tempfile_in(dir)?;
+        tmp.write_all(bytes)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
     };
-    write().with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    write().with_context(|| format!("writing {}", path.display()))
 }
 
 /// `$XDG_<var>` when set and absolute, else `$HOME/<fallback>`, else the temp dir.
