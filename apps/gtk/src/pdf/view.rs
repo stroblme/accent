@@ -154,6 +154,7 @@ impl PdfView {
     /// wanted rather than how they are drawn.
     pub fn set_dark(&self, dark: bool) {
         if self.imp().dark.replace(dark) != dark {
+            self.imp().paper.set(None);
             self.queue_draw();
         }
     }
@@ -216,6 +217,8 @@ impl PdfView {
     pub fn forget_textures(&self) {
         self.cache().borrow_mut().clear();
         self.imp().asked.borrow_mut().clear();
+        // A palette this dark that is not the palette it was: the paper moved with it.
+        self.imp().paper.set(None);
         self.queue_draw();
     }
 
@@ -374,8 +377,8 @@ impl PdfView {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a point the eraser passed over.
-    pub fn connect_erase(&self, f: impl Fn(usize, (f32, f32)) + 'static) {
+    /// Called with a page and the index in its `/Annots` of a stroke the eraser passed over.
+    pub fn connect_erase(&self, f: impl Fn(usize, usize) + 'static) {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
@@ -507,8 +510,30 @@ impl PdfView {
             return;
         };
         let at = self.point_on(page, x, y);
+        let radius = self.imp().style.borrow().eraser_radius;
+        // Hit-tested here, against the strokes the tab keeps for this page, rather than on the
+        // render thread: that read and flattened every annotation on the page under the pdfium
+        // lock, once per pointer event of the drag.
+        let mut inks = self.imp().inks.borrow_mut();
+        let Some(list) = inks.get_mut(&page) else {
+            return;
+        };
+        let Some(found) = list
+            .iter()
+            .position(|ink| accent_core::pdf::hit(&ink.points, at, radius))
+        else {
+            return;
+        };
+        let index = list[found].index;
+        // Taken out here too, so a drag that passes over it again does not name an index the
+        // document no longer has: a delete shifts everything after it down one.
+        list.remove(found);
+        for ink in list.iter_mut().filter(|ink| ink.index > index) {
+            ink.index -= 1;
+        }
+        drop(inks);
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
-            f(page, at);
+            f(page, index);
         }
     }
 
@@ -805,7 +830,8 @@ mod imp {
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
-    type At = Box<dyn Fn(usize, (f32, f32))>;
+    /// A page and the index of a stroke on it: what the eraser passed over.
+    type At = Box<dyn Fn(usize, usize)>;
     type Transform = Box<dyn Fn(usize, usize, accent_core::pdf::Matrix)>;
 
     #[derive(glib::Properties)]
@@ -872,6 +898,9 @@ mod imp {
         /// without it the page keeps painting its blurry stand-in and never asks again.
         pub asked_for: Cell<(u32, bool)>,
         pub page: Cell<usize>,
+        /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
+        /// the same for every page of every frame until the theme changes.
+        pub paper: Cell<Option<gdk::RGBA>>,
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
@@ -919,6 +948,7 @@ mod imp {
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
                 page: Cell::new(0),
+                paper: Cell::new(None),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
@@ -971,6 +1001,17 @@ mod imp {
                 self.adj_handlers.borrow_mut()[slot] = Some(id);
             }
             self.obj().queue_allocate();
+        }
+
+        /// The colour a page's paper is drawn in before its tiles arrive, matching what the
+        /// renderer will produce so nothing flashes when they do.
+        fn paper(&self) -> gdk::RGBA {
+            if let Some(colour) = self.paper.get() {
+                return colour;
+            }
+            let colour = super::paper(self.dark.get());
+            self.paper.set(Some(colour));
+            colour
         }
 
         /// Report the page being read when it changes, for the header and the thumbnail frame.
@@ -1202,7 +1243,9 @@ mod imp {
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
-            let layout = self.layout.borrow().clone();
+            // Borrowed rather than cloned: the clone was a `Vec` of every page in the document,
+            // allocated and dropped once a frame. Nothing under here lays out again.
+            let layout = self.layout.borrow();
             if layout.pages.is_empty() {
                 return;
             }
@@ -1226,16 +1269,15 @@ mod imp {
             let strokes = self.strokes.borrow();
             let adjust = self.adjust.borrow();
             let selection = self.selection.borrow();
-            for (index, rect) in layout.pages.iter().enumerate() {
-                // One viewport of prefetch above and below, so scrolling meets ready tiles.
-                let visible =
-                    f64::from(rect.y + rect.h) >= oy - vh && f64::from(rect.y) <= oy + vh + vh;
-                if !visible {
-                    continue;
-                }
+            // One viewport of prefetch above and below, so scrolling meets ready tiles. The
+            // ends of that range are two binary searches; the pages outside it are not looked at
+            // at all, which at 1 554 pages is the difference between a frame and a scan.
+            let first = page_at(&layout, oy - vh);
+            let last = page_at(&layout, oy + vh + vh);
+            for (index, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
                 let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
                 // The page's own paper, so a tile that has not arrived is not a hole.
-                snapshot.append_color(&paper(dark), &bounds);
+                snapshot.append_color(&self.paper(), &bounds);
 
                 let page = index as u32;
                 let low = cache.borrow_mut().lowres(page, dark);

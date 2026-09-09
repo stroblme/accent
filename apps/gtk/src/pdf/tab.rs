@@ -461,13 +461,22 @@ impl PdfTab {
         if mode == pdfview::Mode::Select {
             self.flush();
         }
-        if mode == pdfview::Mode::Adjust {
+        if self.wants_inks() {
             self.ask_inks();
         }
         self.emit(&self.on_mode);
     }
 
-    /// Give the Adjust tool the page under the reader and its neighbours.
+    /// Whether the tool in hand needs to know what is drawn on the page: the Adjust tool takes
+    /// hold of a stroke, and the eraser has to find the one under the pointer.
+    fn wants_inks(&self) -> bool {
+        matches!(
+            self.view.mode(),
+            pdfview::Mode::Adjust | pdfview::Mode::Eraser
+        )
+    }
+
+    /// Give those tools the page under the reader and its neighbours.
     ///
     // ponytail: three pages, so a fourth that is partly on screen waits until it is current.
     fn ask_inks(&self) {
@@ -751,7 +760,7 @@ impl PdfTab {
                     tab.ask(Request::Links(page));
                 }
                 tab.thumbs.queue_draw();
-                if tab.mode() == pdfview::Mode::Adjust {
+                if tab.wants_inks() {
                     tab.ask_inks();
                 }
                 tab.emit(&tab.on_page);
@@ -817,10 +826,7 @@ impl PdfTab {
         view.connect_erase(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, at| {
-                let radius = tab.view.drawing_config().eraser_radius;
-                tab.ask(Request::Erase { page, at, radius });
-            }
+            move |page, index| tab.ask(Request::Erase { page, index })
         ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
@@ -1057,7 +1063,7 @@ impl PdfTab {
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page, area);
                 self.thumbs.queue_draw();
-                if self.mode() == pdfview::Mode::Adjust {
+                if self.wants_inks() {
                     self.ask_inks();
                 }
                 self.save_soon();

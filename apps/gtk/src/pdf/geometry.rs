@@ -202,12 +202,14 @@ pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
 }
 
 /// Which page a content coordinate falls in, or the nearest one above it.
+///
+/// A binary search rather than a walk: this answers every scroll tick, every motion event of a
+/// drag and both ends of every frame's visible range, and a 1 554-page document is a long walk.
 pub(super) fn page_at(layout: &Layout, y: f64) -> usize {
     layout
         .pages
-        .iter()
-        .rposition(|rect| f64::from(rect.y) <= y)
-        .unwrap_or(0)
+        .partition_point(|rect| f64::from(rect.y) <= y)
+        .saturating_sub(1)
 }
 
 #[cfg(test)]

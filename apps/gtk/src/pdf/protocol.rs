@@ -100,12 +100,11 @@ pub enum Request {
         shape: pdf::Shape,
         style: pdf::InkStyle,
     },
-    /// Take off whichever stroke passes within `radius` page points of this point. Whole
-    /// strokes, never part of one.
+    /// Take one stroke off a page, named by its place in the page's `/Annots`. Which stroke the
+    /// eraser passed over is decided on the main thread, against the list the tab already holds.
     Erase {
         page: usize,
-        at: (f32, f32),
-        radius: f32,
+        index: usize,
     },
     /// Every ink stroke of a page with its box and style, for the Adjust tool.
     Inks(usize),
