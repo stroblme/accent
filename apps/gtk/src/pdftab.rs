@@ -1285,13 +1285,13 @@ impl PdfTab {
         if !self.selected.borrow().is_empty() {
             let clipboard = gio::Menu::new();
             for action in ["win.pdf-copy", "win.pdf-copy-link"] {
-                clipboard.append(Some(crate::label_of(action)), Some(action));
+                clipboard.append(Some(crate::actions::label_of(action)), Some(action));
             }
             menu.append_section(None, &clipboard);
         }
         let file = gio::Menu::new();
         file.append(
-            Some(crate::label_of("win.pdf-export-highlights")),
+            Some(crate::actions::label_of("win.pdf-export-highlights")),
             Some("win.pdf-export-highlights"),
         );
         menu.append_section(None, &file);
