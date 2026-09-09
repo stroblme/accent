@@ -1405,12 +1405,10 @@ mod imp {
                             }
                         }
                     }
-                    // The tool's own style, so what the hand sees is what the render puts on
-                    // the page. The blend mode is not reproduced here: over paper at this alpha
-                    // it reads the same, and only the render is kept.
+                    // The tool's own style, as the render will leave it: what the hand sees
+                    // must not change colour when the tile lands.
                     let style = obj.ink_style(stroke.tool);
-                    let [r, g, b, a] = style.rgba;
-                    let colour = theme::rgba([r, g, b], f32::from(a) / 255.0);
+                    let colour = as_rendered(style, dark, self.paper());
                     let stroke_style = gsk::Stroke::new(style.width * layout.scale);
                     stroke_style.set_line_cap(gsk::LineCap::Round);
                     stroke_style.set_line_join(gsk::LineJoin::Round);
@@ -1500,6 +1498,36 @@ mod imp {
     }
 
     impl ScrollableImpl for PdfView {}
+}
+
+/// The colour a stroke will have once the tile carrying it arrives.
+///
+/// Two things happen to it on the way: every pixel of a page is put on the theme's paper–ink ramp
+/// (see `accent_core::pdf::recolour_pixel`), and a highlighter multiplies into the page rather
+/// than covering it. Painting the live stroke in its raw colour instead is why a highlighter used
+/// to jump to another shade on dark and Solarized the moment the render landed.
+///
+/// The multiply is against the paper, which is what the stroke covers nearly all of; over a
+/// letter it darkens a shade more than this, which is a pixel or two of the stroke's own width.
+fn as_rendered(style: accent_core::pdf::InkStyle, dark: bool, paper: gdk::RGBA) -> gdk::RGBA {
+    let [r, g, b, a] = style.rgba;
+    let rgb = match crate::theme::pdf_colours(dark) {
+        Some((page, ink)) => {
+            let px = accent_core::pdf::recolour_pixel([r, g, b, 255], page, ink);
+            [px[0], px[1], px[2]]
+        }
+        None => [r, g, b],
+    };
+    let colour = theme::rgba(rgb, f32::from(a) / 255.0);
+    match style.multiply {
+        true => gdk::RGBA::new(
+            colour.red() * paper.red(),
+            colour.green() * paper.green(),
+            colour.blue() * paper.blue(),
+            colour.alpha(),
+        ),
+        false => colour,
+    }
 }
 
 /// Whether the tile at `(tx, ty)` covers any of `area`, which is in page points, on a page
