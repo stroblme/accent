@@ -62,10 +62,13 @@ impl Cache {
 
     pub fn insert(&mut self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
         self.tick += 1;
-        if let Some((_, old)) = self.tiles.insert(key, (texture, self.tick)) {
-            let _ = old;
-        }
         self.bytes += bytes;
+        // A re-render of a tile already held replaces it, so its bytes go with it: counting only
+        // what arrives made the total drift up after every stroke and evict long before the
+        // budget was really reached.
+        if let Some((old, _)) = self.tiles.insert(key, (texture, self.tick)) {
+            self.bytes -= bytes_of(&old);
+        }
         self.bytes -= drop_oldest(&mut self.tiles, self.bytes, BUDGET);
     }
 

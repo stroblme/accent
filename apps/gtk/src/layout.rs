@@ -239,7 +239,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
+                move |out, _| app.set_zoom(stepped_zoom(app.zoom.get(), out))
             ),
         );
         preview.connect_found(glib::clone!(

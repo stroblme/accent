@@ -282,12 +282,8 @@ mod tests {
     }
 
     #[test]
-    fn zoom_steps_in_tenths_and_clamps() {
-        assert_eq!(scale(stepped(1.0, false)), 1.1);
-        assert_eq!(scale(stepped(1.0, true)), 0.9);
-        // A page fitted to the window sits off a tenth: the next one, not a tenth further.
-        assert_eq!(scale(stepped(1.37, false)), 1.4);
-        assert_eq!(scale(stepped(1.37, true)), 1.3);
+    fn a_scale_is_clamped_to_what_is_worth_rendering() {
+        // The tenths themselves are `zoom::stepped_zoom`'s, and tested there.
         assert_eq!(clamp_scale(1000.0), 8.0 * PT_TO_PX);
         assert_eq!(clamp_scale(0.0), 0.1 * PT_TO_PX);
     }

@@ -1,11 +1,6 @@
 //! The drawing tools' pure geometry: what a drag means under each of them, and what the Adjust
 //! tool takes hold of.
 
-/// about 80 px wide, and past 800 % one page is more tiles than the budget holds.
-/// How much of the page a highlighter lets through. It also multiplies rather than covers, so
-/// this is about how strong the colour is, not about whether the text survives.
-pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
-
 /// What a drag over the page does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {

@@ -49,6 +49,9 @@ pub enum Reply {
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
     /// write from someone else's and does not reload over strokes drawn since.
     Saved(accent_core::fs::Etag),
+    /// The drawing could not be written, and why. A read-only file used to swallow every stroke
+    /// silently until the tab closed.
+    SaveFailed(String),
     /// The document could not be opened at all, with the reason to show in its place.
     Failed(String),
 }

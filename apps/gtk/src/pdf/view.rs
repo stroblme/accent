@@ -21,9 +21,10 @@ use super::geometry::{
 };
 use super::protocol::{Highlights, Reply};
 use super::tools::{
-    ADJUST_RADIUS, HANDLE, HIGHLIGHTER_ALPHA, Handle, Mode, Selected, Stroke, drag_matrix,
-    handle_at, mapped, shape_of, snap,
+    ADJUST_RADIUS, HANDLE, Handle, Mode, Selected, Stroke, drag_matrix, handle_at, mapped,
+    shape_of, snap,
 };
+use crate::theme;
 
 glib::wrapper! {
     pub struct PdfView(ObjectSubclass<imp::PdfView>)
@@ -39,7 +40,21 @@ impl Default for PdfView {
 
 impl PdfView {
     pub fn new() -> PdfView {
-        glib::Object::new()
+        let view: PdfView = glib::Object::new();
+        // Ctrl+wheel zooms around the pointer, in the same step a chord takes. Bubble phase,
+        // ahead of the scrolled window's own controller, which does not filter Ctrl and would
+        // scroll as well. Not on the thumbnail strip below, which fits itself to its width: a
+        // wheel there is the scroll it has always been.
+        crate::zoom::zoom_on_wheel(
+            &view,
+            gtk::PropagationPhase::Bubble,
+            glib::clone!(
+                #[weak]
+                view,
+                move |out, at| view.zoom_step(out, at)
+            ),
+        );
+        view
     }
 
     /// A narrow view of the same document: low-resolution pages only, with the one being read
@@ -309,12 +324,12 @@ impl PdfView {
             Mode::Highlighter => (
                 c.highlighter_width,
                 c.highlighter_color,
-                HIGHLIGHTER_ALPHA,
+                theme::HIGHLIGHTER_ALPHA,
                 true,
             ),
             _ => (c.pen_width, c.pen_color, 1.0, false),
         };
-        let [r, g, b] = colour.unwrap_or_else(crate::theme::accent_rgb);
+        let [r, g, b] = colour.unwrap_or_else(theme::accent_rgb);
         accent_core::pdf::InkStyle {
             width,
             rgba: [r, g, b, (alpha * 255.0) as u8],
@@ -730,6 +745,11 @@ impl PdfView {
         // reader is anyway.
         let anchor = (!self.imp().layout.borrow().pages.is_empty()).then(|| self.anchor());
         let scale = clamp_scale(fit_scale(&sizes, self.imp().zoom.get(), w as f32, h as f32));
+        // Tiles waiting for a re-render at the scale being left are of a page nothing will paint
+        // again; the keys are the old scale's and would sit in the set for the life of the tab.
+        if self.imp().layout.borrow().scale != scale {
+            self.imp().stale_tiles.borrow_mut().clear();
+        }
         let layout = layout(&sizes, scale, w as f32);
         let (width, height) = (f64::from(layout.width), f64::from(layout.height));
         *self.imp().layout.borrow_mut() = layout;
@@ -842,9 +862,6 @@ mod imp {
         /// without it the page keeps painting its blurry stand-in and never asks again.
         pub asked_for: Cell<(u32, bool)>,
         pub page: Cell<usize>,
-        pub pointer: Cell<(f64, f64)>,
-        /// The fraction of a wheel notch a smooth-scroll device has sent so far.
-        pub scroll_accum: Cell<f64>,
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
@@ -892,8 +909,6 @@ mod imp {
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false)),
                 page: Cell::new(0),
-                pointer: Cell::new((0.0, 0.0)),
-                scroll_accum: Cell::new(0.0),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
@@ -970,34 +985,6 @@ mod imp {
             obj.set_hexpand(true);
             obj.set_vexpand(true);
 
-            // Ctrl+wheel zooms around the pointer. Bubble phase, ahead of the scrolled window's
-            // own controller, which does not filter Ctrl and would scroll as well.
-            let scroll =
-                gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
-            scroll.connect_scroll(glib::clone!(
-                #[weak]
-                obj,
-                #[upgrade_or]
-                glib::Propagation::Proceed,
-                move |controller, _, dy| {
-                    // The strip is a view of the same document, so its own controller would zoom
-                    // the thumbnails instead of the page being read.
-                    if obj.imp().thumbnails.get()
-                        || !controller
-                            .current_event_state()
-                            .contains(gdk::ModifierType::CONTROL_MASK)
-                    {
-                        return glib::Propagation::Proceed;
-                    }
-                    let steps = crate::zoom::wheel_steps(&obj.imp().scroll_accum, dy);
-                    for _ in 0..steps.abs() {
-                        obj.zoom_step(steps > 0, Some(obj.imp().pointer.get()));
-                    }
-                    glib::Propagation::Stop
-                }
-            ));
-            obj.add_controller(scroll);
-
             let zoom = gtk::GestureZoom::new();
             zoom.connect_scale_changed(glib::clone!(
                 #[weak]
@@ -1016,7 +1003,6 @@ mod imp {
                 #[weak]
                 obj,
                 move |_, x, y| {
-                    obj.imp().pointer.set((x, y));
                     let handler = obj.imp().on_motion.borrow();
                     if let Some(f) = handler.as_ref() {
                         f(&obj, x, y);
@@ -1222,7 +1208,7 @@ mod imp {
             snapshot.translate(&graphene::Point::new(-ox as f32, -oy as f32));
 
             let frame = obj.color();
-            let accent = adw::StyleManager::default().accent_color_rgba();
+            let accent = theme::accent();
             let mut wanted: Vec<Want> = Vec::new();
             let cache = obj.cache();
             let marks = self.marks.borrow();
@@ -1310,7 +1296,7 @@ mod imp {
                 snapshot.append_border(
                     &gsk::RoundedRect::from_rect(bounds, 0.0),
                     &[1.0; 4],
-                    &[edge(frame); 4],
+                    &[theme::at(frame, theme::PAGE_EDGE_ALPHA); 4],
                 );
 
                 if thumbnails && self.page.get() == index {
@@ -1324,13 +1310,13 @@ mod imp {
                 // Under the selection and the search marks: a highlight is what the page says,
                 // the other two are what the reader is doing to it right now.
                 if let Some(page_highlights) = highlights.get(&index) {
-                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.2);
+                    let colour = theme::at(accent, theme::HIGHLIGHT_ALPHA);
                     for quad in page_highlights.iter().flat_map(|(quads, _)| quads) {
                         snapshot.append_color(&colour, &layout.rect_of(rect, quad));
                     }
                 }
                 if let Some((_, boxes)) = selection.iter().find(|(at, _)| *at == index) {
-                    let colour = gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), 0.35);
+                    let colour = theme::at(accent, theme::SELECTION_ALPHA);
                     for glyph in boxes {
                         snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
                     }
@@ -1369,8 +1355,8 @@ mod imp {
                     // the page. The blend mode is not reproduced here: over paper at this alpha
                     // it reads the same, and only the render is kept.
                     let style = obj.ink_style(stroke.tool);
-                    let [r, g, b, a] = style.rgba.map(|v| f32::from(v) / 255.0);
-                    let colour = gdk::RGBA::new(r, g, b, a);
+                    let [r, g, b, a] = style.rgba;
+                    let colour = theme::rgba([r, g, b], f32::from(a) / 255.0);
                     let stroke_style = gsk::Stroke::new(style.width * layout.scale);
                     stroke_style.set_line_cap(gsk::LineCap::Round);
                     stroke_style.set_line_join(gsk::LineJoin::Round);
@@ -1392,12 +1378,7 @@ mod imp {
                             builder.line_to(point(p).x(), point(p).y());
                         }
                         let [r, g, b, _] = a.style.rgba;
-                        let colour = gdk::RGBA::new(
-                            f32::from(r) / 255.0,
-                            f32::from(g) / 255.0,
-                            f32::from(b) / 255.0,
-                            0.6,
-                        );
+                        let colour = theme::rgba([r, g, b], theme::GHOST_ALPHA);
                         let ghost = gsk::Stroke::new(a.style.width * layout.scale);
                         ghost.set_line_cap(gsk::LineCap::Round);
                         ghost.set_line_join(gsk::LineJoin::Round);
@@ -1435,11 +1416,10 @@ mod imp {
                 if let Some(page_marks) = marks.get(&index) {
                     for (n, mark) in page_marks.iter().enumerate() {
                         let alpha = match self.current_mark.get() == Some((index, n)) {
-                            true => 0.6,
-                            false => 0.3,
+                            true => theme::CURRENT_MARK_ALPHA,
+                            false => theme::MARK_ALPHA,
                         };
-                        let colour =
-                            gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
+                        let colour = theme::at(accent, alpha);
                         snapshot.append_color(&colour, &layout.rect_of(rect, mark));
                     }
                 }
@@ -1475,9 +1455,4 @@ fn paper(dark: bool) -> gdk::RGBA {
         Ok(colour) => colour,
         Err(_) => gdk::RGBA::WHITE,
     }
-}
-
-/// The hairline around a page: the foreground at a low alpha, like every other derived colour.
-fn edge(fg: gdk::RGBA) -> gdk::RGBA {
-    gdk::RGBA::new(fg.red(), fg.green(), fg.blue(), 0.15)
 }
