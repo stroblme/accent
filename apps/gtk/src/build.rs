@@ -630,11 +630,8 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         }),
         open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
-            app.open_path(rel);
-            if !stops.is_empty() {
-                let stops = stops.to_vec();
-                app.on_tab(rel.to_string(), move |tab| tab.place_stops(&stops));
-            }
+            let stops = stops.to_vec();
+            app.with_tab(rel, Opened::Kept, move |_, tab| tab.place_stops(&stops));
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {

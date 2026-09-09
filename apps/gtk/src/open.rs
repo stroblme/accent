@@ -35,8 +35,9 @@ impl App {
         self.open_as(key, Opened::Preview);
     }
 
-    fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
+    pub fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
+            self.awaiting.borrow_mut().remove(key);
             // A session pointing at a file that has since been deleted lands here too, and
             // "outside this vault" would be the wrong thing to say about it.
             return match self.root().join(key).exists() {
@@ -47,9 +48,15 @@ impl App {
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
+            self.awaiting.borrow_mut().remove(&key);
             return self.reveal_page(doc.page());
         }
-        match doc::kind_of(&key) {
+        let kind = doc::kind_of(&key);
+        // Only text becomes a `Tab`, so anything else has nothing for a waiting closure to run on.
+        if !matches!(kind, Kind::Note | Kind::Text) {
+            self.awaiting.borrow_mut().remove(&key);
+        }
+        match kind {
             Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
@@ -113,7 +120,10 @@ impl App {
             }
             match read {
                 Ok(read) => app.adopt_text(&key, read, flavour, how),
-                Err(_) => tracing::warn!("the reader panicked on {key}"),
+                Err(_) => {
+                    app.awaiting.borrow_mut().remove(&key);
+                    tracing::warn!("the reader panicked on {key}");
+                }
             }
         });
     }
@@ -151,7 +161,10 @@ impl App {
                     how,
                 );
             }
-            Err(e) => return self.toast(&format!("Cannot open {key}: {e}")),
+            Err(e) => {
+                self.awaiting.borrow_mut().remove(key);
+                return self.toast(&format!("Cannot open {key}: {e}"));
+            }
         };
         let prefs = self.prefs();
         let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
@@ -555,6 +568,7 @@ impl App {
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
     /// sentence and at most one button).
     fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
+        self.awaiting.borrow_mut().remove(key);
         let key = key.to_string();
         let status = adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
@@ -653,17 +667,17 @@ impl App {
     /// the note opens as a preview and the next such click takes the same tab.
     pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
         self.mark();
-        self.open_preview(rel);
-        if let Some(at) = at {
-            self.select_when_open(rel, at);
+        match at {
+            Some(at) => self.select_when_open(rel, at),
+            None => self.open_preview(rel),
         }
     }
 
     /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
     /// followed link.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
-        self.on_tab(rel.to_string(), move |tab| {
-            if let Some(chars) = char_range(&tab.text(), at.clone()) {
+        self.with_tab(rel, Opened::Preview, move |_, tab| {
+            if let Some(chars) = char_range(&tab.text(), at) {
                 tab.goto_range(chars);
             }
         });
@@ -936,7 +950,8 @@ impl App {
 
     /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
     /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
-    /// text never gets there, and its `f` is simply never run.
+    /// text never gets there, and its `f` is dropped where that is decided, so it cannot run on
+    /// a later open of the same key.
     pub fn with_tab(
         self: &Rc<Self>,
         key: &str,
