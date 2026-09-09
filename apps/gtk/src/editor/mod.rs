@@ -1165,28 +1165,33 @@ impl Tab {
         if let Some(id) = self.debounce.borrow_mut().take() {
             id.remove();
         }
-        if self.buffer.char_count() <= INSTANT {
+        let instant = self.buffer.char_count() <= INSTANT;
+        if instant {
             self.reanalyse();
-        } else {
+        } else if self.flavour.is_note() {
             // Too long for a full pass inside a frame, so the line under the caret is styled now
             // and everything else waits: what a typist watches change is the line they are typing.
-            if self.flavour.is_note() {
-                let line = caret(&self.buffer).line();
-                highlight::apply_line(&self.buffer, line);
-            }
-            let id = glib::timeout_add_local_once(
-                DEBOUNCE,
-                glib::clone!(
-                    #[weak(rename_to = tab)]
-                    self,
-                    move || {
-                        *tab.debounce.borrow_mut() = None;
+            let line = caret(&self.buffer).line();
+            highlight::apply_line(&self.buffer, line);
+        }
+        // The change bars are a second whole-buffer copy and a line diff against the committed
+        // text, which is too much to spend on a keystroke however short the note is, and nothing
+        // a typist watches: they follow the debounce at either size.
+        let id = glib::timeout_add_local_once(
+            DEBOUNCE,
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || {
+                    *tab.debounce.borrow_mut() = None;
+                    tab.update_marks();
+                    if !instant {
                         tab.reanalyse();
                     }
-                ),
-            );
-            *self.debounce.borrow_mut() = Some(id);
-        }
+                }
+            ),
+        );
+        *self.debounce.borrow_mut() = Some(id);
         self.schedule_autosave();
     }
 
@@ -1194,20 +1199,26 @@ impl Tab {
     /// link table that Ctrl+click and Ctrl+Return follow. The preview listens on `on_edited` and
     /// debounces its own re-render, so calling this per keystroke only re-arms that timer.
     fn reanalyse(self: &Rc<Self>) {
-        self.analyse();
+        self.analyse_text();
         self.emit(&self.on_edited);
     }
 
-    /// Re-derive whatever this tab's text implies. A note gets its styling spans and its link
-    /// table; code gets nothing, because the style scheme colours it from the language.
+    /// Everything this tab's text implies, the change bars included: what a reload or a template
+    /// needs, where the whole document has moved at once.
     fn analyse(&self) {
+        self.analyse_text();
+        self.update_marks();
+    }
+
+    /// The half of [`Tab::analyse`] a keystroke can afford. A note gets its styling spans and its
+    /// link table; code gets nothing, because the style scheme colours it from the language.
+    fn analyse_text(&self) {
         match self.flavour {
             Flavour::Note => *self.links.borrow_mut() = highlight::apply(&self.buffer).links,
             Flavour::Csv => highlight::apply_csv(&self.buffer),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
         }
-        self.update_marks();
         // The tags the sticky title reads are the ones that were just re-applied.
         self.update_sticky();
         if let Some(compare) = self.comparison() {
@@ -1215,8 +1226,8 @@ impl Tab {
         }
     }
 
-    /// Redraw the gutter's change bars from the committed text. Rides the same path as styling,
-    /// so it follows a keystroke on a small note and the debounce on a large one.
+    /// Redraw the gutter's change bars from the committed text. On the debounce, not the
+    /// keystroke: it copies the whole buffer and diffs it against the committed text.
     fn update_marks(&self) {
         let head = self.head.borrow();
         let Some(head) = head.as_ref() else {
