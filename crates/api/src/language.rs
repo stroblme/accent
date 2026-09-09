@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::remote::Remote;
-use crate::{Backend, Event, Local, LspConfig, Vault, locked, remote_err};
+use crate::vault::{Backend, remote_err};
+use crate::{Event, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
 pub(crate) mod notes;

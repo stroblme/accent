@@ -3,6 +3,7 @@
 //! spells the same way.
 
 use crate::*;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
