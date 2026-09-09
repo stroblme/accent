@@ -5,6 +5,7 @@ use crate::widgets::{scroller, set_class};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
 use accent_core::markdown::is_image;
+use accent_core::path::basename;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -480,7 +481,7 @@ fn root_row(label: &str) -> gtk::Box {
     row.append(&gtk::Image::from_icon_name(icon_name('d')));
     row.append(
         &gtk::Label::builder()
-            .label(label.rsplit('/').next().unwrap_or(label))
+            .label(basename(label))
             .xalign(0.0)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
             .css_classes(["heading"])
@@ -622,7 +623,7 @@ pub fn build(
             .next_sibling()
             .and_downcast::<gtk::Label>()
             .expect("label");
-        label.set_text(item.rel.rsplit('/').next().unwrap_or(&item.rel));
+        label.set_text(basename(&item.rel));
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
         // to have the class taken off it again. A row the index does not hold is dimmed by the
         // same rule and for the same reason the ignored ones are: search does not reach it.

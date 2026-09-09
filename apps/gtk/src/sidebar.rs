@@ -12,6 +12,7 @@
 
 use crate::widgets::{Debounce, Pulse, label_factory, row_text, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
+use accent_core::path::{basename, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -497,12 +498,13 @@ fn match_markup(line: &str, range: Range<usize>, replaced: Option<&str>, accent:
     }
 }
 
-/// A result row names the file — `design.md` and the folder holding it — rather than the note's
+/// The folder a result row sits in, with the trailing slash that says it is one; "" at the vault
+/// root. A row names the file — `design.md` and the folder holding it — rather than the note's
 /// title: the title hides the extension, and two notes titled the same are then one row twice.
-fn name_and_dir(rel_path: &str) -> (&str, &str) {
-    match rel_path.rfind('/') {
-        Some(i) => (&rel_path[i + 1..], &rel_path[..i + 1]),
-        None => (rel_path, ""),
+fn dir_label(rel_path: &str) -> String {
+    match parent_dir(rel_path) {
+        "" => String::new(),
+        dir => format!("{dir}/"),
     }
 }
 
@@ -727,15 +729,12 @@ impl Search {
             Answer::Fts(hits) => {
                 self.set_total(0);
                 hits.into_iter()
-                    .map(|hit| {
-                        let (name, dir) = name_and_dir(&hit.rel_path);
-                        Row {
-                            name: name.to_string(),
-                            dir: dir.to_string(),
-                            snippet: snippet_markup(&hit.snippet),
-                            at: hit.at,
-                            rel_path: hit.rel_path,
-                        }
+                    .map(|hit| Row {
+                        name: basename(&hit.rel_path).to_string(),
+                        dir: dir_label(&hit.rel_path),
+                        snippet: snippet_markup(&hit.snippet),
+                        at: hit.at,
+                        rel_path: hit.rel_path,
                     })
                     .collect()
             }
@@ -850,9 +849,9 @@ fn grep_rows(
         if first.as_ref().is_none_or(|(rel, _)| *rel != m.rel_path) {
             first = Some((m.rel_path.clone(), at.clone()));
         }
-        let (name, dir) = name_and_dir(&m.rel_path);
+        let dir = dir_label(&m.rel_path);
         rows.push(Row {
-            name: name.to_string(),
+            name: basename(&m.rel_path).to_string(),
             // "notes/deep/ — line 12"; a file at the vault root has no folder to name.
             dir: match dir.is_empty() {
                 true => format!("line {}", m.line),
@@ -1668,11 +1667,9 @@ mod tests {
 
     #[test]
     fn a_row_is_named_by_its_file_and_its_folder() {
-        assert_eq!(
-            name_and_dir("notes/deep/thought.md"),
-            ("thought.md", "notes/deep/")
-        );
-        assert_eq!(name_and_dir("top.md"), ("top.md", ""));
+        assert_eq!(basename("notes/deep/thought.md"), "thought.md");
+        assert_eq!(dir_label("notes/deep/thought.md"), "notes/deep/");
+        assert_eq!(dir_label("top.md"), "");
     }
 
     #[test]

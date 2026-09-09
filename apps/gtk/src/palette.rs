@@ -13,6 +13,7 @@
 
 use crate::start;
 use crate::widgets::{Debounce, status_page};
+use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::{gdk, gio, pango};
@@ -142,15 +143,6 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
     }
 }
 
-/// A note row reads as basename first, directory after: a vault full of `index.md` files is
-/// unreadable the other way round.
-fn split_note(rel: &str) -> (&str, &str) {
-    match rel.rfind('/') {
-        Some(i) => (&rel[i + 1..], &rel[..i]),
-        None => (rel, ""),
-    }
-}
-
 /// Indices of `haystacks` that match `query`, best first, capped at [`MAX_RESULTS`].
 ///
 /// This is `Pattern::match_list` with the index kept instead of the string, so the caller can map a
@@ -180,7 +172,7 @@ fn rank(
         .enumerate()
         .filter_map(|(i, h)| {
             let path = pattern.score(Utf32Str::new(h, &mut buf), matcher)?;
-            let name = &h[h.rfind('/').map_or(0, |at| at + 1)..];
+            let name = basename(h);
             // Scoring the whole path again when it has no folder in it would give the same number.
             let base = match name.len() == h.len() {
                 true => Some(path),
@@ -367,10 +359,11 @@ fn row_factory(
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         match &*entry {
+            // A note row reads as basename first, directory after: a vault full of `index.md`
+            // files is unreadable the other way round.
             Item::File(rel) => {
-                let (base, parent) = split_note(rel);
-                name.set_text(base);
-                dir.set_text(parent);
+                name.set_text(basename(rel));
+                dir.set_text(parent_dir(rel));
             }
             Item::Command {
                 action,
@@ -957,16 +950,6 @@ mod tests {
         // A prefix still switches, whichever mode it started in.
         assert_eq!(parse_query("#area", Mode::Commands), (Mode::Tags, "area"));
         assert_eq!(parse_query(">save", Mode::Tags), (Mode::Commands, "save"));
-    }
-
-    #[test]
-    fn split_note_puts_the_basename_first() {
-        assert_eq!(
-            split_note("areas/work/index.md"),
-            ("index.md", "areas/work")
-        );
-        assert_eq!(split_note("index.md"), ("index.md", ""));
-        assert_eq!(split_note("a/b.md"), ("b.md", "a"));
     }
 
     #[test]

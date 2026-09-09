@@ -15,6 +15,7 @@ use crate::dialogs::{alert, form, labelled};
 // this module, which is where they used to live.
 pub(crate) use crate::dialogs::{CONFIRM, name_dialog, name_entry};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
+use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::RefCell;
@@ -963,15 +964,6 @@ fn split_ext(name: &str) -> (&str, &str) {
         Some(i) if i > 0 => name.split_at(i),
         _ => (name, ""),
     }
-}
-
-fn basename(rel: &str) -> &str {
-    rel.rsplit('/').next().unwrap_or(rel)
-}
-
-/// The directory `rel` sits in; "" for a file at the vault root.
-fn parent_dir(rel: &str) -> &str {
-    rel.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 
 /// `name` inside `dir`, where "" is the vault root.
