@@ -9,7 +9,10 @@
 
 pub mod cache;
 pub mod geometry;
+pub mod preview;
 pub mod protocol;
+pub mod render;
+pub mod selection;
 pub mod tab;
 pub mod tools;
 pub mod view;
