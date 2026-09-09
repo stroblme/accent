@@ -628,7 +628,7 @@ mod tests {
         }
 
         // A rescan finds the same pair; the UI must not be offered it twice.
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
         assert!(
             wait_for(
@@ -697,7 +697,7 @@ mod tests {
         };
         git(&["init", "-q", "-b", "main"]);
         f.write("a.md", "one\n");
-        f.vault.rescan();
+        f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         // Asking for the repositories is what puts `.git` in the watch set.
