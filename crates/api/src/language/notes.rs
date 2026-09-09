@@ -16,6 +16,7 @@ use anyhow::Result;
 
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
+use accent_core::path::{basename, stem};
 
 use super::{
     Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
@@ -161,15 +162,6 @@ fn section_end(text: &str, headings: &[markdown::Heading], i: usize) -> usize {
         .map_or(text.len(), |next| next.range.start)
         .saturating_sub(1)
         .max(headings[i].range.end)
-}
-
-fn basename(rel: &str) -> &str {
-    rel.rsplit('/').next().unwrap_or(rel)
-}
-
-/// The stem a `[[wikilink]]` names a note by.
-fn stem(rel: &str) -> String {
-    markdown::strip_ext(basename(rel))
 }
 
 // --------------------------------------------------------------------- the provider

@@ -154,20 +154,12 @@ impl Remote {
             }
         }
         if let State::Disconnected(why) = &*state {
-            return Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: why.clone(),
-                data: None,
-            });
+            return Err(RpcError::failed(why));
         }
         drop(state);
         match self.locked(&self.client).clone() {
             Some(client) => Ok(client),
-            None => Err(RpcError {
-                code: crate::rpc::FAILED,
-                message: "not connected".to_string(),
-                data: None,
-            }),
+            None => Err(RpcError::failed("not connected")),
         }
     }
 
@@ -369,19 +361,20 @@ impl Remote {
             });
         }
 
-        self.provision()?;
-        self.spawn_server()
+        let hash = self.provision()?;
+        self.spawn_server(&hash)
     }
 
-    /// Put the right server binary on the host, if it is not already there.
-    fn provision(&self) -> Result<(), String> {
+    /// Put the right server binary on the host, if it is not already there, and answer with what
+    /// it is named by: the hash the caller would otherwise read the 6.4 MB binary again to get.
+    fn provision(&self) -> Result<String, String> {
         self.say("Checking the remote server");
         let local = ssh::server_binary().map_err(|e| e.to_string())?;
         let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
         let hash = ssh::hash_of(&bytes);
 
         if self.ssh_output(&ssh::have_server_cmd(&hash)).is_ok() {
-            return Ok(());
+            return Ok(hash);
         }
 
         let total = bytes.len();
@@ -420,7 +413,7 @@ impl Remote {
             .wait_with_output()
             .map_err(|e| format!("uploading the server: {e}"))?;
         match out.status.success() {
-            true => Ok(()),
+            true => Ok(hash),
             false => Err(format!(
                 "cannot install the server: {}",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -428,11 +421,9 @@ impl Remote {
         }
     }
 
-    fn spawn_server(&self) -> Result<(), String> {
+    fn spawn_server(&self, hash: &str) -> Result<(), String> {
         self.say("Opening the vault");
-        let local = ssh::server_binary().map_err(|e| e.to_string())?;
-        let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
-        let command = ssh::serve_cmd(&ssh::server_path(&ssh::hash_of(&bytes)), &self.url.path);
+        let command = ssh::serve_cmd(&ssh::server_path(hash), &self.url.path);
         let mut child = self
             .ssh(&ssh::run(&self.url, &self.ctl, &command))
             .stdin(Stdio::piped())
@@ -461,7 +452,7 @@ impl Remote {
     }
 
     fn locked<'a, T>(&self, m: &'a Mutex<T>) -> std::sync::MutexGuard<'a, T> {
-        m.lock().unwrap_or_else(|e| e.into_inner())
+        crate::locked(m)
     }
 
     fn read_lock<'a, T>(&self, m: &'a RwLock<T>) -> std::sync::RwLockReadGuard<'a, T> {

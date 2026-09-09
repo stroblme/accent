@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 /// when the answer arrives and dropped wholesale when the connection dies.
 type Waiting = Arc<Mutex<HashMap<u64, Sender<Result<Value, RpcError>>>>>;
 
-use crate::{Event, Local};
+use crate::{Event, Local, locked};
 
 use accent_core::fs::{Etag, SaveError};
 
@@ -59,7 +59,7 @@ impl std::fmt::Display for RpcError {
 impl std::error::Error for RpcError {}
 
 impl RpcError {
-    fn failed(message: impl std::fmt::Display) -> RpcError {
+    pub(crate) fn failed(message: impl std::fmt::Display) -> RpcError {
         RpcError {
             code: FAILED,
             message: message.to_string(),
@@ -132,7 +132,7 @@ impl Client {
                     // EOF: the server is gone. Everyone still waiting is told at once by having
                     // their sender dropped, rather than each of them spending the full deadline.
                     dead.store(true, Ordering::SeqCst);
-                    pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    locked(&pending).clear();
                 }
             })
             .ok();
@@ -163,17 +163,11 @@ impl Client {
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
-        self.pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, tx);
+        locked(&self.pending).insert(id, tx);
 
         let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        if let Err(e) = self.write(&line) {
-            self.pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
+        if let Err(e) = emit(&self.out, &line) {
+            locked(&self.pending).remove(&id);
             return Err(RpcError::failed(format!("cannot reach the server: {e}")));
         }
 
@@ -184,31 +178,18 @@ impl Client {
                 Err(RpcError::failed("the connection closed"))
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                self.pending
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&id);
+                locked(&self.pending).remove(&id);
                 Err(RpcError::failed(format!("{method} timed out")))
             }
         }
-    }
-
-    fn write(&self, line: &Value) -> std::io::Result<()> {
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        serde_json::to_writer(&mut *out, line)?;
-        out.write_all(b"\n")?;
-        out.flush()
     }
 
     /// Let go of the writing end, which is what tells `serve` to stop, then wait for the reader
     /// thread to notice the far end has closed.
     pub fn shutdown(&self) {
         // Replacing the writer drops the pipe, and `serve` reads EOF on its stdin.
-        {
-            let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-            *out = Box::new(std::io::sink());
-        }
-        if let Some(handle) = self.reader.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        *locked(&self.out) = Box::new(std::io::sink());
+        if let Some(handle) = locked(&self.reader).take() {
             let _ = handle.join();
         }
     }
@@ -229,11 +210,7 @@ fn route(msg: Value, pending: &Waiting, events: &Sender<Event>) {
             }),
             None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
         };
-        if let Some(tx) = pending
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id)
-        {
+        if let Some(tx) = locked(pending).remove(&id) {
             let _ = tx.send(answer);
         }
         return;
@@ -349,7 +326,7 @@ pub(crate) fn serve_local(
 }
 
 fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &Value) -> std::io::Result<()> {
-    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+    let mut out = locked(out);
     serde_json::to_writer(&mut *out, line)?;
     out.write_all(b"\n")?;
     out.flush()
@@ -358,23 +335,23 @@ fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &Value) -> std::io::Result<()>
 // ----------------------------------------------------------------- dispatch
 
 /// One positional argument, deserialised.
-fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T, RpcError> {
+pub(crate) fn arg<T: DeserializeOwned>(params: &Value, n: usize) -> Result<T, RpcError> {
     let value = params.get(n).cloned().unwrap_or(Value::Null);
     serde_json::from_value(value)
         .map_err(|e| RpcError::failed(format!("argument {n} is not what was expected: {e}")))
 }
 
 /// Whatever the method returned, as JSON.
-fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
+pub(crate) fn ok<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
     serde_json::to_value(value).map_err(|e| RpcError::failed(format!("cannot answer: {e}")))
 }
 
 /// An `anyhow` failure, formatted the way the app would have shown it locally.
-fn any<T: serde::Serialize>(r: anyhow::Result<T>) -> Result<Value, RpcError> {
+pub(crate) fn any<T: serde::Serialize>(r: anyhow::Result<T>) -> Result<Value, RpcError> {
     ok(r.map_err(|e| RpcError::failed(format!("{e:#}")))?)
 }
 
-fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, RpcError> {
+pub(crate) fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, RpcError> {
     match r {
         Ok(v) => ok(v),
         Err(e) => Err(RpcError {
@@ -385,17 +362,25 @@ fn io<T: serde::Serialize>(r: std::io::Result<T>) -> Result<Value, RpcError> {
     }
 }
 
-fn git_result<T: serde::Serialize>(
+pub(crate) fn git_result<T: serde::Serialize>(
     r: Result<T, accent_core::git::Error>,
 ) -> Result<Value, RpcError> {
     ok(r.map_err(RpcError::failed)?)
 }
 
-/// The whole remote surface. Everything the UI can ask of a vault it cannot reach is one arm
-/// here; anything absent is deliberately local — the session file, the config, and path
-/// arithmetic, all of which belong to the machine the window is on.
+/// The whole remote surface. Most of it is one line of the [`methods!`](crate::vault) table and
+/// is answered by [`crate::vault::dispatch`]; what is left here is what that table cannot say —
+/// the methods whose two sides differ, and the document's own lifecycle. Anything absent from
+/// both is deliberately local: the session file, the config, and path arithmetic, all of which
+/// belong to the machine the window is on.
 fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
     use accent_core::git;
+    if let Some(answer) = crate::vault::dispatch(vault, method, p)
+        .or_else(|| crate::language::dispatch_requests(vault, method, p))
+        .or_else(|| crate::language::dispatch_notifications(vault, method, p))
+    {
+        return answer;
+    }
     let repo = |n: usize| arg::<git::Repo>(p, n);
     // `git` takes `&[&str]`, the wire carries owned strings.
     let paths = |n: usize| -> Result<Vec<String>, RpcError> { arg(p, n) };
@@ -415,11 +400,8 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             })
         }
 
-        // ------------------------------------------------------------ files
-        "read" => io(vault.read(&arg::<String>(p, 0)?)),
-        "read_text" => io(vault.read_text(&arg::<String>(p, 0)?)),
-        "stat" => io(vault.stat(&arg::<String>(p, 0)?)),
-        "delete" => io(vault.delete(&arg::<String>(p, 0)?)),
+        // A save has an error of its own, and the searches compile their pattern here rather
+        // than sending one: a `Regex` does not serialise.
         "save" => match vault.save(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?) {
             Ok(etag) => ok(etag),
             Err(SaveError::ChangedOnDisk { current }) => Err(RpcError {
@@ -437,25 +419,10 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             &arg::<String>(p, 0)?,
             arg::<Option<String>>(p, 1)?.as_deref(),
         )),
-        "create_dir" => io(vault.create_dir(&arg::<String>(p, 0)?)),
-        "plan_rename" => any(vault.plan_rename(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?)),
-        "rename" => any(vault.rename(&arg(p, 0)?, arg(p, 1)?)),
         "replace_all" => {
             let re = compile(p, 0, 1)?;
             any(vault.replace_all(&re, &arg::<String>(p, 2)?, arg(p, 3)?))
         }
-        "adopt_conflict" => any(vault.adopt_conflict(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?)),
-        "conflict_diff" => any(vault.conflict_diff(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?)),
-        "template_target" => any(vault.template_target(&arg::<String>(p, 0)?)),
-        "note_from_template" => any(vault.note_from_template(&arg::<String>(p, 0)?)),
-        "render_template" => {
-            any(vault.render_template(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?))
-        }
-        "templates" => any(vault.templates()),
-
-        // ------------------------------------------------------------ index
-        "list_dir" => any(vault.list_dir(&arg::<String>(p, 0)?)),
-        "search" => any(vault.search(&arg::<String>(p, 0)?, arg(p, 1)?, arg(p, 2)?)),
         "grep" => {
             let re = compile(p, 0, 1)?;
             any(vault.grep(&re, arg(p, 2)?, arg(p, 3)?))
@@ -464,84 +431,22 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             let re = compile(p, 0, 1)?;
             any(vault.grep_unindexed(&re, arg(p, 2)?))
         }
-        "tags" => any(vault.tags()),
-        "files_with_tag" => any(vault.files_with_tag(&arg::<String>(p, 0)?)),
-        "backlinks" => any(vault.backlinks(&arg::<String>(p, 0)?)),
-        "pdf_links" => any(vault.pdf_links(&arg::<String>(p, 0)?)),
-        "note_paths" => any(vault.note_paths()),
-        "file_paths" => any(vault.file_paths(arg(p, 0)?)),
-        "set_excluded" => any(vault.set_excluded(&paths(0)?)),
-        "recent_notes" => any(vault.recent_notes(arg(p, 0)?)),
-        "resolve_link" => any(vault.resolve_link(&arg::<String>(p, 0)?)),
-        "conflicts" => any(vault.conflicts()),
-        "conflicts_of" => any(vault.conflicts_of(&arg::<String>(p, 0)?)),
         "rescan" => {
             vault.rescan();
             ok(())
         }
+        "repos" => ok(vault.repos()),
 
-        // --------------------------------------------------------- language
-        // Every request runs on its own thread here (`serve_local`), so blocking on the runtime
-        // is a wait for one answer and never a nested one.
+        // The document's lifecycle. Opening one is the only call that reads the vault's config,
+        // and closing one forgets it rather than telling a provider, so neither fits the table
+        // the other three go through.
         "open_document" => any(block(vault.open_document(
             &arg::<String>(p, 0)?,
             &arg::<String>(p, 1)?,
             arg(p, 2)?,
         ))),
-        "change_document" => any(block(
-            vault.change_document(&arg::<String>(p, 0)?, arg(p, 1)?),
-        )),
-        "save_document" => any(block(vault.save_document(&arg::<String>(p, 0)?))),
-        "settle" => any(block(vault.settle(&arg::<String>(p, 0)?))),
         "close_document" => any(block(vault.close_document(&arg::<String>(p, 0)?))),
-        "completion" => any(block(vault.completion(
-            &arg::<String>(p, 0)?,
-            arg(p, 1)?,
-            arg(p, 2)?,
-        ))),
-        "resolve_completion" => any(block(
-            vault.resolve_completion(&arg::<String>(p, 0)?, arg(p, 1)?),
-        )),
-        "signature_help" => any(block(
-            vault.signature_help(&arg::<String>(p, 0)?, arg(p, 1)?),
-        )),
-        "hover" => any(block(vault.hover(&arg::<String>(p, 0)?, arg(p, 1)?))),
-        "definition" => any(block(vault.definition(&arg::<String>(p, 0)?, arg(p, 1)?))),
-        "references" => any(block(vault.references(&arg::<String>(p, 0)?, arg(p, 1)?))),
-        "symbols" => any(block(vault.symbols(&arg::<String>(p, 0)?))),
-        "folds" => any(block(vault.folds(&arg::<String>(p, 0)?))),
-        "inline_completion" => any(block(
-            vault.inline_completion(&arg::<String>(p, 0)?, arg(p, 1)?),
-        )),
 
-        // -------------------------------------------------------------- git
-        "repos" => ok(vault.repos()),
-        "git_status" => git_result(git::status(&repo(0)?)),
-        "git_log" => git_result(git::log(&repo(0)?, arg(p, 1)?, arg(p, 2)?)),
-        "git_show" => git_result(git::show(
-            &repo(0)?,
-            &arg::<String>(p, 1)?,
-            &arg::<String>(p, 2)?,
-        )),
-        "git_changed_files" => git_result(git::changed_files(&repo(0)?, &arg::<String>(p, 1)?)),
-        "git_submodules" => git_result(git::submodules(&repo(0)?)),
-        "git_branches" => git_result(git::branches(&repo(0)?)),
-        "git_checkout" => git_result(git::checkout(&repo(0)?, &arg::<String>(p, 1)?)),
-        "git_checkout_commit" => git_result(git::checkout_commit(&repo(0)?, &arg::<String>(p, 1)?)),
-        "git_create_branch" => git_result(git::create_branch(
-            &repo(0)?,
-            &arg::<String>(p, 1)?,
-            arg(p, 2)?,
-        )),
-        "git_delete_branch" => git_result(git::delete_branch(
-            &repo(0)?,
-            &arg::<String>(p, 1)?,
-            arg(p, 2)?,
-        )),
-        "git_commit" => git_result(git::commit(&repo(0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
-        "git_sync" => git_result(git::sync(&repo(0)?)),
-        "git_fetch" => git_result(git::fetch(&repo(0)?)),
-        "git_incoming" => git_result(git::incoming(&repo(0)?)),
         "git_stage" => git_result(git::stage(&repo(0)?, &refs(&paths(1)?))),
         "git_unstage" => git_result(git::unstage(&repo(0)?, &refs(&paths(1)?))),
         "git_discard" => git_result(git::discard(&repo(0)?, &refs(&paths(1)?))),
@@ -552,7 +457,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
 
 /// Wait for a language request. The task is not dropped before it answers, so nothing is
 /// cancelled: the caller on the other end of the pipe is already waiting for this one.
-fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
+pub(crate) fn block<T>(task: crate::Task<T>) -> anyhow::Result<T> {
     accent_lsp::runtime().block_on(task)
 }
 

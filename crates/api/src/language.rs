@@ -26,7 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::remote::Remote;
-use crate::{Backend, Event, Local, LspConfig, Vault, locked, remote_err};
+use crate::vault::{Backend, remote_err};
+use crate::{Event, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
 pub(crate) mod notes;
@@ -497,21 +498,6 @@ impl Languages {
         })
     }
 
-    pub(crate) fn change_document(&self, rel: String, text: String) -> Task<()> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.change(&rel, text) })
-    }
-
-    pub(crate) fn save_document(&self, rel: String) -> Task<()> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.saved(&rel) })
-    }
-
-    pub(crate) fn settle_document(&self, rel: String) -> Task<()> {
-        let provider = self.provider(&rel);
-        Task::spawn(async move { provider?.settle(&rel) })
-    }
-
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
         let provider = locked(&self.docs).remove(&rel);
         Task::spawn(async move {
@@ -629,6 +615,9 @@ pub(crate) fn session_root(vault_root: &Path, abs_file: &Path) -> PathBuf {
 impl Vault {
     /// Start answering for `rel`, and say what the provider can do. Nothing else here works
     /// before this has finished.
+    ///
+    /// Spelled out rather than tabled: it is the one call that reads the vault's config, for the
+    /// language server the file's language names.
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         match &self.backend {
             Backend::Local(v) => v.open_document(rel, language_id, text),
@@ -638,44 +627,21 @@ impl Vault {
         }
     }
 
-    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
-        match &self.backend {
-            Backend::Local(v) => v.change_document(rel, text),
-            Backend::Remote(r) => remote_task(r.clone(), "change_document", json!([rel, text])),
-        }
-    }
-
-    /// The buffer was written; a server that checks on save is told.
-    pub fn save_document(&self, rel: &str) -> Task<()> {
-        match &self.backend {
-            Backend::Local(v) => v.save_document(rel),
-            Backend::Remote(r) => remote_task(r.clone(), "save_document", json!([rel])),
-        }
-    }
-
+    /// The user closed the tab. Spelled out because it forgets the document rather than telling
+    /// a provider about it.
     pub fn close_document(&self, rel: &str) -> Task<()> {
         match &self.backend {
             Backend::Local(v) => v.close_document(rel),
             Backend::Remote(r) => remote_task(r.clone(), "close_document", json!([rel])),
         }
     }
-
-    /// The user left the document. Cheap for every provider but the ghost one, which re-reads
-    /// the vault here rather than on every autosave.
-    pub fn settle(&self, rel: &str) -> Task<()> {
-        match &self.backend {
-            Backend::Local(v) => v.settle(rel),
-            Backend::Remote(r) => remote_task(r.clone(), "settle", json!([rel])),
-        }
-    }
 }
 
-/// The requests a document answers, written once for the two layers that carry them: [`Languages`]
-/// finds the provider that holds the document and spawns the request on the runtime, [`Vault`]
-/// asks it here or on the host that has the files. Each line reads `façade => trait method`.
-///
-/// The document's lifecycle — open, change, save, settle, close — is written out by hand above:
-/// those four differ from each other, while these nine differ only in their arguments.
+/// The requests a document answers, written once for the three layers that carry them:
+/// [`Languages`] finds the provider that holds the document and spawns the request on the
+/// runtime, [`Vault`] asks it here or on the host that has the files, and the host answers it
+/// through the same rpc dispatch every other method goes through. Each line reads
+/// `façade => trait method`.
 macro_rules! requests {
     ($( $(#[$doc:meta])* $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) -> $ret:ty; )*) => {
         impl Languages { $(
@@ -702,6 +668,34 @@ macro_rules! requests {
                 self.lang.$name(rel.to_string(), $($arg),*)
             }
         )* }
+
+        /// These methods' half of the rpc dispatch. Every request runs on its own thread in
+        /// [`crate::rpc::serve_local`], so blocking on the runtime here is a wait for one answer
+        /// and never a nested one.
+        pub(crate) fn dispatch_requests(
+            vault: &Local,
+            method: &str,
+            p: &Value,
+        ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
+            $( if method == stringify!($name) {
+                let rel: String = match crate::rpc::arg(p, 0) {
+                    Ok(rel) => rel,
+                    Err(e) => return Some(Err(e)),
+                };
+                let _i = 1usize;
+                $(
+                    let $arg: $ty = match crate::rpc::arg(p, _i) {
+                        Ok(value) => value,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let _i = _i + 1;
+                )*
+                return Some(crate::rpc::any(crate::rpc::block(
+                    vault.$name(&rel, $($arg),*),
+                )));
+            } )*
+            None
+        }
     };
 }
 
@@ -720,6 +714,75 @@ requests! {
     inline_completion => inline_completion(pos: Pos) -> Option<String>;
 }
 
+/// What the editor did to a document, told to whoever answers for it: no answer to wait for, and
+/// nothing to await inside. The same three layers as [`requests!`], plus the rpc arm; each line
+/// reads `façade => Languages method / trait method`.
+macro_rules! notifications {
+    ($(
+        $(#[$doc:meta])*
+        $name:ident => $held:ident / $inner:ident ( $($arg:ident : $ty:ty),* );
+    )*) => {
+        impl Languages { $(
+            pub(crate) fn $held(&self, rel: String, $($arg: $ty),*) -> Task<()> {
+                let provider = self.provider(&rel);
+                Task::spawn(async move { provider?.$inner(&rel, $($arg),*) })
+            }
+        )* }
+
+        impl Vault { $(
+            $(#[$doc])*
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<()> {
+                match &self.backend {
+                    Backend::Local(v) => v.$name(rel, $($arg),*),
+                    Backend::Remote(r) => {
+                        remote_task(r.clone(), stringify!($name), json!([rel, $($arg),*]))
+                    }
+                }
+            }
+        )* }
+
+        impl Local { $(
+            pub fn $name(&self, rel: &str, $($arg: $ty),*) -> Task<()> {
+                self.lang.$held(rel.to_string(), $($arg),*)
+            }
+        )* }
+
+        pub(crate) fn dispatch_notifications(
+            vault: &Local,
+            method: &str,
+            p: &Value,
+        ) -> Option<std::result::Result<Value, crate::rpc::RpcError>> {
+            $( if method == stringify!($name) {
+                let rel: String = match crate::rpc::arg(p, 0) {
+                    Ok(rel) => rel,
+                    Err(e) => return Some(Err(e)),
+                };
+                let _i = 1usize;
+                $(
+                    let $arg: $ty = match crate::rpc::arg(p, _i) {
+                        Ok(value) => value,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    let _i = _i + 1;
+                )*
+                return Some(crate::rpc::any(crate::rpc::block(
+                    vault.$name(&rel, $($arg),*),
+                )));
+            } )*
+            None
+        }
+    };
+}
+
+notifications! {
+    change_document => change_document / change(text: String);
+    /// The buffer was written; a server that checks on save is told.
+    save_document => save_document / saved();
+    /// The user left the document. Cheap for every provider but the ghost one, which re-reads
+    /// the vault here rather than on every autosave.
+    settle => settle_document / settle();
+}
+
 /// One remote request as a task. The round trip cannot be cancelled the way a server request
 /// can, so dropping the task only stops the answer from being waited for.
 fn remote_task<T: DeserializeOwned + Send + 'static>(
@@ -730,7 +793,7 @@ fn remote_task<T: DeserializeOwned + Send + 'static>(
     Task::blocking(move || r.call(method, params).map_err(remote_err))
 }
 
-/// The same requests where the vault is, which is also where `serve` answers them from.
+/// The two lifecycle calls the macros do not write, where the vault is.
 impl Local {
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         self.lang.open_document(
@@ -741,20 +804,8 @@ impl Local {
         )
     }
 
-    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
-        self.lang.change_document(rel.to_string(), text)
-    }
-
-    pub fn save_document(&self, rel: &str) -> Task<()> {
-        self.lang.save_document(rel.to_string())
-    }
-
     pub fn close_document(&self, rel: &str) -> Task<()> {
         self.lang.close_document(rel.to_string())
-    }
-
-    pub fn settle(&self, rel: &str) -> Task<()> {
-        self.lang.settle_document(rel.to_string())
     }
 }
 
