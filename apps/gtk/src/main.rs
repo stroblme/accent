@@ -231,6 +231,10 @@ const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-pen", "Pen", &[]),
     ("win.pdf-highlighter", "Highlighter", &[]),
     ("win.pdf-eraser", "Eraser", &[]),
+    ("win.pdf-line", "Line", &[]),
+    ("win.pdf-rect", "Rectangle", &[]),
+    ("win.pdf-circle", "Circle", &[]),
+    ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     (
         "win.pane-references",
@@ -1859,6 +1863,11 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
+        pdf.connect_choice(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, tool, choice| app.pdf_choice(tool, choice)
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -2013,6 +2022,20 @@ impl App {
         }
         pdf.set_mode(wanted);
         self.sync_status();
+    }
+
+    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
+    fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
+        choice.apply(tool, &mut self.config.borrow_mut().drawing);
+        let config = self.config.borrow().clone();
+        if let Err(e) = config.save() {
+            tracing::warn!("saving config: {e:#}");
+        }
+        for doc in self.docs() {
+            if let Some(pdf) = doc.pdf() {
+                pdf.set_drawing_config(config.drawing.clone());
+            }
+        }
     }
 
     /// Put the active PDF's tools where this window last had them, and take the position back
@@ -3916,6 +3939,10 @@ impl App {
             "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
             "pdf-highlighter" => self.pdf_mode(pdfview::Mode::Highlighter),
             "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),
+            "pdf-line" => self.pdf_mode(pdfview::Mode::Line),
+            "pdf-rect" => self.pdf_mode(pdfview::Mode::Rect),
+            "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
+            "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
             "pdf-fit-width" | "pdf-fit-page" => {
                 if let Some(pdf) = self.active_pdf() {

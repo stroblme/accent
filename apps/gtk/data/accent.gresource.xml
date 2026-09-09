@@ -27,5 +27,9 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-pen-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-highlighter-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-eraser-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-line-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-rect-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-circle-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-adjust-symbolic.svg</file>
   </gresource>
 </gresources>
