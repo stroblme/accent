@@ -439,11 +439,11 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
 /// What the Tags pane asks of the index.
 fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     sidebar::TagsData {
-        tags: Box::new({
+        tags: Arc::new({
             let vault = vault.clone();
             move || vault.tags().unwrap_or_default()
         }),
-        files_with_tag: Box::new({
+        files_with_tag: Arc::new({
             let vault = vault.clone();
             move |tag| {
                 vault
@@ -461,7 +461,7 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
 /// is kept but the list the pane shows.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
-        add_forward: Box::new({
+        add_forward: Arc::new({
             let vault = vault.clone();
             move |local, remote| match vault.remote() {
                 Some(r) => r.forward(local, remote),
