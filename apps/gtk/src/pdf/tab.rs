@@ -211,7 +211,17 @@ pub fn open(
         tab,
         move || tab.emit(&tab.on_zoom)
     ));
-    tab.wire(&thumbs);
+    tab.wire_strip(&thumbs);
+    tab.ring.connect_choice(glib::clone!(
+        #[weak]
+        tab,
+        move |tool, choice| {
+            let hook = tab.on_choice.borrow().clone();
+            if let Some(f) = hook {
+                f(&tab, tool, choice);
+            }
+        }
+    ));
     tab.wire_keys();
     tab.wire_preview();
     tab.wire_menu();
@@ -726,18 +736,7 @@ impl PdfTab {
 
     /// Hook up one of the two views: what it wants rendered, and what comes back.
     fn wire(self: &Rc<Self>, view: &PdfView) {
-        view.connect_wants(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, scale, dark, wants| {
-                tab.ask(Request::Tiles {
-                    scale,
-                    dark,
-                    theme: theme_of(dark),
-                    wants,
-                });
-            }
-        ));
+        self.wire_strip(view);
         view.connect_reply(glib::clone!(
             #[weak(rename_to = tab)]
             self,
@@ -758,11 +757,6 @@ impl PdfTab {
                 tab.emit(&tab.on_page);
             }
         ));
-        view.connect_goto(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page| tab.goto_page(page)
-        ));
         view.connect_pressed(glib::clone!(
             #[weak(rename_to = tab)]
             self,
@@ -772,6 +766,32 @@ impl PdfTab {
             #[weak(rename_to = tab)]
             self,
             move |view, x, y| tab.clicked_highlight(view, x, y)
+        ));
+        view.connect_select(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, span| tab.selected_between(span)
+        ));
+        view.connect_motion(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |view, x, y| {
+                // The pointer only changes when the answer does: a GDK call per pixel of travel
+                // is what the editor's link hover deliberately avoids too.
+                // While a tool is out, the cursor says so and nothing here takes it back: the
+                // page is not text to be selected, and a link is not to be followed.
+                if view.mode() != pdfview::Mode::Select {
+                    return;
+                }
+                let over = tab.link_at(view, x, y).is_some();
+                let on_page = view.page_point(x, y).is_some();
+                view.set_cursor_from_name(Some(match (over, on_page) {
+                    (true, _) => "pointer",
+                    // A page is text to be dragged across, and says so before anyone tries.
+                    (false, true) => "text",
+                    (false, false) => "default",
+                }));
+            }
         ));
         view.connect_ink(glib::clone!(
             #[weak(rename_to = tab)]
@@ -802,16 +822,6 @@ impl PdfTab {
                 tab.ask(Request::Erase { page, at, radius });
             }
         ));
-        self.ring.connect_choice(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |tool, choice| {
-                let hook = tab.on_choice.borrow().clone();
-                if let Some(f) = hook {
-                    f(&tab, tool, choice);
-                }
-            }
-        ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
             self,
@@ -821,31 +831,31 @@ impl PdfTab {
                 matrix
             })
         ));
-        view.connect_select(glib::clone!(
+    }
+
+    /// What both views answer: the tiles they want rendered, and a click that names a page.
+    ///
+    /// The rest of [`Self::wire`] is the reading view's alone. The strip is a column of
+    /// thumbnails, not a page being read: a drag across it used to select text in the reading
+    /// view, the pointer over it wore an I-beam, and scrolling it asked for the links and the
+    /// strokes of whatever page went past.
+    fn wire_strip(self: &Rc<Self>, view: &PdfView) {
+        view.connect_wants(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_, span| tab.selected_between(span)
-        ));
-        view.connect_motion(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |view, x, y| {
-                // The pointer only changes when the answer does: a GDK call per pixel of travel
-                // is what the editor's link hover deliberately avoids too.
-                // While a tool is out, the cursor says so and nothing here takes it back: the
-                // page is not text to be selected, and a link is not to be followed.
-                if view.mode() != pdfview::Mode::Select {
-                    return;
-                }
-                let over = tab.link_at(view, x, y).is_some();
-                let on_page = view.page_point(x, y).is_some();
-                view.set_cursor_from_name(Some(match (over, on_page) {
-                    (true, _) => "pointer",
-                    // A page is text to be dragged across, and says so before anyone tries.
-                    (false, true) => "text",
-                    (false, false) => "default",
-                }));
+            move |_, scale, dark, wants| {
+                tab.ask(Request::Tiles {
+                    scale,
+                    dark,
+                    theme: theme_of(dark),
+                    wants,
+                });
             }
+        ));
+        view.connect_goto(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page| tab.goto_page(page)
         ));
     }
 
