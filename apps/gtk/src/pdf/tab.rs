@@ -347,10 +347,15 @@ impl PdfTab {
     /// the window's, so the palette lists it and a menu or a script can fire it. This is the one
     /// place the keys and the palette meet.
     fn page(&self, forward: bool) {
-        let action = match forward {
+        self.run(match forward {
             true => "win.pdf-next-page",
             false => "win.pdf-previous-page",
-        };
+        });
+    }
+
+    /// Fire one of the window's commands from the page. What a key over a PDF does is a command
+    /// like any other, so it lists in the palette and can be rebound.
+    fn run(&self, action: &str) {
         let _ = self.view.activate_action(action, None);
     }
 
@@ -507,6 +512,15 @@ impl PdfTab {
     /// own label, so the readout, the ring's tooltip and the palette say one word between them.
     pub fn mode_label(&self) -> Option<&'static str> {
         self.view.mode().action().map(crate::actions::label_of)
+    }
+
+    /// Take back the last stroke drawn or move made in this tab, through `win.pdf-undo`.
+    ///
+    // ponytail: no redo. The ledger is a list of steps to walk backwards, and a redo wants the
+    // step that was undone kept with the geometry to put it back — which for a stroke means
+    // holding its path after the annotation is gone.
+    pub fn undo(self: &Rc<Self>) {
+        self.ask(Request::Undo);
     }
 
     /// Called when the pen is picked up or put down.
@@ -942,8 +956,11 @@ impl PdfTab {
             glib::Propagation::Proceed,
             move |_, key, _, state| {
                 let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                // Through the window's actions, not past them: the key is on the tab because
+                // `Ctrl+C` and `Ctrl+Z` belong to whatever has the keyboard, but what they do is
+                // the command the palette and the menus name.
                 if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-                    tab.copy_selection();
+                    tab.run("win.pdf-copy");
                     return glib::Propagation::Stop;
                 }
                 // The pen's own two keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
@@ -952,7 +969,7 @@ impl PdfTab {
                     if key == gtk::gdk::Key::z
                         && state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
                     {
-                        tab.ask(Request::Undo);
+                        tab.run("win.pdf-undo");
                         return glib::Propagation::Stop;
                     }
                     if key == gtk::gdk::Key::Escape {
@@ -960,6 +977,11 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
+                // `Space`, `n`, `p` and the arrows stay bare keys here rather than joining the
+                // table: an application accelerator is dispatched at the window ahead of whatever
+                // has the keyboard, so a bare `space` in it would stop every entry in the app
+                // from taking one. Paging still goes through the window's own commands below.
+                //
                 // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
                 // scroller's own step: only the bare key reads the document.
                 let bare = !state.intersects(
