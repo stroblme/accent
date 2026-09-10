@@ -3,7 +3,7 @@
 //! Pure, and here rather than in the widget so Android draws the same curve through the same
 //! functions.
 
-use super::Shape;
+use super::{InkStyle, Shape};
 
 /// An affine map `[a, b, c, d, e, f]` in the PDF convention: `x' = a·x + c·y + e`,
 /// `y' = b·x + d·y + f`.
@@ -38,6 +38,15 @@ pub(super) enum Seg {
     /// Two control points, then the end.
     Bezier((f32, f32), (f32, f32), (f32, f32)),
     Close,
+}
+
+/// A stroke's path and style as they were read back off its page: what
+/// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) needs to draw it again once the annotation
+/// is gone.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drawn {
+    pub(super) segs: Vec<Seg>,
+    pub(super) style: InkStyle,
 }
 
 /// Drop points closer than `min` to the last one kept.
@@ -188,21 +197,57 @@ fn cubic(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32)
     )
 }
 
-/// Whether `at` lies within `radius` of the polyline through `points` — the eraser's hit test.
+/// Whether `at` lies within `radius` of the polyline through `points` — the Adjust tool's hit
+/// test.
 pub fn hit(points: &[(f32, f32)], at: (f32, f32), radius: f32) -> bool {
-    let near = |a: (f32, f32), b: (f32, f32)| {
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let len2 = dx * dx + dy * dy;
-        // A degenerate segment is its own endpoint.
-        let t = match len2 > f32::EPSILON {
-            true => (((at.0 - a.0) * dx + (at.1 - a.1) * dy) / len2).clamp(0.0, 1.0),
-            false => 0.0,
-        };
-        (at.0 - (a.0 + t * dx)).hypot(at.1 - (a.1 + t * dy)) <= radius
-    };
+    swept(points, at, at, radius)
+}
+
+/// Whether the pointer, moved in a straight line from `from` to `to`, passed within `radius` of
+/// the polyline through `points` — the eraser's hit test.
+///
+/// The line and not only its ends: a drag reports once a frame, so a quick pass lands one report
+/// either side of a thin stroke and neither of them near it.
+pub fn swept(points: &[(f32, f32)], from: (f32, f32), to: (f32, f32), radius: f32) -> bool {
     match points {
         [] => false,
-        [only] => near(*only, *only),
-        _ => points.windows(2).any(|w| near(w[0], w[1])),
+        [only] => apart((*only, *only), (from, to)) <= radius,
+        _ => points
+            .windows(2)
+            .any(|w| apart((w[0], w[1]), (from, to)) <= radius),
     }
+}
+
+type Segment = ((f32, f32), (f32, f32));
+
+/// How close two segments come: nothing where they cross, else the nearest any end of one comes
+/// to the other.
+fn apart((a, b): Segment, (c, d): Segment) -> f32 {
+    // Which side of the line through `p` and `q` the point `r` is on, by the sign.
+    let side = |p: (f32, f32), q: (f32, f32), r: (f32, f32)| {
+        (q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)
+    };
+    if side(a, b, c) * side(a, b, d) < 0.0 && side(c, d, a) * side(c, d, b) < 0.0 {
+        return 0.0;
+    }
+    [
+        to_segment(a, (c, d)),
+        to_segment(b, (c, d)),
+        to_segment(c, (a, b)),
+        to_segment(d, (a, b)),
+    ]
+    .into_iter()
+    .fold(f32::MAX, f32::min)
+}
+
+/// How far `p` is from the segment `a`–`b`.
+fn to_segment(p: (f32, f32), (a, b): Segment) -> f32 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    // A degenerate segment is its own endpoint.
+    let t = match len2 > f32::EPSILON {
+        true => (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0),
+        false => 0.0,
+    };
+    (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
 }

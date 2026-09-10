@@ -6,7 +6,7 @@ use std::collections::hash_map::Entry;
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
-use super::ink::{Seg, catmull_rom, flatten, points_of, segments_of, thin, transformed};
+use super::ink::{Drawn, Seg, catmull_rom, flatten, points_of, segments_of, thin, transformed};
 use super::text::same_quads;
 use super::{Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock};
 
@@ -258,6 +258,25 @@ impl PdfDoc {
         Ok(gone)
     }
 
+    /// Take one `/Ink` annotation off a page by its index in `/Annots`, keeping what it drew so
+    /// [`PdfDoc::redraw_ink`] can put it back — which is all an erase is, and all its undo is.
+    /// The box it left comes back with it. Any other kind of annotation is refused, so an index
+    /// that has gone stale cannot take a link or a highlight.
+    pub fn take_ink(&mut self, page: usize, index: usize) -> Result<(Drawn, Rect)> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        take(&mut p, page, index)
+    }
+
+    /// Draw a stroke [`PdfDoc::take_ink`] took off again, at the end of the page's `/Annots`,
+    /// and say what box it covers.
+    pub fn redraw_ink(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        self.put_ink(&mut p, &drawn.segs, drawn.style)
+    }
+
     /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
     /// aim at. The index is the annotation's place in `/Annots`, which is what deletes it.
     pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
@@ -306,30 +325,40 @@ impl PdfDoc {
         let _guard = lock();
         let mut p = self.page(page)?;
         p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-        let height = p.height().value;
-        let (segs, style, was) = {
-            let a = p
-                .annotations()
-                .get(index as PdfPageAnnotationIndex)
-                .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
-            let was = a
-                .bounds()
-                .map(|b| Rect::from_pdf(b, height))
-                .unwrap_or(Rect::ZERO);
-            let (segs, style) = read_ink(&a, height)
-                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
-            (segs, style, was)
-        };
-        let a = p
-            .annotations_mut()
-            .get(index as PdfPageAnnotationIndex)
-            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
-        p.annotations_mut()
-            .delete_annotation(a)
-            .context("delete annotation")?;
-        let now = self.put_ink(&mut p, &transformed(&segs, m), style)?;
+        let (drawn, was) = take(&mut p, page, index)?;
+        let now = self.put_ink(&mut p, &transformed(&drawn.segs, m), drawn.style)?;
         Ok(was.union(now))
     }
+}
+
+/// Take the `/Ink` annotation at `index` off a loaded page: what it drew, and the box it left.
+/// The caller holds the lock.
+fn take(p: &mut PdfPage<'_>, page: usize, index: usize) -> Result<(Drawn, Rect)> {
+    let height = p.height().value;
+    let drawn = {
+        let a = p
+            .annotations()
+            .get(index as PdfPageAnnotationIndex)
+            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+        let was = a
+            .bounds()
+            .map(|b| Rect::from_pdf(b, height))
+            .unwrap_or(Rect::ZERO);
+        let (segs, style) = read_ink(&a, height)
+            .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
+        (Drawn { segs, style }, was)
+    };
+    // Through `annotations_mut` rather than `annotations`: the annotation has to carry the
+    // document's lifetime for `delete_annotation` to take it, and the shared accessor hands back
+    // one borrowed from `p` instead.
+    let a = p
+        .annotations_mut()
+        .get(index as PdfPageAnnotationIndex)
+        .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+    p.annotations_mut()
+        .delete_annotation(a)
+        .context("delete annotation")?;
+    Ok(drawn)
 }
 
 /// The colour an annotation is drawn in.
