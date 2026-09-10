@@ -16,7 +16,8 @@ use super::*;
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
-/// was styled on the keystroke or on the debounce.
+/// was styled on the keystroke or on the debounce, then whether a copy and paste out of a styled
+/// line brings its styling along.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up.
@@ -800,9 +801,63 @@ fn bench_style(app: &Rc<App>, rel: &str) {
         println!("bench style_far_sync {}", bench_heading_at(&tab, 0));
         glib::timeout_add_local_once(Duration::from_millis(300), move || {
             println!("bench style_debounced {}", bench_heading_at(&tab, 0));
-            bench_quit(&app);
+            glib::spawn_future_local(async move {
+                bench_style_paste(&tab).await;
+                bench_quit(&app);
+            });
         });
     });
+}
+
+/// Copy part of a styled line, paste it into a plain one, and print whether the pasted text still
+/// carries a heading's or a bold's tags. GTK's own copy is rich text, and pasting it back inserts
+/// the copy run by run with each run's tags applied after `changed` has re-tagged the text, so the
+/// last run kept its tags: a selection ending one character into a bold word left that character
+/// bold. Every paste lands mid-line, so nothing it brings can start a heading of its own.
+async fn bench_style_paste(tab: &Rc<Tab>) {
+    const HEADING: &str = "# Heading here\nplain line\n";
+    const BOLD: &str = "Some **bold** words\nplain line\n";
+    for (case, text, selected, middle_click) in [
+        ("heading", HEADING, "ading he", false),
+        ("bold_tail", BOLD, "Some **b", false),
+        // The primary selection a middle click pastes is still GTK's rich copy.
+        ("primary", BOLD, "Some **b", true),
+    ] {
+        tab.set_text(text);
+        // ASCII throughout, so a byte offset is also the character offset the buffer counts in.
+        let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
+        let len = selected.len() as i32;
+        tab.buffer.select_range(
+            &tab.buffer.iter_at_offset(at(selected)),
+            &tab.buffer.iter_at_offset(at(selected) + len),
+        );
+        let into = at("line");
+        if middle_click {
+            // What the view does on a middle click: the selection stays, the text goes in where
+            // the click was.
+            let clipboard = tab.view.primary_clipboard();
+            let iter = tab.buffer.iter_at_offset(into);
+            tab.buffer.paste_clipboard(&clipboard, Some(&iter), true);
+        } else {
+            tab.view.emit_copy_clipboard();
+            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(into));
+            tab.view.emit_paste_clipboard();
+        }
+        // The clipboard is read asynchronously, even when it is this process that owns it.
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let over = |name: &str| {
+            tab.buffer.tag_table().lookup(name).is_some_and(|tag| {
+                (into..into + len).any(|at| tab.buffer.iter_at_offset(at).has_tag(&tag))
+            })
+        };
+        // The line it landed in, so a paste that brought nothing cannot pass for a clean one.
+        let line = tab.text().lines().nth(1).unwrap_or_default().to_string();
+        println!(
+            "bench style_paste case={case} line={line:?} h1={} strong={}",
+            over("h1"),
+            over("strong")
+        );
+    }
 }
 
 /// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
