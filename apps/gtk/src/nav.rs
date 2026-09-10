@@ -179,7 +179,7 @@ impl App {
 
     /// A new, empty pane beside `at`. The caller has to put something in it: an empty pane closes
     /// itself as soon as a page leaves it, but one that never held a page has nothing to react to.
-    fn split_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side) -> Rc<Pane> {
+    pub(crate) fn split_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side) -> Rc<Pane> {
         let pane = Pane::new(&tab_menu());
         wire_pane(self, &pane);
         self.panes.borrow_mut().push(pane.clone());

@@ -208,6 +208,7 @@ impl App {
                 .active_doc()
                 .filter(|d| !d.is_transient())
                 .map(|d| d.key()),
+            layout: self.layout(),
             // Presentation is not a session state, so the sidebar it hid is saved as it was.
             sidebar: match self.presenting.get() {
                 Some(before) => before.sidebar,
@@ -242,6 +243,66 @@ impl App {
         }
     }
 
+    /// The panes as the session records them, read off the widget tree, which is the layout.
+    /// While presentation mode has the panes off screen, or a split has no size yet, there is no
+    /// ratio to read and the stored layout stands.
+    pub(crate) fn layout(&self) -> Option<Layout> {
+        let root = self
+            .content
+            .child_by_name("tabs")
+            .and_downcast::<adw::Bin>()?
+            .child()?;
+        match self.presenting.get() {
+            None => self.layout_of(&root),
+            Some(_) => Err(Unsized),
+        }
+        .unwrap_or_else(|Unsized| self.vault().and_then(|v| v.session().layout))
+    }
+
+    /// The layout under `widget`: a pane's column, or a `GtkPaned` between two such trees. A pane
+    /// with nothing to put back — shells and comparisons are not files — is left out, and the
+    /// other side of its split takes the split's place.
+    fn layout_of(&self, widget: &gtk::Widget) -> Result<Option<Layout>, Unsized> {
+        if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
+            let (Some(start), Some(end)) = (paned.start_child(), paned.end_child()) else {
+                return Ok(None);
+            };
+            return Ok(match (self.layout_of(&start)?, self.layout_of(&end)?) {
+                (Some(start), Some(end)) => {
+                    let vertical = paned.orientation() == gtk::Orientation::Vertical;
+                    let extent = extent_of(paned);
+                    if extent <= 0 {
+                        return Err(Unsized);
+                    }
+                    Some(Layout::Split {
+                        vertical,
+                        ratio: f64::from(paned.position()) / f64::from(extent),
+                        start: Box::new(start),
+                        end: Box::new(end),
+                    })
+                }
+                (one, other) => one.or(other),
+            });
+        }
+        let Some(pane) = self
+            .panes
+            .borrow()
+            .iter()
+            .find(|p| p.widget() == widget)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let key = |page: &adw::TabPage| {
+            self.doc_for_page(page)
+                .filter(|d| !d.is_transient())
+                .map(|d| d.key())
+        };
+        let tabs: Vec<String> = pane.pages().iter().filter_map(key).collect();
+        let selected = pane.tabs.selected_page().as_ref().and_then(key);
+        Ok((!tabs.is_empty()).then_some(Layout::Pane { tabs, selected }))
+    }
+
     /// Restored after the window is on screen, so nothing here is on the path to the first frame.
     pub fn restore_session(self: &Rc<Self>) {
         let Some(vault) = self.vault() else {
@@ -256,19 +317,9 @@ impl App {
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
-        // ponytail: every note comes back into one pane, because the session does not record the
-        // pane layout. Add a tree of splits to `Session` the day restoring into one column stops
-        // being what someone who left four panes open expects.
-        // A text tab arrives from the worker later and selects itself as it lands, so the one
-        // that was active is put back in front after every arrival; the synchronous opens, a PDF
-        // or an image, are in place by the end of the loop and get the same treatment once.
-        for key in &session.open {
-            let active = session.active.clone();
-            self.with_tab(key, Opened::Kept, move |app, _| {
-                app.select_doc(active.as_deref())
-            });
+        if let Some(layout) = session.panes() {
+            self.restore_panes(layout, session.active.clone());
         }
-        self.select_doc(session.active.as_deref());
         // Restoring tabs selects each in turn, and none of that is somewhere the reader went, so
         // the pane starts with an empty history rather than with the order the restore happened in.
         for pane in self.panes.borrow().iter() {
@@ -334,12 +385,236 @@ impl App {
         page.set_description(Some(&body));
     }
 
-    /// Bring the tab holding `key` to the front, if there is one.
-    fn select_doc(&self, key: Option<&str>) {
-        if let Some(doc) = key.and_then(|key| self.doc_for(key)) {
-            self.reveal_page(doc.page());
+    /// Split the window the way the session left it, then open every tab into its own pane.
+    ///
+    /// The splits come first and stand empty until their tabs land: a text tab only exists once
+    /// the worker's read is back, so each open looks its pane up in `placing` (see
+    /// [`App::tabs_for`]) instead of being moved there afterwards.
+    fn restore_panes(self: &Rc<Self>, layout: Layout, active: Option<String>) {
+        let (mut placed, mut splits) = (Vec::new(), Vec::new());
+        self.arrange(&self.pane(), layout, &mut placed, &mut splits);
+        // Each split made the pane it added the active one. Until the active tab lands, a note
+        // opened meanwhile — the one on the command line — goes to the pane the reader was in.
+        let reader = active
+            .as_deref()
+            .and_then(|key| self.placing.borrow().get(key)?.upgrade());
+        if let Some(pane) = reader {
+            self.set_active_pane(&pane);
+        }
+        if let Some(root) = self.content.child_by_name("tabs") {
+            hold_ratios(&root, splits);
+        }
+        let placed = Rc::new(placed);
+        let active = Rc::new(active);
+        for key in placed.iter().flat_map(|p| &p.tabs) {
+            // Opened while a remote vault was still connecting, and left where it is.
+            if self.doc_for(key).is_some() {
+                continue;
+            }
+            let asked = Asked {
+                app: Rc::downgrade(self),
+                placed: placed.clone(),
+                active: active.clone(),
+                landed: Cell::new(false),
+            };
+            // At once rather than from `Asked`'s idle, so a landing tab is never painted in front
+            // of its pane's own.
+            self.with_tab(key, Opened::Kept, move |app, _| {
+                asked.landed.set(true);
+                app.put_back(&asked.placed, asked.active.as_deref())
+            });
+        }
+        // What is still on its way keeps its place; the rest has landed, or failed to open.
+        self.placing
+            .borrow_mut()
+            .retain(|key, _| self.awaiting.borrow().contains_key(key));
+        self.put_back(&placed, active.as_deref());
+    }
+
+    /// Split `pane` the way `layout` is split, and note which pane each tab belongs in. The pane
+    /// keeps the start of each split and a new one takes the end, which is where `split_beside`
+    /// puts a pane on the right or below.
+    fn arrange(
+        self: &Rc<Self>,
+        pane: &Rc<Pane>,
+        layout: Layout,
+        placed: &mut Vec<Placed>,
+        splits: &mut Vec<(gtk::Paned, f64)>,
+    ) {
+        match layout {
+            Layout::Pane { tabs, selected } => {
+                for key in &tabs {
+                    self.placing
+                        .borrow_mut()
+                        .insert(key.clone(), Rc::downgrade(pane));
+                }
+                placed.push(Placed {
+                    pane: Rc::downgrade(pane),
+                    tabs,
+                    selected,
+                });
+            }
+            Layout::Split {
+                vertical,
+                ratio,
+                start,
+                end,
+            } => {
+                let side = match vertical {
+                    true => Side::Down,
+                    false => Side::Right,
+                };
+                let new = self.split_beside(pane, side);
+                if let Some(paned) = new.widget().parent().and_downcast::<gtk::Paned>() {
+                    splits.push((paned, ratio));
+                }
+                self.arrange(pane, *start, placed, splits);
+                self.arrange(&new, *end, placed, splits);
+            }
         }
     }
+
+    /// Put back what the session had in front, as far as it has landed: each pane's tabs in the
+    /// order its bar had them, whatever order the reads came back in, with its own tab selected;
+    /// then the active tab, whose pane is the one notes open into. A pane still empty with nothing
+    /// on its way has lost every note it held since, and closes, the other side of its split
+    /// taking the room.
+    ///
+    /// Run once every open has been asked for, and again as each one settles (see [`Asked`]): a
+    /// landing tab is selected in its pane as it arrives, and a failed one may have emptied one.
+    fn put_back(self: &Rc<Self>, placed: &[Placed], active: Option<&str>) {
+        for leaf in placed {
+            let Some(pane) = leaf.pane.upgrade() else {
+                continue;
+            };
+            let pages: Vec<adw::TabPage> = leaf
+                .tabs
+                .iter()
+                .filter_map(|key| self.doc_for(key))
+                .map(|doc| doc.page().clone())
+                .filter(|page| pane.has(page))
+                .collect();
+            for (at, page) in (0..).zip(&pages) {
+                pane.tabs.reorder_page(page, at);
+            }
+            if let Some(doc) = leaf.selected.as_deref().and_then(|key| self.doc_for(key))
+                && pane.has(doc.page())
+            {
+                pane.tabs.set_selected_page(doc.page());
+            }
+            let waiting = leaf
+                .tabs
+                .iter()
+                .any(|key| self.awaiting.borrow().contains_key(key));
+            if pane.tabs.n_pages() == 0 && !waiting {
+                self.close_pane(&pane);
+            }
+        }
+        self.select_doc(active);
+    }
+
+    /// Bring the tab holding `key` to the front, if there is one, and make its pane the one notes
+    /// open into.
+    fn select_doc(self: &Rc<Self>, key: Option<&str>) {
+        let Some(doc) = key.and_then(|key| self.doc_for(key)) else {
+            return;
+        };
+        let Some(pane) = self.pane_of(doc.page()) else {
+            return;
+        };
+        pane.tabs.set_selected_page(doc.page());
+        // A tab that was already in front notifies nothing, so only a pane change syncs here.
+        if self.set_active_pane(&pane) {
+            self.sync_active();
+        }
+    }
+}
+
+/// A pane a restore made, and what the session says belongs in it.
+struct Placed {
+    pane: std::rc::Weak<Pane>,
+    tabs: Vec<String>,
+    selected: Option<String>,
+}
+
+/// One tab a restore asked for, held by the work waiting on it in `awaiting`. A tab that fails to
+/// open drops that work without running it, and says nothing else, so the drop is when the panes
+/// are looked at again. From an idle: the drop happens inside a borrow of `awaiting`, which
+/// `put_back` reads.
+struct Asked {
+    app: std::rc::Weak<App>,
+    placed: Rc<Vec<Placed>>,
+    active: Rc<Option<String>>,
+    /// The tab landed and the work ran, putting the panes back itself. A second pass from the
+    /// idle would take the front from a note opened since — the one on the command line.
+    landed: Cell<bool>,
+}
+
+impl Drop for Asked {
+    fn drop(&mut self) {
+        if self.landed.get() {
+            return;
+        }
+        let (app, placed, active) = (self.app.clone(), self.placed.clone(), self.active.clone());
+        glib::idle_add_local_once(move || {
+            if let Some(app) = app.upgrade() {
+                app.put_back(&placed, active.as_deref());
+            }
+        });
+    }
+}
+
+/// A split with no size to take a share of: one made a moment ago, or one in presentation mode.
+struct Unsized;
+
+/// How long a split is along the way it splits.
+fn extent_of(paned: &gtk::Paned) -> i32 {
+    match paned.orientation() {
+        gtk::Orientation::Vertical => paned.height(),
+        _ => paned.width(),
+    }
+}
+
+/// Move each restored split's handle to its share of the split, once the split has a size.
+///
+/// Every frame rather than once: a split inside another has its final size only after the outer
+/// handle has moved, and `GtkPaned` hands a resize out half and half rather than by share. So
+/// each frame puts every handle back at its share of what it has now, until a frame finds nothing
+/// left to move — one frame per level of nesting.
+fn hold_ratios(root: &gtk::Widget, splits: Vec<(gtk::Paned, f64)>) {
+    if splits.is_empty() {
+        return;
+    }
+    let splits: Vec<(glib::WeakRef<gtk::Paned>, f64)> = splits
+        .iter()
+        .map(|(paned, ratio)| (paned.downgrade(), *ratio))
+        .collect();
+    root.add_tick_callback(move |_, _| {
+        let mut moved = false;
+        // A split whose pane has closed since is out of the window, and has nothing to hold.
+        let live = splits
+            .iter()
+            .filter_map(|(paned, ratio)| Some((paned.upgrade()?, *ratio)))
+            .filter(|(paned, _)| paned.parent().is_some());
+        for (paned, ratio) in live {
+            // Not laid out yet: no tab has landed, so the stack still shows its placeholder.
+            let extent = extent_of(&paned);
+            if extent <= 0 {
+                return glib::ControlFlow::Continue;
+            }
+            let at = ((ratio * f64::from(extent)).round() as i32)
+                .min(paned.max_position())
+                .max(paned.min_position());
+            if paned.position() != at {
+                paned.set_position(at);
+                moved = true;
+            }
+        }
+        match moved {
+            true => glib::ControlFlow::Continue,
+            false => glib::ControlFlow::Break,
+        }
+    });
 }
 
 /// A sidebar width in pixels, falling back to the default for anything a sidebar would never
@@ -381,9 +656,21 @@ mod tests {
     /// A window that never restored keeps what was stored, and adds what it opened itself.
     #[test]
     fn a_window_that_never_restored_keeps_the_stored_tabs() {
+        let pane = |key: &str| {
+            Box::new(Layout::Pane {
+                tabs: vec![key.into()],
+                selected: Some(key.into()),
+            })
+        };
         let stored = Session {
             open: vec!["a.md".into(), "b.md".into()],
             active: Some("b.md".into()),
+            layout: Some(Layout::Split {
+                vertical: false,
+                ratio: 0.4,
+                start: pane("a.md"),
+                end: pane("b.md"),
+            }),
             zoom: 1.5,
             recent_commands: vec!["win.find".into()],
             ..Session::default()
@@ -391,6 +678,8 @@ mod tests {
         let merged = unrestored(stored.clone(), Session::default());
         assert_eq!(merged.open, stored.open);
         assert_eq!(merged.active, stored.active);
+        // The panes a window has before its restore are not a layout anyone chose.
+        assert_eq!(merged.layout, stored.layout);
         assert_eq!(merged.zoom, 1.5);
         assert_eq!(merged.recent_commands, stored.recent_commands);
 
@@ -400,9 +689,10 @@ mod tests {
             recent_commands: vec!["win.palette".into()],
             ..Session::default()
         };
-        let merged = unrestored(stored, now);
+        let merged = unrestored(stored.clone(), now);
         assert_eq!(merged.open, ["a.md", "b.md", "c.md"]);
         assert_eq!(merged.active.as_deref(), Some("b.md"));
+        assert_eq!(merged.layout, stored.layout);
         assert_eq!(merged.recent_commands, ["win.palette", "win.find"]);
     }
 }

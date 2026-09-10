@@ -164,7 +164,14 @@ impl App {
             }
         };
         let prefs = self.prefs();
-        let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
+        let tab = editor::open(
+            &self.root(),
+            key,
+            text,
+            flavour,
+            &self.tabs_for(key),
+            &prefs,
+        );
         self.adopt(tab, how);
         if flavour.is_note() {
             self.sync_conflict_banner(key, None);
@@ -183,7 +190,7 @@ impl App {
             key,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
-            &self.tabs(),
+            &self.tabs_for(key),
             place,
         );
         pdf.set_drawing_config(self.config.borrow().drawing.clone());
@@ -701,7 +708,7 @@ impl App {
         icon: &str,
         how: Opened,
     ) -> Rc<doc::Viewer> {
-        let page = self.tabs().append(child);
+        let page = self.tabs_for(key).append(child);
         page.set_title(doc::file_name(key));
         page.set_tooltip(&fileops::display_path(&self.root(), key));
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
@@ -999,21 +1006,41 @@ impl App {
         self.select_new_page(&page);
         self.mark_opened(&page, how);
         self.save_session_soon();
-        if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
+        // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the
+        // restore's `put_back` asks what else is still waiting.
+        let waiting = self.awaiting.borrow_mut().remove(&tab.rel());
+        if let Some(waiting) = waiting {
             waiting(self, &tab);
         }
     }
 
-    /// Put a page that has just been added to the active pane in front.
+    /// The tab view a new tab for `key` goes into: the pane the session restore put it in, while
+    /// that pane is still open, and otherwise the active one. A restore is the one open that
+    /// knows its pane before the tab exists, and a text tab only exists once the worker's read
+    /// lands, so the pane is looked up here rather than the tab moved there afterwards.
+    fn tabs_for(&self, key: &str) -> adw::TabView {
+        let placed = self.placing.borrow_mut().remove(key);
+        match placed
+            .and_then(|pane| pane.upgrade())
+            .filter(|pane| self.panes.borrow().iter().any(|p| Rc::ptr_eq(p, pane)))
+        {
+            Some(pane) => pane.tabs.clone(),
+            None => self.tabs(),
+        }
+    }
+
+    /// Put a page that has just been added to a pane in front of it.
     ///
     /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
     /// pane is selected as it is added, before its document is in `docs`, so that one gets no
     /// notify from here and is synced by hand instead.
     pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage) {
-        let tabs = self.tabs();
-        match tabs.selected_page().as_ref() == Some(page) {
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        match pane.tabs.selected_page().as_ref() == Some(page) {
             true => self.sync_active(),
-            false => tabs.set_selected_page(page),
+            false => pane.tabs.set_selected_page(page),
         }
     }
 

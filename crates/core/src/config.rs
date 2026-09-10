@@ -259,6 +259,10 @@ pub struct Session {
     /// Vault-relative paths of the open tabs.
     pub open: Vec<String>,
     pub active: Option<String>,
+    /// How the tabs were split into panes. `open` still says which tabs there are, and
+    /// [`Session::panes`] places them in this; `None` in a file written before layouts were.
+    /// Not called `pane`: that key is the retired sidebar pane every older file still carries.
+    pub layout: Option<Layout>,
     pub sidebar: bool,
     pub sidebar_width: i32,
     pub view: String,
@@ -282,6 +286,7 @@ impl Default for Session {
         Session {
             open: Vec::new(),
             active: None,
+            layout: None,
             sidebar: true,
             sidebar_width: 280,
             view: "editor".to_string(),
@@ -289,6 +294,96 @@ impl Default for Session {
             recent_notes: Vec::new(),
             recent_commands: Vec::new(),
             pdf: BTreeMap::new(),
+        }
+    }
+}
+
+/// The panes of a window: one pane's tabs, or a split between two layouts. The same tree the
+/// window's `GtkPaned`s make, written down.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    /// Tabs in the order the bar shows them, and the one in front.
+    Pane {
+        tabs: Vec<String>,
+        selected: Option<String>,
+    },
+    /// `start` is left of `end`, or above it when `vertical`. `ratio` is the share of the split
+    /// `start` has.
+    Split {
+        vertical: bool,
+        ratio: f64,
+        start: Box<Layout>,
+        end: Box<Layout>,
+    },
+}
+
+impl Layout {
+    /// This layout holding exactly the tabs in `open`. A tab it does not have goes to the end of
+    /// the pane holding `active`, or of the first pane when none does; a tab no longer open is
+    /// dropped; a pane left with nothing collapses, its sibling taking the split's place; and a
+    /// ratio is kept to 0.1–0.9, so neither side of a split comes back too thin to find. `None`
+    /// when no tab is left.
+    pub fn place(self, open: &[String], active: Option<&str>) -> Option<Layout> {
+        let missing: Vec<String> = open
+            .iter()
+            .filter(|key| !self.holds(key))
+            .cloned()
+            .collect();
+        let Some(mut layout) = self.keep(open) else {
+            return (!missing.is_empty()).then_some(Layout::Pane {
+                tabs: missing,
+                selected: None,
+            });
+        };
+        let active = active.filter(|key| layout.holds(key));
+        let into = |tabs: &[String]| active.is_none_or(|key| tabs.iter().any(|t| t == key));
+        if let Some(tabs) = layout.pane_where(&into) {
+            tabs.extend(missing);
+        }
+        Some(layout)
+    }
+
+    fn holds(&self, key: &str) -> bool {
+        match self {
+            Layout::Pane { tabs, .. } => tabs.iter().any(|t| t == key),
+            Layout::Split { start, end, .. } => start.holds(key) || end.holds(key),
+        }
+    }
+
+    /// The tabs of the first pane `wanted` accepts.
+    fn pane_where(&mut self, wanted: &impl Fn(&[String]) -> bool) -> Option<&mut Vec<String>> {
+        match self {
+            Layout::Pane { tabs, .. } => wanted(tabs).then_some(tabs),
+            Layout::Split { start, end, .. } => {
+                start.pane_where(wanted).or_else(|| end.pane_where(wanted))
+            }
+        }
+    }
+
+    /// The part of [`place`](Self::place) that takes away: tabs not in `open`, then the panes and
+    /// splits that leaves with nothing.
+    fn keep(self, open: &[String]) -> Option<Layout> {
+        match self {
+            Layout::Pane { mut tabs, selected } => {
+                tabs.retain(|key| open.contains(key));
+                let selected = selected.filter(|key| tabs.contains(key));
+                (!tabs.is_empty()).then_some(Layout::Pane { tabs, selected })
+            }
+            Layout::Split {
+                vertical,
+                ratio,
+                start,
+                end,
+            } => match (start.keep(open), end.keep(open)) {
+                (Some(start), Some(end)) => Some(Layout::Split {
+                    vertical,
+                    ratio: ratio.clamp(0.1, 0.9),
+                    start: Box::new(start),
+                    end: Box::new(end),
+                }),
+                (one, other) => one.or(other),
+            },
         }
     }
 }
@@ -384,6 +479,16 @@ impl Session {
 
     pub fn save(&self, root: &Path) -> Result<()> {
         replace(&state_path(root), &serde_json::to_vec_pretty(self)?)
+    }
+
+    /// The panes to put back: the stored layout with the open tabs placed in it, or one pane
+    /// holding them all when no layout was stored. `None` when there is no tab to put back.
+    pub fn panes(&self) -> Option<Layout> {
+        let layout = self.layout.clone().unwrap_or(Layout::Pane {
+            tabs: Vec::new(),
+            selected: None,
+        });
+        layout.place(&self.open, self.active.as_deref())
     }
 }
 
@@ -774,8 +879,14 @@ daily_dir = "Daily"
         let state = tmp.path().join("state");
 
         let s = Session {
-            open: vec!["Daily/2026-09-03.md".to_string()],
+            open: vec!["Daily/2026-09-03.md".to_string(), "b.md".to_string()],
             active: Some("Daily/2026-09-03.md".to_string()),
+            layout: Some(split(
+                true,
+                0.3,
+                pane(&["Daily/2026-09-03.md"], Some("Daily/2026-09-03.md")),
+                pane(&["b.md"], None),
+            )),
             sidebar: false,
             sidebar_width: 320,
             view: "preview".to_string(),
@@ -800,6 +911,7 @@ daily_dir = "Daily"
             let back = Session::load(&vault);
             assert_eq!(back.open, s.open);
             assert_eq!(back.active, s.active);
+            assert_eq!(back.layout, s.layout);
             assert_eq!(back.pdf, s.pdf);
             assert!(!back.sidebar);
             assert_eq!(back.sidebar_width, 320);
@@ -832,6 +944,121 @@ daily_dir = "Daily"
             let back = Session::load(&vault);
             assert_eq!(back.open, ["a.md"]);
             assert_eq!(back.zoom, 1.0);
+            // No layout was written then, so every tab comes back into one pane.
+            assert_eq!(back.layout, None);
+            assert_eq!(back.panes(), Some(pane(&["a.md"], None)));
         });
+    }
+
+    fn pane(tabs: &[&str], selected: Option<&str>) -> Layout {
+        Layout::Pane {
+            tabs: tabs.iter().map(|t| t.to_string()).collect(),
+            selected: selected.map(str::to_string),
+        }
+    }
+
+    fn split(vertical: bool, ratio: f64, start: Layout, end: Layout) -> Layout {
+        Layout::Split {
+            vertical,
+            ratio,
+            start: Box::new(start),
+            end: Box::new(end),
+        }
+    }
+
+    fn open(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    /// `[a b | [c / d]]`, the right-hand side stacked, a third of the width on the left.
+    fn stored() -> Layout {
+        split(
+            false,
+            0.33,
+            pane(&["a.md", "b.md"], Some("b.md")),
+            split(true, 0.5, pane(&["c.md"], None), pane(&["d.md"], None)),
+        )
+    }
+
+    #[test]
+    fn a_layout_takes_exactly_the_open_tabs() {
+        // Everything still open: nothing moves.
+        let all = open(&["a.md", "b.md", "c.md", "d.md"]);
+        assert_eq!(stored().place(&all, Some("b.md")), Some(stored()));
+
+        // b closed and e opened by a window that never restored: b goes, and so does the pane
+        // selection it was; e joins the pane of the active tab.
+        let placed = stored().place(&open(&["a.md", "c.md", "d.md", "e.md"]), Some("d.md"));
+        assert_eq!(
+            placed,
+            Some(split(
+                false,
+                0.33,
+                pane(&["a.md"], None),
+                split(
+                    true,
+                    0.5,
+                    pane(&["c.md"], None),
+                    pane(&["d.md", "e.md"], None)
+                ),
+            ))
+        );
+
+        // An active tab the layout does not hold sends the newcomers to the first pane.
+        let placed = stored().place(&open(&["a.md", "c.md", "d.md", "e.md"]), Some("e.md"));
+        assert_eq!(
+            placed,
+            Some(split(
+                false,
+                0.33,
+                pane(&["a.md", "e.md"], None),
+                split(true, 0.5, pane(&["c.md"], None), pane(&["d.md"], None)),
+            ))
+        );
+    }
+
+    #[test]
+    fn an_empty_pane_collapses_into_its_sibling() {
+        // d gone: the stacked split is c alone, and the outer split keeps its ratio.
+        assert_eq!(
+            stored().place(&open(&["a.md", "b.md", "c.md"]), None),
+            Some(split(
+                false,
+                0.33,
+                pane(&["a.md", "b.md"], Some("b.md")),
+                pane(&["c.md"], None)
+            ))
+        );
+        // Only the stacked side left: no split at all.
+        assert_eq!(
+            stored().place(&open(&["d.md", "c.md"]), None),
+            Some(split(
+                true,
+                0.5,
+                pane(&["c.md"], None),
+                pane(&["d.md"], None)
+            ))
+        );
+        assert_eq!(stored().place(&[], None), None);
+        // Nothing of the layout left, but a tab to show: one pane.
+        assert_eq!(
+            stored().place(&open(&["e.md"]), Some("e.md")),
+            Some(pane(&["e.md"], None))
+        );
+    }
+
+    #[test]
+    fn a_ratio_is_kept_off_the_edges() {
+        let thin = split(false, 0.01, pane(&["a.md"], None), pane(&["b.md"], None));
+        let placed = thin.place(&open(&["a.md", "b.md"]), None);
+        assert_eq!(
+            placed,
+            Some(split(
+                false,
+                0.1,
+                pane(&["a.md"], None),
+                pane(&["b.md"], None)
+            ))
+        );
     }
 }
