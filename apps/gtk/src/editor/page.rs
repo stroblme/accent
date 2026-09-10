@@ -59,15 +59,15 @@ fn digits(line_count: i32) -> usize {
 /// at an alpha, which is how `highlight::restyle` dims everything else. The pointer takes it back
 /// to the full strength it was drawn at before, which is the style scheme's own gutter grey.
 ///
-/// A plain `GutterRendererText` rather than a subclass: `query-data` arrives once per visible
-/// line and only has to print a number. Same shape as `diff.rs`, which prints source numbers the
-/// same way. The renderer is a child of the view, so the per-tab `accent-doc-N` font provider
-/// reaches it and the zoom follows.
+/// `query-data` arrives once per visible line and only has to print a number; where it is drawn
+/// is [`numbers`]'s part. The renderer is a child of the view, so the per-tab `accent-doc-N` font
+/// provider reaches it and the zoom follows.
 pub(super) fn line_numbers(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
 ) -> sourceview5::GutterRendererText {
-    let renderer = sourceview5::GutterRendererText::new();
+    let renderer: sourceview5::GutterRendererText =
+        glib::Object::new::<numbers::Numbers>().upcast();
     renderer.set_xalign(1.0);
     renderer.set_xpad(6);
     renderer.set_visible(false);
@@ -128,6 +128,71 @@ pub(super) fn line_numbers(
     ));
     gutter.add_controller(motion);
     renderer
+}
+
+/// The line numbers, drawn level with the first line of their text rather than at the top of the
+/// line's cell.
+///
+/// The two differ where a comparison lays blank space above a line to keep it beside its partner
+/// (`diff::pad`): GtkSourceView aligns a renderer in the whole cell, blank included, so the number
+/// sat beside the blank, or beside the "⋯ N unchanged lines" button over it. `alignment-mode`
+/// `first` with a centred `yalign` would move the numbers of lines with text, but it takes an
+/// empty line's cell whole, and a blank line is the commonest line in a note.
+mod numbers {
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use gtk::{glib, graphene};
+    use sourceview5::subclass::prelude::*;
+
+    glib::wrapper! {
+        pub struct Numbers(ObjectSubclass<imp::Numbers>)
+            @extends sourceview5::GutterRendererText, sourceview5::GutterRenderer, gtk::Widget,
+            @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+    }
+
+    // The bindings make only `GutterRenderer` subclassable. `GutterRendererText` is derivable in C
+    // and adds no virtual methods of its own, its class being `GutterRendererClass` and padding,
+    // so the parent's class setup is all it needs.
+    unsafe impl IsSubclassable<imp::Numbers> for sourceview5::GutterRendererText {}
+
+    /// How far below the top of its cell a line's text starts, beyond the view's own spacing: the
+    /// padding a comparison gave it, and 0 anywhere else.
+    fn blank_above(view: &gtk::TextView, line: &gtk::TextIter) -> i32 {
+        let (top, _) = view.line_yrange(line);
+        (view.iter_location(line).y() - top - view.pixels_above_lines()).max(0)
+    }
+
+    mod imp {
+        use super::*;
+
+        #[derive(Default)]
+        pub struct Numbers;
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for Numbers {
+            const NAME: &'static str = "AccentLineNumbers";
+            type Type = super::Numbers;
+            type ParentType = sourceview5::GutterRendererText;
+        }
+
+        impl ObjectImpl for Numbers {}
+        impl WidgetImpl for Numbers {}
+
+        impl GutterRendererImpl for Numbers {
+            fn snapshot_line(
+                &self,
+                snapshot: &gtk::Snapshot,
+                lines: &sourceview5::GutterLines,
+                line: u32,
+            ) {
+                let blank = blank_above(&lines.view(), &lines.iter_at_line(line));
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(0.0, blank as f32));
+                self.parent_snapshot_line(snapshot, lines, line);
+                snapshot.restore();
+            }
+        }
+    }
 }
 
 /// Name the font `zoom` scales for the views called `name`, replacing the provider from last time.
