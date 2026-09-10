@@ -455,14 +455,18 @@ impl App {
     }
 
     /// Undo and Redo in the header, while a tool is in hand over the PDF in front — the same
-    /// condition `Ctrl+Z` answers under — and each only when it has something to walk.
+    /// condition `Ctrl+Z` answers under — and either has something to walk. They come and go as a
+    /// pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside the
+    /// Drawing toggle pushed Undo out from under the pointer.
     pub fn sync_history(&self) {
         let (undo, redo) = self
             .active_pdf()
             .filter(|pdf| pdf.mode() != pdfview::Mode::Select)
             .map_or((false, false), |pdf| pdf.history());
-        self.undo_button.set_visible(undo);
-        self.redo_button.set_visible(redo);
+        for (button, walks) in [(&self.undo_button, undo), (&self.redo_button, redo)] {
+            button.set_visible(undo || redo);
+            button.set_sensitive(walks);
+        }
     }
 
     /// Write the note links that highlight the open PDF into the file, as real annotations.

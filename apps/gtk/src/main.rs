@@ -238,7 +238,7 @@ struct App {
     modes: gtk::ToggleButton,
     /// The header's Drawing toggle, shown only over a PDF.
     drawing_button: gtk::ToggleButton,
-    /// Undo and Redo beside it, each shown only while it has something to walk.
+    /// Undo and Redo beside it, shown as a pair while either has something to walk.
     undo_button: gtk::Button,
     redo_button: gtk::Button,
     /// Whether the ring of tools is out, which is the window's state and not the tab's.
