@@ -78,7 +78,7 @@ use panes::{Pane, Place, Side, Spot, Zone};
 // they moved into `pdf/`.
 pub(crate) use pdf as pdfview;
 pub(crate) use pdf::tab as pdftab;
-use references::{PdfAnchor, char_range, reference_target, split_pdf_anchor};
+use references::{PdfAnchor, char_range, reference_target};
 use session::Corpus;
 use shell::Shell;
 use sourceview5::prelude::ViewExt as _;

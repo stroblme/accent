@@ -848,15 +848,24 @@ impl App {
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
+    /// No name is the note on screen, as `[[#Heading]]` writes it.
     pub fn open_target(self: &Rc<Self>, target: &str) {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
         };
-        // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
-        let (target, anchor) = split_pdf_anchor(target);
+        // `paper.pdf#page=3&selection=…` and `Note#Heading` resolve by the path and land by the
+        // anchor: a PDF's page, or a note's heading.
+        let (target, anchor) = target.split_once('#').unwrap_or((target, ""));
         // Where the link was, so Back returns to it. Before the open, and before the selection
         // change it causes records the same place, which coalesces into this one.
         self.mark();
+        let anchor = anchor.to_string();
+        if target.is_empty() {
+            if let Some(rel) = self.active_key() {
+                self.land_on(&rel, &anchor);
+            }
+            return;
+        }
         // Resolved on a worker: the index that knows the name is on the host for a remote vault.
         let (vault, target) = (vault.clone(), target.to_string());
         let weak = Rc::downgrade(self);
@@ -865,15 +874,29 @@ impl App {
             let resolved = gio::spawn_blocking(move || vault.resolve_link(&asked)).await;
             let Some(app) = weak.upgrade() else { return };
             match resolved {
-                Ok(Ok(Some(rel))) => {
-                    app.open_preview(&rel);
-                    app.show_pdf_anchor(&rel, anchor);
-                }
+                Ok(Ok(Some(rel))) => app.land_on(&rel, &anchor),
                 Ok(Ok(None)) => app.toast(&format!("No note called {target}")),
                 Ok(Err(e)) => app.cannot(&format!("resolve {target}"), e),
                 Err(_) => tracing::warn!("the link worker panicked on {target}"),
             }
         });
+    }
+
+    /// Open `rel` and land where `anchor` says: a PDF's page and selection, or a note's heading.
+    fn land_on(self: &Rc<Self>, rel: &str, anchor: &str) {
+        match accent_core::markdown::pdf_anchor(anchor) {
+            Some(at) => {
+                self.open_preview(rel);
+                self.show_pdf_anchor(rel, Some(at));
+            }
+            None if anchor.is_empty() => self.open_preview(rel),
+            None => {
+                let anchor = anchor.to_string();
+                self.with_tab(rel, Opened::Preview, move |_, tab| {
+                    tab.goto_heading(&anchor)
+                });
+            }
+        }
     }
 
     /// Show the page and selection an anchor names, if the tab just opened is that PDF.
