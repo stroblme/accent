@@ -889,6 +889,13 @@ fn install_chrome_css() {
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
+             .git-ref {{ padding: 0 4px; border-radius: 4px; \
+               background-color: color-mix(in srgb, currentColor 10%, transparent); }} \
+             .git-ref.head {{ color: var(--accent-color); \
+               background-color: color-mix(in srgb, var(--accent-bg-color) 15%, transparent); }} \
+             .git-ref.remote {{ opacity: 0.6; }} \
+             .git-ref.tag {{ background-color: transparent; \
+               box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent); }} \
              popover.git-menu > contents {{ background-color: var(--popover-bg-color); }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
