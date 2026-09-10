@@ -516,7 +516,7 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
                 None => Err("this vault is not remote".to_string()),
             }
         }),
-        remove_forward: Box::new({
+        remove_forward: Arc::new({
             let vault = vault.clone();
             move |local, remote| {
                 if let Some(r) = vault.remote()
