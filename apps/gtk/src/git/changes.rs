@@ -381,6 +381,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             all: section,
         } => {
             stack.set_visible_child_name("header");
+            stack.set_tooltip_text(None);
             title.set_text(text);
             all.set_visible(section.is_some());
             all.set_label(match section {

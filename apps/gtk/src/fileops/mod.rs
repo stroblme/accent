@@ -21,11 +21,10 @@ pub use transfer::{download, upload};
 use self::paths::{
     already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
-use crate::dialogs::{alert, choose, focus_entry, form, labelled};
+use crate::dialogs::{
+    CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
+};
 use crate::pathfield::{completions, look_again, path_field};
-// Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
-// this module, which is where they used to live.
-pub(crate) use crate::dialogs::{CONFIRM, name_dialog, name_entry};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
