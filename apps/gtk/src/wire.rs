@@ -553,18 +553,7 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
                     // Solarized has one palette per system state, so which half is installed is
                     // decided here, before anything reads the resulting colours back out.
                     theme::refresh();
-                    for tab in app.open_tabs() {
-                        tab.restyle();
-                    }
-                    // A PDF is rendered light or dark rather than recoloured, so the theme
-                    // change is a re-render of whatever is on screen.
-                    for pdf in app.pdfs() {
-                        pdf.restyle();
-                    }
-                    if let Some(preview) = app.preview.borrow().as_ref() {
-                        preview.restyle();
-                    }
-                    app.restyle_terminals();
+                    app.restyle_all();
                 }
             ),
         );
