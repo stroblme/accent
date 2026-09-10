@@ -590,14 +590,14 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 app.statusbar.set_syncing(on);
             }
         }),
-        // The pane has already redrawn itself; this only writes the preference the Preferences
-        // switch edits, so the two surfaces stay one value.
+        // The pane has already redrawn itself; this writes the preference the Preferences switch
+        // edits, so the two surfaces stay one value, and hands it to every other window's pane.
         set_tree: Box::new(move |on| {
             let Some(app) = set_tree.upgrade() else {
                 return;
             };
             app.config.borrow_mut().git_tree = on;
-            settings::save(&app.config.borrow());
+            app.config_changed();
         }),
     })
 }
@@ -735,11 +735,9 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 }
                 config.search.exclude.push(dir.to_string());
             }
-            settings::save(&app.config.borrow());
-            // The one path that turns git's answer and this list into the set the tree dims and
-            // the index leaves out. Called whole rather than half-copied here; what it repeats on
-            // top of the exclusions is a branch readout and a `git show` per tab.
-            app.on_git_changed();
+            // The list is every vault's, so every window re-derives the set its tree dims and its
+            // index leaves out (`App::sync_excluded`).
+            app.config_changed();
             app.toast(&format!("Left {dir} out of search"));
         }),
         close: Box::new(move |rel| {

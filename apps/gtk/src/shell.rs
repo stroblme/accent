@@ -103,7 +103,8 @@ impl Shell {
     }
 
     /// Put a config into effect in every window. There is one config per process, so a preference
-    /// changed in one window's dialog is the same preference in all of them.
+    /// changed in one window — in its dialog or anywhere else (`App::config_changed`) — is the
+    /// same preference in all of them.
     pub fn apply_config(&self, config: &Config) {
         // The theme is the display's rather than a window's, so it goes on once.
         theme::apply(config.theme);

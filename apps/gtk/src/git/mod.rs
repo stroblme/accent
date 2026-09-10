@@ -508,8 +508,9 @@ impl Panel {
     }
 
     /// Whether the changes list is grouped by folder, and putting it either way. The preference
-    /// has two surfaces — this one is the Preferences switch, through `App::apply_config` — so
-    /// nothing here writes the config back; only a move really redraws.
+    /// has two surfaces — this one is the Preferences switch, and the toggle in another window's
+    /// pane, both through `App::apply_config` — so nothing here writes the config back; only a
+    /// move really redraws.
     pub fn tree(&self) -> bool {
         self.tree.get()
     }

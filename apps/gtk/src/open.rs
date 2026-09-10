@@ -422,14 +422,11 @@ impl App {
         self.sync_status();
     }
 
-    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF.
-    fn pdf_choice(self: &Rc<Self>, tool: pdfview::Mode, choice: ring::Choice) {
+    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF
+    /// in every window.
+    fn pdf_choice(&self, tool: pdfview::Mode, choice: ring::Choice) {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
-        let config = self.config.borrow();
-        settings::save(&config);
-        for pdf in self.pdfs() {
-            pdf.set_drawing_config(config.drawing.clone());
-        }
+        self.config_changed();
     }
 
     /// Put the active PDF's tools where this window last had them, and take the position back
