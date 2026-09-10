@@ -319,9 +319,9 @@ fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
     button
 }
 
-/// Row template: name, dimmed directory, and the slot the accelerator button goes in. The
-/// directory label expands, so the accelerator sits at the far end even when there is no
-/// directory to show.
+/// Row template: a file row's icon, name, dimmed directory, and the slot the accelerator button
+/// goes in. The directory label expands, so the accelerator sits at the far end even when there
+/// is no directory to show.
 ///
 /// No margins: `.navigation-sidebar` gives the row its 36 px height and its padding, the same way
 /// the sidebar's file rows get theirs.
@@ -351,6 +351,7 @@ fn row_factory(
             .css_classes(["dim-label"])
             .build();
         let slot = gtk::Box::builder().valign(gtk::Align::Center).build();
+        row.append(&gtk::Image::new());
         row.append(&name);
         row.append(&dir);
         row.append(&slot);
@@ -367,9 +368,12 @@ fn row_factory(
         ) else {
             return;
         };
+        let Some(icon) = row.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
         let (Some(name), Some(dir), Some(slot)) = (
-            row.first_child().and_downcast::<gtk::Label>(),
-            row.first_child()
+            icon.next_sibling().and_downcast::<gtk::Label>(),
+            icon.next_sibling()
                 .and_then(|w| w.next_sibling())
                 .and_downcast::<gtk::Label>(),
             row.last_child().and_downcast::<gtk::Box>(),
@@ -380,10 +384,13 @@ fn row_factory(
             slot.remove(&child);
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
+        // Only a file has an icon: the Files tree's, so a row reads the same in both places.
+        icon.set_visible(matches!(&*entry, Item::File(_)));
         match &*entry {
             // A note row reads as basename first, directory after: a vault full of `index.md`
             // files is unreadable the other way round.
             Item::File(rel) => {
+                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
                 name.set_text(basename(rel));
                 dir.set_text(parent_dir(rel));
             }

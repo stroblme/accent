@@ -1,18 +1,42 @@
 //! The rows more than one pane draws the same way.
 
-use crate::widgets::{label_factory, row_text};
+use crate::widgets::row_text;
 use gtk::pango;
 use gtk::prelude::*;
 
-/// A `GtkListView` of plain strings — references and the files carrying a tag are the same row.
+/// A `GtkListView` of plain strings — references and the files carrying a tag are the same row,
+/// led by the icon `icon` gives the row's text, as every file list's rows are.
 pub(super) fn path_list(
     model: &gtk::StringList,
+    icon: fn(&str) -> &'static str,
     on_activate: impl Fn(&str) + 'static,
 ) -> gtk::ListView {
-    let factory = label_factory(pango::EllipsizeMode::Middle, |label, item| {
-        if let Some(text) = row_text(item) {
-            label.set_text(&text);
-        }
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::Middle)
+            .build();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.append(&gtk::Image::new());
+        row.append(&label);
+        item.downcast_ref::<gtk::ListItem>()
+            .expect("list item")
+            .set_child(Some(&row));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        let (Some(text), Some(row)) = (row_text(item), item.child()) else {
+            return;
+        };
+        let (Some(image), Some(label)) = (
+            row.first_child().and_downcast::<gtk::Image>(),
+            row.last_child().and_downcast::<gtk::Label>(),
+        ) else {
+            return;
+        };
+        image.set_icon_name(Some(icon(&text)));
+        label.set_text(&text);
     });
 
     let view = gtk::ListView::new(

@@ -845,8 +845,9 @@ thread_local! {
 // dragged is invisible, so it is the cheaper of the two.
 /// Registers the icons compiled into the binary and points the theme at them.
 ///
-/// A GResource rather than hicolor: the completion list needs the kind icons long before anyone
-/// runs `make install`, and the theme keeps answering for every Adwaita name as it did.
+/// A GResource rather than hicolor: the completion list and the file lists need their icons
+/// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
+/// as it did.
 fn install_icons() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
