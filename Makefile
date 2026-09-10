@@ -42,7 +42,9 @@ VAULT_FILES ?= 40000
 # Repo tooling rather than a CLI subcommand, so the fixtures are not a public feature of the app.
 GEN_VAULT := crates/core/examples/gen-vault.rs
 
-# Headless runs need an X server; :99 is what ROADMAP.md and CI use.
+# Headless runs need an X server; :99 is what ROADMAP.md and CI use. GDK_BACKEND=x11 because
+# DISPLAY alone leaves GTK on a Wayland session; cairo because there is no GL under Xvfb; no a11y
+# because the private bus has no registry; fatal-criticals so a GTK critical fails the check.
 DISPLAY_NUM ?= 99
 XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
 
@@ -126,11 +128,17 @@ $(VAULT): $(GEN_VAULT)
 ## smoke: headless start-up check, fails on any GTK critical
 smoke: gtk vault
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
-	@pgrep -f "Xvfb :$(DISPLAY_NUM)" >/dev/null || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
+	@# The display's socket, not `pgrep -f "Xvfb :N"`: that pattern matches the shell running it.
+	@test -S /tmp/.X11-unix/X$(DISPLAY_NUM) || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
 	@sleep 2
 	@# A private session bus per run: accent is a single-instance GApplication, so without one a
 	@# second invocation forwards its arguments to whatever instance is already up and exits 0,
 	@# which makes this check pass while proving nothing.
+	@# The XDG dirs point at a scratch directory, set outside the bus so whatever it activates sees
+	@# them too: a check must neither read the user's config nor write a session and an index.
+	xdg=$$(mktemp -d) && trap 'rm -rf "$$xdg"' EXIT && \
+	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
+		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" \
 	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
 ## server: build the static accent-cli that gets uploaded to a remote host

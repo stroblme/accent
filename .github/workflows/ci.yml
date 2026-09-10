@@ -37,11 +37,12 @@ jobs:
     steps:
       # Before checkout: the base image has no git, so actions/checkout would fall back to the API.
       # make, tar and curl are for `make pdfium`; the image ships curl-minimal, which the full
-      # curl package conflicts with, hence --allowerasing.
+      # curl package conflicts with, hence --allowerasing. dbus-daemon is for `make smoke`'s
+      # dbus-run-session.
       - run: >
           dnf install -y --allowerasing git gcc make tar curl gtk4-devel libadwaita-devel
           gtksourceview5-devel webkitgtk6.0-devel libspelling-devel vte291-gtk4-devel
-          xorg-x11-server-Xvfb
+          xorg-x11-server-Xvfb dbus-daemon
           dejavu-sans-fonts
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -56,13 +57,7 @@ jobs:
       - run: cargo build --release --locked -p accent -p accent-cli
       # The generator is a core example, not a CLI subcommand; `make vault` is its only caller.
       - run: make vault VAULT_NOTES=200 VAULT_FILES=2000
+      # The Makefile is the one definition of the gate's environment: XVFB_ENV, the private bus
+      # and the scratch XDG dirs. It reuses the vault above, which is newer than its generator.
       - name: Headless smoke run
-        run: |
-          Xvfb :99 &
-          # GSK_RENDERER=cairo   no GPU or GL under Xvfb, the GL renderers abort there
-          # GTK_A11Y=none        no accessibility bus inside the container
-          # G_DEBUG=fatal-criticals  a GTK critical fails the build instead of scrolling past
-          # ACCENT_BENCH_SWITCHER    opens the palette, prints its timings and quits by itself
-          # timeout 60           turns a hang into a failure instead of a six hour job
-          DISPLAY=:99 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals \
-            ACCENT_BENCH_SWITCHER=1 timeout 60 target/release/accent testvault
+        run: make smoke
