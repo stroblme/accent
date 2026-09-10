@@ -26,6 +26,9 @@ use super::*;
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind.
+/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
+/// held, and prints what the Ctrl+hover underline covers.
+///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
@@ -44,6 +47,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -52,6 +56,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && pdf.is_none()
         && tabs.is_none()
         && occur.is_none()
+        && follow.is_none()
         && !git
         && !keys
         && !chrome
@@ -78,6 +83,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = occur {
             return bench_occurrences(&app, &rel);
+        }
+        if let Some(rel) = follow {
+            return bench_follow(&app, &rel);
         }
         if shell_keys {
             return bench_shell_keys(&app);
@@ -674,6 +682,44 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// The buffer is filled with text of its own first: the ranges are the point, and they have to be
 /// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
 /// well inside the one-second autosave.
+/// What a Ctrl+hover underlines. The link half only: a plain word is a question for a language
+/// server, and the vault a drill runs against holds notes rather than code.
+fn bench_follow(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        // ASCII throughout, so `find` gives the character offset the buffer counts in.
+        let text = "See [[Other Note]] and a plain word here.\n";
+        tab.set_text(text);
+        // The link table is filled by the analysis debounce, not by the edit.
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
+            let probe = |label: &str, needle: &str, ctrl: bool| {
+                let where_ = tab
+                    .view
+                    .iter_location(&tab.buffer.iter_at_offset(at(needle)));
+                let (x, y) = tab.view.buffer_to_window_coords(
+                    gtk::TextWindowType::Widget,
+                    where_.x() + 1,
+                    where_.y() + 1,
+                );
+                tab.follow_hint(x as f64, y as f64, ctrl);
+                println!("bench follow {label} underlined={:?}", tab.follow_shown());
+            };
+            // The link underlines whole, markers and all; the prose beside it does not.
+            probe("wikilink", "Other", true);
+            probe("plain_word", "plain", true);
+            probe("wikilink_again", "Other", true);
+            // Ctrl up over the same link takes it off again.
+            probe("ctrl_released", "Other", false);
+            bench_quit(&app);
+        });
+    });
+}
+
 fn bench_occurrences(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
