@@ -352,7 +352,14 @@ fn parse_log_and_lanes_on_a_linear_history() {
     assert_eq!(summaries, ["three", "two", "one"]);
     assert_eq!(commits[0].author, "Accent Test");
     assert!(commits[0].time > 0);
-    assert!(commits[0].refs.iter().any(|r| r.contains("main")));
+    assert_eq!(
+        commits[0].refs,
+        [Ref {
+            name: "main".to_string(),
+            kind: RefKind::LocalBranch,
+            head: true
+        }]
+    );
     assert!(
         commits[1].refs.is_empty(),
         "an undecorated commit has no refs"
@@ -377,6 +384,38 @@ fn parse_log_and_lanes_on_a_linear_history() {
     assert_eq!(head[0].summary, "four");
     assert_eq!(head[0].body, "why it happened\nand a second line");
     assert_eq!(log(&repo, 1, 1).unwrap()[0].body, "", "a one-line message");
+}
+
+#[test]
+fn parse_refs_types_each_decoration_and_puts_heads_first() {
+    let r = |name: &str, kind, head| Ref {
+        name: name.to_string(),
+        kind,
+        head,
+    };
+    assert_eq!(
+        parse_refs(
+            "tag: refs/tags/v1, HEAD -> refs/heads/main, refs/remotes/origin/main, \
+             refs/remotes/origin/HEAD, refs/heads/side"
+        ),
+        [
+            r("main", RefKind::LocalBranch, true),
+            r("side", RefKind::LocalBranch, false),
+            r("origin/main", RefKind::RemoteBranch, false),
+            r("v1", RefKind::Tag, false),
+        ],
+        "origin/HEAD points at a branch rather than being one"
+    );
+    assert_eq!(
+        parse_refs("refs/heads/side, HEAD"),
+        [
+            r("HEAD", RefKind::Head, true),
+            r("side", RefKind::LocalBranch, false)
+        ],
+        "a detached HEAD is a decoration of its own"
+    );
+    assert!(parse_refs("refs/stash").is_empty(), "not a branch or a tag");
+    assert!(parse_refs("").is_empty());
 }
 
 #[test]

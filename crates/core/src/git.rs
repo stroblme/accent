@@ -99,14 +99,34 @@ impl Status {
 pub struct Commit {
     pub id: String,
     pub parents: Vec<String>,
-    /// Decorations: branch and tag names pointing here.
-    pub refs: Vec<String>,
+    /// Decorations: the branches and tags pointing here, HEAD's first (see [`parse_refs`]).
+    pub refs: Vec<Ref>,
     pub author: String,
     /// Author time, unix seconds.
     pub time: i64,
     pub summary: String,
     /// Everything after the subject and its blank line. Empty for a one-line message.
     pub body: String,
+}
+
+/// One decoration on a commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ref {
+    /// As git shortens it: `main`, `origin/main`, `v1`, or `HEAD` for a detached HEAD.
+    pub name: String,
+    pub kind: RefKind,
+    /// HEAD is here: this is the branch it is on, or HEAD itself where it is detached.
+    pub head: bool,
+}
+
+/// What a [`Ref`] is, in the order a commit lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum RefKind {
+    /// A detached HEAD, which names no branch.
+    Head,
+    LocalBranch,
+    RemoteBranch,
+    Tag,
 }
 
 /// A commit placed on the history graph: which column it sits in, and which columns the edges
@@ -505,6 +525,8 @@ pub fn log(repo: &Repo, skip: usize, n: usize) -> Result<Vec<Commit>, Error> {
             &n,
             "--skip",
             &skip,
+            // Whole ref names in `%D`, which is what tells a branch from a tag of the same name.
+            "--decorate=full",
             // Unit and record separators: a summary line can hold anything else, including tabs,
             // and a body holds newlines, so the record separator has to be neither.
             "--format=%H%x1f%P%x1f%D%x1f%an%x1f%at%x1f%s%x1f%b%x1e",
@@ -528,14 +550,11 @@ pub fn parse_log(bytes: &[u8]) -> Vec<Commit> {
                 .split_whitespace()
                 .map(String::from)
                 .collect();
-            let refs = fields.next()?;
+            let refs = parse_refs(fields.next()?);
             Some(Commit {
                 id,
                 parents,
-                refs: match refs.is_empty() {
-                    true => Vec::new(),
-                    false => refs.split(", ").map(String::from).collect(),
-                },
+                refs,
                 author: fields.next()?.to_string(),
                 time: fields.next()?.parse().unwrap_or(0),
                 summary: fields.next().unwrap_or_default().to_string(),
@@ -545,6 +564,45 @@ pub fn parse_log(bytes: &[u8]) -> Vec<Commit> {
             })
         })
         .collect()
+}
+
+/// Read `%D` under `--decorate=full`: `HEAD -> refs/heads/main, tag: refs/tags/v1,
+/// refs/remotes/origin/main`, or `HEAD` alone where it is detached.
+///
+/// Only branches, tags and HEAD are kept: `origin/HEAD` points at a branch rather than being one,
+/// and the stash and notes are refs no row has anything to say about. Sorted HEAD's first, then by
+/// [`RefKind`], git's own order kept within each kind.
+pub fn parse_refs(decorations: &str) -> Vec<Ref> {
+    let mut refs: Vec<Ref> = decorations
+        .split(", ")
+        .filter_map(|decoration| {
+            let (head, full) = match decoration.strip_prefix("HEAD -> ") {
+                Some(full) => (true, full),
+                None => (decoration == "HEAD", decoration),
+            };
+            let (kind, name) = if full == "HEAD" {
+                (RefKind::Head, full)
+            } else if let Some(name) = full.strip_prefix("refs/heads/") {
+                (RefKind::LocalBranch, name)
+            } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
+                (RefKind::Tag, name)
+            } else if let Some(name) = full
+                .strip_prefix("refs/remotes/")
+                .filter(|name| !name.ends_with("/HEAD"))
+            {
+                (RefKind::RemoteBranch, name)
+            } else {
+                return None;
+            };
+            Some(Ref {
+                name: name.to_string(),
+                kind,
+                head,
+            })
+        })
+        .collect();
+    refs.sort_by_key(|r| (!r.head, r.kind));
+    refs
 }
 
 /// Lay commits out on a graph, one column per line of history.
