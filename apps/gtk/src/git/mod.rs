@@ -241,7 +241,10 @@ impl Panel {
             .build();
         let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         face.append(&branch_label);
-        face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
+        // `go-down-symbolic` rather than `pan-down-symbolic`: WhiteSur writes the latter with
+        // single-quoted attributes, which GTK 4's symbolic recolouring does not parse, and the
+        // chevron drew nothing (DESIGN.md, Iconography).
+        face.append(&gtk::Image::from_icon_name("go-down-symbolic"));
 
         let branch_list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)

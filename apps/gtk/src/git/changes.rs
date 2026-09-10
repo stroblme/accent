@@ -324,9 +324,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 .collapsed
                 .borrow()
                 .contains(&folder_key(section, &path));
+            // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
             chevron.set_icon_name(Some(match shut {
-                true => "pan-end-symbolic",
-                false => "pan-down-symbolic",
+                true => "go-next-symbolic",
+                false => "go-down-symbolic",
             }));
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
