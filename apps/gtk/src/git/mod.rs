@@ -865,6 +865,16 @@ impl Panel {
             .is_some_and(|s| s.merging)
     }
 
+    /// Whether the selected repository still has a conflict that is not staged as resolved. git
+    /// refuses a commit over one, so Commit is not offered until there is none.
+    pub(super) fn unresolved(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| s.conflicts().next().is_some())
+    }
+
     /// The placeholder, the Commit button and whether the box is there at all.
     ///
     /// A merge under way always has its commit to make — resolved to "ours", it may stage nothing
@@ -878,8 +888,11 @@ impl Panel {
             false => "Commit message",
         });
         let anything = merging || self.to_commit().1;
+        let unresolved = self.unresolved();
         self.commit
-            .set_sensitive(anything && (merging || !message.trim().is_empty()));
+            .set_sensitive(anything && !unresolved && (merging || !message.trim().is_empty()));
+        self.commit
+            .set_tooltip_text(unresolved.then_some("Stage the resolved conflicts first"));
         // A clean tree has nothing to say, so the box goes — but never out from under a message
         // being written: a refresh fires on every save, and one of those would take it away
         // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
@@ -928,6 +941,12 @@ impl Panel {
     /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
     pub fn sync_hint(&self) -> Option<String> {
         self.sync.tooltip_text().map(|t| t.to_string())
+    }
+
+    /// Whether Commit can be pressed, and its tooltip. `ACCENT_BENCH_GIT` and nothing else.
+    pub fn commit_hint(&self) -> (bool, Option<String>) {
+        let tip = self.commit.tooltip_text().map(|t| t.to_string());
+        (self.commit.is_sensitive(), tip)
     }
 
     /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
