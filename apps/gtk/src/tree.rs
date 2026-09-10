@@ -85,6 +85,14 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
         || rel.rsplit('/').next().is_some_and(is_sync_conflict)
 }
 
+/// How many listings of each directory ("" is the root) one tree has asked for.
+///
+/// Two listings of one directory can be on their way at once — the refresh after a reconnect and
+/// the file that was just made, or two reindexes in a row — and over a link they need not land in
+/// the order they were asked. Only the newest one is spliced in: an older one landing after it
+/// would put back the rows it no longer has.
+type Asked = Rc<RefCell<HashMap<String, u64>>>;
+
 /// Bring `store` in step with the direct children of `prefix`.
 ///
 /// The listing is asked for on a worker thread and spliced in when it lands, so the store this
@@ -92,10 +100,25 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
 /// directory without the click waiting for a round trip; on a local vault the index answers in
 /// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
 /// names case-insensitively.
-pub fn fill(store: &gio::ListStore, vault: &Arc<Vault>, prefix: &str) {
-    let (store, vault, dir) = (store.clone(), vault.clone(), prefix.to_string());
+fn fill(store: &gio::ListStore, vault: &Arc<Vault>, asked: &Asked, prefix: &str) {
+    let ticket = {
+        let mut asked = asked.borrow_mut();
+        let n = asked.entry(prefix.to_string()).or_default();
+        *n += 1;
+        *n
+    };
+    let (store, vault, asked) = (store.clone(), vault.clone(), asked.clone());
+    let dir = prefix.to_string();
     glib::spawn_future_local(async move {
-        let listed = gio::spawn_blocking(move || vault.list_dir(&dir)).await;
+        let listed = gio::spawn_blocking({
+            let dir = dir.clone();
+            move || vault.list_dir(&dir)
+        })
+        .await;
+        // A newer listing of this directory was asked for while this one was on its way.
+        if asked.borrow().get(&dir) != Some(&ticket) {
+            return;
+        }
         match listed {
             Ok(Ok(rows)) => splice(&store, rows),
             // Leaving the rows alone beats blanking a directory the index simply could not answer
@@ -168,6 +191,7 @@ pub struct Tree {
     vault: Arc<Vault>,
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
+    asked: Asked,
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
@@ -233,26 +257,33 @@ impl Tree {
         };
         for (dir, store) in stores {
             if dir.is_empty() {
-                fill(&store, &self.vault, dir);
+                fill(&store, &self.vault, &self.asked, dir);
                 continue;
             }
             // A directory that is gone keeps no model: a same-named one created later must be
             // listed afresh instead of re-expanding into the files this one used to hold. Asked
-            // of the index rather than of the disk, which on a remote vault is not here at all —
-            // and asked on a worker thread, because on that vault it is one round trip per
-            // invalidated directory and a reindex invalidates a handful at a time.
-            let (vault, cache, dir) = (self.vault.clone(), self.cache.clone(), dir.clone());
+            // of the vault rather than of this disk, which on a remote vault is not where the
+            // files are — and asked on a worker thread, because on that vault it is one round
+            // trip per invalidated directory and a reindex invalidates a handful at a time.
+            let (vault, cache, asked) =
+                (self.vault.clone(), self.cache.clone(), self.asked.clone());
+            let dir = dir.clone();
             glib::spawn_future_local(async move {
                 let there = gio::spawn_blocking({
                     let (vault, dir) = (vault.clone(), dir.clone());
-                    move || vault.exists(&dir)
+                    move || vault.stat(&dir)
                 })
                 .await;
                 match there {
-                    Ok(true) => fill(&store, &vault, &dir),
-                    Ok(false) => {
+                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &dir),
+                    Ok(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                     }
+                    // No answer is not an answer that it is gone. A reconnect's reindex arrives
+                    // while the link is still being made, and taking that as gone left each
+                    // expanded folder showing a model nothing refilled any more: the files made
+                    // in it afterwards never appeared until it was collapsed.
+                    Ok(Err(e)) => tracing::warn!("asking after {dir} failed: {e}"),
                     Err(_) => tracing::warn!("the tree worker panicked"),
                 }
             });
@@ -400,6 +431,7 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
 fn children_model(
     vault: &Arc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
+    asked: &Asked,
     rel: &str,
 ) -> gio::ListStore {
     // Cloned out so the cache borrow cannot still be live during `fill`.
@@ -409,7 +441,7 @@ fn children_model(
     }
     let t0 = Instant::now();
     let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, vault, rel);
+    fill(&store, vault, asked, rel);
     cache.borrow_mut().insert(rel.to_string(), store.clone());
     tracing::debug!(
         dir = rel,
@@ -547,13 +579,16 @@ pub fn build(
     on_move: impl Fn(&str, &str) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
+    let asked = Asked::default();
+    // Populated straight from the index: the window must be up before the reconcile finishes.
+    fill(root, &vault, &asked, "");
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
-        let (vault, cache) = (vault.clone(), cache.clone());
+        let (vault, cache, asked) = (vault.clone(), cache.clone(), asked.clone());
         move |obj| {
             let row = decode(obj)?;
             row.is_dir()
-                .then(|| children_model(&vault, &cache, &row.rel).upcast())
+                .then(|| children_model(&vault, &cache, &asked, &row.rel).upcast())
         }
     });
 
@@ -795,6 +830,7 @@ pub fn build(
         vault,
         root: root.clone(),
         cache,
+        asked,
         ignored,
         active,
     }

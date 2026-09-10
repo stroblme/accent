@@ -315,10 +315,7 @@ pub fn build_window(
     // between its notes. A window without one is tabs and nothing else.
     match &vault {
         Some(vault) => {
-            // Populate straight from the index: the window must be up before reconcile finishes.
             let rows = gio::ListStore::new::<gtk::StringObject>();
-            tree::fill(&rows, vault, "");
-            tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
             build_sidebar(&app, &rows, vault);
         }
         // Outline only, and collapsed: a window opened on one file is that file, and the
