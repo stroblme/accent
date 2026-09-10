@@ -3,9 +3,33 @@
 //! button; header capitalisation on the buttons.
 
 use adw::prelude::*;
+use gtk::glib;
+use std::cell::Cell;
 
 /// The response id the name dialogs confirm with.
 pub(crate) const CONFIRM: &str = "confirm";
+
+/// Present `dialog` over `parent` and call `callback` once, with the response it closes on: what
+/// `AlertDialogExtManual::choose` does, without its leak.
+///
+/// libadwaita-rs 0.9.2's `choose` hands `adw_alert_dialog_choose` a full reference where the C side
+/// takes `self` as `transfer none`, so every dialog shown with it outlived its close, and with it
+/// whatever its handlers held: New File's path field completes from the vault, which kept a closed
+/// window's vault open. Once a release of the bindings passes `self` borrowed, this can go and the
+/// callers can call `choose` again.
+pub(crate) fn choose(
+    dialog: &adw::AlertDialog,
+    parent: Option<&impl IsA<gtk::Widget>>,
+    callback: impl FnOnce(glib::GString) + 'static,
+) {
+    let callback = Cell::new(Some(callback));
+    dialog.connect_response(None, move |_, response| {
+        if let Some(callback) = callback.take() {
+            callback(response.into());
+        }
+    });
+    dialog.present(parent);
+}
 
 /// An alert with its responses in one call. `responses` are `(id, label, appearance)` in the
 /// order they are shown; the first one is also what closing the dialog answers, which is why it
