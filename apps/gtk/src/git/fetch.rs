@@ -104,7 +104,7 @@ pub(super) struct Fetched {
     pub(super) repos: Option<Vec<Repo>>,
     pub(super) statuses: Vec<Status>,
     pub(super) commits: Option<Vec<Commit>>,
-    pub(super) branches: Option<Vec<String>>,
+    pub(super) branches: Option<git::Branches>,
     pub(super) submodules: Option<Vec<Submodule>>,
     /// The commits a pull would bring in, which is what marks the history's rows. Asked for only
     /// where the branch says there are any, so an up-to-date repository pays nothing for it.

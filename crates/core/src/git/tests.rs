@@ -643,7 +643,12 @@ fn branches_lists_the_local_ones_and_checkout_refuses_to_clobber() {
     ok(dir, &["branch", "side"]);
     let repo = open(dir);
 
-    assert_eq!(branches(&repo).unwrap(), ["main", "side"]);
+    let listed = branches(&repo).unwrap();
+    assert_eq!(listed.local, ["main", "side"]);
+    assert!(
+        listed.remote.is_empty(),
+        "no remote, no remote-tracking branches"
+    );
 
     checkout(&repo, "side").unwrap();
     assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("side"));
@@ -703,7 +708,7 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     let repo = open(dir);
 
     create_branch(&repo, "side", false).unwrap();
-    assert_eq!(branches(&repo).unwrap(), ["main", "side"]);
+    assert_eq!(branches(&repo).unwrap().local, ["main", "side"]);
     assert_eq!(
         status(&repo).unwrap().branch.head.as_deref(),
         Some("main"),
@@ -720,7 +725,7 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     // Nothing on `side` that `main` does not already have, so `-d` is enough.
     checkout(&repo, "main").unwrap();
     delete_branch(&repo, "side", false).unwrap();
-    assert_eq!(branches(&repo).unwrap(), ["main", "work"]);
+    assert_eq!(branches(&repo).unwrap().local, ["main", "work"]);
 
     checkout(&repo, "work").unwrap();
     write_file(dir, "b.md", "b\n");
@@ -729,7 +734,7 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     let refused = delete_branch(&repo, "work", false).unwrap_err().to_string();
     assert!(unmerged(&refused), "{refused}");
     delete_branch(&repo, "work", true).unwrap();
-    assert_eq!(branches(&repo).unwrap(), ["main"]);
+    assert_eq!(branches(&repo).unwrap().local, ["main"]);
 
     // The checked-out branch is a refusal nothing can force, so it must not read as one.
     let refused = delete_branch(&repo, "main", false).unwrap_err().to_string();
@@ -745,9 +750,48 @@ fn unmerged_is_gits_own_wording() {
 }
 
 #[test]
-fn parse_branches_drops_the_blank_line_git_ends_with() {
-    assert_eq!(parse_branches(b"main\nfeature/x\n"), ["main", "feature/x"]);
-    assert!(parse_branches(b"").is_empty());
+fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
+    let listed = parse_branches(
+        b"refs/heads/main\0\nrefs/heads/feature/x\0\n\
+          refs/remotes/origin/HEAD\0refs/remotes/origin/main\nrefs/remotes/origin/main\0\n",
+    );
+    assert_eq!(listed.local, ["main", "feature/x"]);
+    assert_eq!(listed.remote, ["origin/main"], "origin/HEAD is a pointer");
+    assert_eq!(parse_branches(b""), Branches::default());
+}
+
+/// A clone whose origin has a branch the clone never checked out: the remote-tracking branch is
+/// listed, and tracking it is what makes it a local branch.
+#[test]
+fn a_remote_only_branch_is_listed_and_tracking_it_checks_it_out() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    init(&source);
+    write_file(&source, "a.md", "one\n");
+    commit_all(&source, "first");
+    ok(&source, &["branch", "side"]);
+    ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+    ok(tmp.path(), &["clone", "-q", "origin", "work"]);
+    let work = tmp.path().join("work");
+    configure(&work);
+    let repo = open(&work);
+
+    let listed = branches(&repo).unwrap();
+    assert_eq!(listed.local, ["main"]);
+    assert_eq!(listed.remote, ["origin/main", "origin/side"]);
+
+    track(&repo, "origin/side").unwrap();
+    let branch = status(&repo).unwrap().branch;
+    assert_eq!(branch.head.as_deref(), Some("side"));
+    assert_eq!(branch.upstream.as_deref(), Some("origin/side"));
+    assert_eq!(branches(&repo).unwrap().local, ["main", "side"]);
+    assert!(
+        track(&repo, "origin/side").is_err(),
+        "the local branch exists now"
+    );
 }
 
 #[test]

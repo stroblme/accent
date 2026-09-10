@@ -186,7 +186,7 @@ impl Panel {
     /// naming a branch we are not on.
     pub(super) fn checkout(self: &Rc<Self>, branch: String) {
         // The row a detached HEAD adds to the list is a readout, not a branch to switch to.
-        if !self.state.borrow().branches.contains(&branch) {
+        if !self.state.borrow().branches.local.contains(&branch) {
             return;
         }
         let asked = branch.clone();
@@ -304,6 +304,7 @@ impl Panel {
             };
             let others: Vec<String> = state
                 .branches
+                .local
                 .iter()
                 .filter(|b| branch.head.as_ref() != Some(*b))
                 .cloned()

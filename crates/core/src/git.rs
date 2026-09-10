@@ -751,22 +751,45 @@ pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     }
 }
 
-/// The repository's local branches, alphabetically, as `git branch` would list them.
-pub fn branches(repo: &Repo) -> Result<Vec<String>, Error> {
+/// A repository's branches, each list alphabetical as `git branch -a` would give it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branches {
+    pub local: Vec<String>,
+    /// Remote-tracking branches, `origin/main` and so on, as the last fetch left them.
+    pub remote: Vec<String>,
+}
+
+/// The repository's local and remote-tracking branches, in one `for-each-ref`.
+pub fn branches(repo: &Repo) -> Result<Branches, Error> {
     let out = run(
         &repo.root,
-        &["for-each-ref", "--format=%(refname:short)", "refs/heads/"],
+        &[
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
         true,
     )?;
     Ok(parse_branches(&out))
 }
 
-pub fn parse_branches(bytes: &[u8]) -> Vec<String> {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect()
+/// Parse `<refname> NUL <symref>` lines. Whole ref names rather than `refname:short`, which is the
+/// only way a local branch called `origin/x` stays apart from the remote one. A symbolic ref —
+/// `origin/HEAD`, which a clone sets — names another branch rather than being one, so it goes.
+pub fn parse_branches(bytes: &[u8]) -> Branches {
+    let mut branches = Branches::default();
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let Some((name, "")) = line.split_once('\0') else {
+            continue;
+        };
+        if let Some(local) = name.strip_prefix("refs/heads/") {
+            branches.local.push(local.to_string());
+        } else if let Some(remote) = name.strip_prefix("refs/remotes/") {
+            branches.remote.push(remote.to_string());
+        }
+    }
+    branches
 }
 
 /// Move HEAD to a local branch.
@@ -776,6 +799,14 @@ pub fn parse_branches(bytes: &[u8]) -> Vec<String> {
 /// ours — it refuses where the working tree would be clobbered, and that refusal is the answer.
 pub fn checkout(repo: &Repo, branch: &str) -> Result<(), Error> {
     run(&repo.root, &["switch", "--", branch], false)?;
+    Ok(())
+}
+
+/// Make a local branch of a remote-tracking one (`origin/x`) and move HEAD to it, the way
+/// `git switch --track` does: git names it after the remote branch and sets it as the upstream.
+/// A local branch of that name already there is git's refusal, like every other.
+pub fn track(repo: &Repo, remote: &str) -> Result<(), Error> {
+    run(&repo.root, &["switch", "--track", "--", remote], false)?;
     Ok(())
 }
 
