@@ -324,9 +324,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 .collapsed
                 .borrow()
                 .contains(&folder_key(section, &path));
+            // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
             chevron.set_icon_name(Some(match shut {
-                true => "pan-end-symbolic",
-                false => "pan-down-symbolic",
+                true => "go-next-symbolic",
+                false => "go-down-symbolic",
             }));
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
@@ -339,7 +340,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             depth,
         } => {
             stack.set_visible_child_name("entry");
-            entry.set_margin_start(inset(depth));
+            entry.set_margin_start(inset(depth, panel.tree.get()));
             let directory = match depth {
                 0 => split_name(&e.path).0,
                 _ => "",
@@ -438,11 +439,13 @@ fn rows_of(
     rows
 }
 
-/// How far in a file row of the tree view starts. Flat rows are not indented at all.
-fn inset(depth: usize) -> i32 {
-    match depth {
-        0 => 0,
-        depth => depth as i32 * INDENT + FILE_INSET,
+/// How far in a file row starts. In the folder view every file clears the chevron, the root's
+/// included, so its icon lands under a sibling folder's; flat rows are not indented at all, and
+/// share depth 0 with the root's files, which is why the view is asked rather than the depth.
+fn inset(depth: usize, tree: bool) -> i32 {
+    match tree {
+        true => depth as i32 * INDENT + FILE_INSET,
+        false => 0,
     }
 }
 
@@ -701,6 +704,13 @@ mod tests {
             shape(&rows[1..]),
             [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
         );
+    }
+
+    #[test]
+    fn a_file_at_the_root_of_the_folder_view_is_inset_like_every_other_file() {
+        assert_eq!(inset(0, true), FILE_INSET, "under a root folder's icon");
+        assert_eq!(inset(2, true), 2 * INDENT + FILE_INSET);
+        assert_eq!(inset(0, false), 0, "the flat view is not indented");
     }
 
     #[test]
