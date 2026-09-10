@@ -108,7 +108,8 @@ impl Panel {
         let message = self.message_text();
         // A merge under way commits with git's own message where the box is empty.
         let merging = self.merging();
-        if message.trim().is_empty() && !merging {
+        // `Ctrl+Return` reaches here without the button, so it asks what the button asked.
+        if (message.trim().is_empty() && !merging) || self.unresolved() {
             return;
         }
         // Nothing staged means "commit what changed", which is `git commit -a`: every tracked

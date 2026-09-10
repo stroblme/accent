@@ -215,6 +215,8 @@ fn bench_git(app: &Rc<App>) {
         );
         println!("bench git_not_pulled {}", git.not_pulled_rows());
         println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
+        let (live, tip) = git.commit_hint();
+        println!("bench git_commit live={live} {}", tip.unwrap_or_default());
         git.activate_last_log_row();
         let app = app.clone();
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
