@@ -239,6 +239,17 @@ pub(crate) fn install_font(
     }
 }
 
+/// The page's margins at `zoom`: the side gutters and the room above and below the text, scaled
+/// with it as [`Tab::set_page`] explains. A comparison of two texts that are not files lays its
+/// two views out on the same page.
+pub(crate) fn set_margins(view: &sourceview5::View, zoom: f64) {
+    let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
+    view.set_left_margin(scale(GUTTER));
+    view.set_right_margin(scale(GUTTER));
+    view.set_top_margin(scale(TOP));
+    view.set_bottom_margin(scale(BOTTOM));
+}
+
 /// A per-view CSS name, so the font override can be one provider per tab.
 ///
 /// ponytail: `#name` is the only per-widget CSS hook GTK 4 still offers — `StyleContext` and its
@@ -323,12 +334,8 @@ impl Tab {
     /// way h5 and h6 already do. Scaling the gutters and the clamp together with the font keeps
     /// the page proportional, so zooming reads as moving closer rather than as a narrower column.
     fn set_page(&self, zoom: f64) {
-        let scale = |base: i32| (f64::from(base) * zoom).round() as i32;
         self.zoom.set(zoom);
-        self.view.set_left_margin(scale(GUTTER));
-        self.view.set_right_margin(scale(GUTTER));
-        self.view.set_top_margin(scale(TOP));
-        self.view.set_bottom_margin(scale(BOTTOM));
+        set_margins(&self.view, zoom);
         self.set_clamp();
     }
 

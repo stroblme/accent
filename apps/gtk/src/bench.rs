@@ -1064,7 +1064,7 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// claim) — before the first hunk is taken from Theirs, the hidden run is opened, and the same
 /// is read again, with the button of the changed-on-disk banner that stands over it (none while
 /// the comparison is up, Compare once it has gone). Then two blobs in a tab of their own, at a
-/// zoom, for the same numbers. With the vault under git, last, the working tree against the index
+/// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under git, last, the working tree against the index
 /// in the note's tab: whether it opened with the run before the first change folded and the caret
 /// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
 /// a scratch repository whose committed note differs from the fifty lines in a few places, one of
@@ -1145,8 +1145,9 @@ fn bench_compare(app: &Rc<App>, rel: &str) {
                 app.set_zoom(1.5);
                 glib::timeout_add_local_once(Duration::from_millis(500), move || {
                     println!(
-                        "bench compare_blobs {}",
-                        bench_compare_line(diff.comparison())
+                        "bench compare_blobs {} margins={:?}",
+                        bench_compare_line(diff.comparison()),
+                        bench_margins(&diff.page.child())
                     );
                     // With the vault under git: the working tree against the index, in the
                     // note's tab, which the Git pane reaches through the same door as a row.
@@ -1257,6 +1258,22 @@ fn bench_compare_type(tab: &Rc<Tab>, at: f64, then: impl FnOnce() + 'static) {
             });
         });
     });
+}
+
+/// The left and top margins of the first text view under `widget`: the page a zoomed comparison
+/// is laid out on.
+fn bench_margins(widget: &gtk::Widget) -> Option<(i32, i32)> {
+    if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+        return Some((view.left_margin(), view.top_margin()));
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        if let Some(margins) = bench_margins(&c) {
+            return Some(margins);
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// The banner's button as it reads on screen: `None` for none.

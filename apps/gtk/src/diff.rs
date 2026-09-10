@@ -1395,6 +1395,9 @@ pub struct DiffTab {
     pub page: adw::TabPage,
     key: String,
     compare: Rc<Compare>,
+    /// Both panes' views. They take the page's margins from the zoom here, having no editor
+    /// beside them for [`Compare::relayout`] to copy them from.
+    views: [sourceview5::View; 2],
     flavour: Flavour,
     name: String,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -1422,6 +1425,7 @@ impl DiffTab {
         };
         let old = pane(old.0, flavour, old.1, &name, language.as_ref());
         let new = pane(new.0, flavour, new.1, &name, language.as_ref());
+        let views = [old.view.clone(), new.view.clone()];
         let compare = Compare::new(old, new, None, false);
         let page = tabs.append(compare.widget());
         page.set_title(title);
@@ -1430,6 +1434,7 @@ impl DiffTab {
             page,
             key: key.to_string(),
             compare,
+            views,
             flavour,
             name,
             font: RefCell::new(None),
@@ -1442,8 +1447,20 @@ impl DiffTab {
         self.key.clone()
     }
 
+    /// The font and the page at `zoom`, as `Tab::set_font` sets them for an editor.
     pub fn set_font(&self, font: Option<&str>, zoom: f64) {
+        for view in &self.views {
+            editor::set_margins(view, zoom);
+        }
         editor::install_font(&self.font, self.flavour, font, zoom, &self.name);
+        // Heading markers hang in the left margin and are measured in the font, so they are
+        // measured again once the font has reached the views, as `Tab::rehang` does.
+        let compare = Rc::downgrade(&self.compare);
+        glib::idle_add_local_once(move || {
+            if let Some(compare) = compare.upgrade() {
+                compare.restyle();
+            }
+        });
     }
 
     pub fn restyle(&self) {
