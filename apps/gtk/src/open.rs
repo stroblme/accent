@@ -623,8 +623,15 @@ impl App {
             .title(title)
             .description(body)
             .build();
+        // A file on the host is on no disk here for a file manager to show, so there the one
+        // button is the copy that puts it on one.
+        let on_host = self.on_host(&key);
         let button = gtk::Button::builder()
-            .label("Show in Files")
+            .label(if on_host {
+                "Download…"
+            } else {
+                "Show in Files"
+            })
             .halign(gtk::Align::Center)
             .css_classes(["pill"])
             .build();
@@ -634,9 +641,13 @@ impl App {
             #[strong]
             key,
             move |_| {
-                let path = app.root().join(&key);
-                let toast = app.clone();
-                fileops::reveal(&app.window, &path, move |m| toast.toast(m));
+                if !on_host {
+                    let path = app.root().join(&key);
+                    let toast = app.clone();
+                    fileops::reveal(&app.window, &path, move |m| toast.toast(m));
+                } else if let Some(ops) = app.ops() {
+                    fileops::download(ops, &key);
+                }
             }
         ));
         status.set_child(Some(&button));

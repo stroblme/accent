@@ -316,6 +316,11 @@ impl App {
             }
             "show-in-files" => {
                 if let Some(rel) = self.menu_rel() {
+                    if self.on_host(&rel) {
+                        let name = doc::file_name(&rel);
+                        return self
+                            .cannot(&format!("show {name}"), format!("it is on {}", self.host()));
+                    }
                     let path = self.root().join(&rel);
                     let toast = self.clone();
                     fileops::reveal(&self.window, &path, move |m| toast.toast(m));

@@ -69,10 +69,11 @@ pub fn context_menu(
     elsewhere.append_item(&item("Copy Name", "copy-name", rel));
     elsewhere.append_item(&item("Copy Relative Path", "copy-rel", rel));
     elsewhere.append_item(&item("Copy Absolute Path", "copy-abs", rel));
-    elsewhere.append_item(&item("Show in Files", "show", rel));
-    // The other half of Show in Files when the file is on a host: getting a copy of it here is
-    // the only way to reach it with anything but accent.
-    if !is_dir && ops.vault.is_remote() {
+    // Download… takes Show in Files' place when the file is on a host: no file manager here can
+    // show it, and a copy here is the only way to reach it with anything but accent.
+    if !ops.vault.is_remote() {
+        elsewhere.append_item(&item("Show in Files", "show", rel));
+    } else if !is_dir {
         elsewhere.append_item(&item("Download…", "download", rel));
     }
     menu.append_section(None, &elsewhere);
