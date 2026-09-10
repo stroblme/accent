@@ -249,7 +249,7 @@ fn ink_round_trips_through_save() {
 
     // Erasing takes the whole stroke and leaves what was there before.
     let mut back = back;
-    back.delete_annotation(0, strokes[0].0).unwrap();
+    back.take_ink(0, strokes[0].0).unwrap();
     assert_eq!(back.annotation_count(0).unwrap(), before);
     assert!(back.ink_paths(0).unwrap().is_empty());
 }
@@ -422,6 +422,66 @@ fn thin_catmull_rom_and_hit() {
     // Past the end of the segment, not just off its side.
     assert!(!hit(&line, (20.0, 0.0), 4.0));
     assert!(hit(&[(0.0, 0.0)], (2.0, 0.0), 4.0));
+}
+
+/// A drag reports once a frame, so a quick pass lands one report either side of a thin stroke
+/// and neither of them near it: the line between the two is what crosses it.
+#[test]
+fn a_quick_pass_takes_the_stroke_it_steps_over() {
+    let stroke = [(50.0, 0.0), (50.0, 100.0)];
+    let (before, after) = ((40.0, 50.0), (60.0, 50.0));
+    assert!(!hit(&stroke, before, 4.0) && !hit(&stroke, after, 4.0));
+    assert!(swept(&stroke, before, after, 4.0));
+    // Alongside it 5 pt away, and across the line it would make past its end, are both misses.
+    assert!(!swept(&stroke, (45.0, 10.0), (45.0, 90.0), 4.0));
+    assert!(!swept(&stroke, (40.0, 110.0), (60.0, 110.0), 4.0));
+    // A dot is taken by a pass beside it, not only by one that ends on it.
+    assert!(swept(&[(10.0, 10.0)], (0.0, 12.0), (20.0, 12.0), 4.0));
+    assert!(!hit(&[(10.0, 10.0)], (0.0, 12.0), 4.0));
+}
+
+/// What `take_ink` keeps is enough for `redraw_ink` to draw the same stroke again, which is what
+/// an erase, and the undo of one, both come down to.
+#[test]
+fn a_taken_stroke_draws_again_as_it_was() {
+    // With the fixture's highlight, which sits at index 0 ahead of the link.
+    let Some((_dir, mut doc)) = open_tiny_with(true) else {
+        return;
+    };
+    let before = doc.annotation_count(0).unwrap();
+    let style = InkStyle {
+        width: 3.0,
+        rgba: [0, 128, 0, 255],
+        multiply: false,
+    };
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], style)
+        .unwrap();
+    let drawn = doc.inks(0).unwrap().remove(0);
+    let (kept, area) = doc.take_ink(0, drawn.index).unwrap();
+    assert_eq!(doc.annotation_count(0).unwrap(), before);
+    assert!(doc.inks(0).unwrap().is_empty());
+    let near = |a: Rect, b: Rect| {
+        [
+            a.left - b.left,
+            a.top - b.top,
+            a.right - b.right,
+            a.bottom - b.bottom,
+        ]
+        .iter()
+        .all(|d| d.abs() < 0.01)
+    };
+    assert!(near(area, drawn.bounds), "{area:?} {:?}", drawn.bounds);
+
+    doc.redraw_ink(0, &kept).unwrap();
+    let back = doc.inks(0).unwrap().remove(0);
+    assert_eq!(back.index, before, "drawn again at the end");
+    assert_eq!(back.style, drawn.style);
+    assert!(near(back.bounds, drawn.bounds), "{:?}", back.bounds);
+    assert_eq!(back.points.len(), drawn.points.len());
+
+    // Only a drawn path can be taken: the highlight is refused, and still there.
+    assert!(doc.take_ink(0, 0).is_err());
+    assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
 }
 
 #[test]

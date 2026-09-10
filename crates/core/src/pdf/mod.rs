@@ -16,7 +16,7 @@ mod tests;
 mod text;
 
 pub use doc::{PdfDoc, blank_pdf};
-pub use ink::{IDENTITY, Matrix, apply, catmull_rom, hit, invert, thin};
+pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, hit, invert, swept, thin};
 pub use text::{line_top, same_quads, selection_link, selection_quads};
 
 use std::path::{Path, PathBuf};
