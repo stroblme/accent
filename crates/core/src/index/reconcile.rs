@@ -22,17 +22,19 @@ impl Index {
     pub fn reconcile(
         &mut self,
         root: &Path,
-        on_progress: impl FnMut(Progress),
+        mut on_progress: impl FnMut(Progress),
     ) -> Result<ReconcileStats> {
-        self.reconcile_with(root, &ScanOptions::default(), on_progress)
+        self.reconcile_with(root, &ScanOptions::default(), |_, p| on_progress(p))
     }
 
-    /// [`reconcile`](Self::reconcile) with explicit walk options.
+    /// [`reconcile`](Self::reconcile) with explicit walk options, and the index handed to
+    /// `on_progress`. It is called between batches with no transaction open, so the caller can
+    /// write in the middle of a long walk instead of after it.
     pub fn reconcile_with(
         &mut self,
         root: &Path,
         opts: &ScanOptions,
-        mut on_progress: impl FnMut(Progress),
+        mut on_progress: impl FnMut(&mut Index, Progress),
     ) -> Result<ReconcileStats> {
         let t_scan = Instant::now();
         let scan = walk::scan(root, opts);
@@ -52,11 +54,14 @@ impl Index {
             scan_ms: t_scan.elapsed().as_millis() as u64,
             ..Default::default()
         };
-        on_progress(Progress {
-            phase: Phase::Scan,
-            done: scan.files.len(),
-            total: scan.files.len(),
-        });
+        on_progress(
+            self,
+            Progress {
+                phase: Phase::Scan,
+                done: scan.files.len(),
+                total: scan.files.len(),
+            },
+        );
 
         // One pass over `files` into memory. 47k rows of five integers is a few MB and turns the
         // per-file diff into a hash lookup instead of a query.
@@ -123,11 +128,14 @@ impl Index {
                 done += 1;
             }
             tx.commit()?;
-            on_progress(Progress {
-                phase: Phase::Index,
-                done,
-                total,
-            });
+            on_progress(
+                self,
+                Progress {
+                    phase: Phase::Index,
+                    done,
+                    total,
+                },
+            );
         }
 
         if dirty {
@@ -156,11 +164,14 @@ impl Index {
             tx.commit()?;
         }
         if cold || !changed.is_empty() {
-            on_progress(Progress {
-                phase: Phase::Resolve,
-                done: total,
-                total,
-            });
+            on_progress(
+                self,
+                Progress {
+                    phase: Phase::Resolve,
+                    done: total,
+                    total,
+                },
+            );
         }
 
         Ok(stats)

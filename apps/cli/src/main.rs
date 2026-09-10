@@ -133,7 +133,7 @@ fn main() -> Result<()> {
             let mut ix = common.open()?;
             let t = Instant::now();
             let stats =
-                ix.reconcile_with(&common.vault, &common.scan_options(), |p: Progress| {
+                ix.reconcile_with(&common.vault, &common.scan_options(), |_, p: Progress| {
                     if progress && p.phase == Phase::Index {
                         eprintln!("  indexing {}/{}", p.done, p.total);
                     }
