@@ -200,8 +200,8 @@ pub(super) fn mapped(
 /// The stroke the Adjust tool has hold of, and the drag being applied to it.
 pub struct Selected {
     pub page: usize,
-    /// Its place in the page's `/Annots` as of the last [`Reply::Inks`].
-    pub index: usize,
+    /// The render thread's name for it, which follows it through a move.
+    pub id: u32,
     pub points: Vec<(f32, f32)>,
     pub bounds: accent_core::pdf::Rect,
     pub style: accent_core::pdf::InkStyle,

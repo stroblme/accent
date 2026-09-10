@@ -159,9 +159,28 @@ pub fn build_window(
         .visible(false)
         .build();
     drawing.add_css_class("flat");
+    // Undo and Redo for the drawing, beside the toggle that puts the tools out and shown only
+    // while one is in hand with something to walk (`App::sync_history`). A click leaves the
+    // keyboard on the page, where `Ctrl+Z` is.
+    let history = |icon: &str, action: &'static str| {
+        gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(label_of(action))
+            .action_name(action)
+            .valign(gtk::Align::Center)
+            .focus_on_click(false)
+            .visible(false)
+            .build()
+    };
+    let (undo, redo) = (
+        history("edit-undo-symbolic", "win.pdf-undo"),
+        history("edit-redo-symbolic", "win.pdf-redo"),
+    );
     let menu = menu_button();
     header.pack_end(&menu);
     header.pack_end(&drawing);
+    header.pack_end(&redo);
+    header.pack_end(&undo);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -259,6 +278,8 @@ pub fn build_window(
         header,
         modes: modes.clone(),
         drawing_button: drawing.clone(),
+        undo_button: undo,
+        redo_button: redo,
         drawing: Cell::new(false),
         tool: Cell::new(pdfview::Mode::Pen),
         ring_at: Cell::new(None),

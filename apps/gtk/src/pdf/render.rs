@@ -10,9 +10,10 @@ use std::sync::mpsc::{Sender, TryRecvError, channel};
 
 use accent_api::PdfLink;
 use accent_core::pdf::{self, PdfDoc};
+use anyhow::{Result, anyhow};
 use gtk::glib;
 
-use super::protocol::Request;
+use super::protocol::{NamedInk, Request};
 use super::{Highlights, LOWRES_W, PdfView, Reply, TILE, TileKey, Want};
 
 /// Open `path` on a thread of its own and answer for it until the sender is dropped.
@@ -43,53 +44,69 @@ pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<R
     Ok(tx)
 }
 
-/// One step of this session's drawing, for `Ctrl+Z`: a stroke to take off, or a move to make
-/// backwards. Each names its annotation by an id rather than an index, because every erase and
-/// every move shuffles the indices.
-#[derive(Debug, Clone, Copy)]
+/// One change this session made to a page's ink, for Undo to walk back and Redo to walk forward
+/// again. Each names its annotation by an id rather than an index, because every erase and every
+/// move shuffles the indices.
+#[derive(Debug, Clone)]
 enum Step {
-    Stroke {
+    /// A stroke or a shape was drawn. What it drew is kept once Undo has taken it off, so that
+    /// Redo can draw it again.
+    Drawn {
         page: usize,
         id: u32,
+        kept: Option<pdf::Drawn>,
     },
+    /// A stroke was erased, and this is what it drew.
+    Erased {
+        page: usize,
+        id: u32,
+        kept: Option<pdf::Drawn>,
+    },
+    /// A stroke was moved or resized by `matrix`.
     Moved {
         page: usize,
         id: u32,
-        inverse: pdf::Matrix,
+        matrix: pdf::Matrix,
     },
 }
 
 impl Step {
-    fn id(&self) -> u32 {
+    /// The page it changed and the stroke it names.
+    fn at(&self) -> (usize, u32) {
         match *self {
-            Step::Stroke { id, .. } | Step::Moved { id, .. } => id,
-        }
-    }
-
-    fn page(&self) -> usize {
-        match *self {
-            Step::Stroke { page, .. } | Step::Moved { page, .. } => page,
+            Step::Drawn { page, id, .. }
+            | Step::Erased { page, id, .. }
+            | Step::Moved { page, id, .. } => (page, id),
         }
     }
 }
 
-/// What the render thread knows about the ink it has touched, so that Undo can reach this
-/// session's work and nothing else.
+/// What the render thread knows about the ink of the pages it has touched or listed, so that the
+/// tools can name a stroke wherever it has moved to, and Undo and Redo reach this session's
+/// changes and nothing else.
 ///
-/// `ids` mirrors a page's `/Annots` from the moment we first touch it: `None` is one the
-/// document already had, `Some` one we drew or moved. `steps` is the undo list, newest last.
+/// `ids` mirrors a page's `/Annots` from the first time it is touched or listed: `Some` is an
+/// annotation that has been given a name, `None` one nobody has asked about. `done` is the undo
+/// list and `undone` the redo list, newest last, one entry per gesture: the strokes one eraser
+/// drag takes come back together.
 #[derive(Default)]
 struct Ink {
     ids: HashMap<usize, Vec<Option<u32>>>,
-    steps: Vec<Step>,
+    done: Vec<Vec<Step>>,
+    undone: Vec<Vec<Step>>,
     next: u32,
     dirty: bool,
 }
 
 impl Ink {
-    /// A page is about to be touched: remember what was on it before, once.
+    /// A page carrying `count` annotations is about to be touched or listed: mirror it the first
+    /// time, and after that account for any that joined its end without us — an export appends
+    /// its highlights there.
     fn note(&mut self, page: usize, count: usize) {
-        self.ids.entry(page).or_insert_with(|| vec![None; count]);
+        let slots = self.ids.entry(page).or_default();
+        if slots.len() < count {
+            slots.resize(count, None);
+        }
     }
 
     fn fresh(&mut self) -> u32 {
@@ -97,35 +114,14 @@ impl Ink {
         self.next
     }
 
-    /// A stroke of ours went onto the end of `page`'s `/Annots`.
-    fn added(&mut self, page: usize) {
-        let id = self.fresh();
-        self.ids.entry(page).or_default().push(Some(id));
-        self.steps.push(Step::Stroke { page, id });
-    }
-
-    /// The annotation at `index` was removed from `page`, and with it every step that named it.
-    fn erased(&mut self, page: usize, index: usize) {
-        let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
-        if let Some(id) = slots.and_then(|s| s.remove(index)) {
-            self.steps.retain(|step| step.id() != id);
+    /// The id of the annotation at `index` of a noted page, giving it one if it has none yet.
+    fn id_at(&mut self, page: usize, index: usize) -> Option<u32> {
+        if let Some(id) = *self.ids.get(&page)?.get(index)? {
+            return Some(id);
         }
-    }
-
-    /// The annotation at `index` was drawn again at the end of `page`'s `/Annots`, keeping its
-    /// identity — given one, if it was the document's own. Which id it has now.
-    fn requeued(&mut self, page: usize, index: usize) -> u32 {
-        let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
-        let had = slots.and_then(|s| s.remove(index));
-        let id = had.unwrap_or_else(|| self.fresh());
-        self.ids.entry(page).or_default().push(Some(id));
-        id
-    }
-
-    /// A move of the annotation at `index`, undone by `inverse`.
-    fn moved(&mut self, page: usize, index: usize, inverse: pdf::Matrix) {
-        let id = self.requeued(page, index);
-        self.steps.push(Step::Moved { page, id, inverse });
+        let id = self.fresh();
+        self.ids.get_mut(&page)?[index] = Some(id);
+        Some(id)
     }
 
     /// Where the annotation with this id sits in `page`'s `/Annots` today.
@@ -134,6 +130,154 @@ impl Ink {
             .get(&page)?
             .iter()
             .position(|slot| *slot == Some(id))
+    }
+
+    /// The annotation at `index` left `page`, and everything after it moved up one. Its id — a
+    /// fresh one, if it had none.
+    fn removed(&mut self, page: usize, index: usize) -> u32 {
+        let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
+        let had = slots.and_then(|s| s.remove(index));
+        had.unwrap_or_else(|| self.fresh())
+    }
+
+    /// The annotation named `id` went onto the end of `page`'s `/Annots`.
+    fn appended(&mut self, page: usize, id: u32) {
+        self.ids.entry(page).or_default().push(Some(id));
+    }
+
+    /// The annotation at `index` was drawn again at the end of `page`, keeping its identity.
+    /// Which id it has now.
+    fn requeued(&mut self, page: usize, index: usize) -> u32 {
+        let id = self.removed(page, index);
+        self.appended(page, id);
+        id
+    }
+
+    /// A change was made: a step of its own, or one more of the gesture before it when
+    /// `joined`. Whatever Undo had taken back cannot be put back on top of it.
+    fn record(&mut self, step: Step, joined: bool) {
+        match self.done.last_mut().filter(|_| joined) {
+            Some(gesture) => gesture.push(step),
+            None => self.done.push(vec![step]),
+        }
+        self.undone.clear();
+    }
+
+    /// A stroke of ours went onto the end of `page`, which carried `before` annotations.
+    fn drew(&mut self, page: usize, before: usize) {
+        self.note(page, before);
+        let id = self.fresh();
+        self.appended(page, id);
+        self.record(
+            Step::Drawn {
+                page,
+                id,
+                kept: None,
+            },
+            false,
+        );
+    }
+
+    /// The stroke at `index` was erased, and `kept` is what it drew.
+    fn erased(&mut self, page: usize, index: usize, kept: pdf::Drawn, joined: bool) {
+        let id = self.removed(page, index);
+        let kept = Some(kept);
+        self.record(Step::Erased { page, id, kept }, joined);
+    }
+
+    /// The stroke at `index` was moved by `matrix`, which drew it again at the end of `page`.
+    fn moved(&mut self, page: usize, index: usize, matrix: pdf::Matrix) {
+        let id = self.requeued(page, index);
+        self.record(Step::Moved { page, id, matrix }, false);
+    }
+
+    /// Whether Undo, and then Redo, has anything to walk.
+    fn history(&self) -> (bool, bool) {
+        (!self.done.is_empty(), !self.undone.is_empty())
+    }
+
+    /// Every ink stroke of `page`, each under the id the tools will name it by.
+    fn named(&mut self, doc: &PdfDoc, page: usize) -> Vec<NamedInk> {
+        self.note(page, doc.annotation_count(page).unwrap_or(0));
+        doc.inks(page)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|shape| Some((self.id_at(page, shape.index)?, shape)))
+            .collect()
+    }
+
+    /// Walk the last gesture back (Undo), or the last one Undo took forward again (Redo), and
+    /// say which page each of its steps changed and how much of it.
+    ///
+    /// A step that cannot be made — pdfium refusing, or a stroke the ledger lost track of — drops
+    /// its gesture from the history, after whatever steps of it came first.
+    fn walk(&mut self, doc: &mut PdfDoc, forwards: bool) -> Vec<(usize, pdf::Rect)> {
+        let gesture = match forwards {
+            true => self.undone.pop(),
+            false => self.done.pop(),
+        };
+        let Some(mut gesture) = gesture else {
+            return Vec::new();
+        };
+        // Backwards in the reverse of the order it was made in.
+        if !forwards {
+            gesture.reverse();
+        }
+        let mut changed = Vec::new();
+        for step in &mut gesture {
+            match self.apply(doc, step, forwards) {
+                Ok(area) => changed.push((step.at().0, area)),
+                Err(e) => {
+                    tracing::warn!("walking the ink history on page {}: {e:#}", step.at().0);
+                    return changed;
+                }
+            }
+        }
+        if !forwards {
+            gesture.reverse();
+        }
+        match forwards {
+            true => self.done.push(gesture),
+            false => self.undone.push(gesture),
+        }
+        changed
+    }
+
+    /// Make one step (`forwards`) or take it back: a stroke goes on or comes off the page, or
+    /// moves by the map or by its inverse. How much of the page that changed.
+    fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<pdf::Rect> {
+        let (page, id) = step.at();
+        self.note(page, doc.annotation_count(page)?);
+        let index = self.index_of(page, id);
+        let gone = || anyhow!("stroke {id} is not on page {page}");
+        match (step, forwards) {
+            (Step::Moved { matrix, .. }, _) => {
+                let index = index.ok_or_else(gone)?;
+                let m = match forwards {
+                    true => *matrix,
+                    false => pdf::invert(*matrix),
+                };
+                let area = doc.transform_ink(page, index, m)?;
+                self.requeued(page, index);
+                Ok(area)
+            }
+            // Drawing forwards puts a stroke on, and so does erasing backwards.
+            (Step::Drawn { kept, .. }, true) | (Step::Erased { kept, .. }, false) => {
+                let drawn = kept
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("nothing kept of {id}"))?;
+                let area = doc.redraw_ink(page, drawn)?;
+                self.appended(page, id);
+                Ok(area)
+            }
+            (Step::Drawn { kept, .. }, false) | (Step::Erased { kept, .. }, true) => {
+                let index = index.ok_or_else(gone)?;
+                let (drawn, area) = doc.take_ink(page, index)?;
+                self.removed(page, index);
+                *kept = Some(drawn);
+                Ok(area)
+            }
+        }
     }
 }
 
@@ -233,13 +377,25 @@ fn render_loop(
     let mut etag = accent_core::fs::Etag::of(&path).ok();
     // What has been drawn here, so Undo reaches this session's strokes and no others.
     let mut ink = Ink::default();
+    // What the tab was last told Undo and Redo have to walk, so it hears again only on a change.
+    let mut told = (false, false);
     // The pages whose text has already been read, for the highlights, the selections and the
     // exports that all want the same glyphs.
     let mut glyphs = Glyphs::new();
     // The channel closing is the tab going away, which is the only way this thread ends.
     while let Ok(first) = rx.recv() {
         let mut queue = vec![first];
-        while let Some(current) = queue.pop() {
+        loop {
+            // Before every request and after the last, so the header hears of a step as soon
+            // as it is taken, whatever tiles are still to come.
+            if ink.history() != told {
+                told = ink.history();
+                let (undo, redo) = told;
+                send(&view, Reply::History { undo, redo });
+            }
+            let Some(current) = queue.pop() else {
+                break;
+            };
             match current {
                 Request::Tiles {
                     scale,
@@ -331,8 +487,7 @@ fn render_loop(
                     let before = doc.annotation_count(page).unwrap_or(0);
                     match doc.add_ink(page, &points, style) {
                         Ok(area) => {
-                            ink.note(page, before);
-                            ink.added(page);
+                            ink.drew(page, before);
                             ink.dirty = true;
                             send(&view, Reply::PageChanged(page, area));
                         }
@@ -343,78 +498,63 @@ fn render_loop(
                     let before = doc.annotation_count(page).unwrap_or(0);
                     match doc.add_shape(page, shape, style) {
                         Ok(area) => {
-                            ink.note(page, before);
-                            ink.added(page);
+                            ink.drew(page, before);
                             ink.dirty = true;
                             send(&view, Reply::PageChanged(page, area));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
                 }
-                Request::Inks(page) => send(
-                    &view,
-                    Reply::Inks {
-                        page,
-                        inks: doc.inks(page).unwrap_or_default(),
-                    },
-                ),
-                Request::Transform {
-                    page,
-                    index,
-                    matrix,
-                } => {
-                    let before = doc.annotation_count(page).unwrap_or(0);
-                    ink.note(page, before);
-                    match doc.transform_ink(page, index, matrix) {
-                        Ok(area) => {
-                            ink.moved(page, index, pdf::invert(matrix));
+                Request::Inks(page) => {
+                    let inks = ink.named(&doc, page);
+                    send(&view, Reply::Inks { page, inks });
+                }
+                Request::Transform { page, id, matrix } => {
+                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
+                    let moved = ink
+                        .index_of(page, id)
+                        .ok_or_else(|| anyhow!("stroke {id} is gone"))
+                        .and_then(|index| Ok((index, doc.transform_ink(page, index, matrix)?)));
+                    match moved {
+                        Ok((index, area)) => {
+                            ink.moved(page, index, matrix);
                             ink.dirty = true;
                             send(&view, Reply::PageChanged(page, area));
                         }
-                        Err(e) => tracing::warn!("moving a stroke on page {page}: {e:#}"),
+                        // Gone or refused, as for an erase below: the page's list goes back.
+                        Err(e) => {
+                            tracing::debug!("moving a stroke on page {page}: {e:#}");
+                            let inks = ink.named(&doc, page);
+                            send(&view, Reply::Inks { page, inks });
+                        }
                     }
                 }
-                Request::Erase { page, index } => {
-                    let before = doc.annotation_count(page).unwrap_or(0);
-                    ink.note(page, before);
-                    let area = match doc.delete_annotation(page, index) {
-                        Ok(area) => area,
+                Request::Erase { page, id, joined } => {
+                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
+                    let taken = ink
+                        .index_of(page, id)
+                        .ok_or_else(|| anyhow!("stroke {id} is gone"))
+                        .and_then(|index| Ok((index, doc.take_ink(page, index)?)));
+                    match taken {
+                        Ok((index, (kept, area))) => {
+                            ink.erased(page, index, kept, joined);
+                            ink.dirty = true;
+                            send(&view, Reply::PageChanged(page, area));
+                        }
+                        // Gone already — the list the eraser aimed at had not caught up with an
+                        // erase before this one — or refused. Either way the page's list goes
+                        // back at once, so the two agree again rather than at the next change.
                         Err(e) => {
-                            tracing::warn!("erasing on page {page}: {e:#}");
-                            continue;
+                            tracing::debug!("erasing on page {page}: {e:#}");
+                            let inks = ink.named(&doc, page);
+                            send(&view, Reply::Inks { page, inks });
                         }
-                    };
-                    ink.erased(page, index);
-                    ink.dirty = true;
-                    send(&view, Reply::PageChanged(page, area));
+                    }
                 }
-                Request::Undo => {
-                    // One step per `Ctrl+Z`; a step whose annotation was erased since is skipped.
-                    while let Some(step) = ink.steps.pop() {
-                        let Some(index) = ink.index_of(step.page(), step.id()) else {
-                            continue;
-                        };
-                        let page = step.page();
-                        let done = match step {
-                            Step::Stroke { .. } => {
-                                doc.delete_annotation(page, index).inspect(|_| {
-                                    ink.erased(page, index);
-                                })
-                            }
-                            Step::Moved { inverse, .. } => {
-                                doc.transform_ink(page, index, inverse).inspect(|_| {
-                                    ink.requeued(page, index);
-                                })
-                            }
-                        };
-                        match done {
-                            Ok(area) => {
-                                ink.dirty = true;
-                                send(&view, Reply::PageChanged(page, area));
-                            }
-                            Err(e) => tracing::warn!("undoing on page {page}: {e:#}"),
-                        }
-                        break;
+                request @ (Request::Undo | Request::Redo) => {
+                    for (page, area) in ink.walk(&mut doc, matches!(request, Request::Redo)) {
+                        ink.dirty = true;
+                        send(&view, Reply::PageChanged(page, area));
                     }
                 }
                 Request::Save(ack) => {
@@ -509,8 +649,13 @@ fn render_loop(
                             // The ledger is of the document that just went: its ids mirror an
                             // `/Annots` array this one need not share, so a later Ctrl+Z would
                             // resolve one to an index and delete whatever now sits there. It
-                            // also carries `dirty`, which the fresh document is not.
-                            ink = Ink::default();
+                            // also carries `dirty`, which the fresh document is not. The ids
+                            // keep counting, so a request still naming a stroke of the old
+                            // document cannot land on one of the new.
+                            ink = Ink {
+                                next: ink.next,
+                                ..Ink::default()
+                            };
                             // The text moved with the document, so what was read of it goes.
                             glyphs.clear();
                             send(&view, Reply::Reloaded(page_sizes(&doc)));
@@ -611,53 +756,107 @@ fn send(view: &glib::SendWeakRef<PdfView>, reply: Reply) {
 mod tests {
     use super::*;
 
-    /// Undo takes back this session's strokes and stops at whatever the document already had,
-    /// however the eraser moved the line in between.
+    /// A stroke's id follows it through the moves and erases that shuffle `/Annots`, and the id
+    /// of one that is gone names nothing — which is what keeps a list that has not caught up
+    /// from erasing the stroke after the one it meant.
     #[test]
-    fn undo_never_reaches_a_pre_existing_annotation() {
+    fn an_id_follows_its_stroke_and_a_gone_one_names_nothing() {
         let mut ink = Ink::default();
-        // A page that already carried three annotations, then two strokes of ours.
+        // A page that already carried three annotations, the first and last of them strokes.
         ink.note(0, 3);
-        ink.added(0);
-        ink.added(0);
-        let newest = ink.steps[1].id();
-        assert_eq!(ink.index_of(0, newest), Some(4));
+        let (a, c) = (ink.id_at(0, 0).unwrap(), ink.id_at(0, 2).unwrap());
+        assert_eq!(ink.id_at(0, 0), Some(a), "asked again, the same name");
 
-        // The reader erases one of the document's own: ours move down and stay ours.
-        ink.erased(0, 1);
-        assert_eq!(ink.index_of(0, newest), Some(3));
-        assert_eq!(ink.steps.len(), 2);
+        // `a` is moved, which puts it at the end; then `c` is erased.
+        ink.moved(0, 0, pdf::IDENTITY);
+        assert_eq!((ink.index_of(0, a), ink.index_of(0, c)), (Some(2), Some(1)));
+        ink.removed(0, 1);
+        assert_eq!((ink.index_of(0, a), ink.index_of(0, c)), (Some(1), None));
 
-        // Erasing one of ours leaves one stroke to undo, and then nothing.
-        ink.erased(0, 3);
-        assert_eq!(ink.steps.len(), 1);
-        assert_eq!(ink.index_of(0, ink.steps[0].id()), Some(2));
-        ink.erased(0, 2);
-        assert!(ink.steps.is_empty(), "the document's own are not ours");
-
-        // A page never drawn on has nothing to undo, whatever it carries.
-        assert_eq!(ink.index_of(9, newest), None);
+        // An export's highlight joins the end unseen, and the next stroke counts it.
+        ink.drew(0, 3);
+        assert_eq!(ink.index_of(0, ink.next), Some(3), "{:?}", ink.ids);
+        // A page nobody touched names nothing, whatever it carries.
+        assert_eq!(ink.index_of(9, a), None);
     }
 
-    /// A moved annotation is found by what it is, not where it was: after a move it sits at
-    /// the end, a stroke can come after it, and erasing it drops its step.
+    /// Undo walks every kind of step back and Redo walks it forward again, on a real page: a
+    /// stroke, a move of it, and one eraser drag over it and over a stroke the file already had.
     #[test]
-    fn undo_of_a_move_finds_the_annotation_wherever_it_went() {
-        let mut ink = Ink::default();
-        ink.note(0, 2);
-        ink.moved(0, 0, accent_core::pdf::IDENTITY);
-        ink.added(0);
-        let Step::Moved { id, .. } = ink.steps[0] else {
-            panic!("the move comes first");
+    fn undo_and_redo_walk_every_kind_of_step() {
+        if !pdf::available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("accent-undo-{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        let mut doc = PdfDoc::open(&path).unwrap();
+        let style = pdf::InkStyle {
+            width: 2.0,
+            rgba: [0, 0, 0, 255],
+            multiply: false,
         };
-        assert_eq!(ink.index_of(0, id), Some(1), "{:?}", ink.ids);
-        assert_eq!(ink.index_of(0, ink.steps[1].id()), Some(2));
-        // Undone: it is drawn again at the end, keeping its id.
-        ink.requeued(0, 1);
-        assert_eq!(ink.index_of(0, id), Some(2));
-        ink.erased(0, 2);
-        assert_eq!(ink.steps.len(), 1);
-        assert!(matches!(ink.steps[0], Step::Stroke { .. }));
+        let line = |y: f32| pdf::Shape::Line {
+            a: (20.0, y),
+            b: (80.0, y),
+        };
+        // Where the page's lines are, top to bottom.
+        let lines = |doc: &PdfDoc| {
+            let mut ys: Vec<i32> = doc
+                .inks(0)
+                .unwrap()
+                .iter()
+                .map(|i| i.points[0].1 as i32)
+                .collect();
+            ys.sort();
+            ys
+        };
+        let mut ink = Ink::default();
+        // The file's own line, then one of ours, moved 10 pt down.
+        doc.add_shape(0, line(20.0), style).unwrap();
+        doc.add_shape(0, line(40.0), style).unwrap();
+        ink.drew(0, 1);
+        let ours = ink.next;
+        let at = ink.index_of(0, ours).unwrap();
+        let down = [1.0, 0.0, 0.0, 1.0, 0.0, 10.0];
+        doc.transform_ink(0, at, down).unwrap();
+        ink.moved(0, at, down);
+        assert_eq!(lines(&doc), [20, 50]);
+        // One drag takes both, so the eraser's list names the file's own too.
+        let named: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
+        for (n, id) in named.into_iter().enumerate() {
+            let at = ink.index_of(0, id).unwrap();
+            let (kept, _) = doc.take_ink(0, at).unwrap();
+            ink.erased(0, at, kept, n > 0);
+        }
+        assert!(lines(&doc).is_empty());
+        assert_eq!(ink.history(), (true, false));
+
+        // Back through the drag, the move and the stroke; the file's own line stays.
+        let walked: Vec<Vec<i32>> = (0..4)
+            .map(|_| {
+                ink.walk(&mut doc, false);
+                lines(&doc)
+            })
+            .collect();
+        assert_eq!(walked, [vec![20, 50], vec![20, 40], vec![20], vec![20]]);
+        assert_eq!(ink.history(), (false, true));
+        // And forward again.
+        let walked: Vec<Vec<i32>> = (0..3)
+            .map(|_| {
+                ink.walk(&mut doc, true);
+                lines(&doc)
+            })
+            .collect();
+        assert_eq!(walked, [vec![20, 40], vec![20, 50], vec![]]);
+        // A new stroke after an undo leaves nothing to redo.
+        ink.walk(&mut doc, false);
+        let before = doc.annotation_count(0).unwrap();
+        doc.add_shape(0, line(60.0), style).unwrap();
+        ink.drew(0, before);
+        assert_eq!(lines(&doc), [20, 50, 60]);
+        assert_eq!(ink.history(), (true, false));
+        let _ = std::fs::remove_file(&path);
     }
 
     fn search(query: u64, from: usize) -> Request {

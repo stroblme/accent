@@ -235,29 +235,6 @@ impl PdfDoc {
         Ok(self.page(page)?.annotations().len())
     }
 
-    /// Remove one annotation by its index in the page's `/Annots`, and say what box it left.
-    pub fn delete_annotation(&mut self, page: usize, index: usize) -> Result<Rect> {
-        let _guard = lock();
-        let mut p = self.page(page)?;
-        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-        let height = p.height().value;
-        // Through `annotations_mut` rather than `annotations`: the annotation has to carry the
-        // document's lifetime for `delete_annotation` to take it, and the shared accessor hands
-        // back one borrowed from `p` instead.
-        let a = p
-            .annotations_mut()
-            .get(index as PdfPageAnnotationIndex)
-            .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
-        let gone = a
-            .bounds()
-            .map(|b| Rect::from_pdf(b, height))
-            .unwrap_or(Rect::ZERO);
-        p.annotations_mut()
-            .delete_annotation(a)
-            .context("delete annotation")?;
-        Ok(gone)
-    }
-
     /// Take one `/Ink` annotation off a page by its index in `/Annots`, keeping what it drew so
     /// [`PdfDoc::redraw_ink`] can put it back — which is all an erase is, and all its undo is.
     /// The box it left comes back with it. Any other kind of annotation is refused, so an index

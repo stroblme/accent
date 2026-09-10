@@ -19,7 +19,7 @@ use super::geometry::{
     Anchor, Layout, PT_TO_PX, PdfZoom, Span, anchor_at, clamp_scale, fit_scale, layout, offset_of,
     page_at, resume_at, stepped,
 };
-use super::protocol::{Highlights, Reply};
+use super::protocol::{Highlights, NamedInk, Reply};
 use super::tools::{
     ADJUST_RADIUS, HANDLE, Handle, Mode, Selected, Stroke, drag_matrix, handle_at, mapped,
     shape_of, snap,
@@ -309,7 +309,8 @@ impl PdfView {
         }
         // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
         // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
-        // exactly the thing that will not happen.
+        // exactly the thing that will not happen. A stylus's next move puts its dot back.
+        self.imp().dot.set(false);
         self.set_cursor_from_name(match mode {
             Mode::Select => None,
             _ => Some("default"),
@@ -361,9 +362,6 @@ impl PdfView {
         if mode == Mode::Select {
             return mode;
         }
-        // A pen is known by its tool: on Wayland a tablet's events arrive on a logical device
-        // whose source is a mouse, and only the tool says otherwise. X11 without libwacom has
-        // no tool, and there the device's source is what says pen.
         let tool = controller.current_event().and_then(|e| e.device_tool());
         if tool
             .as_ref()
@@ -371,10 +369,10 @@ impl PdfView {
         {
             return Mode::Eraser;
         }
-        let source = controller.current_event_device().map(|d| d.source());
-        if tool.is_some() || source == Some(gdk::InputSource::Pen) {
+        if from_stylus(controller) {
             return mode;
         }
+        let source = controller.current_event_device().map(|d| d.source());
         if source == Some(gdk::InputSource::Touchscreen) {
             return Mode::Select;
         }
@@ -384,40 +382,48 @@ impl PdfView {
         }
     }
 
+    /// Under a stylus with a tool in hand the pointer is a dot where the ink will go; under
+    /// anything else it is the arrow a tool shows. Set only when that changes: a cursor per event
+    /// of travel is what the link hover avoids too.
+    fn show_dot(&self, controller: &impl IsA<gtk::EventController>) {
+        let dot = self.imp().mode.get() != Mode::Select && from_stylus(controller);
+        if self.imp().dot.replace(dot) == dot {
+            return;
+        }
+        match dot {
+            true => self.set_cursor(Some(&dot_cursor())),
+            false => self.set_cursor_from_name(Some("default")),
+        }
+    }
+
     /// Called with a finished stroke: the page and its points, in that page's own points.
     pub fn connect_ink(&self, f: impl Fn(usize, Vec<(f32, f32)>) + 'static) {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a page and the index in its `/Annots` of a stroke the eraser passed over.
-    pub fn connect_erase(&self, f: impl Fn(usize, usize) + 'static) {
+    /// Called with a page, the id of a stroke on it the eraser passed over, and whether the same
+    /// drag took one before it.
+    pub fn connect_erase(&self, f: impl Fn(usize, u32, bool) + 'static) {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a page, the index of a stroke on it and the map to move it by.
-    pub fn connect_transform(&self, f: impl Fn(usize, usize, accent_core::pdf::Matrix) + 'static) {
+    /// Called with a page, the id of a stroke on it and the map to move it by.
+    pub fn connect_transform(&self, f: impl Fn(usize, u32, accent_core::pdf::Matrix) + 'static) {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
     }
 
-    /// What one page holds for the Adjust tool. A selection on that page follows its stroke
-    /// to the fresh list, or to the list's end after a move, or goes if the stroke did.
-    pub fn set_inks(&self, page: usize, inks: Vec<accent_core::pdf::InkShape>) {
+    /// What one page holds for the eraser and the Adjust tool. A selection on that page follows
+    /// its stroke by id to wherever a move put it, or goes if the stroke did.
+    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>) {
         {
-            // A move that the thread could not make leaves the page exactly as the widget last
-            // saw it, and the stroke where it was: the list itself says which happened, so a
-            // failed move no longer hands the selection to whatever sits at the end.
-            let landed = self.imp().inks.borrow().get(&page) != Some(&inks);
             let mut adjust = self.imp().adjust.borrow_mut();
             if let Some(a) = adjust.as_ref()
                 && a.page == page
             {
-                let fresh = match self.imp().reselect.replace(false) && landed {
-                    true => inks.last(),
-                    false => inks.iter().find(|i| i.index == a.index),
-                };
-                *adjust = fresh.map(|i| Selected {
+                let fresh = inks.iter().find(|(id, _)| *id == a.id);
+                *adjust = fresh.map(|(id, i)| Selected {
                     page,
-                    index: i.index,
+                    id: *id,
                     points: i.points.clone(),
                     bounds: i.bounds,
                     style: i.style,
@@ -457,15 +463,15 @@ impl PdfView {
         let inks = self.imp().inks.borrow();
         let found = inks.get(&page).and_then(|inks| {
             inks.iter()
-                .find(|i| accent_core::pdf::hit(&i.points, at, ADJUST_RADIUS))
+                .find(|(_, i)| accent_core::pdf::hit(&i.points, at, ADJUST_RADIUS))
                 .or_else(|| {
                     inks.iter()
-                        .find(|i| handle_at(i.bounds, at, grip).is_some())
+                        .find(|(_, i)| handle_at(i.bounds, at, grip).is_some())
                 })
         });
-        *adjust = found.map(|i| Selected {
+        *adjust = found.map(|(id, i)| Selected {
             page,
-            index: i.index,
+            id: *id,
             points: i.points.clone(),
             bounds: i.bounds,
             style: i.style,
@@ -507,45 +513,47 @@ impl PdfView {
                 .map(|&p| accent_core::pdf::apply(m, p))
                 .collect();
             a.bounds = mapped(a.bounds, m);
-            (a.page, a.index, m)
+            (a.page, a.id, m)
         };
-        self.imp().reselect.set(true);
         if let Some(f) = self.imp().on_transform.borrow().as_ref() {
             f(sent.0, sent.1, sent.2);
         }
         self.queue_draw();
     }
 
-    /// Tell the tab the eraser passed over this point of whichever page is under it.
+    /// Tell the tab which strokes the eraser passed over since it was last reported.
     fn erase_at(&self, x: f64, y: f64) {
         let Some((page, _)) = self.nearest_page_point(x, y) else {
             return;
         };
         let at = self.point_on(page, x, y);
+        // The line from where the drag was last reported on this page, not the point alone: a
+        // drag reports once a frame, and a quick pass lands its reports either side of a stroke.
+        let from = match self.imp().erasing.replace(Some((page, at))) {
+            Some((was, from)) if was == page => from,
+            _ => at,
+        };
         let radius = self.imp().style.borrow().eraser_radius;
         // Hit-tested here, against the strokes the tab keeps for this page, rather than on the
         // render thread: that read and flattened every annotation on the page under the pdfium
-        // lock, once per pointer event of the drag.
-        let mut inks = self.imp().inks.borrow_mut();
-        let Some(list) = inks.get_mut(&page) else {
-            return;
-        };
-        let Some(found) = list
-            .iter()
-            .position(|ink| accent_core::pdf::hit(&ink.points, at, radius))
-        else {
-            return;
-        };
-        let index = list[found].index;
-        // Taken out here too, so a drag that passes over it again does not name an index the
-        // document no longer has: a delete shifts everything after it down one.
-        list.remove(found);
-        for ink in list.iter_mut().filter(|ink| ink.index > index) {
-            ink.index -= 1;
+        // lock, once per pointer event of the drag. Taken out of the list at once, so a drag
+        // that passes over one again does not ask for it twice.
+        let mut taken = Vec::new();
+        if let Some(list) = self.imp().inks.borrow_mut().get_mut(&page) {
+            list.retain(|(id, ink)| {
+                // To the stroke's edge rather than its middle: a highlighter is 14 pt across.
+                let reach = radius + ink.style.width / 2.0;
+                let hit = accent_core::pdf::swept(&ink.points, from, at, reach);
+                if hit {
+                    taken.push(*id);
+                }
+                !hit
+            });
         }
-        drop(inks);
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
-            f(page, index);
+            for id in taken {
+                f(page, id, self.imp().erased.replace(true));
+            }
         }
     }
 
@@ -830,6 +838,48 @@ fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
+/// Whether the event in hand is a stylus's, its tip or its eraser. A pen is known by its tool: on
+/// Wayland a tablet's events arrive on a logical device whose source is a mouse, and only the tool
+/// says otherwise. X11 without libwacom has no tool, and there the device's source is what says
+/// pen.
+fn from_stylus(controller: &impl IsA<gtk::EventController>) -> bool {
+    controller
+        .current_event()
+        .and_then(|e| e.device_tool())
+        .is_some()
+        || controller.current_event_device().map(|d| d.source()) == Some(gdk::InputSource::Pen)
+}
+
+/// The stylus's pointer: a dark dot ringed in white so it reads on any paper, its hotspot in the
+/// middle. Drawn here because no cursor theme names a dot, and built once per thread.
+fn dot_cursor() -> gdk::Cursor {
+    const SIZE: i32 = 7;
+    thread_local! {
+        static DOT: gdk::Cursor = {
+            let middle = (SIZE / 2) as f32;
+            let pixels: Vec<u8> = (0..SIZE * SIZE)
+                .flat_map(|at| {
+                    let d = ((at % SIZE) as f32 - middle).hypot((at / SIZE) as f32 - middle);
+                    // How much of the pixel the ring and the dot inside it cover: a soft pixel
+                    // at each edge rather than a jagged one.
+                    let (ring, dot) = ((3.5 - d).clamp(0.0, 1.0), (2.5 - d).clamp(0.0, 1.0));
+                    let grey = (255.0 * (1.0 - dot)) as u8;
+                    [grey, grey, grey, (255.0 * ring) as u8]
+                })
+                .collect();
+            let texture = gdk::MemoryTexture::new(
+                SIZE,
+                SIZE,
+                gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_owned(pixels),
+                SIZE as usize * 4,
+            );
+            gdk::Cursor::from_texture(&texture, SIZE / 2, SIZE / 2, None)
+        };
+    }
+    DOT.with(Clone::clone)
+}
+
 mod imp {
     use super::*;
     use std::cell::OnceCell;
@@ -842,9 +892,10 @@ mod imp {
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
-    /// A page and the index of a stroke on it: what the eraser passed over.
-    type At = Box<dyn Fn(usize, usize)>;
-    type Transform = Box<dyn Fn(usize, usize, accent_core::pdf::Matrix)>;
+    /// A page and the id of a stroke on it the eraser passed over, and whether the same drag took
+    /// one before it.
+    type At = Box<dyn Fn(usize, u32, bool)>;
+    type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -895,12 +946,17 @@ mod imp {
         // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
         // a stroke with no render to replace it is one that still has to be painted.
         pub strokes: RefCell<Vec<super::Stroke>>,
-        /// What the Adjust tool can take hold of, per page it has been told about.
-        pub inks: RefCell<HashMap<usize, Vec<accent_core::pdf::InkShape>>>,
+        /// What the eraser and the Adjust tool can find, per page they have been told about.
+        pub inks: RefCell<HashMap<usize, Vec<NamedInk>>>,
         pub adjust: RefCell<Option<super::Selected>>,
-        /// A move went out: the stroke comes back at the end of its page's `/Annots`, so the
-        /// next list of that page selects its last entry.
-        pub reselect: Cell<bool>,
+        /// Where the eraser was last reported in the drag under way, as a page and a point on
+        /// it, so the next report tests the line between the two.
+        pub erasing: Cell<Option<(usize, (f32, f32))>>,
+        /// Whether the drag under way has taken a stroke yet: every later one is part of the
+        /// same step for Undo.
+        pub erased: Cell<bool>,
+        /// Whether the pointer is the stylus's dot rather than the arrow a tool otherwise shows.
+        pub dot: Cell<bool>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -956,7 +1012,9 @@ mod imp {
                 strokes: RefCell::new(Vec::new()),
                 inks: RefCell::new(HashMap::new()),
                 adjust: RefCell::new(None),
-                reselect: Cell::new(false),
+                erasing: Cell::new(None),
+                erased: Cell::new(false),
+                dot: Cell::new(false),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false, 0)),
@@ -1066,7 +1124,8 @@ mod imp {
             motion.connect_motion(glib::clone!(
                 #[weak]
                 obj,
-                move |_, x, y| {
+                move |motion, x, y| {
+                    obj.show_dot(motion);
                     let handler = obj.imp().on_motion.borrow();
                     if let Some(f) = handler.as_ref() {
                         f(&obj, x, y);
@@ -1110,6 +1169,8 @@ mod imp {
                         }
                         _ => {
                             gesture.set_state(gtk::EventSequenceState::Claimed);
+                            obj.imp().erasing.set(None);
+                            obj.imp().erased.set(false);
                             obj.erase_at(x, y);
                         }
                     }
