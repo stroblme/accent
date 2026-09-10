@@ -84,6 +84,8 @@ pub struct PdfTab {
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
+    /// Whether Undo, and then Redo, has anything to walk: what the header's two buttons show.
+    pub(super) history: Cell<(bool, bool)>,
     pub(super) outline: RefCell<Vec<pdf::Outline>>,
     /// The link preview on screen, if the pointer is on a link with Ctrl held.
     pub(super) preview: RefCell<Option<super::preview::Preview>>,
@@ -107,6 +109,7 @@ pub struct PdfTab {
     pub(super) on_matches: Hook,
     pub(super) on_uri: UriHook,
     pub(super) on_mode: Hook,
+    pub(super) on_history: Hook,
     pub(super) on_note: NoteHook,
     pub(super) on_export: ExportHook,
     pub(super) on_save_failed: FailHook,
@@ -183,6 +186,7 @@ pub fn open(
         pending_show: Cell::new(None),
         save_pending: Cell::new(false),
         saved: Cell::new(None),
+        history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
         preview: RefCell::new(None),
         query: Cell::new(0),
@@ -196,6 +200,7 @@ pub fn open(
         on_matches: RefCell::new(None),
         on_uri: RefCell::new(None),
         on_mode: RefCell::new(None),
+        on_history: RefCell::new(None),
         on_note: RefCell::new(None),
         on_export: RefCell::new(None),
         on_save_failed: RefCell::new(None),
@@ -477,13 +482,11 @@ impl PdfTab {
         self.emit(&self.on_mode);
     }
 
-    /// Whether the tool in hand needs to know what is drawn on the page: the Adjust tool takes
-    /// hold of a stroke, and the eraser has to find the one under the pointer.
+    /// Whether the tool in hand needs to know what is drawn on the page, which every tool does:
+    /// the Adjust tool takes hold of a stroke, the eraser has to find the one under the pointer,
+    /// and a stylus's eraser tip erases under any of them.
     fn wants_inks(&self) -> bool {
-        matches!(
-            self.view.mode(),
-            pdfview::Mode::Adjust | pdfview::Mode::Eraser
-        )
+        self.view.mode() != pdfview::Mode::Select
     }
 
     /// Give those tools the page under the reader and its neighbours.
@@ -519,13 +522,25 @@ impl PdfTab {
         self.view.mode().action().map(crate::actions::label_of)
     }
 
-    /// Take back the last stroke drawn or move made in this tab, through `win.pdf-undo`.
-    ///
-    // ponytail: no redo. The ledger is a list of steps to walk backwards, and a redo wants the
-    // step that was undone kept with the geometry to put it back — which for a stroke means
-    // holding its path after the annotation is gone.
+    /// Take back the last stroke drawn, drag erased or move made in this tab, through
+    /// `win.pdf-undo`.
     pub fn undo(self: &Rc<Self>) {
         self.ask(Request::Undo);
+    }
+
+    /// Make again what Undo last took back, through `win.pdf-redo`.
+    pub fn redo(self: &Rc<Self>) {
+        self.ask(Request::Redo);
+    }
+
+    /// Whether Undo, and then Redo, has anything to walk, as the render thread last said.
+    pub fn history(&self) -> (bool, bool) {
+        self.history.get()
+    }
+
+    /// Called when what Undo and Redo can reach changes.
+    pub fn connect_history(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_history.borrow_mut() = Some(Rc::new(f));
     }
 
     /// Called when the pen is picked up or put down.
@@ -846,16 +861,12 @@ impl PdfTab {
         view.connect_erase(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, index| tab.ask(Request::Erase { page, index })
+            move |page, id, joined| tab.ask(Request::Erase { page, id, joined })
         ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, index, matrix| tab.ask(Request::Transform {
-                page,
-                index,
-                matrix
-            })
+            move |page, id, matrix| tab.ask(Request::Transform { page, id, matrix })
         ));
     }
 
@@ -969,14 +980,22 @@ impl PdfTab {
                     tab.run("win.pdf-copy");
                     return glib::Propagation::Stop;
                 }
-                // The pen's own two keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
-                // whatever has the keyboard, and here that is the page being drawn on.
+                // The pen's own keys, on the tab like Copy: `Ctrl+Z` and `Escape` belong to
+                // whatever has the keyboard, and here that is the page being drawn on. Redo is
+                // `Ctrl+Shift+Z` or `Ctrl+Y`, the two a note's own undo answers to.
                 if tab.mode() != pdfview::Mode::Select {
-                    if key == gtk::gdk::Key::z
-                        && state.contains(gtk::gdk::ModifierType::CONTROL_MASK)
-                    {
-                        tab.run("win.pdf-undo");
-                        return glib::Propagation::Stop;
+                    if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                        let history = match (key.to_lower(), shift) {
+                            (gtk::gdk::Key::z, false) => Some("win.pdf-undo"),
+                            (gtk::gdk::Key::z, true) | (gtk::gdk::Key::y, false) => {
+                                Some("win.pdf-redo")
+                            }
+                            _ => None,
+                        };
+                        if let Some(action) = history {
+                            tab.run(action);
+                            return glib::Propagation::Stop;
+                        }
                     }
                     if key == gtk::gdk::Key::Escape {
                         tab.set_mode(pdfview::Mode::Select);
@@ -1097,6 +1116,10 @@ impl PdfTab {
                 self.save_soon();
             }
             Reply::Inks { page, inks } => self.view.set_inks(page, inks),
+            Reply::History { undo, redo } => {
+                self.history.set((undo, redo));
+                self.emit(&self.on_history);
+            }
             Reply::Saved(etag) => self.saved.set(Some(etag)),
             Reply::SaveFailed(why) => {
                 let hook = self.on_save_failed.borrow().clone();
@@ -1124,6 +1147,10 @@ impl PdfTab {
                     None => self.view.scroll_to(anchor),
                 }
                 self.ask(Request::Outline);
+                // The strokes went with the old document, and a tool in hand needs this one's.
+                if self.wants_inks() {
+                    self.ask_inks();
+                }
                 // A link followed into a document that was still opening waits here.
                 if let Some((page, sel)) = self.pending_show.get() {
                     self.show_link(page, sel);

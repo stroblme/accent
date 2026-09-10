@@ -12,6 +12,10 @@ use super::cache::{TileKey, Want};
 /// index of the link each came from.
 pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 
+/// One ink stroke as the tools address it: the id the render thread gave it, which unlike its
+/// place in `/Annots` survives every erase and move made before it lands, and its shape.
+pub type NamedInk = (u32, accent_core::pdf::InkShape);
+
 /// What the render thread sends back. Every variant is `Send`, because each one travels to the
 /// main loop inside its own idle callback.
 pub enum Reply {
@@ -39,10 +43,16 @@ pub enum Reply {
     Highlights(Highlights),
     /// An export finished: how many annotations it wrote, or why it could not.
     Exported(Result<usize, String>),
-    /// Every ink stroke of one page with its box and style, for the Adjust tool to take hold of.
+    /// Every ink stroke of one page with its box and style, for the eraser to find and the
+    /// Adjust tool to take hold of.
     Inks {
         page: usize,
-        inks: Vec<accent_core::pdf::InkShape>,
+        inks: Vec<NamedInk>,
+    },
+    /// Whether there is anything for Undo to take back and for Redo to put back.
+    History {
+        undo: bool,
+        redo: bool,
     },
     /// This much of this page's annotations changed, in page points, so what is cached of that
     /// part of it is of the old page. A stroke is a few square inches of a page: re-rendering
@@ -100,22 +110,26 @@ pub enum Request {
         shape: pdf::Shape,
         style: pdf::InkStyle,
     },
-    /// Take one stroke off a page, named by its place in the page's `/Annots`. Which stroke the
-    /// eraser passed over is decided on the main thread, against the list the tab already holds.
+    /// Take one stroke off a page, named by its id. Which stroke the eraser passed over is
+    /// decided on the main thread, against the list the tab already holds; `joined` is that the
+    /// same drag took one already, which makes the two one step for Undo.
     Erase {
         page: usize,
-        index: usize,
+        id: u32,
+        joined: bool,
     },
-    /// Every ink stroke of a page with its box and style, for the Adjust tool.
+    /// Every ink stroke of a page with its box and style, for the eraser and the Adjust tool.
     Inks(usize),
     /// Move or resize one stroke; it comes back at the end of the page's `/Annots`.
     Transform {
         page: usize,
-        index: usize,
+        id: u32,
         matrix: pdf::Matrix,
     },
-    /// Undo the last stroke drawn or move made in this session.
+    /// Take back the last step drawn, erased or moved in this session.
     Undo,
+    /// Make the last step Undo took back again.
+    Redo,
     /// Write the drawn-on document out, if anything was drawn since the last time. The channel,
     /// where there is one, is told when that is done — which is what the window close waits on.
     Save(Option<Sender<()>>),
