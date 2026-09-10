@@ -213,6 +213,13 @@ fn never_walked(name: &str, include_skipped: bool) -> bool {
         || (!include_skipped && SKIP_DIRS.contains(&name))
 }
 
+/// Names the vault never lists at any depth, not even in the trees the walk skips:
+/// [`ALWAYS_SKIP_DIRS`], Syncthing's temporaries and our own `.accent-` save temporaries. Nothing
+/// may be created or renamed under one either, since it would never be seen again.
+pub fn out_of_reach(name: &str) -> bool {
+    never_walked(name, true) || name.starts_with(".accent-")
+}
+
 /// Classify by file name. Conflict wins over extension: `Note.sync-conflict-….md` is not a note.
 fn classify(name: &str) -> FileKind {
     if crate::fs::is_sync_conflict(name) {
@@ -321,9 +328,9 @@ pub fn unindexed_children(
     for entry in std::fs::read_dir(root.join(rel))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // `include_skipped`, because the skipped trees are exactly what this lists; what stays
-        // refused is `ALWAYS_SKIP_DIRS` and the temporaries.
-        if never_walked(&name, true) || name.starts_with(".accent-") {
+        // The skipped trees are exactly what this lists; what stays refused is `ALWAYS_SKIP_DIRS`
+        // and the temporaries.
+        if out_of_reach(&name) {
             continue;
         }
         let rel_path = match rel.is_empty() {

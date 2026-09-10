@@ -89,7 +89,7 @@ pub fn hidden(row_kind: FileKind, rel: &str, indexed: bool, show_hidden: bool) -
 }
 
 /// A dot-named path, or one inside a dot-named folder: what a file manager calls hidden.
-fn dot_named(rel: &str) -> bool {
+pub fn dot_named(rel: &str) -> bool {
     rel.split('/').any(|c| c.starts_with('.'))
 }
 

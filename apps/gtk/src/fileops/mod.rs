@@ -45,6 +45,22 @@ const LISTED: usize = 20;
 fn why(e: &anyhow::Error) -> String {
     e.root_cause().to_string()
 }
+
+/// What a toast adds when a file lands where the tree does not list it, so that one just made or
+/// renamed does not seem to have vanished.
+const HIDDEN: &str = "it is hidden while Show Hidden Files is off";
+
+/// Whether the tree leaves `rel` out right now: a dot-named path while Show Hidden Files is off,
+/// read off the window's own toggle.
+fn hidden_now(ops: &Ops, rel: &str) -> bool {
+    let showing = ops
+        .window
+        .lookup_action("show-hidden-files")
+        .and_then(|action| action.state())
+        .and_then(|state| state.get::<bool>());
+    showing == Some(false) && crate::tree::dot_named(rel)
+}
+
 /// Everything the operations need from the app, without depending on it.
 // Boxed closures are the whole point of this struct; a type alias per field would only hide the
 // signature the caller has to write anyway.
@@ -132,7 +148,13 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&why);
         }
         match ops.vault.create_note(&rel, template.map(String::as_str)) {
-            Ok((created, stops)) => (ops.open)(&created, &stops),
+            Ok((created, stops)) => {
+                (ops.open)(&created, &stops);
+                // The tab is the report, unless the tree is not going to list what it holds.
+                if hidden_now(&ops, &created) {
+                    (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+                }
+            }
             Err(e) if already_exists(&e) => {
                 (ops.toast)(&format!("Cannot create {name}: it already exists"))
             }
@@ -176,6 +198,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&format!("Cannot create {name}: it already exists"));
         }
         match ops.vault.create_dir(&rel) {
+            Ok(()) if hidden_now(&ops, &rel) => (ops.toast)(&format!("Created {name}; {HIDDEN}")),
             Ok(()) => (ops.toast)(&format!("Created {name}")),
             Err(e) => (ops.toast)(&made_what_it_could(&ops, &rel, &e.to_string())),
         }
@@ -471,13 +494,11 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
         match done {
             Ok(Ok(report)) => {
                 let unsaved = (ops.reload)(&report.rewritten);
-                (ops.toast)(&rename_message(
-                    verb,
-                    &name,
-                    &to,
-                    report.failed.len(),
-                    unsaved,
-                ));
+                let mut message = rename_message(verb, &name, &to, report.failed.len(), unsaved);
+                if hidden_now(&ops, &to) {
+                    message.push_str(&format!("; {HIDDEN}"));
+                }
+                (ops.toast)(&message);
             }
             Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
             Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
@@ -796,13 +817,12 @@ fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::
     })
 }
 
-/// The folder names directly inside a listing. Hidden ones are left out because the tree hides
-/// them and a typed path refuses them anyway.
+/// The folder names directly inside a listing, dot-named ones included: a typed path may name them
+/// whatever Show Hidden Files says. `.git` is never in a listing to begin with.
 fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
     rows.into_iter()
         .filter(|row| row.kind == FileKind::Dir)
         .map(|row| basename(&row.rel_path).to_string())
-        .filter(|name| !name.starts_with('.'))
         .collect()
 }
 
