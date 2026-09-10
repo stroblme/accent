@@ -141,6 +141,11 @@ pub struct LogRow {
     pub below: Vec<usize>,
     /// Columns of unrelated branches passing this row untouched.
     pub through: Vec<usize>,
+    /// The branch this commit's column draws: the first decoration found on it, going down from
+    /// its tip. `None` for a line of history no branch or tag names.
+    pub lane: Option<String>,
+    /// The named columns that end at this commit besides its own: the branches that forked here.
+    pub forks: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -614,8 +619,14 @@ pub fn parse_refs(decorations: &str) -> Vec<Ref> {
 ///
 /// Freed columns are reused, so a history of two branches never drifts rightwards: the width of
 /// the drawing stays the number of lines of history actually open at that row.
+///
+/// Each column also carries the name of the branch it draws, taken from the first decorated
+/// commit on it and handed down its first parents, so a branch merged into it by fast-forward
+/// does not rename it. Where several columns end at one commit, the commit carries its own column
+/// on and the others are the branches that forked from it: the graph's own reading, one line
+/// going straight on and the rest joining it.
 pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
-    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut lanes: Vec<Option<Lane>> = Vec::new();
     let mut rows = Vec::with_capacity(commits.len());
 
     for commit in commits {
@@ -624,9 +635,17 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
             Some(&column) => column,
             None => free_slot(&mut lanes),
         };
-        for &i in &above {
-            lanes[i] = None;
-        }
+        // Every column drawn into this commit ends here, its own first.
+        let ending: Vec<Option<String>> = above
+            .iter()
+            .map(|&i| lanes[i].take().and_then(|l| l.name))
+            .collect();
+        let lane = ending
+            .first()
+            .cloned()
+            .flatten()
+            .or_else(|| lane_name(&commit.refs));
+        let forks: Vec<String> = ending.into_iter().skip(1).flatten().collect();
 
         let through: Vec<usize> = (0..lanes.len())
             .filter(|&i| i != column && lanes[i].is_some())
@@ -634,15 +653,18 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
 
         let mut below = Vec::with_capacity(commit.parents.len());
         for (nth, parent) in commit.parents.iter().enumerate() {
-            // The first parent stays in this commit's own column; the others join a column
-            // already waiting for them, or open one.
+            // The first parent stays in this commit's own column, and carries its name on; the
+            // others join a column already waiting for them, or open one no name has reached yet.
             let waiting = waiting_for(&lanes, parent).next();
-            let i = match (nth, waiting) {
-                (0, _) => column,
-                (_, Some(i)) => i,
-                (_, None) => free_slot(&mut lanes),
+            let (i, name) = match (nth, waiting) {
+                (0, _) => (column, lane.clone()),
+                (_, Some(i)) => (i, lanes[i].take().and_then(|l| l.name)),
+                (_, None) => (free_slot(&mut lanes), None),
             };
-            lanes[i] = Some(parent.clone());
+            lanes[i] = Some(Lane {
+                waiting: parent.clone(),
+                name,
+            });
             below.push(i);
         }
 
@@ -655,20 +677,36 @@ pub fn lanes(commits: Vec<Commit>) -> Vec<LogRow> {
             above,
             below,
             through,
+            lane,
+            forks,
         });
     }
     rows
 }
 
-fn waiting_for<'a>(lanes: &'a [Option<String>], oid: &'a str) -> impl Iterator<Item = usize> + 'a {
+/// One open column of the graph: the oid it is waiting for, and the branch it draws.
+struct Lane {
+    waiting: String,
+    name: Option<String>,
+}
+
+/// What a commit's decorations would name a column after: its first branch, or failing that its
+/// first tag. A detached HEAD names no line of history.
+fn lane_name(refs: &[Ref]) -> Option<String> {
+    refs.iter()
+        .find(|r| r.kind != RefKind::Head)
+        .map(|r| r.name.clone())
+}
+
+fn waiting_for<'a>(lanes: &'a [Option<Lane>], oid: &'a str) -> impl Iterator<Item = usize> + 'a {
     lanes
         .iter()
         .enumerate()
-        .filter(move |(_, lane)| lane.as_deref() == Some(oid))
+        .filter(move |(_, lane)| lane.as_ref().is_some_and(|l| l.waiting == oid))
         .map(|(i, _)| i)
 }
 
-fn free_slot(lanes: &mut Vec<Option<String>>) -> usize {
+fn free_slot(lanes: &mut Vec<Option<Lane>>) -> usize {
     match lanes.iter().position(Option::is_none) {
         Some(i) => i,
         None => {

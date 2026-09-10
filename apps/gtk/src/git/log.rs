@@ -19,6 +19,10 @@ const SHOWN_REFS: usize = 3;
 /// One line of the history list. A flat store with two kinds rather than a `GtkTreeListModel`:
 /// the log is spliced wholesale on every refresh anyway, so a tree model would only add a
 /// create-child-model closure and a placeholder state to keep in step with it.
+// Every item already lives on the heap inside its `BoxedAnyObject`, and the rows that are not
+// commits are a handful at a time, so the size of the commit variant costs nothing a second box
+// would save.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum LogItem {
     Commit(LogRow),
@@ -357,6 +361,13 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     for class in ["caption", "dim-label"] {
         meta.add_css_class(class);
     }
+    // "side branched here", on the commit where the lanes beside this one end. Not dimmed, so it
+    // does not read as more of the author line above it.
+    let forked = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    forked.add_css_class("caption");
 
     // The row's own vertical margin is off, so the breathing room lives here (see the `.git-log`
     // rule): the drawing area has to reach the row's edges for the lanes to join.
@@ -367,6 +378,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .build();
     text.append(&line);
     text.append(&meta);
+    text.append(&forked);
 
     let commit = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     commit.append(&area);
@@ -468,8 +480,11 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
-    let (Some(line), Some(meta)) = (
-        text.first_child().and_downcast::<gtk::Box>(),
+    let Some(line) = text.first_child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let (Some(meta), Some(forked)) = (
+        line.next_sibling().and_downcast::<gtk::Label>(),
         text.last_child().and_downcast::<gtk::Label>(),
     ) else {
         return;
@@ -494,6 +509,8 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         row.commit.author,
         ago(now(), row.commit.time)
     ));
+    forked.set_visible(!row.forks.is_empty());
+    forked.set_text(&format!("{} branched here", row.forks.join(", ")));
     // Read off the last refresh's answer rather than stored on the row: `git rev-list HEAD..@{u}`
     // is what decides this, and a row that has since been pulled is marked by the refresh that
     // noticed, not by whatever was true when it was spliced in.
@@ -508,8 +525,8 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         false => 1.0,
     });
     stack.set_tooltip_text(Some(&match waiting {
-        true => format!("Not pulled yet\n\n{}", commit_tooltip(&row.commit)),
-        false => commit_tooltip(&row.commit),
+        true => format!("Not pulled yet\n\n{}", commit_tooltip(&row)),
+        false => commit_tooltip(&row),
     }));
 }
 
@@ -665,12 +682,17 @@ fn ago(now: i64, then: i64) -> String {
 /// What hovering a commit says: where it sits, what it is called, and the whole message.
 ///
 /// The decorations `git log` already fetched rather than a `git branch --contains` per hover, so
-/// a commit that is no branch tip simply has no first line.
-fn commit_tooltip(c: &Commit) -> String {
-    let head = match c.refs.is_empty() {
+/// a commit that is no branch tip simply has no first line; the branch its lane draws
+/// ([`git::lanes`]) is the "On" line, where a branch or a tag above it on that lane names one.
+fn commit_tooltip(row: &LogRow) -> String {
+    let c = &row.commit;
+    let mut head = match c.refs.is_empty() {
         true => short(&c.id),
         false => format!("{}\n{}", decorations(&c.refs), short(&c.id)),
     };
+    if let Some(lane) = &row.lane {
+        head = format!("{head}\nOn {lane}");
+    }
     let message = match c.body.is_empty() {
         true => c.summary.clone(),
         false => format!("{}\n\n{}", c.summary, c.body),
@@ -731,16 +753,29 @@ mod tests {
         }
     }
 
+    /// `commit` on the graph, in a column that draws `lane`.
+    fn placed(commit: &Commit, lane: Option<&str>) -> LogRow {
+        LogRow {
+            commit: commit.clone(),
+            column: 0,
+            above: Vec::new(),
+            below: Vec::new(),
+            through: Vec::new(),
+            lane: lane.map(str::to_string),
+            forks: Vec::new(),
+        }
+    }
+
     #[test]
     fn commit_tooltip_says_where_the_commit_is_and_what_it_says() {
         let mut c = commit_at("abcdef1234567");
         c.summary = "subject".to_string();
-        assert_eq!(commit_tooltip(&c), "abcdef1\n\nsubject");
+        assert_eq!(commit_tooltip(&placed(&c, None)), "abcdef1\n\nsubject");
 
         c.body = "why it happened\nand a second line".to_string();
         assert_eq!(
-            commit_tooltip(&c),
-            "abcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+            commit_tooltip(&placed(&c, Some("side"))),
+            "abcdef1\nOn side\n\nsubject\n\nwhy it happened\nand a second line"
         );
 
         c.refs = vec![
@@ -749,8 +784,8 @@ mod tests {
             ref_to("v1", git::RefKind::Tag, false),
         ];
         assert_eq!(
-            commit_tooltip(&c),
-            "HEAD -> main, origin/main, tag: v1\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+            commit_tooltip(&placed(&c, Some("main"))),
+            "HEAD -> main, origin/main, tag: v1\nabcdef1\nOn main\n\nsubject\n\nwhy it happened\nand a second line"
         );
     }
 
