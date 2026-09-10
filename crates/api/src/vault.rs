@@ -599,6 +599,11 @@ mod tests {
             assert_eq!(items[0].label, "Beta");
             assert_eq!(items[0].insert, "[[Beta]]");
             assert_eq!(
+                items[0].filter.as_deref(),
+                Some("[[sub/Beta"),
+                "the popup narrows by what was typed, `[[` and all"
+            );
+            assert_eq!(
                 items[0].replace,
                 Range {
                     start: at(4),
