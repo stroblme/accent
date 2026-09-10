@@ -511,18 +511,18 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({
             let vault = vault.clone();
-            move |local, remote| match vault.remote() {
-                Some(r) => r.forward(local, remote),
+            move |f| match vault.remote() {
+                Some(r) => r.forward(f),
                 None => Err("this vault is not remote".to_string()),
             }
         }),
         remove_forward: Arc::new({
             let vault = vault.clone();
-            move |local, remote| {
+            move |f| {
                 if let Some(r) = vault.remote()
-                    && let Err(e) = r.cancel_forward(local, remote)
+                    && let Err(e) = r.cancel_forward(f)
                 {
-                    tracing::warn!("cancelling the forward {local} -> {remote}: {e}");
+                    tracing::warn!("cancelling the forward {f:?}: {e}");
                 }
             }
         }),
