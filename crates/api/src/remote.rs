@@ -444,9 +444,25 @@ impl Remote {
             .spawn(move || match self.connect(quiet) {
                 Ok(()) => {
                     // Said under the lock, so a loss the reader reports at once lands after it.
+                    // One it saw before now, while the documents were reopened or the forwards
+                    // put back, found the state still Connecting, which it does not speak for;
+                    // the client it left dead is what says so here instead.
                     let mut state = self.locked(&self.state);
-                    *state = State::Connected;
-                    let _ = self.events.send(Event::Connected);
+                    let dead = self
+                        .locked(&self.client)
+                        .as_ref()
+                        .is_none_or(|c| c.is_dead());
+                    let event = match dead {
+                        false => {
+                            *state = State::Connected;
+                            Event::Connected
+                        }
+                        true => {
+                            *state = State::Disconnected(self.lost());
+                            Event::Disconnected(self.lost())
+                        }
+                    };
+                    let _ = self.events.send(event);
                 }
                 Err(e) => self.disconnect(&e),
             });
@@ -485,7 +501,7 @@ impl Remote {
     /// It holds the state and the channel rather than the `Remote`: were it the last holder,
     /// dropping it there would run [`teardown`](Self::teardown), which joins the very thread it is
     /// on. Only a connection that was up can be lost: one still being made fails its own `hello`
-    /// and says why, or is found dead by the first call after [`Event::Connected`].
+    /// and says why, or is found dead where [`start`](Self::start) would have said it was up.
     fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
         let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
         Box::new(move || {
