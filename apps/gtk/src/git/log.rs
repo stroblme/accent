@@ -13,6 +13,9 @@ const MENU_GROUP: &str = "gitlog";
 /// here yet" beside a commit that is, and not so far that the summary stops being legible.
 const NOT_PULLED_DIM: f64 = 0.55;
 
+/// How many of a commit's decorations get a label of their own; the rest are a `+N`.
+const SHOWN_REFS: usize = 3;
+
 /// One line of the history list. A flat store with two kinds rather than a `GtkTreeListModel`:
 /// the log is spliced wholesale on every refresh anyway, so a tree model would only add a
 /// create-child-model closure and a placeholder state to keep in step with it.
@@ -220,15 +223,31 @@ impl Panel {
     /// hangs off a layout-managed box rather than off the list, the actions live on that same box
     /// so an item can resolve them, and the unparent waits for an idle because `closed` is emitted
     /// from inside the item's own click and an unparented popover has no path to the action group.
-    fn commit_menu(self: &Rc<Self>, oid: &str, anchor: gdk::Rectangle) {
+    fn commit_menu(self: &Rc<Self>, commit: &Commit, anchor: gdk::Rectangle) {
         self.column
             .insert_action_group(MENU_GROUP, Some(&self.commit_actions()));
 
         let menu = gio::Menu::new();
-        menu.append_item(&menu_item("Check Out Commit", "checkout-commit", oid));
+        // The branches on this commit lead: moving onto one of them keeps HEAD on a branch,
+        // which checking out the commit itself does not.
+        let branches = gio::Menu::new();
+        for (label, action, target) in ref_items(&commit.refs, &self.state.borrow().branches.local)
+        {
+            branches.append_item(&menu_item(&label, action, &target));
+        }
+        if branches.n_items() > 0 {
+            menu.append_section(None, &branches);
+        }
+        let checkout = gio::Menu::new();
+        checkout.append_item(&menu_item(
+            "Check Out Commit",
+            "checkout-commit",
+            &commit.id,
+        ));
+        menu.append_section(None, &checkout);
         // Its own section: reading an id out is not a thing that moves HEAD.
         let copy = gio::Menu::new();
-        copy.append_item(&menu_item("Copy Commit ID", "copy-id", oid));
+        copy.append_item(&menu_item("Copy Commit ID", "copy-id", &commit.id));
         menu.append_section(None, &copy);
 
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
@@ -244,24 +263,27 @@ impl Panel {
         popover.popup();
     }
 
-    /// The two actions the menu items name, each taking the commit's id as its parameter.
+    /// The actions the menu items name, each taking the commit's id or a branch's name as its
+    /// parameter.
     fn commit_actions(self: &Rc<Self>) -> gio::SimpleActionGroup {
         let group = gio::SimpleActionGroup::new();
-        for (name, detach) in [("checkout-commit", true), ("copy-id", false)] {
+        for name in ["switch", "track", "checkout-commit", "copy-id"] {
             let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
             let weak = Rc::downgrade(self);
             action.connect_activate(move |_, target| {
-                let (Some(panel), Some(oid)) = (weak.upgrade(), target.and_then(|t| t.str()))
+                let (Some(panel), Some(target)) = (weak.upgrade(), target.and_then(|t| t.str()))
                 else {
                     return;
                 };
-                match detach {
-                    true => panel.detach(oid.to_string()),
+                match name {
+                    "switch" => panel.checkout(target.to_string()),
+                    "track" => panel.track(target.to_string()),
+                    "checkout-commit" => panel.detach(target.to_string()),
                     // No toast for the clipboard alone would be truer to DESIGN.md, but nothing
                     // else on screen says the id was taken: the row looks the same either way.
-                    false => {
-                        panel.hooks.window.clipboard().set_text(oid);
-                        (panel.hooks.toast)(&format!("Copied {}", short(oid)));
+                    _ => {
+                        panel.hooks.window.clipboard().set_text(target);
+                        (panel.hooks.toast)(&format!("Copied {}", short(target)));
                     }
                 }
             });
@@ -298,13 +320,19 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         }
     ));
 
-    // Ellipsized like every other name in the pane: a decoration is as long as the branch it
-    // names, and without this a long branch is the sidebar's floor.
-    let refs = gtk::Label::builder()
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    for class in ["caption", "dim-label"] {
-        refs.add_css_class(class);
+    // A label per decoration, the first [`SHOWN_REFS`] and then a count of the rest, because a
+    // release commit can carry a handful of tags and the summary beside them still has to be
+    // read. Each is ellipsized like every other name in the pane — a decoration is as long as the
+    // branch it names, and without this a long branch is the sidebar's floor — and capped, the
+    // tooltip having every name whole.
+    let refs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    for _ in 0..=SHOWN_REFS {
+        refs.append(
+            &gtk::Label::builder()
+                .ellipsize(pango::EllipsizeMode::End)
+                .max_width_chars(16)
+                .build(),
+        );
     }
     let summary = gtk::Label::builder()
         .xalign(0.0)
@@ -396,7 +424,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
                 return;
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-            panel.commit_menu(&row.commit.id, anchor);
+            panel.commit_menu(&row.commit, anchor);
         }
     ));
     stack.add_controller(click);
@@ -452,14 +480,14 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
-    let Some(refs) = not_pulled.next_sibling().and_downcast::<gtk::Label>() else {
+    let Some(refs) = not_pulled.next_sibling().and_downcast::<gtk::Box>() else {
         return;
     };
 
     area.set_content_width(lane_width(&row));
     area.queue_draw();
     refs.set_visible(!row.commit.refs.is_empty());
-    refs.set_text(&decorations(&row.commit.refs));
+    bind_refs(&refs, &row.commit.refs);
     summary.set_text(&row.commit.summary);
     meta.set_text(&format!(
         "{} · {}",
@@ -483,6 +511,41 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         true => format!("Not pulled yet\n\n{}", commit_tooltip(&row.commit)),
         false => commit_tooltip(&row.commit),
     }));
+}
+
+/// Put a commit's decorations on the labels [`log_row`] made: the first [`SHOWN_REFS`] as names,
+/// then `+N` for the rest on the last one, and any label left over hidden.
+///
+/// The classes are the `.git-ref` rules in `install_chrome_css`: HEAD's branch in the accent
+/// colour, a remote branch dimmer than a local one, a tag outlined. Set whole on every bind,
+/// because a recycled row still wears whatever the commit before it was.
+fn bind_refs(labels: &gtk::Box, refs: &[git::Ref]) {
+    let mut next = labels.first_child().and_downcast::<gtk::Label>();
+    for i in 0..=SHOWN_REFS {
+        let Some(label) = next else {
+            return;
+        };
+        next = label.next_sibling().and_downcast();
+        let (text, classes): (String, &[&str]) = match refs.get(i) {
+            Some(r) if i < SHOWN_REFS => (
+                r.name.clone(),
+                match (r.head, r.kind) {
+                    (true, _) => &["caption", "git-ref", "head"],
+                    (_, git::RefKind::RemoteBranch) => &["caption", "git-ref", "remote"],
+                    (_, git::RefKind::Tag) => &["caption", "git-ref", "tag"],
+                    _ => &["caption", "git-ref"],
+                },
+            ),
+            Some(_) => (
+                format!("+{}", refs.len() - SHOWN_REFS),
+                &["caption", "dim-label"],
+            ),
+            None => (String::new(), &[]),
+        };
+        label.set_visible(!text.is_empty());
+        label.set_text(&text);
+        label.set_css_classes(classes);
+    }
 }
 
 /// The graph: the lanes passing this row, the edges into and out of this commit, and the node.
@@ -540,15 +603,35 @@ fn lane_width(row: &LogRow) -> i32 {
     (widest as i32 + 1) * LANE + LANE
 }
 
-/// One context-menu item carrying its commit id as a `String` target rather than in a
-/// detailed-action string, which is the shape `fileops::item` settled on.
-fn menu_item(label: &str, action: &str, oid: &str) -> gio::MenuItem {
+/// One context-menu item carrying its commit id or branch name as a `String` target rather than
+/// in a detailed-action string, which is the shape `fileops::item` settled on.
+fn menu_item(label: &str, action: &str, target: &str) -> gio::MenuItem {
     let item = gio::MenuItem::new(Some(label), None);
     item.set_action_and_target_value(
         Some(&format!("{MENU_GROUP}.{action}")),
-        Some(&oid.to_variant()),
+        Some(&target.to_variant()),
     );
     item
+}
+
+/// The commit menu's branch items, as (label, action, branch): Switch to each local branch here
+/// that HEAD is not already on, and Check Out each remote one no local branch has the name of,
+/// which makes it one. A tag names no branch to be on, so it offers nothing.
+fn ref_items(refs: &[git::Ref], local: &[String]) -> Vec<(String, &'static str, String)> {
+    refs.iter()
+        .filter_map(|r| {
+            let (label, action) = match r.kind {
+                git::RefKind::LocalBranch if !r.head => ("Switch to", "switch"),
+                git::RefKind::RemoteBranch if !local.iter().any(|b| b == local_name(&r.name)) => {
+                    ("Check Out", "track")
+                }
+                _ => return None,
+            };
+            // A menu label is read for mnemonics, so a branch's own underscores are doubled.
+            let name = r.name.replace('_', "__");
+            Some((format!("{label} {name}"), action, r.name.clone()))
+        })
+        .collect()
 }
 
 fn now() -> i64 {
@@ -668,6 +751,31 @@ mod tests {
         assert_eq!(
             commit_tooltip(&c),
             "HEAD -> main, origin/main, tag: v1\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+        );
+    }
+
+    #[test]
+    fn the_commit_menu_offers_only_the_branches_there_is_somewhere_to_go_with() {
+        use git::RefKind::*;
+        let refs = [
+            ref_to("main", LocalBranch, true),
+            ref_to("side", LocalBranch, false),
+            ref_to("origin/main", RemoteBranch, false),
+            ref_to("origin/my_topic", RemoteBranch, false),
+            ref_to("v1", Tag, false),
+        ];
+        let local = ["main".to_string(), "side".to_string()];
+        assert_eq!(
+            ref_items(&refs, &local),
+            [
+                ("Switch to side".to_string(), "switch", "side".to_string()),
+                (
+                    "Check Out origin/my__topic".to_string(),
+                    "track",
+                    "origin/my_topic".to_string()
+                ),
+            ],
+            "not the branch HEAD is on, a remote one with a local twin, or a tag"
         );
     }
 
