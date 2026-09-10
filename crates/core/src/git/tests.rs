@@ -418,6 +418,78 @@ fn parse_refs_types_each_decoration_and_puts_heads_first() {
     assert!(parse_refs("").is_empty());
 }
 
+/// A commit with local branches `refs` on it, for the graph tests that need no repository.
+fn node(id: &str, parents: &[&str], refs: &[&str]) -> Commit {
+    Commit {
+        id: id.to_string(),
+        parents: parents.iter().map(|p| p.to_string()).collect(),
+        refs: refs
+            .iter()
+            .map(|name| Ref {
+                name: name.to_string(),
+                kind: RefKind::LocalBranch,
+                head: false,
+            })
+            .collect(),
+        author: String::new(),
+        time: 0,
+        summary: String::new(),
+        body: String::new(),
+    }
+}
+
+fn named(rows: &[LogRow]) -> Vec<(Option<&str>, Vec<&str>)> {
+    rows.iter()
+        .map(|r| {
+            let forks = r.forks.iter().map(String::as_str).collect();
+            (r.lane.as_deref(), forks)
+        })
+        .collect()
+}
+
+#[test]
+fn a_lane_is_named_by_its_tip_and_a_fork_names_the_lanes_that_end_there() {
+    let rows = lanes(vec![
+        node("m", &["b"], &["main"]),
+        node("s", &["b"], &["side"]),
+        node("b", &[], &[]),
+    ]);
+    check_invariants(&rows);
+    assert_eq!(
+        named(&rows),
+        [
+            (Some("main"), vec![]),
+            (Some("side"), vec![]),
+            (Some("main"), vec!["side"]),
+        ],
+        "the base carries on in main's column, and side branched from it"
+    );
+}
+
+#[test]
+fn a_lane_keeps_the_first_name_it_is_given_and_an_unnamed_one_forks_silently() {
+    // A merge whose second parent's branch is gone: its lane has no name, and the base it came
+    // from says nothing. A branch merged into main by fast-forward sits on main's own lane.
+    let rows = lanes(vec![
+        node("wip", &["merge"], &[]),
+        node("merge", &["a", "s"], &["main"]),
+        node("a", &["b"], &["done"]),
+        node("s", &["b"], &[]),
+        node("b", &[], &[]),
+    ]);
+    check_invariants(&rows);
+    assert_eq!(
+        named(&rows),
+        [
+            (None, vec![]),
+            (Some("main"), vec![]),
+            (Some("main"), vec![]),
+            (None, vec![]),
+            (Some("main"), vec![]),
+        ]
+    );
+}
+
 #[test]
 fn lanes_on_a_diamond_merge() {
     if !have_git() {
