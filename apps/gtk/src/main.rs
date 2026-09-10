@@ -709,7 +709,24 @@ impl App {
         self.sync_branch();
     }
 
-    fn restyle_terminals(&self) {
+    /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or
+    /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
+    /// the preview and the shells.
+    fn restyle_all(&self) {
+        for tab in self.open_tabs() {
+            tab.restyle();
+        }
+        for diff in self.diffs() {
+            diff.restyle();
+        }
+        // A PDF is rendered in the theme's colours rather than recoloured, so this is a re-render
+        // of whatever is on screen.
+        for pdf in self.pdfs() {
+            pdf.restyle();
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.restyle();
+        }
         for term in self.terminals() {
             term.restyle();
         }
@@ -985,8 +1002,10 @@ impl App {
         }
     }
 
-    /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
-    /// or a re-read from disk can have changed.
+    /// Put a config into effect in this window: everything an edit in the preferences dialog, a
+    /// Restore Defaults or a re-read from disk can have changed. Reached through
+    /// [`Shell::apply_config`], which does this for every window and puts the theme on screen
+    /// first.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
             // Both of these are a `hello` round trip on a remote vault, and this runs from the
@@ -1000,9 +1019,6 @@ impl App {
                 vault.set_ghost(ghost);
             });
         }
-        // Switching to or away from Solarized does not change the system's dark state, so the
-        // notify handler that usually restyles never fires here.
-        theme::apply(config.theme);
         self.apply_accels();
         for tab in self.open_tabs() {
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
@@ -1011,25 +1027,19 @@ impl App {
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
-            tab.restyle();
         }
         for diff in self.diffs() {
             diff.set_font(config.editor_font.as_deref(), self.zoom.get());
-            diff.restyle();
         }
-        // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
-        // though the system's dark state, and with it the notify handler, never moved.
         for pdf in self.pdfs() {
-            pdf.restyle();
             pdf.set_drawing_config(config.drawing.clone());
-        }
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.restyle();
         }
         if let Some(git) = self.git.get() {
             git.set_tree(config.git_tree);
         }
-        self.restyle_terminals();
+        // Switching to or away from Solarized does not change the system's dark state, so the
+        // notify handler that usually restyles never fires here.
+        self.restyle_all();
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -1041,22 +1051,26 @@ impl App {
             Ok(fresh) => {
                 *self.config.borrow_mut() = fresh;
                 let config = self.config.borrow().clone();
-                self.apply_config(&config);
+                if let Some(shell) = self.shell.upgrade() {
+                    shell.apply_config(&config);
+                }
             }
             Err(e) if accent_core::config::config_path().exists() => {
                 tracing::warn!("re-reading the config: {e:#}")
             }
             Err(_) => {}
         }
+        // Every window, not just the one the dialog is over: the config is the process's.
+        let shell = self.shell.clone();
         settings::present(
             &self.window,
             self.config.clone(),
             self.vault().map(|v| v.root().to_path_buf()),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |config: &Config| app.apply_config(config)
-            ),
+            move |config: &Config| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.apply_config(config);
+                }
+            },
         );
     }
 

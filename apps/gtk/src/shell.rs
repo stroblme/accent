@@ -102,6 +102,23 @@ impl Shell {
         }
     }
 
+    /// Put a config into effect in every window. There is one config per process, so a preference
+    /// changed in one window's dialog is the same preference in all of them.
+    pub fn apply_config(&self, config: &Config) {
+        // The theme is the display's rather than a window's, so it goes on once.
+        theme::apply(config.theme);
+        // Cloned out of the borrow: applying a config reaches a long way into each window.
+        let apps: Vec<Rc<App>> = self
+            .windows
+            .borrow()
+            .iter()
+            .map(|(_, app)| app.clone())
+            .collect();
+        for app in apps {
+            app.apply_config(config);
+        }
+    }
+
     /// Close Vault: hand this window's vault back and land on the start screen.
     ///
     /// The window goes rather than being emptied out. The vault, its worker thread and its WebKit
