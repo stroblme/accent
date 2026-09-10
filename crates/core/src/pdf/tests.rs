@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use super::ink::{Seg, flatten};
+use super::ink::{Seg, flatten, segments_of};
 use super::text::{item_offset, line_groups};
 use super::*;
 
@@ -56,6 +56,11 @@ fn tiny_pdf(highlight: bool) -> Vec<u8> {
             .to_string(),
         "<</Title(Child)/Parent 12 0 R/Dest[9 0 R /XYZ 0 60 0]>>".to_string(),
     ];
+    pdf_of(&objs)
+}
+
+/// A PDF of these objects, numbered from 1, the first being the catalog.
+fn pdf_of(objs: &[String]) -> Vec<u8> {
     let mut out = String::from("%PDF-1.4\n");
     let mut offsets = Vec::new();
     for (i, o) in objs.iter().enumerate() {
@@ -77,15 +82,40 @@ fn tiny_pdf(highlight: bool) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// One 200 x 100 pt page carrying an `/Ink` the way another editor may write one: its
+/// appearance stream draws a line from (10, 10) to (40, 40) in a box of its own, `[0 0 50 50]`,
+/// which the viewer fits onto the annotation's `/Rect` at (100, 20). Read back, the line is in
+/// that box's space and nowhere near where it shows.
+fn foreign_ink_pdf() -> Vec<u8> {
+    let stream = "1 0 0 RG 2 w 10 10 m 40 40 l S";
+    pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Ink/Rect[100 20 150 70]/C[1 0 0]/InkList[[110 30 140 60]]\
+         /AP<</N 5 0 R>>/F 4>>"
+            .to_string(),
+        format!(
+            "<</Type/XObject/Subtype/Form/BBox[0 0 50 50]/Length {}>>stream\n{stream}\nendstream",
+            stream.len()
+        ),
+    ])
+}
+
 /// Write the tiny PDF into a tempdir and open it, or `None` if pdfium is missing.
 fn open_tiny_with(highlight: bool) -> Option<(tempfile::TempDir, PdfDoc)> {
+    open_pdf(&tiny_pdf(highlight))
+}
+
+/// Write these bytes into a tempdir and open them, or `None` if pdfium is missing.
+fn open_pdf(bytes: &[u8]) -> Option<(tempfile::TempDir, PdfDoc)> {
     if !available() {
         eprintln!("skipping: no libpdfium in {}", library_dir().display());
         return None;
     }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tiny.pdf");
-    std::fs::write(&path, tiny_pdf(highlight)).unwrap();
+    std::fs::write(&path, bytes).unwrap();
     Some((dir, PdfDoc::open(&path).unwrap()))
 }
 
@@ -365,10 +395,9 @@ fn flatten_samples_a_bezier_and_a_matrix_inverts() {
         Seg::Close,
     ];
     let flat = flatten(&segs);
-    assert_eq!(flat.len(), 6, "{flat:?}");
-    assert!(flat.iter().all(|p| p.1 == 0.0));
-    assert_eq!(flat[4], (10.0, 0.0));
-    assert_eq!(flat[5], (0.0, 0.0));
+    assert!(flat.iter().all(|p| p.1 == 0.0), "{flat:?}");
+    assert_eq!(flat[flat.len() - 2], (10.0, 0.0));
+    assert_eq!(flat[flat.len() - 1], (0.0, 0.0));
 
     let s = [2.0, 0.0, 0.0, 0.5, 3.0, 4.0];
     let p = (7.0, -2.0);
@@ -438,6 +467,138 @@ fn a_quick_pass_takes_the_stroke_it_steps_over() {
     // A dot is taken by a pass beside it, not only by one that ends on it.
     assert!(swept(&[(10.0, 10.0)], (0.0, 12.0), (20.0, 12.0), 4.0));
     assert!(!hit(&[(10.0, 10.0)], (0.0, 12.0), 4.0));
+}
+
+/// A flattened curve stays on the curve between its points as well as at them, which is what lets
+/// a cut draw what it leaves as straight lines: a 100 pt circle's chords keep within a tenth of a
+/// point of its rim.
+#[test]
+fn a_flattened_circle_stays_on_its_rim() {
+    let segs = segments_of(Shape::Circle {
+        centre: (0.0, 0.0),
+        radius: 100.0,
+    });
+    let flat = flatten(&segs);
+    for w in flat.windows(2) {
+        let mid = ((w[0].0 + w[1].0) / 2.0, (w[0].1 + w[1].1) / 2.0);
+        let off = (mid.0.hypot(mid.1) - 100.0).abs();
+        assert!(off < 0.1, "{off} pt off the rim at {mid:?}");
+    }
+}
+
+/// A pass across a stroke takes what lies within its reach and leaves the rest as runs of their
+/// own; a pass that misses leaves the stroke alone, and a crumb is not worth keeping.
+#[test]
+fn a_cut_leaves_what_the_pass_did_not_cover() {
+    let near = |run: &[(f32, f32)], want: &[(f32, f32)]| {
+        run.len() == want.len()
+            && run
+                .iter()
+                .zip(want)
+                .all(|(a, b)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01)
+    };
+    let line = [(0.0, 0.0), (100.0, 0.0)];
+    // Straight down across the middle, taking 5 pt either side of the pass.
+    let runs = cut(&line, (50.0, -20.0), (50.0, 20.0), 5.0).unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert!(near(&runs[0], &[(0.0, 0.0), (45.0, 0.0)]), "{runs:?}");
+    assert!(near(&runs[1], &[(55.0, 0.0), (100.0, 0.0)]), "{runs:?}");
+    // Along the whole of it: nothing is left. Beside it: nothing is taken.
+    assert_eq!(
+        cut(&line, (-10.0, 0.0), (110.0, 0.0), 5.0),
+        Some(Vec::new())
+    );
+    assert_eq!(cut(&line, (0.0, 20.0), (100.0, 20.0), 5.0), None);
+    // Half a point left past the pass at the end is a crumb, and goes with it.
+    let runs = cut(&line, (96.0, -20.0), (96.0, 20.0), 3.5).unwrap();
+    assert!(
+        near(&runs[0], &[(0.0, 0.0), (92.5, 0.0)]) && runs.len() == 1,
+        "{runs:?}"
+    );
+
+    // A closed path cut once is one piece, running on round from the cut to the cut.
+    let rect = [
+        (0.0, 0.0),
+        (100.0, 0.0),
+        (100.0, 50.0),
+        (0.0, 50.0),
+        (0.0, 0.0),
+    ];
+    let runs = cut(&rect, (50.0, -20.0), (50.0, 20.0), 5.0).unwrap();
+    let round = [
+        (55.0, 0.0),
+        (100.0, 0.0),
+        (100.0, 50.0),
+        (0.0, 50.0),
+        (0.0, 0.0),
+        (45.0, 0.0),
+    ];
+    assert!(runs.len() == 1 && near(&runs[0], &round), "{runs:?}");
+}
+
+/// Cutting through pdfium: the line goes, and what is left of it comes back as two strokes of
+/// its own in the same style.
+#[test]
+fn a_cut_line_comes_back_in_two() {
+    let Some((_dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let before = doc.annotation_count(0).unwrap();
+    let style = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 255, 255],
+        multiply: false,
+    };
+    let line = Shape::Line {
+        a: (20.0, 50.0),
+        b: (180.0, 50.0),
+    };
+    doc.add_shape(0, line, style).unwrap();
+    let drawn = doc.inks(0).unwrap().remove(0);
+    assert!(drawn.cuttable);
+    // Down across x = 100 with a 4 pt eraser: it reaches the line's edge 1 pt further out.
+    let cut = doc.cut_ink(0, drawn.index, (100.0, 20.0), (100.0, 80.0), 4.0);
+    let cut = cut.unwrap().expect("the pass crossed the line");
+    assert_eq!(cut.left.len(), 2);
+    let inks = doc.inks(0).unwrap();
+    assert_eq!(doc.annotation_count(0).unwrap(), before + 2);
+    let ends: Vec<(f32, f32)> = inks
+        .iter()
+        .map(|i| (i.points[0].0, i.points[i.points.len() - 1].0))
+        .collect();
+    assert_eq!(inks.len(), 2, "{ends:?}");
+    assert!((ends[0].0 - 20.0).abs() < 0.01 && (ends[0].1 - 95.0).abs() < 0.01);
+    assert!((ends[1].0 - 105.0).abs() < 0.01 && (ends[1].1 - 180.0).abs() < 0.01);
+    assert!(inks.iter().all(|i| i.style == style), "{inks:?}");
+    // A pass that misses touches nothing.
+    let at = inks[0].index;
+    assert!(
+        doc.cut_ink(0, at, (0.0, 0.0), (10.0, 0.0), 4.0)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(doc.annotation_count(0).unwrap(), before + 2);
+}
+
+/// Ink drawn in a space of its own is read there, so a cut would draw its pieces somewhere else:
+/// it is not cuttable, and a cut leaves it alone.
+#[test]
+fn ink_drawn_in_its_own_space_is_not_cut() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf()) else {
+        return;
+    };
+    let inks = doc.inks(0).unwrap();
+    assert_eq!(inks.len(), 1, "{inks:?}");
+    assert!(
+        !inks[0].cuttable,
+        "{:?} is outside {:?}",
+        inks[0].points, inks[0].bounds
+    );
+    // Straight across the line where it was read, which a cuttable stroke would lose a piece to.
+    assert!(swept(&inks[0].points, (0.0, 75.0), (60.0, 75.0), 4.0));
+    let cut = doc.cut_ink(0, inks[0].index, (0.0, 75.0), (60.0, 75.0), 4.0);
+    assert!(cut.unwrap().is_none());
+    assert_eq!(doc.annotation_count(0).unwrap(), 1);
 }
 
 /// What `take_ink` keeps is enough for `redraw_ink` to draw the same stroke again, which is what
