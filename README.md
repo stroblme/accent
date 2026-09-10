@@ -11,7 +11,7 @@ Some features:
 - Git management and diff. view for resolving file conflicts
 - Remote vaults via dedicated ssh server
 - Integrated terminal
-- Multi-pane support, Android app and much more
+- Multi-pane support, Android app and much more (see [Roadmap](#Roadmap))
 
 TOOD: some screenshots or gif
 
@@ -21,11 +21,11 @@ Accent can do everything UNote did (and much more) and I didn't saw a reason for
 
 ## Installation
 
-### The lazy way
+The current implementation is focused on Linux/openSUSE (Gnome) and Android support.
+That being said, other distros and desktops will very likely work.
+Adding Windows or Mac support is a thing that will not happen any time soon (sorry).
 
 TODO: flatpak install and one-line install bash command
-
-### Build your own
 
 ```
 cargo build            # core + api + cli
@@ -34,9 +34,14 @@ cargo build -p accent  # GTK app
 cargo run --release -p accent -- testvault
 ```
 
-## Architecture
+## Roadmap
 
-TODO: brief description of the architecture and software stack
+- [ ] Debugger (DAP client)
+- [ ] MCP server
+- [ ] Bibtex library management
+- [ ] Export and printing notes
+- [ ] Pasting/ dropping images into .md files
+- [ ] Persistent terminals
 
 ## License & References
 
