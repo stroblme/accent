@@ -1016,7 +1016,12 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// hunks, hidden runs, buttons, and how many rows GTK lays out at a height other than the one
 /// the alignment asked for (0 is the claim) — before the first hunk is taken from Theirs, the
 /// hidden run is opened, and the same is read again. Then two blobs in a tab of their own, at a
-/// zoom, for the same numbers.
+/// zoom, for the same numbers. With the vault under git, last, the working tree against the index
+/// in the note's tab: whether it opened with the run before the first change folded and the caret
+/// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
+/// a scratch repository whose committed note differs from the fifty lines in a few places, one of
+/// them a long line where the drill writes a short one, so the change is padded and the view has
+/// room to scroll.
 fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -1090,20 +1095,106 @@ fn bench_compare(app: &Rc<App>, rel: &str) {
                         println!("bench compare_worktree no_repo");
                         return bench_quit(&app);
                     };
+                    // Where a note that has just been opened has its caret.
+                    tab.buffer.place_cursor(&tab.buffer.start_iter());
                     git.compare_worktree(&tab.rel());
                     glib::timeout_add_local_once(Duration::from_millis(800), move || {
-                        match tab.comparison() {
-                            Some(compare) => println!(
-                                "bench compare_worktree title={:?} {} first={:?}",
-                                tab.page.title(),
-                                bench_compare_line(&compare),
-                                compare.first_misaligned()
-                            ),
-                            None => println!("bench compare_worktree none"),
-                        }
-                        bench_quit(&app);
+                        let Some(compare) = tab.comparison() else {
+                            println!("bench compare_worktree none");
+                            return bench_quit(&app);
+                        };
+                        println!(
+                            "bench compare_worktree title={:?} {} first={:?}",
+                            tab.page.title(),
+                            bench_compare_line(&compare),
+                            compare.first_misaligned()
+                        );
+                        let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+                        println!(
+                            "bench compare_open leading_hidden={} caret_on_first_change={}",
+                            compare.hides_row(0),
+                            compare.opens_at() == Some(caret.offset())
+                        );
+                        let then = tab.clone();
+                        bench_compare_type(&tab, 0.5, move || {
+                            bench_compare_type(&then, 0.0, move || bench_quit(&app))
+                        });
                     });
                 });
+            });
+        });
+    });
+}
+
+/// Type one character into the first change on the comparing editor's side, `at` of the way
+/// along its line, and print what moved while the comparison caught up: how often the shared
+/// scroll range changed, whether the scroll position did, how many rows were off right after the
+/// keystroke and once it had settled, and how often something laid over the editor was hidden or
+/// shown. The claim is 0, false, 0, 0, 0. `padded` says whether the line carried alignment
+/// padding, which is the case the flash was about, and `scroll` is the position against the
+/// furthest it can go, which says whether it had room to drift.
+fn bench_compare_type(tab: &Rc<Tab>, at: f64, then: impl FnOnce() + 'static) {
+    let tab = tab.clone();
+    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+        let (Some(compare), Some(adj)) = (tab.comparison(), tab.view.vadjustment()) else {
+            return then();
+        };
+        let Some(line) = compare.opens_at().map(|o| tab.buffer.iter_at_offset(o)) else {
+            println!("bench compare_type at={at} no_change");
+            return then();
+        };
+        let base = tab.view.pixels_above_lines();
+        let padded = line
+            .tags()
+            .iter()
+            .any(|t| t.is_pixels_above_lines_set() && t.pixels_above_lines() > base);
+        let mut end = line;
+        end.forward_to_line_end();
+        let offset = line.offset() + ((end.offset() - line.offset()) as f64 * at) as i32;
+        let mark = tab.buffer.create_mark(None, &line, true);
+        tab.view.scroll_to_mark(&mark, 0.0, true, 0.0, 0.5);
+        tab.buffer.delete_mark(&mark);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            let (value, moves, flips) = (adj.value(), Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+            let count = |n: &Rc<Cell<u32>>| {
+                let n = n.clone();
+                move || n.set(n.get() + 1)
+            };
+            let tick = count(&moves);
+            let mut ids = vec![(
+                adj.clone().upcast::<glib::Object>(),
+                adj.connect_upper_notify(move |_| tick()),
+            )];
+            // The overlaid buttons sit one level down, on the view's text child.
+            let mut stack = vec![tab.view.clone().upcast::<gtk::Widget>()];
+            while let Some(widget) = stack.pop() {
+                let mut child = widget.first_child();
+                while let Some(c) = child {
+                    let tick = count(&flips);
+                    ids.push((
+                        c.clone().upcast(),
+                        c.connect_visible_notify(move |_| tick()),
+                    ));
+                    child = c.next_sibling();
+                    stack.push(c);
+                }
+            }
+            tab.buffer
+                .insert(&mut tab.buffer.iter_at_offset(offset), "x");
+            let now = compare.misaligned();
+            glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                println!(
+                    "bench compare_type at={at} padded={padded} upper_moves={} value_moved={} misaligned_now={now} misaligned={} flips={} scroll={value}/{}",
+                    moves.get(),
+                    adj.value() != value,
+                    compare.misaligned(),
+                    flips.get(),
+                    adj.upper() - adj.page_size(),
+                );
+                for (object, id) in ids {
+                    object.disconnect(id);
+                }
+                then();
             });
         });
     });
