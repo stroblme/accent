@@ -76,12 +76,9 @@ pub fn build_window(
     // would slide it away instead if that ever reads as a jump.
     let statusbar = statusbar::Bar::new();
 
-    // An empty vault window should say so rather than showing a blank rectangle.
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("text-x-generic-symbolic")
-        .title("No Note Open")
-        .description("Pick one in the sidebar, or press Ctrl+E to go to a file.")
-        .build();
+    // An empty vault window should say so rather than showing a blank rectangle; what it says is
+    // `App::sync_placeholder`'s.
+    let placeholder = adw::StatusPage::new();
     // The panes hang off a bin, so a split can swap the whole arrangement for a `GtkPaned` the
     // same way it swaps one branch of it (`panes::split`).
     let panes_root = adw::Bin::builder().child(first.widget()).build();
@@ -263,6 +260,7 @@ pub fn build_window(
         title,
         toasts,
         connection,
+        retry: Default::default(),
         connect,
         corpus: RefCell::new(Corpus::default()),
         statusbar,
@@ -311,6 +309,7 @@ pub fn build_window(
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
     }
+    app.sync_placeholder();
 
     // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
     // between its notes. A window without one is tabs and nothing else.
@@ -330,19 +329,14 @@ pub fn build_window(
         }
     }
 
-    // The banner's one button, which until now was a label with nothing behind it. `reconnect`
-    // returns before the connection exists and reports itself through the events, so the banner
-    // is what says it is working — and stops taking presses — until `Event::Connected` takes it
-    // down or `Event::Disconnected` puts a fresh reason on it.
+    // The banner's one button. `reconnect` returns before the connection exists and reports
+    // itself through the events, so the banner is what says it is working — and stops taking
+    // presses — until `Event::Connected` takes it down or `Event::Disconnected` puts a fresh
+    // reason, or the next automatic attempt's countdown, on it.
     app.connection.connect_button_clicked(glib::clone!(
         #[weak(rename_to = app)]
         app,
-        move |banner| {
-            let Some(vault) = app.vault() else { return };
-            banner.set_title("Reconnecting…");
-            banner.set_sensitive(false);
-            vault.reconnect();
-        }
+        move |_| app.reconnect_now()
     ));
 
     wire_pane(&app, &first);
@@ -369,10 +363,10 @@ pub fn build_window(
             {
                 tracing::warn!("saving config: {e:#}");
             }
-            // A remote vault that is still connecting has nothing to read a tab out of yet, so
-            // the restore waits for `Event::Connected` rather than filling the window with
-            // failures. Everything else restores here, before the first frame anyone looks at.
-            if !app.connecting() {
+            // A remote vault that has not answered has nothing to read a tab out of yet, so the
+            // restore waits for `Event::Connected` rather than filling the window with failures.
+            // Everything else restores here, before the first frame anyone looks at.
+            if !app.offline() {
                 app.restore_session();
             }
             if let Some(rel) = note {

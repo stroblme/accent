@@ -38,6 +38,7 @@ mod panes;
 mod pathfield;
 mod pdf;
 mod preview;
+mod reconnect;
 mod references;
 mod ring;
 mod save;
@@ -191,6 +192,8 @@ struct App {
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
     connection: adw::Banner,
+    /// The automatic reconnect that banner counts down to.
+    retry: reconnect::Retry,
     /// How far a remote vault has got in coming up, across the top of the document column. Only
     /// a remote vault's window puts it in the layout at all.
     connect: connect::Bar,
@@ -322,19 +325,20 @@ impl App {
         !doc::is_loose_key(key) && self.vault().is_some_and(|v| v.is_remote())
     }
 
-    /// Whether this window's vault is one on another machine that has not answered yet. Nothing
-    /// it holds can be read while that is true, and everything asked for while it was is asked
-    /// again on `Event::Connected`.
-    fn connecting(&self) -> bool {
+    /// Whether this window's vault is one on another machine that is not answering: still being
+    /// connected to, or dropped. Nothing it holds can be read while that is true, and everything
+    /// asked for meanwhile is asked again on `Event::Connected`.
+    fn offline(&self) -> bool {
         self.vault()
             .and_then(|v| v.remote())
-            .is_some_and(|r| r.state() == accent_api::remote::State::Connecting)
+            .is_some_and(|r| r.state() != accent_api::remote::State::Connected)
     }
 
     /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
     /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
     fn show_connection_banner(&self, why: &str) {
         self.connection.set_title(why);
+        self.connection.set_button_label(Some("Reconnect"));
         // Pressable again: an attempt that ended here is one the reader may want to repeat.
         self.connection.set_sensitive(true);
         self.connection.set_revealed(true);

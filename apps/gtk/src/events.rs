@@ -183,7 +183,13 @@ impl App {
             Event::Connected => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
-                self.hide_connection_banner();
+                self.connection_up();
+                // A new server has each document as the tab last tried to send it, and an edit
+                // refused while it was coming up is newer; the refresh sends that, and asks for
+                // the symbols and folds of a server that has only just heard of the tab.
+                for tab in self.open_tabs() {
+                    lang::resync(&tab);
+                }
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
@@ -201,7 +207,7 @@ impl App {
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
-                self.show_connection_banner(&why);
+                self.connection_down(&why);
             }
             Event::Error(message) => self.toast(&message),
             Event::Diagnostics { rel, items } => {

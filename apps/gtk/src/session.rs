@@ -249,6 +249,7 @@ impl App {
         if self.restored.replace(true) {
             return;
         }
+        self.sync_placeholder();
         let session = vault.session();
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
@@ -292,6 +293,43 @@ impl App {
                 RECENT_COMMANDS,
             );
         }
+    }
+
+    /// What the empty document column says. A remote window whose host has not answered yet
+    /// says how many stored tabs are waiting for it, because an empty window with a failed
+    /// connection over it otherwise reads as a session that was lost.
+    pub fn sync_placeholder(&self) {
+        let Some(page) = self
+            .content
+            .child_by_name("empty")
+            .and_downcast::<adw::StatusPage>()
+        else {
+            return;
+        };
+        let waiting = match !self.restored.get() && self.offline() {
+            true => self.vault().map_or(0, |v| v.session().open.len()),
+            false => 0,
+        };
+        let (icon, title, body) = match waiting {
+            0 => (
+                "text-x-generic-symbolic",
+                "No Note Open".to_string(),
+                "Pick one in the sidebar, or press Ctrl+E to go to a file.".to_string(),
+            ),
+            1 => (
+                "network-server-symbolic",
+                format!("Waiting for {}", self.host()),
+                "1 tab will open when it answers.".to_string(),
+            ),
+            n => (
+                "network-server-symbolic",
+                format!("Waiting for {}", self.host()),
+                format!("{n} tabs will open when it answers."),
+            ),
+        };
+        page.set_icon_name(Some(icon));
+        page.set_title(&title);
+        page.set_description(Some(&body));
     }
 
     /// Bring the tab holding `key` to the front, if there is one.
