@@ -1,7 +1,7 @@
 //! The preview pane's HTML: wikilinks become `accent://` anchors, math becomes MathML, and every
 //! block carries the source line it starts on.
 
-use super::links::{is_image, percent_encode, split_anchor};
+use super::links::{is_image, percent_encode, slugs, split_anchor};
 use super::options;
 use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
 
@@ -70,7 +70,8 @@ fn mathml(src: &str, display: bool) -> Option<String> {
 /// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
 ///
 /// Each block opens with an empty `<span data-line="N">`, so the preview can scroll to the line
-/// the editor's cursor is on.
+/// the editor's cursor is on, and each heading gets its [`slugs`] anchor as its `id`, so an
+/// in-note `[text](#slug)` scrolls there.
 pub fn to_html(text: &str) -> String {
     let mut evts: Vec<Event> = Vec::new();
     let mut link_wiki: Vec<bool> = Vec::new();
@@ -79,8 +80,26 @@ pub fn to_html(text: &str) -> String {
     // Block starts arrive in source order, so one forward pass over the newlines suffices.
     let mut counted = 0usize;
     let mut line = 1usize;
+    // Each heading's place in `evts` and its text, gathered the way `analyze` gathers
+    // `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
+    // anchor the editor resolves.
+    let mut headings: Vec<(usize, String)> = Vec::new();
+    let mut in_heading = false;
 
     for (ev, r) in Parser::new_ext(text, options()).into_offset_iter() {
+        match &ev {
+            Event::Start(Cm::Heading { .. }) => {
+                in_heading = true;
+                headings.push((evts.len(), String::new()));
+            }
+            Event::End(TagEnd::Heading(_)) => in_heading = false,
+            Event::Text(t) | Event::Code(t) if in_heading => {
+                if let Some((_, h)) = headings.last_mut() {
+                    h.push_str(t);
+                }
+            }
+            _ => {}
+        }
         if skip > 0 {
             match ev {
                 Event::Start(Cm::Image { .. }) => skip += 1,
@@ -163,6 +182,13 @@ pub fn to_html(text: &str) -> String {
         evts.extend(marker);
     }
 
+    let ids = slugs(headings.iter().map(|(_, h)| h.as_str()));
+    for ((at, _), slug) in headings.iter().zip(ids) {
+        if let Event::Start(Cm::Heading { id, .. }) = &mut evts[*at] {
+            *id = Some(slug.into());
+        }
+    }
+
     let mut out = String::new();
     pulldown_cmark::html::push_html(&mut out, evts.into_iter());
     out
@@ -201,7 +227,7 @@ mod tests {
 
         // ordinary markdown is untouched
         let h = bare("# Hi\n\n[x](y.md)\n");
-        assert!(h.contains("<h1>Hi</h1>"), "{h}");
+        assert!(h.contains("<h1 id=\"hi\">Hi</h1>"), "{h}");
         assert!(h.contains("<a href=\"y.md\">x</a>"), "{h}");
     }
 
@@ -243,6 +269,24 @@ mod tests {
         assert!(h.contains("src=\"Attachments/img%200.png\""), "{h}");
     }
 
+    /// A heading's `id` is the anchor `[text](#…)` completes and the editor resolves, so a click
+    /// on one lands where Ctrl+click does: a repeat takes its suffix, markup and embeds count.
+    #[test]
+    fn html_gives_each_heading_its_anchor() {
+        let src = "# Notes\n## Notes\n## `C++` and ![[logo.png]]\n";
+        let h = bare(src);
+        let ids: Vec<&str> = h
+            .match_indices(" id=\"")
+            .map(|(i, m)| {
+                let rest = &h[i + m.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+            .collect();
+        let headings = crate::markdown::analyze(src).headings;
+        assert_eq!(ids, slugs(headings.iter().map(|h| h.text.as_str())), "{h}");
+        assert_eq!(ids, ["notes", "notes-1", "c-and-logopng"]);
+    }
+
     /// The preview markers are tested on their own; strip them so the older assertions stay
     /// about the HTML the renderer produces.
     fn bare(text: &str) -> String {
@@ -267,7 +311,7 @@ mod tests {
             .collect();
         assert_eq!(lines, ["1", "3", "5", "7", "9"], "{h}");
         assert!(
-            h.contains("<h1><span data-line=\"1\"></span>Title</h1>"),
+            h.contains("<h1 id=\"title\"><span data-line=\"1\"></span>Title</h1>"),
             "{h}"
         );
         assert!(

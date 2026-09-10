@@ -602,7 +602,7 @@ fn block_network(content: &webkit6::UserContentManager) {
 }
 
 /// Route a navigation: wikilinks back to the app, web links to the browser, our own document load
-/// through, everything else nowhere.
+/// and an anchor into it through, everything else nowhere.
 fn decide(
     view: &webkit6::WebView,
     decision: &webkit6::PolicyDecision,
@@ -639,6 +639,8 @@ fn decide(
         Some(("file", _)) if action.navigation_type() != webkit6::NavigationType::LinkClicked => {
             return false;
         }
+        // An in-note `[text](#slug)`: WebKit scrolls to the heading `to_html` gave that `id`.
+        _ if view.uri().is_some_and(|page| same_page(&uri, &page)) => return false,
         // Only a click leaves the app: a note carrying `<meta http-equiv="refresh">` or a script
         // redirect must not be able to open a browser on its own.
         _ if (uri.starts_with("http://") || uri.starts_with("https://"))
@@ -655,6 +657,13 @@ fn decide(
     }
     decision.ignore();
     true
+}
+
+/// Whether `uri` is a place on the page `current` shows: the same document with a `#fragment`.
+/// `current` may carry a fragment of its own, from the last anchor followed.
+fn same_page(uri: &str, current: &str) -> bool {
+    let page = current.split_once('#').map_or(current, |(doc, _)| doc);
+    uri.split_once('#').is_some_and(|(doc, _)| doc == page)
 }
 
 // ----------------------------------------------------------------------------------- uri scheme
@@ -945,6 +954,20 @@ mod tests {
             Some(("open", "100%%zz".to_string()))
         );
         assert_eq!(accent_uri("https://example.com/x"), None);
+    }
+
+    #[test]
+    fn an_anchor_into_the_page_on_screen_stays_on_it() {
+        let page = "accent://file/Notes/";
+        assert!(same_page("accent://file/Notes/#intro", page));
+        // After the first jump the view's own URI carries the fragment it scrolled to.
+        assert!(same_page(
+            "accent://file/Notes/#outro",
+            "accent://file/Notes/#intro"
+        ));
+        assert!(!same_page("accent://file/Notes/Other.md#intro", page));
+        // No fragment is a load of the directory, not a place on the page.
+        assert!(!same_page(page, page));
     }
 
     #[test]
