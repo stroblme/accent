@@ -291,7 +291,8 @@ pub struct Preview {
 impl Preview {
     /// `resolve` turns a vault-relative asset path into a file on this machine; [`resolve_asset`]
     /// says which half of the containment guarantee is whose. `on_open` fires when the reader
-    /// clicks a wikilink, with the link target as written.
+    /// clicks a link into the vault, with a wikilink's target as written or a markdown link's
+    /// vault path, and the `#anchor` if there is one.
     ///
     /// ponytail: every `Preview` builds its own `WebContext`, so one per tab means one WebKit
     /// process group per tab. Sharing a context (and its registered scheme) across previews is the
@@ -601,8 +602,8 @@ fn block_network(content: &webkit6::UserContentManager) {
     );
 }
 
-/// Route a navigation: wikilinks back to the app, web links to the browser, our own document load
-/// and an anchor into it through, everything else nowhere.
+/// Route a navigation: links into the vault back to the app, web links to the browser, our own
+/// document load and an anchor into it through, everything else nowhere.
 fn decide(
     view: &webkit6::WebView,
     decision: &webkit6::PolicyDecision,
@@ -626,21 +627,22 @@ fn decide(
         .to_string();
 
     match accent_uri(&uri) {
-        // The anchor rides along for a PDF, which needs the page as well as the file. Rejoined
-        // here rather than kept by `accent_uri`, whose other host must go on dropping it: an
-        // asset is fetched by path and a `#` in one is not a place in a document.
-        Some(("open", target)) => match uri.split_once('#') {
-            Some((_, anchor)) if !anchor.is_empty() => {
-                on_open(&format!("{target}#{}", percent_decode(anchor)))
-            }
-            _ => on_open(&target),
-        },
         // Our own `load_html`, which arrives as the base URI and never as a click.
         Some(("file", _)) if action.navigation_type() != webkit6::NavigationType::LinkClicked => {
             return false;
         }
         // An in-note `[text](#slug)`: WebKit scrolls to the heading `to_html` gave that `id`.
         _ if view.uri().is_some_and(|page| same_page(&uri, &page)) => return false,
+        // A wikilink, or a markdown link the base URI has already made a vault path. The anchor
+        // rides along for a PDF, which needs the page as well as the file, and for a note, whose
+        // heading it names. Rejoined here rather than kept by `accent_uri`, whose asset requests
+        // must go on dropping it: an asset is fetched by path and a `#` in one is not a place.
+        Some(("open" | "file", target)) => match uri.split_once('#') {
+            Some((_, anchor)) if !anchor.is_empty() => {
+                on_open(&format!("{target}#{}", percent_decode(anchor)))
+            }
+            _ => on_open(&target),
+        },
         // Only a click leaves the app: a note carrying `<meta http-equiv="refresh">` or a script
         // redirect must not be able to open a browser on its own.
         _ if (uri.starts_with("http://") || uri.starts_with("https://"))
