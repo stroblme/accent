@@ -267,19 +267,37 @@ impl Shell {
     /// It used to land on the start screen, which then showed a button that opened this dialog —
     /// a screen in the way of the thing it was asking for. The start screen is still what a bare
     /// launch with no vault lands on, where it also lists the recent ones.
+    ///
+    /// A remote window's folders are on its host, so there the picker is the Open Remote form,
+    /// filled in with this window's address: a vault opened at a mistyped path is steered from
+    /// here. What it picks replaces this window — one window per vault, and the vault this one
+    /// was on is the one being corrected — unless it is the same vault, which only raises it.
     fn choose_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
-        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
         let parent = gtk_app.active_window();
+        let asking = parent.as_ref().and_then(|w| self.app_at(w));
+        if let Some(app) = asking
+            && let Some(vault) = app.vault()
+            && let Some(remote) = vault.remote()
+        {
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            let (from, here) = (app.window.downgrade(), vault.key().to_owned());
+            start::connect_dialog(&app.window, Some(remote.url()), move |address| {
+                let root = PathBuf::from(address);
+                let replace = root != here;
+                shell.open_from_start(&gtk_app, root);
+                // Once the new one is up, so the application never stands at zero windows.
+                if let Some(window) = from.upgrade().filter(|_| replace) {
+                    window.close();
+                }
+            });
+            return;
+        }
+        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
         dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
             // A dismissed chooser is an error here, and not one worth saying anything about.
-            let Some(path) = result.ok().and_then(|folder| folder.path()) else {
-                return;
-            };
-            shell.open_vault(&gtk_app, path, None);
-            // The start screen has done its job if it was what asked.
-            if let Some(window) = shell.start.upgrade() {
-                window.close();
+            if let Some(path) = result.ok().and_then(|folder| folder.path()) {
+                shell.open_from_start(&gtk_app, path);
             }
         });
     }
@@ -292,12 +310,8 @@ impl Shell {
             return;
         };
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-        start::connect_dialog(&window, move |address| {
-            shell.open_vault(&gtk_app, PathBuf::from(address), None);
-            // The start screen has done its job if it was what asked.
-            if let Some(window) = shell.start.upgrade() {
-                window.close();
-            }
+        start::connect_dialog(&window, None, move |address| {
+            shell.open_from_start(&gtk_app, PathBuf::from(address));
         });
     }
 
@@ -308,16 +322,20 @@ impl Shell {
         }
         let window = start::present(gtk_app, self.config.clone(), {
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |root| {
-                shell.open_vault(&gtk_app, root, None);
-                // The start window has done its job. It is reached through the shell rather than
-                // captured, which is what keeps the closure it lives in out of its own cycle.
-                if let Some(window) = shell.start.upgrade() {
-                    window.close();
-                }
-            }
+            move |root| shell.open_from_start(&gtk_app, root)
         });
         self.start.set(Some(&window));
+    }
+
+    /// Open a vault picked on the start screen or in one of the dialogs that stand in for it, and
+    /// close the start screen if one is up: it has done its job whichever window asked. It is
+    /// reached through the shell rather than captured, which keeps the start screen's own
+    /// callback out of a cycle with the window it lives in.
+    fn open_from_start(self: &Rc<Self>, gtk_app: &adw::Application, root: PathBuf) {
+        self.open_vault(gtk_app, root, None);
+        if let Some(window) = self.start.upgrade() {
+            window.close();
+        }
     }
 
     /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather

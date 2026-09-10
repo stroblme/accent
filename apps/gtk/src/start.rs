@@ -310,8 +310,12 @@ pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<St
 /// keeping Connect insensitive and saying why under the fields, rather than by closing on a
 /// failure the user would then have to reopen the dialog to correct. The start screen has no
 /// toast overlay, so there is nowhere else for that sentence to go anyway.
+///
+/// `at` fills the form in with a remote window's own address, for Open Folder… there: the host
+/// is the one the window is on, and the path is the one it was opened at, ready to be corrected.
 pub(crate) fn connect_dialog(
     window: &impl IsA<gtk::Widget>,
+    at: Option<&ssh::Url>,
     on_open_remote: impl Fn(String) + 'static,
 ) {
     let host = gtk::Entry::builder()
@@ -414,7 +418,17 @@ pub(crate) fn connect_dialog(
         }
     });
     // The entry is mapped once the dialog has been presented, not before.
-    host.grab_focus();
+    let Some(at) = at else {
+        host.grab_focus();
+        return;
+    };
+    // Filled in once the handlers are there, so Connect is enabled by the same check as typing.
+    host.set_text(&at.authority());
+    path.set_text(&at.path.to_string_lossy());
+    // The keyboard in the path, at its end, and the completion asked for straight away: the host
+    // is already named, so the folders next to a mistyped one are what this form is for.
+    crate::dialogs::focus_entry(&path, |path| path.set_position(-1));
+    pathfield::look_again(&path);
 }
 
 /// The host's folders, fetched over a connection the dialog makes for itself, so the path can be

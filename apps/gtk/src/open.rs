@@ -850,7 +850,9 @@ impl App {
     /// from outside opens as a loose tab in this window, marked as being from outside it.
     pub fn open_file_dialog(self: &Rc<Self>) {
         let dialog = gtk::FileDialog::builder().title("Open File").build();
-        if let Some(vault) = self.vault() {
+        // A remote vault's root is a path on its host: this machine's chooser cannot start there,
+        // and a local pick under the same path is not in the vault, so it always opens loose.
+        if let Some(vault) = self.vault().filter(|v| !v.is_remote()) {
             dialog.set_initial_folder(Some(&gio::File::for_path(vault.root())));
         }
         dialog.open(
@@ -864,7 +866,8 @@ impl App {
                     let Some(path) = result.ok().and_then(|file| file.path()) else {
                         return;
                     };
-                    let key = match app.vault().and_then(|v| path.strip_prefix(v.root()).ok()) {
+                    let local = app.vault().filter(|v| !v.is_remote());
+                    let key = match local.and_then(|v| path.strip_prefix(v.root()).ok()) {
                         Some(rel) => rel.to_string_lossy().into_owned(),
                         None => path.to_string_lossy().into_owned(),
                     };
