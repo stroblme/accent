@@ -739,10 +739,9 @@ impl Panel {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        // A repository whose status never came back still has its branches listed, and the list
-        // marks the one HEAD is on. A detached HEAD is on none, so that case stays empty until a
-        // status says where it is.
-        let name = head.map(|(name, _)| name).or_else(|| branches.head.clone());
+        let name = statuses
+            .get(selected)
+            .and_then(|s| head_name(s, Some(&branches)));
         let (rows, at) = branch_model(name, &branches);
         self.set_branches(&rows, at);
         tracing::debug!(
@@ -999,13 +998,16 @@ impl Panel {
     }
 
     /// The branch line for the repository `key` lives in, or for the selected one when `key` is
-    /// `None`. What the status bar shows.
+    /// `None`. What the status bar shows: while git has given the repository no status, the bare
+    /// name the chooser falls back on too ([`head_name`]).
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
-        branch_line(state.statuses.get(index)?)
+        let status = state.statuses.get(index)?;
+        let listed = (index == state.selected).then_some(&state.branches);
+        branch_line(status).or_else(|| head_name(status, listed))
     }
 
     /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
@@ -1400,6 +1402,16 @@ fn branch_parts(b: &Branch) -> Option<(String, String)> {
     Some((name, counts))
 }
 
+/// The branch HEAD is on, as the chooser and the status bar both name it: what the status says,
+/// or while git has given the repository no status, the branch its branch list marks. Only the
+/// selected repository's branches are read, so `listed` is `None` for any other; a detached HEAD
+/// marks none, and stays unnamed until a status says where it is.
+fn head_name(status: &Status, listed: Option<&git::Branches>) -> Option<String> {
+    branch_parts(&status.branch)
+        .map(|(name, _)| name)
+        .or_else(|| listed?.head.clone())
+}
+
 /// The branch row on one line, for anywhere with room for one string.
 fn branch_text(b: &Branch) -> Option<String> {
     branch_parts(b).map(|(name, counts)| match counts.is_empty() {
@@ -1585,6 +1597,28 @@ mod tests {
             merged,
             [on("kept"), Status::default(), on("fresh")],
             "kept, nothing to keep for a new one, and an answer beats what was kept"
+        );
+    }
+
+    #[test]
+    fn head_name_falls_back_on_the_branch_list_only_while_there_is_no_status() {
+        let branches = git::Branches {
+            head: Some("side".to_string()),
+            ..listed(&["main", "side"], &[])
+        };
+        let status = Status {
+            branch: on_main(None, 0, 0),
+            ..Status::default()
+        };
+        assert_eq!(head_name(&status, Some(&branches)).as_deref(), Some("main"));
+        assert_eq!(
+            head_name(&Status::default(), Some(&branches)).as_deref(),
+            Some("side")
+        );
+        assert_eq!(
+            head_name(&Status::default(), None),
+            None,
+            "another repository's branches are not read"
         );
     }
 
