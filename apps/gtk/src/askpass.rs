@@ -9,7 +9,7 @@
 //! ssh sets when the answer it wants is `yes` or `no` — an unknown host key — rather than a secret:
 //! answering that one with a password field hands ssh a passphrase where it waits for a word.
 
-use crate::dialogs::alert;
+use crate::dialogs::{alert, choose};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
@@ -107,21 +107,17 @@ fn present(
     // answer is in is what ends it.
     let hold = app.hold();
     let answer = answer.clone();
-    dialog.choose(
-        None::<&gtk::Widget>,
-        gio::Cancellable::NONE,
-        move |response| {
-            *answer.borrow_mut() = match (response == CONFIRM, &entry) {
-                (true, Some(entry)) => Some(entry.text().to_string()),
-                (true, None) => Some(YES.to_string()),
-                // A refused confirmation is still an answer ssh wants to hear; a refused secret is
-                // not, and the non-zero exit is what tells ssh to give up rather than retry.
-                (false, None) => Some(NO.to_string()),
-                (false, Some(_)) => None,
-            };
-            drop(hold);
-        },
-    );
+    choose(&dialog, None::<&gtk::Widget>, move |response| {
+        *answer.borrow_mut() = match (response == CONFIRM, &entry) {
+            (true, Some(entry)) => Some(entry.text().to_string()),
+            (true, None) => Some(YES.to_string()),
+            // A refused confirmation is still an answer ssh wants to hear; a refused secret is
+            // not, and the non-zero exit is what tells ssh to give up rather than retry.
+            (false, None) => Some(NO.to_string()),
+            (false, Some(_)) => None,
+        };
+        drop(hold);
+    });
 }
 
 /// The unknown host key. ssh accepts `yes`, and reads anything else as a refusal.

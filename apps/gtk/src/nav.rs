@@ -258,6 +258,17 @@ impl App {
         self.focus_document(to);
     }
 
+    /// A tab dropped on the middle of `pane`: at the end of its bar and with the keyboard, where
+    /// [`Self::move_tab`] leaves one. libadwaita has already attached and selected it, at the
+    /// front, the one position `create-window` can put a page in.
+    pub fn move_in(&self, pane: &Pane, page: &adw::TabPage) {
+        if !pane.has(page) {
+            return;
+        }
+        pane.tabs.reorder_last(page);
+        self.focus_document(pane);
+    }
+
     /// A note from the tree, opened in a pane of its own beside `at`. Unlike [`Self::split_page`]
     /// this always splits: the note may not be open at all, so there is something new to show.
     pub fn open_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side, rel: &str) {
@@ -356,23 +367,29 @@ impl App {
     /// Put the drop sheets in or out of the picture in every pane at once: a drag that started
     /// over one pane has to be droppable on all of them.
     pub fn set_drop_active(&self, on: bool) {
+        // A drag starting is where one that was aimed and never spent stops mattering.
+        if on && let Some(shell) = self.shell.upgrade() {
+            shell.landing.take();
+        }
         for pane in self.panes.borrow().iter() {
             pane.set_drop_active(on);
         }
     }
 
-    /// A tab or a vault path let go over `pane`. `true` when it was taken — never for a tab,
-    /// which is declined on purpose so that `create-window` fires; see [`Landing`].
+    /// A tab or a vault path let go over `pane`. `true` when it was taken; a tab is taken but
+    /// only recorded, and `create-window` moves it (see [`Landing`]).
     pub fn dropped(self: &Rc<Self>, pane: &Rc<Pane>, zone: Zone, value: &glib::Value) -> bool {
         if value.get::<adw::TabPage>().is_ok() {
-            // Recorded, and deliberately declined: a dragged page has left its view, and
-            // declining is what summons the `create-window` that can give it one again. Whose
-            // tab it is does not matter here — `Shell::adopt_page` sorts that out from
-            // `page-attached` once libadwaita has attached it.
+            // A dragged page has left its view, and libadwaita gives it one again through the
+            // `create-window` it asks for once any drop outside its own tab bars has finished.
+            // Declining used to be how that was summoned, which only held on X11: on Wayland the
+            // compositor cancels a declined drop, and libadwaita takes a cancel as the tab going
+            // back where it came from. Whose tab it is does not matter here —
+            // `Shell::adopt_page` sorts that out from `page-attached` once it is attached.
             if let Some(shell) = self.shell.upgrade() {
                 shell.aim(self, pane, zone);
             }
-            return false;
+            return true;
         }
         let Ok(rel) = value.get::<String>() else {
             return false;

@@ -201,9 +201,9 @@ impl App {
         dialog.set_close_response("cancel");
 
         let (app, tab) = (self.clone(), tab.clone());
-        dialog.choose(
+        dialogs::choose(
+            &dialog,
             Some(&self.window),
-            gio::Cancellable::NONE,
             move |response| match response.as_str() {
                 "compare" => app.compare_with_disk(&tab),
                 "overwrite" => match app.write_tab(&tab, None) {
@@ -246,27 +246,23 @@ impl App {
         dialog.set_close_response("cancel");
 
         let (app, tab) = (self.clone(), tab.clone());
-        dialog.choose(
-            Some(&self.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                let close = match response.as_str() {
-                    "discard" => {
-                        tab.discard();
-                        true
+        dialogs::choose(&dialog, Some(&self.window), move |response| {
+            let close = match response.as_str() {
+                "discard" => {
+                    tab.discard();
+                    true
+                }
+                "overwrite" => match app.write_tab(&tab, None) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        app.cannot("save", e);
+                        false
                     }
-                    "overwrite" => match app.write_tab(&tab, None) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            app.cannot("save", e);
-                            false
-                        }
-                    },
-                    _ => false,
-                };
-                after(&app, close);
-            },
-        );
+                },
+                _ => false,
+            };
+            after(&app, close);
+        });
     }
 
     /// Forget a page that is really closing. Called on every path that closes one, because

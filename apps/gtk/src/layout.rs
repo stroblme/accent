@@ -360,8 +360,8 @@ impl App {
     }
 
     /// Fade what the focus mode preference says to: nothing at None; the chrome at Medium; and at
-    /// High the chrome, every pane but the one being written in, and the text away from the caret
-    /// (DESIGN.md, Chrome auto-hide).
+    /// High the chrome, the window's dividers, every pane but the one being written in, and the
+    /// text away from the caret (DESIGN.md, Chrome auto-hide).
     pub fn hide_chrome(&self) {
         let level = self.config.borrow().focus_mode;
         if level == FocusMode::None || self.chrome_hidden.get() || self.chrome_busy() {
@@ -374,6 +374,9 @@ impl App {
         if level != FocusMode::High {
             return;
         }
+        // The lines between the panes and along their edges too, which would otherwise frame the
+        // panes that are receding (`.dividers-hidden` in `install_chrome_css`).
+        self.window.add_css_class("dividers-hidden");
         let active = self.pane();
         for pane in self.panes.borrow().iter() {
             if !Rc::ptr_eq(pane, &active) {
@@ -395,6 +398,7 @@ impl App {
         for widget in self.chrome() {
             widget.remove_css_class("chrome-hidden");
         }
+        self.window.remove_css_class("dividers-hidden");
         for pane in self.panes.borrow().iter() {
             pane.widget().remove_css_class("chrome-away");
         }

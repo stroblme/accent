@@ -399,7 +399,7 @@ pub(crate) fn connect_dialog(
         entry.connect_changed(move |_| check());
     }
 
-    dialog.choose(Some(window), gio::Cancellable::NONE, {
+    crate::dialogs::choose(&dialog, Some(window), {
         let (host, path) = (host.clone(), path.clone());
         move |response| {
             probe.close();

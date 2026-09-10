@@ -816,9 +816,15 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
-        // What search leaves out: git's answer and the `[search] exclude` list, as one set. This
-        // is where the two meet, and it is also what gives a vault with no repository an exclusion
-        // mechanism at all — a refresh lands here whether or not it found one.
+        self.sync_excluded(git);
+        self.after_git_changed(git);
+    }
+
+    /// What search leaves out: git's answer and the `[search] exclude` list, as one set. This is
+    /// where the two meet, so a git refresh and a change to the list both come here, and it is
+    /// also what gives a vault with no repository an exclusion mechanism at all — a refresh lands
+    /// whether or not it found one.
+    fn sync_excluded(self: &Rc<Self>, git: &git::Panel) {
         let mut excluded = git.ignored();
         excluded.extend(self.config.borrow().search.exclude.iter().cloned());
         // Only where it really moved. A refresh lands on every save and the write below is a few
@@ -827,7 +833,7 @@ impl App {
         // the question can be asked at all, and it starts as `None` rather than empty: the first
         // refresh of a window has to clear whatever the last session recorded.
         if self.excluded.borrow().as_ref() == Some(&excluded) {
-            return self.after_git_changed(git);
+            return;
         }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(excluded.clone());
@@ -838,7 +844,7 @@ impl App {
         // without the box being touched.
         let Some(vault) = self.vault.clone() else {
             self.excluded.replace(Some(excluded));
-            return self.after_git_changed(git);
+            return;
         };
         let ignored: Vec<String> = excluded.iter().cloned().collect();
         let weak = Rc::downgrade(self);
@@ -859,7 +865,6 @@ impl App {
                 }
             }
         });
-        self.after_git_changed(git);
     }
 
     /// What follows every git refresh, whether or not the exclusion set moved with it.
@@ -908,18 +913,14 @@ impl App {
         }
     }
 
-    /// The minimap is a global preference with no accelerator, so the palette and the preferences
-    /// dialog are the two ways to it. Both end up here.
-    fn toggle_minimap(self: &Rc<Self>) {
-        let on = {
+    /// The palette's Toggle Minimap. The switch in Preferences is the other way to the same
+    /// preference, and both reach every window.
+    fn toggle_minimap(&self) {
+        {
             let mut config = self.config.borrow_mut();
             config.minimap = !config.minimap;
-            config.minimap
-        };
-        settings::save(&self.config.borrow());
-        for tab in self.open_tabs() {
-            tab.set_minimap(on);
         }
+        self.config_changed();
     }
 
     /// Hand a URL to the desktop.
@@ -1002,10 +1003,22 @@ impl App {
         }
     }
 
+    /// Save the config this window has just changed and put it into effect in every open window.
+    /// The route for every surface that writes a preference outside the dialog — Toggle Minimap,
+    /// the Git pane's tree toggle, a drawing ring pick, a rebound chord, Leave Out of Search — so
+    /// none of them is left acting on its own window alone.
+    fn config_changed(&self) {
+        let config = self.config.borrow().clone();
+        settings::save(&config);
+        if let Some(shell) = self.shell.upgrade() {
+            shell.apply_config(&config);
+        }
+    }
+
     /// Put a config into effect in this window: everything an edit in the preferences dialog, a
-    /// Restore Defaults or a re-read from disk can have changed. Reached through
-    /// [`Shell::apply_config`], which does this for every window and puts the theme on screen
-    /// first.
+    /// Restore Defaults, a re-read from disk or [`Self::config_changed`] can have changed.
+    /// Reached through [`Shell::apply_config`], which does this for every window and puts the
+    /// theme on screen first.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
             // Both of these are a `hello` round trip on a remote vault, and this runs from the
@@ -1036,6 +1049,11 @@ impl App {
         }
         if let Some(git) = self.git.get() {
             git.set_tree(config.git_tree);
+            // Only once git has answered: the first answer reads the list itself, and a set
+            // written before it would drop what the last session left out until it lands.
+            if self.excluded.borrow().is_some() {
+                self.sync_excluded(git);
+            }
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.

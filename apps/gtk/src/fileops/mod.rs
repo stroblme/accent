@@ -21,7 +21,7 @@ pub use transfer::{download, upload};
 use self::paths::{
     already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
-use crate::dialogs::{alert, form, labelled};
+use crate::dialogs::{alert, choose, form, labelled};
 use crate::pathfield::{completions, look_again, path_field};
 // Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
 // this module, which is where they used to live.
@@ -112,7 +112,7 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
     let dialog = name_dialog("New File", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -159,7 +159,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
     let dialog = name_dialog("New Folder", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -211,7 +211,7 @@ pub fn new_from_template(ops: &Rc<Ops>) {
 
     let dialog = name_dialog("New from Template", "Create", &form);
     let (ops, window) = (ops.clone(), ops.window.clone());
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -248,7 +248,7 @@ pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
 
     let dialog = name_dialog("Insert Template", "Insert", &form);
     let (ops, window, title) = (ops.clone(), ops.window.clone(), title.to_string());
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -306,7 +306,7 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let note = is_markdown(&current);
     let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -352,7 +352,7 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
         to.to_string(),
         ops.window.clone(),
     );
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response == "rename" {
             plan(&ops, &from, &to, verb(&from, &to));
         }
@@ -419,15 +419,13 @@ fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
     );
 
     let (ops, window) = (ops.clone(), ops.window.clone());
-    dialog.choose(
-        Some(&window),
-        gio::Cancellable::NONE,
-        move |response| match response.as_str() {
+    choose(&dialog, Some(&window), move |response| {
+        match response.as_str() {
             "keep" => apply(&ops, plan, false, verb),
             "update" => apply(&ops, plan, true, verb),
             _ => {}
-        },
-    );
+        }
+    });
 }
 
 /// Body of the "Update Links?" dialog: the count, then the paths, then what it stopped listing.
@@ -582,7 +580,7 @@ fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
         rel.to_string(),
         ops.window.clone(),
     );
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != "delete" {
             return;
         }

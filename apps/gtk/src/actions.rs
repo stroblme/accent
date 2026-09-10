@@ -501,8 +501,9 @@ impl App {
         fill_captured(&self.captured, &captured);
     }
 
-    /// Store an accelerator override for `action` and put it into effect at once. `None` drops the
-    /// override, so the action goes back to what [`ACTIONS`] says. Returns what is in force after.
+    /// Store an accelerator override for `action` and put it into effect at once, in every
+    /// window. `None` drops the override, so the action goes back to what [`ACTIONS`] says.
+    /// Returns what is in force after.
     pub fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
         {
             let mut config = self.config.borrow_mut();
@@ -511,8 +512,7 @@ impl App {
                 None => config.shortcuts.remove(action),
             };
         }
-        settings::save(&self.config.borrow());
-        self.apply_accels();
+        self.config_changed();
         accels_for(&self.config.borrow(), action)
     }
 }
