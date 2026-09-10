@@ -240,6 +240,10 @@ pub fn build_window(
         .resize_end_child(true)
         .position(Session::default().sidebar_width)
         .build();
+    // The handle between the columns is the paned's own pixel, not either column's, so the paned
+    // is flat too: at High, where the handle fades (`.dividers-hidden`), the gap it leaves would
+    // otherwise be a stripe of the window's background.
+    split.add_css_class("accent-flat");
 
     let window = adw::ApplicationWindow::builder()
         .application(gtk_app)
@@ -800,7 +804,11 @@ thread_local! {
 /// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
 /// shifts and neither the focus order nor accessibility notices; with `gtk-enable-animations` off
 /// the class still toggles but there is no transition, so the chrome snaps instead of fading and
-/// nothing becomes unreachable. `.accent-flat` puts the two columns on the note's own background
+/// nothing becomes unreachable. `.dividers-hidden` is High's addition, on the window: every paned
+/// handle, and the undershoot line a scrolled window draws where it meets a flat bar, since a
+/// divider left at full strength frames the panes that recede. The undershoot is a CSS node of the
+/// scrolled window's own rather than a widget, so it takes its line and gradient away where
+/// everything else takes opacity. `.accent-flat` puts the two columns on the note's own background
 /// so nothing bands against it, on a class of ours rather than on `headerbar` globally.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
@@ -867,8 +875,10 @@ fn install_chrome_css() {
         };
         let fade = match gtk::Settings::for_display(&display).is_gtk_enable_animations() {
             true => format!(
-                ".chrome-fade {{ transition: opacity {}ms ease; }} ",
-                fade::RAMP_MS
+                ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
+                 scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
+                   background-image {ms}ms ease; }} ",
+                ms = fade::RAMP_MS
             ),
             false => String::new(),
         };
@@ -876,6 +886,9 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-away {{ opacity: {away}; }} \
+             .dividers-hidden paned > separator {{ opacity: 0; }} \
+             .dividers-hidden scrolledwindow > undershoot {{ box-shadow: none; \
+               background-image: none; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
