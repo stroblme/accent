@@ -760,9 +760,11 @@ fn branches_lists_the_local_ones_and_checkout_refuses_to_clobber() {
         listed.remote.is_empty(),
         "no remote, no remote-tracking branches"
     );
+    assert_eq!(listed.head.as_deref(), Some("main"));
 
     checkout(&repo, "side").unwrap();
     assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("side"));
+    assert_eq!(branches(&repo).unwrap().head.as_deref(), Some("side"));
 
     // A change that the other branch would overwrite is git's own refusal, and the whole
     // point of driving `git switch`: nothing here decides whether a checkout is safe.
@@ -801,6 +803,7 @@ fn checkout_commit_detaches_head_and_a_branch_takes_it_back() {
     let detached = status(&repo).unwrap().branch;
     assert_eq!(detached.head, None, "no branch to be on");
     assert_eq!(detached.oid.as_deref(), Some(first.as_str()));
+    assert_eq!(branches(&repo).unwrap().head, None, "HEAD is on no branch");
 
     checkout(&repo, "main").unwrap();
     assert_eq!(status(&repo).unwrap().branch.head.as_deref(), Some("main"));
@@ -863,11 +866,12 @@ fn unmerged_is_gits_own_wording() {
 #[test]
 fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
     let listed = parse_branches(
-        b"refs/heads/main\0\nrefs/heads/feature/x\0\n\
-          refs/remotes/origin/HEAD\0refs/remotes/origin/main\nrefs/remotes/origin/main\0\n",
+        b"refs/heads/main\0\0 \nrefs/heads/feature/x\0\0*\n\
+          refs/remotes/origin/HEAD\0refs/remotes/origin/main\0 \nrefs/remotes/origin/main\0\0 \n",
     );
     assert_eq!(listed.local, ["main", "feature/x"]);
     assert_eq!(listed.remote, ["origin/main"], "origin/HEAD is a pointer");
+    assert_eq!(listed.head.as_deref(), Some("feature/x"));
     assert_eq!(parse_branches(b""), Branches::default());
 }
 

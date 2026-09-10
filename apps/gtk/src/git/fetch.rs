@@ -102,7 +102,8 @@ pub(super) struct Fetched {
     /// under another's index, and the refresh the chooser scheduled is the one that lands.
     pub(super) selected: usize,
     pub(super) repos: Option<Vec<Repo>>,
-    pub(super) statuses: Vec<Status>,
+    /// One per repository asked about, `None` where git did not answer.
+    pub(super) statuses: Vec<Option<Status>>,
     pub(super) commits: Option<Vec<Commit>>,
     pub(super) branches: Option<git::Branches>,
     pub(super) submodules: Option<Vec<Submodule>>,
@@ -125,15 +126,16 @@ pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Rep
         None => None,
     };
     let against: &[Repo] = repos.as_deref().unwrap_or(&known);
-    let statuses: Vec<Status> = against
+    let statuses: Vec<Option<Status>> = against
         .iter()
         .map(|repo| match vault.git_status(repo) {
-            Ok(status) => status,
+            Ok(status) => Some(status),
             Err(e) => {
-                // A repository git will not talk about costs an empty row, not a dialog: it may
-                // be mid-rebase, on a network mount, or gone since discovery.
+                // A repository git will not talk about keeps the status it last had and raises no
+                // dialog: it may be mid-rebase, on a network mount, gone since discovery, or on a
+                // host too busy with its first index to answer within the deadline.
                 tracing::debug!("git status in {}: {e}", repo.root.display());
-                Status::default()
+                None
             }
         })
         .collect();
@@ -164,9 +166,13 @@ pub(super) fn fetch(vault: &Vault, selected: usize, depth: Depth, known: Vec<Rep
     };
     // `behind` is the count and this is the same set by oid, so one implies the other: nothing to
     // pull means no `rev-list` at all, which is what keeps a refresh on every save as cheap as it
-    // was. A non-zero count also means there is an upstream, which the range needs.
-    let behind = statuses.get(at).is_some_and(|s| s.branch.behind > 0);
-    let incoming = head.map(|repo| match behind {
+    // was. A non-zero count also means there is an upstream, which the range needs. Without a
+    // status there is no count, and the marks stay as they were.
+    let behind = statuses
+        .get(at)
+        .and_then(Option::as_ref)
+        .map(|s| s.branch.behind > 0);
+    let incoming = head.zip(behind).map(|(repo, behind)| match behind {
         true => vault
             .git_incoming(repo)
             .unwrap_or_else(|e| {
