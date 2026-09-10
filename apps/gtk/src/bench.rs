@@ -1068,7 +1068,8 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
 /// a scratch repository whose committed note differs from the fifty lines in a few places, one of
 /// them a long line where the drill writes a short one, so the change is padded and the view has
-/// room to scroll.
+/// room to scroll. With that long line the first, typing at the start of the change is typing at
+/// the start of the buffer, which is the one place a padding tag has no newline before it.
 fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();

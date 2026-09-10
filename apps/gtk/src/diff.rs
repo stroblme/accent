@@ -500,7 +500,8 @@ fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32) {
 /// lands inside them — text inserted where a tag begins does not take the tag — and so does the
 /// character left when the first is deleted, where tags on the first character alone were lost
 /// to either edit and the line was laid out bare for a frame. The paragraph's own newline is left
-/// out because a tag ending at the next line's start is taken by text typed there.
+/// out because a tag ending at the next line's start is taken by text typed there. The first
+/// paragraph has no newline before it: [`reclaim_start`] makes up for that.
 fn pad(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -529,6 +530,40 @@ fn pad(
         }
         if px > 0 {
             buffer.apply_tag(&pad_tag(buffer, prefix, base + px), &start, &end);
+        }
+    }
+}
+
+fn is_pad(tag: &gtk::TextTag) -> bool {
+    tag.name()
+        .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
+}
+
+/// Put text typed at the very start of the buffer back under the first paragraph's padding.
+///
+/// That paragraph has no newline before it for [`pad`] to start its tags from, so a character
+/// typed ahead of it went in outside them: GTK laid the line out bare for a frame, and the
+/// relayout, finding no padding on its first character, measured it at the height it had last
+/// been laid out at, padding and all. Stretched back over what was typed, the tags cover the
+/// first character again and say what GTK last laid the line out with. The first pad tag that
+/// begins inside the line is the one the typing moved: the next paragraph's begins at the
+/// line's own newline. A first line that was empty is left alone, for that reason: its tags sit
+/// on that newline beside the next paragraph's.
+fn reclaim_start(buffer: &sourceview5::Buffer) {
+    let start = buffer.start_iter();
+    if start.tags().iter().any(is_pad) {
+        return;
+    }
+    let mut end = start;
+    end.forward_to_line_end();
+    let mut at = start;
+    while at.forward_to_tag_toggle(None::<&gtk::TextTag>) && at < end {
+        let moved: Vec<gtk::TextTag> = at.toggled_tags(true).into_iter().filter(is_pad).collect();
+        if !moved.is_empty() {
+            for tag in &moved {
+                buffer.apply_tag(tag, &start, &at);
+            }
+            return;
         }
     }
 }
@@ -735,6 +770,14 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
+        // Text typed ahead of the first line's padding goes back under it on the keystroke itself:
+        // above 16 KB the editor refreshes the comparison only on its debounce, and the line
+        // would be laid out bare until then.
+        if let Some(mine) = editable {
+            let buffer = this.pane(mine).buffer.clone();
+            let id = buffer.connect_changed(reclaim_start);
+            connect(buffer.upcast(), id);
+        }
 
         for pane in &this.panes {
             *pane.pool.owner.borrow_mut() = this.weak.clone();
@@ -986,10 +1029,7 @@ impl Compare {
             let (start, end) = pane.buffer.bounds();
             let mut pads = Vec::new();
             pane.buffer.tag_table().foreach(|tag| {
-                if tag
-                    .name()
-                    .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
-                {
+                if is_pad(tag) {
                     pads.push(tag.clone());
                 }
             });
@@ -1042,6 +1082,11 @@ impl Compare {
         let views = [&self.panes[0].view, &self.panes[1].view];
         if !views.iter().all(|v| v.is_mapped()) {
             return;
+        }
+        // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
+        // `changed` handler.
+        if let Some(mine) = self.editable {
+            reclaim_start(&self.pane(mine).buffer);
         }
         // The companion takes the editor's page margins, so the first row of each starts level.
         if let Some(mine) = self.editable {
