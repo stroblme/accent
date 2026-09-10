@@ -9,7 +9,7 @@ use accent_core::path::basename;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -74,15 +74,23 @@ fn decode_str(s: &str) -> Option<Row> {
     })
 }
 
-/// `.obsidian`, `.stfolder`, `.git`, … and Syncthing conflicts never belong in the tree.
+/// Whether the tree leaves a listed row out: a Syncthing conflict always, and a dot-named one
+/// while Show Hidden Files (`show_hidden`) is off.
 ///
-/// Only asked of the rows the index holds: a row read off the disk is one of the skipped trees,
-/// which the walk has already filtered (`.git` and `.trash` are out of reach there too), and
-/// hiding the dot-named ones would hide `.venv` and four of the six names in `SKIP_DIRS`.
-pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
-    row_kind == FileKind::Conflict
-        || rel.split('/').any(|c| c.starts_with('.'))
-        || rel.rsplit('/').next().is_some_and(is_sync_conflict)
+/// A row the index does not hold is never left out: it is one of the skipped trees, which the walk
+/// has already filtered, and hiding the dot-named ones would hide `.venv` and four of the six names
+/// in `SKIP_DIRS`. `.git` and `.trash` never get this far whatever the toggle says, because
+/// neither the index nor that listing ever holds them (`walk::ALWAYS_SKIP_DIRS`).
+pub fn hidden(row_kind: FileKind, rel: &str, indexed: bool, show_hidden: bool) -> bool {
+    indexed
+        && (row_kind == FileKind::Conflict
+            || (!show_hidden && dot_named(rel))
+            || rel.rsplit('/').next().is_some_and(is_sync_conflict))
+}
+
+/// A dot-named path, or one inside a dot-named folder: what a file manager calls hidden.
+fn dot_named(rel: &str) -> bool {
+    rel.split('/').any(|c| c.starts_with('.'))
 }
 
 /// How many listings of each directory ("" is the root) one tree has asked for.
@@ -93,6 +101,10 @@ pub fn hidden(row_kind: FileKind, rel: &str) -> bool {
 /// would put back the rows it no longer has.
 type Asked = Rc<RefCell<HashMap<String, u64>>>;
 
+/// Show Hidden Files, shared by every listing the tree asks for. Read when a listing lands rather
+/// than when it is asked for, so one still on its way after a toggle is filtered by the new value.
+type ShowHidden = Rc<Cell<bool>>;
+
 /// Bring `store` in step with the direct children of `prefix`.
 ///
 /// The listing is asked for on a worker thread and spliced in when it lands, so the store this
@@ -100,14 +112,25 @@ type Asked = Rc<RefCell<HashMap<String, u64>>>;
 /// directory without the click waiting for a round trip; on a local vault the index answers in
 /// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
 /// names case-insensitively.
-fn fill(store: &gio::ListStore, vault: &Arc<Vault>, asked: &Asked, prefix: &str) {
+fn fill(
+    store: &gio::ListStore,
+    vault: &Arc<Vault>,
+    asked: &Asked,
+    show_hidden: &ShowHidden,
+    prefix: &str,
+) {
     let ticket = {
         let mut asked = asked.borrow_mut();
         let n = asked.entry(prefix.to_string()).or_default();
         *n += 1;
         *n
     };
-    let (store, vault, asked) = (store.clone(), vault.clone(), asked.clone());
+    let (store, vault, asked, show_hidden) = (
+        store.clone(),
+        vault.clone(),
+        asked.clone(),
+        show_hidden.clone(),
+    );
     let dir = prefix.to_string();
     glib::spawn_future_local(async move {
         let listed = gio::spawn_blocking({
@@ -120,7 +143,7 @@ fn fill(store: &gio::ListStore, vault: &Arc<Vault>, asked: &Asked, prefix: &str)
             return;
         }
         match listed {
-            Ok(Ok(rows)) => splice(&store, rows),
+            Ok(Ok(rows)) => splice(&store, rows, show_hidden.get()),
             // Leaving the rows alone beats blanking a directory the index simply could not answer
             // for — or, on a remote vault, one the connection could not reach.
             Ok(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
@@ -130,12 +153,12 @@ fn fill(store: &gio::ListStore, vault: &Arc<Vault>, asked: &Asked, prefix: &str)
 }
 
 /// The rows the listing produced, against the ones the store already holds.
-fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>) {
+fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>, show_hidden: bool) {
     let items: Vec<String> = rows
         .into_iter()
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
         // the index.
-        .filter(|r| r.id == 0 || !hidden(r.kind, &r.rel_path))
+        .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0, show_hidden))
         .map(|r| encode(r.kind, &r.rel_path, r.id != 0))
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {
@@ -192,6 +215,7 @@ pub struct Tree {
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
     asked: Asked,
+    show_hidden: ShowHidden,
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
@@ -216,6 +240,15 @@ impl Tree {
         let factory = self.view.factory();
         self.view.set_factory(None::<&gtk::ListItemFactory>);
         self.view.set_factory(factory.as_ref());
+    }
+
+    /// Show or hide the dot-named rows. Every level already listed is listed again, since a
+    /// hidden row was never put in the store; a change of nothing costs nothing, because every
+    /// preference edit arrives here.
+    pub fn set_show_hidden(&self, on: bool) {
+        if self.show_hidden.replace(on) != on {
+            self.refresh();
+        }
     }
 
     pub fn view(&self) -> &gtk::ListView {
@@ -257,7 +290,7 @@ impl Tree {
         };
         for (dir, store) in stores {
             if dir.is_empty() {
-                fill(&store, &self.vault, &self.asked, dir);
+                fill(&store, &self.vault, &self.asked, &self.show_hidden, dir);
                 continue;
             }
             // A directory that is gone keeps no model: a same-named one created later must be
@@ -265,8 +298,12 @@ impl Tree {
             // of the vault rather than of this disk, which on a remote vault is not where the
             // files are — and asked on a worker thread, because on that vault it is one round
             // trip per invalidated directory and a reindex invalidates a handful at a time.
-            let (vault, cache, asked) =
-                (self.vault.clone(), self.cache.clone(), self.asked.clone());
+            let (vault, cache, asked, show_hidden) = (
+                self.vault.clone(),
+                self.cache.clone(),
+                self.asked.clone(),
+                self.show_hidden.clone(),
+            );
             let dir = dir.clone();
             glib::spawn_future_local(async move {
                 let there = gio::spawn_blocking({
@@ -275,7 +312,7 @@ impl Tree {
                 })
                 .await;
                 match there {
-                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &dir),
+                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir),
                     Ok(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                     }
@@ -432,6 +469,7 @@ fn children_model(
     vault: &Arc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
     asked: &Asked,
+    show_hidden: &ShowHidden,
     rel: &str,
 ) -> gio::ListStore {
     // Cloned out so the cache borrow cannot still be live during `fill`.
@@ -441,7 +479,7 @@ fn children_model(
     }
     let t0 = Instant::now();
     let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, vault, asked, rel);
+    fill(&store, vault, asked, show_hidden, rel);
     cache.borrow_mut().insert(rel.to_string(), store.clone());
     tracing::debug!(
         dir = rel,
@@ -567,28 +605,36 @@ fn root_row(label: &str) -> gtk::Box {
     row
 }
 
-/// Build the tree. `on_activate` is called with the rel_path of an activated non-directory row,
-/// `on_drag` with `true` while a row is being dragged out of the tree and `false` when it is over,
-/// so the panes can put their drop zones up for the duration, and `on_move` with the path a row
-/// was dragged from and the path it was dropped onto.
+/// Build the tree. `show_hidden` is Show Hidden Files as the window opens. `on_activate` is called
+/// with the rel_path of an activated non-directory row, `on_drag` with `true` while a row is being
+/// dragged out of the tree and `false` when it is over, so the panes can put their drop zones up
+/// for the duration, and `on_move` with the path a row was dragged from and the path it was
+/// dropped onto.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
+    show_hidden: bool,
     on_activate: impl Fn(char, &str) + 'static,
     on_drag: impl Fn(bool) + 'static,
     on_move: impl Fn(&str, &str) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
+    let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     // Populated straight from the index: the window must be up before the reconcile finishes.
-    fill(root, &vault, &asked, "");
+    fill(root, &vault, &asked, &show_hidden, "");
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
-        let (vault, cache, asked) = (vault.clone(), cache.clone(), asked.clone());
+        let (vault, cache, asked, show_hidden) = (
+            vault.clone(),
+            cache.clone(),
+            asked.clone(),
+            show_hidden.clone(),
+        );
         move |obj| {
             let row = decode(obj)?;
             row.is_dir()
-                .then(|| children_model(&vault, &cache, &asked, &row.rel).upcast())
+                .then(|| children_model(&vault, &cache, &asked, &show_hidden, &row.rel).upcast())
         }
     });
 
@@ -709,8 +755,9 @@ pub fn build(
         label.set_text(basename(&item.rel));
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
         // to have the class taken off it again. A row the index does not hold is dimmed by the
-        // same rule and for the same reason the ignored ones are: search does not reach it.
-        let dim = !item.indexed || bind_ignored.borrow().has(&item.rel);
+        // same rule and for the same reason the ignored ones are: search does not reach it. A
+        // dot-named row is dimmed so that it still reads as hidden while it is shown.
+        let dim = !item.indexed || dot_named(&item.rel) || bind_ignored.borrow().has(&item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             set_class(widget, "dim-label", dim);
         }
@@ -831,6 +878,7 @@ pub fn build(
         root: root.clone(),
         cache,
         asked,
+        show_hidden,
         ignored,
         active,
     }
@@ -867,6 +915,24 @@ mod tests {
         assert!(dep.is_dir());
         assert_eq!(dep.rel, "node_modules");
         assert!(!dep.indexed);
+    }
+
+    #[test]
+    fn show_hidden_decides_the_dot_named_rows_the_index_holds() {
+        use FileKind::{Conflict, Dir, Markdown, Other};
+        // Shown with the toggle on, left out with it off.
+        for rel in [".gitignore", ".obsidian/app.json", "Notes/.draft.md"] {
+            assert!(!hidden(Other, rel, true, true), "{rel}");
+            assert!(hidden(Other, rel, true, false), "{rel}");
+        }
+        assert!(!hidden(Markdown, "Notes/a.md", true, false));
+        // A dot-named tree the walk refuses is listed off the disk either way, as it was before
+        // the toggle existed.
+        assert!(!hidden(Dir, ".venv", false, false));
+        assert!(!hidden(Other, ".venv/pyvenv.cfg", false, false));
+        // A conflict copy never is: resolving one is the conflict banner's business.
+        let conflict = "a.sync-conflict-20260903-101500-ABCDEFG.md";
+        assert!(hidden(Conflict, conflict, true, true));
     }
 
     #[test]

@@ -22,6 +22,7 @@ ghost_text = true
 minimap = false
 line_numbers = false
 git_tree = true
+show_hidden = false
 column_width = 50
 theme = "solarized"
 focus_mode = "high"
@@ -99,6 +100,9 @@ pub struct Config {
     /// a vault's changes arrive a folder at a time, and a flat list of thirty repeats the same
     /// directory thirty times.
     pub git_tree: bool,
+    /// List dot-named files and folders in the Files pane, dimmed. On by default: `.gitignore`
+    /// and `.python-version` are files people edit. `.git` and `.trash` are never listed.
+    pub show_hidden: bool,
     /// How much of the editor's width the document column may fill, as a percentage. 50 is what
     /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
     /// window keeps a readable line.
@@ -184,6 +188,7 @@ impl Default for Config {
             minimap: false,
             line_numbers: false,
             git_tree: true,
+            show_hidden: true,
             column_width: 50,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
@@ -595,6 +600,7 @@ daily_template = "DailyNote.md"
         assert!(!c.minimap);
         assert!(!c.line_numbers);
         assert!(c.git_tree);
+        assert!(!c.show_hidden);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.focus_mode, FocusMode::High);
@@ -618,6 +624,7 @@ daily_template = "DailyNote.md"
         c.write(&back).unwrap();
         let again = Config::read(&back).unwrap();
         assert_eq!(again.recent_vaults, c.recent_vaults);
+        assert_eq!(again.show_hidden, c.show_hidden);
         assert_eq!(again.theme, Theme::Solarized);
         assert_eq!(again.focus_mode, FocusMode::High);
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
@@ -664,6 +671,7 @@ daily_template = "DailyNote.md"
         let tmp = tempfile::tempdir().unwrap();
         let c = with_xdg(tmp.path(), Config::load);
         assert!(c.spellcheck);
+        assert!(c.show_hidden);
         assert_eq!(c.focus_mode, FocusMode::Medium);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));

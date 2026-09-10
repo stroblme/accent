@@ -160,6 +160,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.view-mode", "Toggle Split View", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
+    // No chord: `Ctrl+H`, the file managers' own, is Replace here.
+    ("win.show-hidden-files", "Show Hidden Files", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
     ("win.copy-absolute-path", "Copy Absolute Path", &[]),
     ("win.show-in-files", "Show in Files", &[]),
@@ -299,6 +301,19 @@ impl App {
             "pdf-fit-width" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitWidth)),
             "pdf-fit-page" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitPage)),
             "minimap" => self.toggle_minimap(),
+            // A preference, not this window's state: written, then put into effect in every
+            // window the way a switch in Preferences is, which also moves each window's check mark.
+            "show-hidden-files" => {
+                let config = {
+                    let mut config = self.config.borrow_mut();
+                    config.show_hidden = !config.show_hidden;
+                    config.clone()
+                };
+                settings::save(&config);
+                if let Some(shell) = self.shell.upgrade() {
+                    shell.apply_config(&config);
+                }
+            }
             "copy-relative-path" => {
                 if let (Some(rel), Some(ops)) =
                     (self.menu_rel(), self.need_ops("copy a vault path"))
@@ -628,7 +643,17 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
 pub fn install_actions(app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
-            let action = gio::SimpleAction::new(name, None);
+            // Show Hidden Files carries its value, so a menu draws it as a check item. Activating
+            // it runs the handler below like any other; the value follows the preference in
+            // `App::apply_config`.
+            let action = match name {
+                "show-hidden-files" => gio::SimpleAction::new_stateful(
+                    name,
+                    None,
+                    &app.config.borrow().show_hidden.to_variant(),
+                ),
+                _ => gio::SimpleAction::new(name, None),
+            };
             action.connect_activate(glib::clone!(
                 #[weak]
                 app,
