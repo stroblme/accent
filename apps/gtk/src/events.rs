@@ -44,6 +44,14 @@ impl App {
                         tracing::debug!(t_ms = ms(), rows = tree.model().n_items(), "tree painted");
                     }
                 }
+                // The same batches are what put a nested repository's directory in the index,
+                // which is where discovery finds it: the Git pane looks again as the walk goes,
+                // throttling itself, rather than only once it is over.
+                if p.phase == Phase::Index
+                    && let Some(git) = self.git.get()
+                {
+                    git.rediscover();
+                }
             }
             Event::Busy { what, busy } => {
                 self.statusbar
@@ -67,21 +75,26 @@ impl App {
                 self.refresh_corpus();
                 self.sync_active();
                 // Conflicts on notes nobody has open have no banner to appear on, so the toast
-                // that is already there says how many are waiting in the vault.
-                let mut message = format!(
+                // that is already there says how many are waiting in the vault. Counted on a
+                // worker, the index being on the host for a remote vault.
+                let message = format!(
                     "Indexed {} files ({} new, {} updated)",
                     stats.scanned, stats.added, stats.updated
                 );
-                match self
-                    .vault()
-                    .and_then(|v| v.conflicts().ok())
-                    .unwrap_or_default()
-                    .len()
-                {
-                    0 => {}
-                    n => message.push_str(&format!(", {n} with sync conflicts")),
-                }
-                self.toast(&message);
+                let (Some(vault), weak) = (self.vault().cloned(), Rc::downgrade(self)) else {
+                    return self.toast(&message);
+                };
+                glib::spawn_future_local(async move {
+                    let counted =
+                        gio::spawn_blocking(move || vault.conflicts().map(|c| c.len())).await;
+                    let Some(app) = weak.upgrade() else { return };
+                    match counted {
+                        Ok(Ok(n)) if n > 0 => {
+                            app.toast(&format!("{message}, {n} with sync conflicts"));
+                        }
+                        _ => app.toast(&message),
+                    }
+                });
             }
             Event::DirsChanged(dirs) => {
                 if let Some(tree) = self.tree.get() {

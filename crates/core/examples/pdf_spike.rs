@@ -58,12 +58,8 @@ fn main() -> Result<()> {
     // libadwaita's dark view colours, which is what the app asks for under a dark theme.
     let (paper, ink) = ([0x1d, 0x1d, 0x20], [0xeb, 0xeb, 0xeb]);
     let t = Instant::now();
-    for px in dark.data.chunks_exact_mut(4) {
-        px.copy_from_slice(&accent_core::pdf::recolour_pixel(
-            [px[0], px[1], px[2], px[3]],
-            paper,
-            ink,
-        ));
+    for px in dark.data.as_chunks_mut::<4>().0 {
+        *px = accent_core::pdf::recolour_pixel(*px, paper, ink);
     }
     println!(
         "  dark pass: {:>7.1} ms  ({} px)",
@@ -168,7 +164,7 @@ fn ms(t: Instant) -> f64 {
 fn write_ppm(path: &std::path::Path, img: &RgbaImage) -> Result<()> {
     let mut buf = Vec::with_capacity(img.data.len() / 4 * 3 + 32);
     buf.extend_from_slice(format!("P6\n{} {}\n255\n", img.width, img.height).as_bytes());
-    for px in img.data.chunks_exact(4) {
+    for px in img.data.as_chunks::<4>().0 {
         buf.extend_from_slice(&px[..3]);
     }
     std::fs::File::create(path)?.write_all(&buf)?;

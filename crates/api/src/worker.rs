@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 
 use accent_core::index::{Change, Index};
 use accent_core::path::parent_dir;
-use accent_core::walk::{self, FileKind};
+use accent_core::walk::{self, FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
 use crate::Event;
@@ -37,6 +37,7 @@ pub(crate) fn spawn(
         seen_conflicts: BTreeSet::new(),
         reported: BTreeSet::new(),
         git_dirs: Vec::new(),
+        held: Vec::new(),
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
@@ -78,6 +79,9 @@ struct Worker {
     /// Every watched repository's git directory, absolute. A change under one of these is news
     /// for the git pane and nothing else: `.git` is not indexed and must never be.
     git_dirs: Vec<PathBuf>,
+    /// What the inbox held that a walk read between its batches and could not answer there. See
+    /// [`Worker::reconcile`].
+    held: Vec<Msg>,
 }
 
 /// What one batch has accumulated: the directories whose children changed, the paths it took out
@@ -103,10 +107,14 @@ impl Worker {
         self.rebuild_watcher();
         self.reconcile();
 
-        while let Ok(first) = self.rx.recv() {
+        loop {
             // One `recv` plus the rest of the burst: a Syncthing pull of 500 files is one batch,
-            // and therefore one event for the UI.
-            let mut batch = vec![first];
+            // and therefore one event for the UI. What the last walk held back came first.
+            let mut batch = std::mem::take(&mut self.held);
+            if batch.is_empty() {
+                let Ok(first) = self.rx.recv() else { break };
+                batch.push(first);
+            }
             batch.extend(self.rx.try_iter());
             let stop = batch.iter().any(|m| matches!(m, Msg::Shutdown));
             self.process(batch);
@@ -201,11 +209,57 @@ impl Worker {
     /// A full walk, then a fresh watcher because symlinked directories may have come or gone.
     /// [`Event::Reconciled`] is emitted once both are done, so receiving it means the vault is
     /// indexed *and* watched.
+    ///
+    /// A first walk of a large vault takes seconds, so the inbox is read between its batches.
+    /// What does not touch the walk is answered there — git news, the git directories to watch,
+    /// the exclusion set — and everything else is held for [`Worker::run`], in the order it came.
     fn reconcile(&mut self) {
-        let events = self.events.clone();
-        let stats = self.index.reconcile(&self.root, |p| {
+        let mut excluded = None;
+        let Worker {
+            root,
+            index,
+            rx,
+            tx,
+            events,
+            watcher,
+            git_dirs,
+            held,
+            ..
+        } = self;
+        let stats = index.reconcile_with(root, &ScanOptions::default(), |index, p| {
             let _ = events.send(Event::Progress(p));
+            let mut git = false;
+            for msg in rx.try_iter() {
+                match msg {
+                    Msg::Fs(VaultEvent::Git(_)) => git = true,
+                    Msg::WatchGit(dirs) => {
+                        if dirs != *git_dirs {
+                            *git_dirs = dirs;
+                            // A failure is left to the rebuild after the walk, which reports it.
+                            *watcher = None;
+                            *watcher = watch(index, root, git_dirs, tx)
+                                .inspect_err(|e| tracing::warn!("watching the vault: {e:#}"))
+                                .ok();
+                        }
+                    }
+                    Msg::SetExcluded(entries, reply) => {
+                        let _ = reply.send(index.set_excluded(&entries));
+                        excluded = Some(entries);
+                    }
+                    other => held.push(other),
+                }
+            }
+            if git {
+                let _ = events.send(Event::GitChanged);
+            }
         });
+        // A set written mid-walk marked the rows that were there; the rest of the walk added its
+        // rows unmarked.
+        if let Some(entries) = excluded
+            && let Err(e) = self.index.set_excluded(&entries)
+        {
+            self.fail("recording the exclusion set", e);
+        }
         self.rebuild_watcher();
         match stats {
             Ok(stats) => {
@@ -232,26 +286,9 @@ impl Worker {
     }
 
     fn rebuild_watcher(&mut self) {
-        // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
-        // must not come back in through a recursive watch on the root.
-        let mut dirs = self.index.dirs(&self.root).unwrap_or_else(|e| {
-            tracing::warn!("listing the directories to watch: {e:#}");
-            Vec::new()
-        });
-        // A repository's own directory and the branch tips inside it. Two watches per repo is
-        // what tells the git pane a commit happened in a terminal; `notify` refuses a path that
-        // does not exist, so a repository removed under us costs a warning, not the watch set.
-        for git_dir in &self.git_dirs {
-            dirs.push(git_dir.clone());
-            dirs.push(git_dir.join("refs/heads"));
-        }
-
-        let tx = self.tx.clone();
         // Drop the old watch set first: two registrations on one tree would double every event.
         self.watcher = None;
-        match Watcher::new(&self.root, &dirs, move |e| {
-            let _ = tx.send(Msg::Fs(e));
-        }) {
+        match watch(&self.index, &self.root, &self.git_dirs, &self.tx) {
             Ok(w) => self.watcher = Some(w),
             Err(e) => self.fail("watching the vault", e),
         }
@@ -389,6 +426,27 @@ impl Worker {
     }
 }
 
+/// A watcher over the directories the index holds, plus the git directories.
+fn watch(index: &Index, root: &Path, git_dirs: &[PathBuf], tx: &Sender<Msg>) -> Result<Watcher> {
+    // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
+    // must not come back in through a recursive watch on the root.
+    let mut dirs = index.dirs(root).unwrap_or_else(|e| {
+        tracing::warn!("listing the directories to watch: {e:#}");
+        Vec::new()
+    });
+    // A repository's own directory and the branch tips inside it. Two watches per repo is
+    // what tells the git pane a commit happened in a terminal; `notify` refuses a path that
+    // does not exist, so a repository removed under us costs a warning, not the watch set.
+    for git_dir in git_dirs {
+        dirs.push(git_dir.clone());
+        dirs.push(git_dir.join("refs/heads"));
+    }
+    let tx = tx.clone();
+    Watcher::new(root, &dirs, move |e| {
+        let _ = tx.send(Msg::Fs(e));
+    })
+}
+
 /// A directory with something in it, which is what a moved-in tree looks like.
 fn has_children(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some())
@@ -396,9 +454,12 @@ fn has_children(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{Msg, spawn};
     use crate::tests::*;
     use crate::{Etag, Event, VaultConfig, fs};
-    use std::sync::mpsc::RecvTimeoutError;
+    use accent_core::index::Index;
+    use accent_core::watch::VaultEvent;
+    use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, Instant};
 
     /// Depends on real inotify events.
@@ -709,5 +770,61 @@ mod tests {
             f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
             "a commit has to reach the pane"
         );
+    }
+
+    /// A first index of a large vault takes seconds, and some of what reaches the inbox meanwhile
+    /// cannot wait that long: a commit made in a terminal, and a `set_excluded` whose caller is
+    /// blocked on the answer — over ssh, against a 10 s deadline. Both are posted before the
+    /// worker starts, so they are certainly read while its first walk is in progress.
+    #[test]
+    fn the_inbox_is_read_between_the_batches_of_a_walk() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        std::fs::write(root_path.join("keep.txt"), "keep").unwrap();
+        std::fs::create_dir(root_path.join("build")).unwrap();
+        std::fs::write(root_path.join("build/out.txt"), "out").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+
+        let (tx, rx) = channel();
+        let (events, event_rx) = channel();
+        let (reply, answer) = channel();
+        tx.send(Msg::SetExcluded(vec!["build/".to_string()], reply))
+            .unwrap();
+        tx.send(Msg::Fs(VaultEvent::Git(root_path.join(".git"))))
+            .unwrap();
+        let worker = spawn(
+            root_path.clone(),
+            Index::open(&db).unwrap(),
+            rx,
+            tx.clone(),
+            events,
+        )
+        .unwrap();
+
+        let first = wait_for(
+            &event_rx,
+            |e| matches!(e, Event::GitChanged | Event::Reconciled(_)),
+            BUDGET,
+        );
+        assert!(
+            matches!(first, Some(Event::GitChanged)),
+            "the git change waited for the walk: {first:?}"
+        );
+        assert!(
+            matches!(answer.try_recv(), Ok(Ok(()))),
+            "set_excluded waited for the walk"
+        );
+
+        // Written before the walk had added a row, so what left `build/out.txt` out is the set
+        // being written again once the walk was over.
+        assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+        assert_eq!(
+            Index::open(&db).unwrap().file_paths(false).unwrap(),
+            ["keep.txt"]
+        );
+
+        tx.send(Msg::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 }

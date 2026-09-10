@@ -7,6 +7,8 @@
 use super::{Tab, caret, line_end};
 use crate::{fold, lang};
 use accent_api::Pos;
+use accent_api::language::pos_of;
+use accent_core::markdown;
 use gtk::gdk;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
@@ -224,6 +226,15 @@ impl Tab {
     /// Put the caret at a server position, which is zero-based and counts characters.
     pub fn goto_pos(&self, pos: Pos) {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
+    }
+
+    /// Put the caret on the heading `anchor` names, by slug or by text as a link writes it. A
+    /// heading the note does not have leaves the caret where it was.
+    pub fn goto_heading(&self, anchor: &str) {
+        let text = self.text();
+        if let Some(h) = markdown::heading_for(&markdown::analyze(&text).headings, anchor) {
+            self.goto_pos(pos_of(&text, h.range.start));
+        }
     }
 
     /// Jump to a character range and mark it the way the find bar marks a match it found: the

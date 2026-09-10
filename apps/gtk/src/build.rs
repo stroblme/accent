@@ -270,6 +270,8 @@ pub fn build_window(
         statusbar,
         docs: RefCell::new(Vec::new()),
         awaiting: RefCell::new(HashMap::new()),
+        placing: RefCell::new(HashMap::new()),
+        restore: RefCell::new(std::rc::Weak::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),
@@ -576,9 +578,9 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 register(Rc::downgrade(&compare));
             });
         }),
-        trash: Box::new(move |key| {
+        trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
-                fileops::trash(&ops, key);
+                fileops::trash_all(&ops, keys.to_vec());
             }
         }),
         changed: Box::new(move || {
@@ -714,7 +716,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                     .iter()
                     .any(|rel| fileops::trashed_with(rel, &tab.rel()));
                 if under && tab.modified.get() {
-                    app.save_tab(&tab, false);
+                    app.save_tab_now(&tab);
                 }
             }
         }),

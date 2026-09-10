@@ -104,6 +104,24 @@ pub fn resolve(dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
+/// Whether a link written inside the note at `dir` stays in the vault without [`resolve`]'s help:
+/// relative, and never more `..` than there are folders to climb out of.
+pub fn stays_inside(dir: &str, target: &str) -> bool {
+    if target.starts_with('/') {
+        return false;
+    }
+    let mut depth = dir.split('/').filter(|s| !s.is_empty()).count();
+    for seg in target.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." if depth == 0 => return false,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
 /// The link from a note at `dir` to the vault path `rel`, which [`resolve`] turns back into
 /// `rel`: `sub/a.md` from `sub/deep` is `../a.md`, and from the root it is `sub/a.md`.
 pub fn relative(dir: &str, rel: &str) -> String {
@@ -175,6 +193,12 @@ mod tests {
         assert_eq!(resolve("", "a.md"), "a.md");
         assert_eq!(resolve("sub", "../../a.md"), "a.md");
         assert_eq!(resolve("sub", "/a.md"), "a.md");
+
+        // `resolve` maps the last two into the vault too, but they did not point there.
+        assert!(stays_inside("sub/deep", "../a.md"));
+        assert!(stays_inside("sub", "./x/../../a.md"));
+        assert!(!stays_inside("sub", "../../a.md"));
+        assert!(!stays_inside("sub", "/a.md"));
     }
 
     #[test]

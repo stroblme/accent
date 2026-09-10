@@ -9,7 +9,9 @@ use super::*;
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
-/// pulled yet.
+/// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
+/// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// an XTEST press held while the repository changes.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
@@ -43,11 +45,20 @@ use super::*;
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
+///
+/// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
+/// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
+/// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
+/// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
+/// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
+/// `=focus:<rel>` gives it the keyboard instead. On a remote vault they wait for the host to
+/// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
+/// way Ctrl+Q does.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
-    let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
+    let git = std::env::var("ACCENT_BENCH_GIT").ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
@@ -61,6 +72,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
+    let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -70,7 +82,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && follow.is_none()
-        && !git
+        && layout.is_none()
+        && git.is_none()
         && !keys
         && chrome.is_none()
         && !templates
@@ -81,11 +94,18 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     {
         return;
     }
+    // Not after the first frame: a restore has landed every tab by then.
+    if let Some(arg) = layout.as_deref().filter(|arg| arg.contains(':')) {
+        return bench_layout_pick(app, arg);
+    }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
         if let Some(rels) = panes {
             return bench_panes(&app, &rels);
+        }
+        if let Some(arg) = layout {
+            return bench_layout(&app, &arg);
         }
         if let Some(rel) = compare {
             return bench_compare(&app, &rel);
@@ -123,8 +143,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if keys {
             return bench_keys(&app);
         }
-        if git {
-            return bench_git(&app);
+        if let Some(arg) = git {
+            return match arg.strip_prefix("press:") {
+                Some(path) => bench_git_press(&app, path),
+                None => bench_git(&app),
+            };
         }
         if let Some(rel) = style {
             return bench_style(&app, &rel);
@@ -222,9 +245,10 @@ fn bench_close(app: &Rc<App>) {
     let (app, vault) = (Rc::downgrade(app), Arc::downgrade(vault));
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        let dialogs = app
-            .upgrade()
-            .map_or_else(Vec::new, |app| bench_dialogs(&app));
+        let dialogs = match app.upgrade() {
+            Some(app) => bench_dialogs(&app).await,
+            None => Vec::new(),
+        };
         // Past the close animation, so a dialog still alive is one its close did not let go of.
         glib::timeout_future(Duration::from_millis(600)).await;
         let mut kept = 0;
@@ -254,8 +278,15 @@ fn bench_close(app: &Rc<App>) {
 /// Cancel a New File dialog and, over the open note, an Unsaved Changes one: a dialog that
 /// outlives its close keeps whatever its handlers hold, and New File's path field completes from
 /// the vault.
-fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+async fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
     let _ = WidgetExt::activate_action(&app.window, "win.new-file", None);
+    // The dialog is built once a worker has the templates.
+    for _ in 0..40 {
+        if app.window.visible_dialog().is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
     let mut dialogs = vec![bench_cancel(app)];
     if let Some(tab) = app.open_tabs().into_iter().next() {
         app.ask_unsaved(&tab, &SaveError::Offline, |_, _| {});
@@ -370,6 +401,8 @@ fn bench_git(app: &Rc<App>) {
             "bench git_branch {}",
             git.branch_label(None).unwrap_or_default()
         );
+        // `false` on a cold vault: the pane answered while the walk was still going.
+        println!("bench git_indexed {}", app.reconciled.get());
         let (local, remote) = git.branch_counts();
         println!("bench git_branches local={local} remote={remote}");
         println!("bench git_not_pulled {}", git.not_pulled_rows());
@@ -382,9 +415,155 @@ fn bench_git(app: &Rc<App>) {
             if let Some(git) = app.git.get() {
                 println!("bench git_rows {}", git.log_rows());
             }
-            bench_quit(&app);
+            bench_git_stage(&app);
         });
     });
+}
+
+/// The changes list's splices, printed as they happen, across a refresh that changes nothing and
+/// two Stage clicks, and whether a row below the staged one kept its widget. A row that is spliced
+/// out from under a press loses its release, so this is the headless half of "rapid Stage clicks
+/// all land". Point it at a repository with `b.md` and `c.md` modified and `new.md` untracked at
+/// its root, and nothing staged; elsewhere it prints the splices and the clicks it could not make.
+fn bench_git_stage(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        git.set_tree(true);
+        let list = git.divider().start_child();
+        let view = list
+            .as_ref()
+            .and_then(|w| find_widget(w, &|w| w.is::<gtk::ListView>()))
+            .and_downcast::<gtk::ListView>();
+        if let Some(model) = view.and_then(|v| v.model()) {
+            model.connect_items_changed(|_, at, removed, added| {
+                println!("bench git_splice at={at} removed={removed} added={added}");
+            });
+        }
+        let row = |path: &str| list.as_ref().and_then(|list| change_row(list, path));
+        let click = |path: &str, tooltip: &str| {
+            let button = row(path).and_then(|r| row_button(&r, tooltip));
+            println!("bench git_click {path} {tooltip} {}", button.is_some());
+            if let Some(button) = button {
+                button.emit_clicked();
+            }
+        };
+        // The command's own refresh and the one its `.git` write schedules both land in this.
+        let settle = || glib::timeout_future(Duration::from_millis(1500));
+
+        println!("bench git_step refresh_unchanged");
+        git.schedule_refresh(git::Depth::Everything);
+        settle().await;
+
+        for (staged, below) in [("b.md", "c.md"), ("c.md", "new.md")] {
+            println!("bench git_step stage {staged}");
+            let before = row(below);
+            click(staged, "Stage");
+            settle().await;
+            let kept = before.is_some() && before == row(below);
+            println!("bench git_kept {below} {kept}");
+        }
+        println!("bench git_changes_rows {}", git.changes_rows());
+
+        // A folder's own buttons: all of `src` into the index and out again, then its Discard,
+        // whose question is printed and answered — and the permanent delete's too, where the
+        // scratch directory has no trash.
+        for tooltip in ["Stage", "Unstage"] {
+            println!("bench git_step folder {tooltip}");
+            click("src", tooltip);
+            settle().await;
+            println!("bench git_changes_rows {}", git.changes_rows());
+        }
+        println!("bench git_step folder Discard");
+        click("src", "Discard");
+        for answer in ["discard", "delete"] {
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let Some(dialog) = app
+                .window
+                .visible_dialog()
+                .and_downcast::<adw::AlertDialog>()
+            else {
+                continue;
+            };
+            let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
+            println!("bench git_dialog {heading:?} {body:?}");
+            dialog.emit_by_name::<()>("response", &[&answer]);
+            dialog.close();
+            settle().await;
+        }
+        println!("bench git_changes_rows {}", git.changes_rows());
+        bench_quit(&app);
+    });
+}
+
+/// Hold a real press on the Stage button of `path`'s row while the list changes under it. Prints
+/// where the button is on screen (`bench git_press x y`, window coordinates) and stays up for ten
+/// seconds, so that a script can press there through XTEST, change the repository and release; the
+/// repository's `git status` afterwards says whether the click landed. `emit_clicked` cannot show
+/// this, having no press and no release to take apart.
+fn bench_git_press(app: &Rc<App>, path: &str) {
+    app.show_pane("git");
+    let (app, path) = (app.clone(), path.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        git.set_tree(true);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let list = git.divider().start_child();
+        let button = list
+            .as_ref()
+            .and_then(|list| change_row(list, &path))
+            .and_then(|row| row_button(&row, "Stage"));
+        let at = button.and_then(|b| {
+            let middle = graphene::Point::new(b.width() as f32 / 2.0, b.height() as f32 / 2.0);
+            b.compute_point(&app.window, &middle)
+        });
+        match at {
+            Some(at) => println!("bench git_press {} {}", at.x() as i32, at.y() as i32),
+            None => println!("bench git_press none"),
+        }
+        glib::timeout_future(Duration::from_secs(10)).await;
+        bench_quit(&app);
+    });
+}
+
+/// The changes list's row for `path`, a file or a folder. A header row keeps whatever tooltip its
+/// widget last had, so the layout it shows is asked as well.
+fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
+    find_widget(list, &|w| {
+        w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
+            matches!(s.visible_child_name().as_deref(), Some("entry" | "folder"))
+                && s.tooltip_text().as_deref() == Some(path)
+        })
+    })
+}
+
+/// The button of `row` that `tooltip` names, where the row shows it.
+fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
+    find_widget(row, &|w| {
+        w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
+    })
+    .and_downcast::<gtk::Button>()
+}
+
+/// The first widget in `root`'s subtree, `root` included, that `found` accepts.
+fn find_widget(root: &gtk::Widget, found: &dyn Fn(&gtk::Widget) -> bool) -> Option<gtk::Widget> {
+    if found(root) {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(hit) = find_widget(&c, found) {
+            return Some(hit);
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// Drive the key semantics [`multicaret::View`] corrects — the wordwise deletes, logical-line
@@ -803,6 +982,221 @@ fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
             .cloned()
     });
     at("focus_at", focused.as_ref());
+}
+
+/// See `ACCENT_BENCH_LAYOUT` above. Each step waits for the one before it to be laid out: a split
+/// has no size to put a handle in until it is allocated, and a tab moved into a split takes the
+/// keyboard, and with it the active pane, from an idle.
+fn bench_layout(app: &Rc<App>, arg: &str) {
+    // A remote vault restores, and opens anything at all, once its host has answered.
+    if !app.restored.get() {
+        return bench_layout_waiting(app, arg);
+    }
+    if arg == "1" {
+        let (app, landing) = (app.clone(), app.clone());
+        let landed = move || landing.awaiting.borrow().is_empty();
+        bench_layout_when(landed, move || {
+            glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                bench_layout_print(&app);
+                bench_quit(&app);
+            });
+        });
+        return;
+    }
+    let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    let [a, b, c, d] = &rels[..] else {
+        return bench_quit(app);
+    };
+    for rel in [a, b, c, d] {
+        app.open_path(rel);
+    }
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let (app, a, c, d) = (app.clone(), a.clone(), c.clone(), d.clone());
+    bench_layout_when(landed, move || {
+        let page = |rel: &str| app.doc_for(rel).map(|doc| doc.page().clone());
+        let (Some(a), Some(c), Some(d)) = (page(&a), page(&c), page(&d)) else {
+            return bench_quit(&app);
+        };
+        app.split_page(&app.pane(), Side::Right, &c);
+        let Some(right) = app.pane_of(&c) else {
+            return bench_quit(&app);
+        };
+        app.split_page(&right, Side::Down, &d);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            app.reveal_page(&a);
+            app.reveal_page(&c);
+            let outer = app
+                .content
+                .child_by_name("tabs")
+                .and_downcast::<adw::Bin>()
+                .and_then(|bin| bin.child())
+                .and_downcast::<gtk::Paned>();
+            let inner = outer
+                .as_ref()
+                .and_then(|paned| paned.end_child())
+                .and_downcast::<gtk::Paned>();
+            let (Some(outer), Some(inner)) = (outer, inner) else {
+                return bench_quit(&app);
+            };
+            outer.set_position(outer.width() * 3 / 10);
+            inner.set_position(inner.height() * 6 / 10);
+            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                bench_layout_print(&app);
+                if let Some(gtk_app) = app.window.application() {
+                    gtk_app.activate_action("quit", None);
+                }
+            });
+        });
+    });
+}
+
+/// Run `then` once `ready` holds, looked at every 50 ms: on a remote vault a read is a round trip
+/// away, so the layout drill waits for what it needs rather than for a set time.
+fn bench_layout_when(ready: impl Fn() -> bool + 'static, then: impl FnOnce() + 'static) {
+    let mut then = Some(then);
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if !ready() {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(then) = then.take() {
+            then();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// What a window that has not restored yet shows, printed each time it changes, until the restore
+/// runs and the drill goes on; `=quit` quits there instead.
+fn bench_layout_waiting(app: &Rc<App>, arg: &str) {
+    let (app, arg) = (app.clone(), arg.to_string());
+    let mut said = String::new();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if app.restored.get() {
+            bench_layout(&app, &arg);
+            return glib::ControlFlow::Break;
+        }
+        let page = app
+            .content
+            .child_by_name("empty")
+            .and_downcast::<adw::StatusPage>();
+        let shows = format!(
+            "{} {:?} {:?}",
+            app.content.visible_child_name().unwrap_or_default(),
+            page.as_ref().map(|p| p.title()).unwrap_or_default(),
+            page.and_then(|p| p.description()).unwrap_or_default()
+        );
+        if shows != said {
+            println!("bench layout_waiting {shows}");
+            said = shows;
+        }
+        if arg == "quit"
+            && let Some(gtk_app) = app.window.application()
+        {
+            gtk_app.activate_action("quit", None);
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// See `ACCENT_BENCH_LAYOUT` above. However fast the reads are, the pick comes between two tabs
+/// landing: the restore's work waiting on each tab is wrapped before any lands, and the first
+/// landing after which `<rel>` is in its pane — behind another tab to be picked, in front to be
+/// given the keyboard — with a tab still to come does it.
+fn bench_layout_pick(app: &Rc<App>, arg: &str) {
+    let Some((how, rel)) = arg.split_once(':') else {
+        return bench_quit(app);
+    };
+    let (app, how, rel) = (app.clone(), Rc::<str>::from(how), Rc::<str>::from(rel));
+    let done = Rc::new(Cell::new(false));
+    let mut hooked = false;
+    // From before the restore, every millisecond: the first tick after it runs ahead of the reads.
+    glib::timeout_add_local(Duration::from_millis(1), move || {
+        if !hooked && app.restored.get() {
+            hooked = true;
+            let keys: Vec<String> = app.awaiting.borrow().keys().cloned().collect();
+            for key in keys {
+                let Some(restore) = app.awaiting.borrow_mut().remove(&key) else {
+                    continue;
+                };
+                let (how, rel, done) = (how.clone(), rel.clone(), done.clone());
+                let pick: Waiting = Box::new(move |app, tab| {
+                    restore(app, tab);
+                    let landing = app.awaiting.borrow().len();
+                    let Some(tab) = app.tab_for(&rel).filter(|_| !done.get() && landing > 0) else {
+                        return;
+                    };
+                    let Some(pane) = app.pane_of(&tab.page) else {
+                        return;
+                    };
+                    let front = pane.tabs.selected_page().as_ref() == Some(&tab.page);
+                    match (&*how, front) {
+                        ("focus", true) => {
+                            tab.view.grab_focus();
+                        }
+                        ("pick", false) => pane.tabs.set_selected_page(&tab.page),
+                        _ => return,
+                    }
+                    done.set(true);
+                    println!("bench layout_{how} {rel} with {landing} still landing");
+                });
+                app.awaiting.borrow_mut().insert(key, pick);
+            }
+        }
+        if !app.restored.get() || !app.awaiting.borrow().is_empty() {
+            return glib::ControlFlow::Continue;
+        }
+        if !done.get() {
+            println!("bench layout_{how} {rel} missed");
+        }
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            bench_layout_print(&app);
+            bench_quit(&app);
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+/// The tree the session would write, the tab notes open next to, and how many panes there are.
+fn bench_layout_print(app: &Rc<App>) {
+    let tree = app
+        .layout()
+        .map_or_else(|| "none".to_string(), |layout| bench_layout_line(&layout));
+    println!("bench layout {tree}");
+    println!(
+        "bench layout_active {}",
+        app.active_key().unwrap_or_default()
+    );
+    println!("bench layout_panes {}", app.panes.borrow().len());
+}
+
+/// `(h 0.300 [a.md b.md *a.md] (v 0.600 [c.md *c.md] [d.md *d.md]))`: each split's axis and
+/// share, and each pane's tabs with the one in front.
+fn bench_layout_line(layout: &Layout) -> String {
+    match layout {
+        Layout::Pane { tabs, selected } => {
+            format!(
+                "[{} *{}]",
+                tabs.join(" "),
+                selected.as_deref().unwrap_or("-")
+            )
+        }
+        Layout::Split {
+            vertical,
+            ratio,
+            start,
+            end,
+        } => format!(
+            "({} {ratio:.3} {} {})",
+            if *vertical { "v" } else { "h" },
+            bench_layout_line(start),
+            bench_layout_line(end)
+        ),
+    }
 }
 
 /// The find bar and the Outline pane across a tab switch and a close: a note with the bar open, a

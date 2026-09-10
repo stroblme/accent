@@ -108,24 +108,45 @@ pub fn present(
         .width_request(COLUMN_WIDTH)
         .build();
     column.append(&buttons);
-    if let Some(list) = recent_list(&config, &on_open) {
-        // The one boundary on this screen: the two ways to open a vault the app has never seen,
-        // then the ones it has. A bare `GtkSeparator`, with the column's 18 px on either side.
-        column.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        column.append(&list);
-    }
-
-    let status = adw::StatusPage::builder()
-        .icon_name(crate::APP_ID)
-        .title("Accent")
-        .description("Open a folder of markdown notes to start writing.")
-        .child(&column)
-        .build();
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
-    toolbar.set_content(Some(&status));
     window.set_content(Some(&toolbar));
+    match recent_section(&window, &config, &on_open) {
+        // Once there are vaults to go back to, they are what this screen is for, so they take the
+        // window: no status page, whose icon and title would leave room for a row at most at the
+        // default size. A long list fills the height between the margins and scrolls inside it.
+        // Top-aligned rather than centred, so the search field stays put while the list it
+        // filters grows and shrinks under it.
+        Some((recent, search)) => {
+            column.append(&recent);
+            column.set_valign(gtk::Align::Start);
+            column.set_margin_top(24);
+            column.set_margin_bottom(24);
+            column.set_margin_start(12);
+            column.set_margin_end(12);
+            toolbar.set_content(Some(&column));
+            // The keyboard starts in the search: typing narrows the list, and Enter opens the
+            // first row left, which with nothing typed is the newest vault.
+            search.grab_focus();
+            // The row that empties the list takes the section with it (see `recent_row`), and
+            // the two buttons left go to the middle, where a status page would have put them.
+            recent.connect_visible_notify(|section| {
+                if let Some(column) = section.parent() {
+                    column.set_valign(gtk::Align::Center);
+                }
+            });
+        }
+        None => {
+            let status = adw::StatusPage::builder()
+                .icon_name(crate::APP_ID)
+                .title("Accent")
+                .description("Open a folder of markdown notes to start writing.")
+                .child(&column)
+                .build();
+            toolbar.set_content(Some(&status));
+        }
+    }
 
     // The one action on this screen, on the shell's usual accelerator for Open. A controller on
     // the window rather than an app accelerator, so it dies with this window.
@@ -143,24 +164,113 @@ pub fn present(
     window
 }
 
-/// The recent-vaults list, or `None` when none of the entries is still there.
-fn recent_list(
+/// The vaults the app has seen and the field that searches them, or `None` when it has seen none
+/// that are still there.
+///
+/// One section: the rule that divides them from the two ways to a vault the app has never seen —
+/// a bare `GtkSeparator`, with the column's 18 px on either side — a search field, and the list.
+/// The list scrolls on its own, because it is not capped and the buttons above it must stay put.
+fn recent_section(
+    window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
-) -> Option<gtk::ListBox> {
-    let recent = existing(&config.borrow().recent_vaults);
+) -> Option<(gtk::Box, gtk::SearchEntry)> {
+    let recent = recent_vaults(config);
     if recent.is_empty() {
         return None;
     }
+    let section = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(18)
+        .build();
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .build();
     list.add_css_class("boxed-list");
     for path in recent {
-        list.append(&recent_row(path, home.as_deref(), config, on_open));
+        list.append(&recent_row(
+            path,
+            home.as_deref(),
+            config,
+            on_open,
+            &section,
+        ));
     }
-    Some(list)
+    list.set_placeholder(Some(
+        &gtk::Label::builder()
+            .label("No matching vaults")
+            .margin_top(12)
+            .margin_bottom(12)
+            .css_classes(["dim-label"])
+            .build(),
+    ));
+
+    // The window's keys, so typing searches wherever the keyboard has gone on this screen.
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search recent vaults…")
+        .build();
+    search.set_key_capture_widget(Some(window));
+    list.set_filter_func({
+        // Weak: the list is the entry's sibling, and the entry's handlers hold the list.
+        let search = search.downgrade();
+        move |row| {
+            let (Some(search), Some(row)) =
+                (search.upgrade(), row.downcast_ref::<adw::ActionRow>())
+            else {
+                return true;
+            };
+            matches(
+                &search.text(),
+                &row.title(),
+                &row.subtitle().unwrap_or_default(),
+            )
+        }
+    });
+    search.connect_search_changed({
+        let list = list.downgrade();
+        move |_| {
+            if let Some(list) = list.upgrade() {
+                list.invalidate_filter();
+            }
+        }
+    });
+    // Enter opens what the search has narrowed to, the first row still showing.
+    search.connect_activate({
+        let list = list.downgrade();
+        move |_| {
+            let first = list.upgrade().and_then(|list| {
+                std::iter::successors(list.first_child(), |w| w.next_sibling())
+                    .filter(|w| w.is_child_visible())
+                    .find_map(|w| w.downcast::<adw::ActionRow>().ok())
+            });
+            if let Some(row) = first {
+                ActionRowExt::activate(&row);
+            }
+        }
+    });
+
+    // Natural width, so a long path widens the column rather than wrapping in the narrowest one,
+    // and natural height, so the list is as tall as its rows until the window says otherwise.
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_width(true)
+        .propagate_natural_height(true)
+        .child(&list)
+        .build();
+    section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    section.append(&search);
+    section.append(&scroller);
+    Some((section, search))
+}
+
+/// Whether a row belongs under what is typed in the search: every row while nothing is, and
+/// otherwise the rows whose name or path holds the text, case aside.
+fn matches(query: &str, title: &str, subtitle: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty()
+        || title.to_lowercase().contains(&query)
+        || subtitle.to_lowercase().contains(&query)
 }
 
 fn recent_row(
@@ -168,6 +278,7 @@ fn recent_row(
     home: Option<&Path>,
     config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
+    section: &gtk::Box,
 ) -> adw::ActionRow {
     let (title, subtitle) = labels(&path, home);
     let row = adw::ActionRow::builder()
@@ -194,7 +305,8 @@ fn recent_row(
         .build();
     forget.add_css_class("flat");
     forget.connect_clicked({
-        let (path, config) = (path.clone(), config.clone());
+        // Weak: the section holds this row, so a strong handle would be a cycle.
+        let (path, config, section) = (path.clone(), config.clone(), section.downgrade());
         move |button| {
             forget_vault(&config, &path);
             // Looked up rather than captured, so the row does not hold a reference to itself.
@@ -202,16 +314,15 @@ fn recent_row(
                 && let Some(list) = row.parent().and_downcast::<gtk::ListBox>()
             {
                 list.remove(&row);
-                // Nothing left to offer: the card and the rule above it are what "the vaults it
-                // has seen" is made of, and an empty boxed list under a bare separator says
-                // nothing. `recent_list` answers this at build time and cannot answer it again,
-                // so the row that empties the list takes the list with it — the separator being
-                // the sibling `present` appends before it.
-                if list.first_child().is_none() {
-                    if let Some(rule) = list.prev_sibling() {
-                        rule.set_visible(false);
-                    }
-                    list.set_visible(false);
+                // Nothing left to offer: the rule, the search and the card are what "the vaults
+                // it has seen" is made of, and an empty one says nothing. `recent_section`
+                // answers this at build time and cannot answer it again, so the row that empties
+                // the list takes the section with it. `row_at_index` rather than `first_child`,
+                // which is the placeholder once the rows are gone.
+                if list.row_at_index(0).is_none()
+                    && let Some(section) = section.upgrade()
+                {
+                    section.set_visible(false);
                 }
             }
         }
@@ -274,28 +385,37 @@ pub(crate) fn abbreviate(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
-/// Recent vaults still worth offering. A local directory that has gone — deleted, or on a drive
-/// nobody has mounted — is dropped rather than offered as a row that can only fail.
-///
-/// A remote is kept whatever state it is in: the only way to find out is to connect, and dialling
-/// out to draw a start screen would be far worse than an entry that might not answer.
-pub(crate) fn existing(recent: &[PathBuf]) -> Vec<PathBuf> {
-    recent
-        .iter()
-        .filter(|p| ssh::is_remote_path(p) || p.is_dir())
-        .cloned()
-        .collect()
+/// The recent vaults, once [`prune`] has taken out the ones that have gone. What it takes is
+/// written back through the usual save, and nothing is written when it takes nothing.
+pub(crate) fn recent_vaults(config: &Rc<RefCell<Config>>) -> Vec<PathBuf> {
+    if prune(&mut config.borrow_mut().recent_vaults) {
+        crate::settings::save(&config.borrow());
+    }
+    config.borrow().recent_vaults.clone()
 }
 
-/// The recent vaults a window can switch to: the ones still worth offering, minus the one it is
-/// already on. Keys, not paths — `Vault::key`, `Config::touch_recent` and this list all spell a
-/// vault the same way, a canonical path or an `ssh://` address, so plain equality is the answer.
+/// Drop the local vaults whose folder has gone — deleted, or on a drive nobody has mounted — and
+/// say whether any went. The list is not capped, so this is what keeps it to vaults that can
+/// still open, rather than a row that can only fail.
+///
+/// A remote stays whatever state it is in, until it is removed by hand: the only way to find out
+/// is to connect, and dialling out to draw a list would be far worse than an entry that might
+/// not answer.
+fn prune(recent: &mut Vec<PathBuf>) -> bool {
+    let before = recent.len();
+    recent.retain(|p| ssh::is_remote_path(p) || p.is_dir());
+    recent.len() < before
+}
+
+/// The recent vaults a window can switch to: all of them but the one it is already on. Keys, not
+/// paths — `Vault::key`, `Config::touch_recent` and this list all spell a vault the same way, a
+/// canonical path or an `ssh://` address, so plain equality is the answer.
 ///
 /// A vault that already has a window of its own stays in: picking it raises that window, which is
 /// the one-vault-one-window rule doing its job rather than a row that fails.
 pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<String> {
-    existing(recent)
-        .into_iter()
+    recent
+        .iter()
         .filter(|p| Some(p.as_path()) != current)
         .map(|p| p.to_string_lossy().into_owned())
         .collect()
@@ -737,44 +857,51 @@ mod tests {
     }
 
     #[test]
-    fn existing_drops_recent_vaults_that_are_gone() {
+    fn prune_drops_the_local_vaults_that_are_gone_and_keeps_the_remotes() {
         // ponytail: `std::env::temp_dir` rather than a `tempfile` dev-dependency apps/gtk does
         // not have. One directory, named after the process, removed at the end.
         let dir = std::env::temp_dir().join(format!("accent-start-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("note.md");
         std::fs::write(&file, "x").unwrap();
+        let remote = PathBuf::from("ssh://box/srv/vault");
 
-        let kept = existing(&[dir.clone(), dir.join("gone"), file]);
-        assert_eq!(kept, std::slice::from_ref(&dir));
+        // Recency order kept, a folder that went and a file dropped, the remote kept unchecked.
+        let mut recent = vec![remote.clone(), dir.join("gone"), dir.clone(), file];
+        assert!(prune(&mut recent));
+        assert_eq!(recent, [remote, dir.clone()]);
+        // Nothing left to take, so nothing to write.
+        assert!(!prune(&mut recent));
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn existing_keeps_a_remote_it_cannot_check() {
-        let remote = PathBuf::from("ssh://box/srv/vault");
-        let gone = PathBuf::from("/no/such/vault/on/this/machine");
-        assert_eq!(existing(&[remote.clone(), gone]), [remote]);
     }
 
     #[test]
     fn other_vaults_leaves_out_the_one_this_window_is_on() {
         let here = PathBuf::from("/tmp");
         let remote = PathBuf::from("ssh://box/srv/vault");
-        let gone = PathBuf::from("/no/such/vault/on/this/machine");
-        let recent = [remote.clone(), here.clone(), gone];
-        // Recency order kept, the missing directory dropped, the remote kept unchecked.
+        let recent = [remote.clone(), here.clone()];
         assert_eq!(
             other_vaults(&recent, Some(&here)),
             ["ssh://box/srv/vault".to_string()]
         );
         assert_eq!(other_vaults(&recent, Some(&remote)), ["/tmp".to_string()]);
-        // No vault at all — a loose window — leaves every surviving entry in.
+        // No vault at all — a loose window — leaves every entry in, in recency order.
         assert_eq!(
             other_vaults(&recent, None),
             ["ssh://box/srv/vault".to_string(), "/tmp".to_string()]
         );
+    }
+
+    #[test]
+    fn the_search_matches_a_name_or_a_path_case_aside() {
+        assert!(matches("", "Notes", "~/Notes"));
+        assert!(matches("  ", "Notes", "~/Notes"));
+        assert!(matches("not", "Notes", "~/Notes"));
+        // The path counts, a remote's host included.
+        assert!(matches("box:", "vault", "me@box:/srv/vault"));
+        assert!(matches("~/No", "Notes", "~/Notes"));
+        assert!(!matches("thesis", "Notes", "~/Notes"));
     }
 
     #[test]

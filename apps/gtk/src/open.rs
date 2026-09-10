@@ -8,14 +8,17 @@ use super::*;
 /// A tab opened by browsing — a click in the sidebar tree, a search hit, a Git row, a wikilink
 /// followed — is a `Preview`: the next such open closes it and takes its place, so clicking down
 /// a list of notes to see what is in them leaves one tab rather than twenty. Anything the reader
-/// named is `Kept`: the palette, Open File…, a drop, a rename, the command line and the session,
-/// where the file was asked for by name and the tab is meant to stay. A preview tab becomes a
-/// kept one the moment it is edited, its own tab is double-clicked, or it is moved to another
-/// pane, all three being the reader saying they want to keep it.
+/// named is `Kept`: the palette, Open File…, a drop, a rename and the command line, where the
+/// file was asked for by name and the tab is meant to stay. A preview tab becomes a kept one the
+/// moment it is edited, its own tab is double-clicked, or it is moved to another pane, all three
+/// being the reader saying they want to keep it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Opened {
     Kept,
     Preview,
+    /// Kept, and put back by the session restore, which says itself which tab each pane shows
+    /// (see [`App::put_back`]): so it lands behind whatever its pane is showing.
+    Restored,
 }
 
 impl App {
@@ -160,11 +163,18 @@ impl App {
             }
             Err(e) => {
                 self.awaiting.borrow_mut().remove(key);
-                return self.cannot(&format!("open {key}"), e);
+                return self.cannot_open(key, e);
             }
         };
         let prefs = self.prefs();
-        let tab = editor::open(&self.root(), key, text, flavour, &self.tabs(), &prefs);
+        let tab = editor::open(
+            &self.root(),
+            key,
+            text,
+            flavour,
+            &self.tabs_for(key),
+            &prefs,
+        );
         self.adopt(tab, how);
         if flavour.is_note() {
             self.sync_conflict_banner(key, None);
@@ -177,13 +187,12 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
-        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
         let pdf = pdftab::open(
-            &path,
+            path,
             key,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
-            &self.tabs(),
+            &self.tabs_for(key),
             place,
         );
         pdf.set_drawing_config(self.config.borrow().drawing.clone());
@@ -286,10 +295,20 @@ impl App {
         ));
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
+        let reader = Rc::downgrade(&pdf);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
+        // The tab is up and says it is opening; the bytes follow, which on a remote vault is a
+        // transfer of however long the file takes.
+        self.local_copy(key, path, move |app, copy| {
+            let Some(pdf) = reader.upgrade() else { return };
+            match copy {
+                Ok(copy) => pdf.load(&copy),
+                Err(e) => app.gone(pdf.key(), &pdf.page, e),
+            }
+        });
     }
 
     /// The PDF in the active tab, for the actions that only mean something in one.
@@ -422,8 +441,8 @@ impl App {
         self.sync_status();
     }
 
-    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF
-    /// in every window.
+    /// A width or a colour picked on the ring: into the config, to every open PDF in every window,
+    /// and onto disk a second later (`App::config_changed`).
     fn pdf_choice(&self, tool: pdfview::Mode, choice: ring::Choice) {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
         self.config_changed();
@@ -491,19 +510,35 @@ impl App {
         }
     }
 
-    /// Tell a PDF tab which note links highlight it.
-    fn sync_pdf_links(&self, pdf: &Rc<pdftab::PdfTab>) {
+    /// Tell a PDF tab which note links highlight it. The index is asked on a worker: this runs
+    /// after every save while a PDF is open, and on a remote vault the asking is a round trip.
+    fn sync_pdf_links(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         let key = pdf.key();
         // A file outside every vault has no index to ask.
         if doc::is_loose_key(&key) {
             return;
         }
-        let Some(vault) = self.vault() else { return };
-        match vault.pdf_links(&key) {
-            Ok(links) => pdf.set_note_links(links),
-            Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
-        }
-        self.sync_export();
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let (app, reader) = (Rc::downgrade(self), Rc::downgrade(pdf));
+        glib::spawn_future_local(async move {
+            let asked = key.clone();
+            let links = gio::spawn_blocking(move || vault.pdf_links(&asked)).await;
+            let (Some(app), Some(pdf)) = (app.upgrade(), reader.upgrade()) else {
+                return;
+            };
+            // Renamed while the index was asked: the answer is about a name it no longer has.
+            if pdf.key() != key {
+                return;
+            }
+            match links {
+                Ok(Ok(links)) => pdf.set_note_links(links),
+                Ok(Err(e)) => tracing::warn!("pdf links for {key}: {e:#}"),
+                Err(_) => tracing::warn!("the pdf links worker panicked on {key}"),
+            }
+            app.sync_export();
+        });
     }
 
     /// Export Highlights is offered only where there is a highlight to export: over a PDF no note
@@ -554,7 +589,7 @@ impl App {
     }
 
     /// The same for every open PDF, after something changed the notes.
-    fn sync_all_pdf_links(&self) {
+    fn sync_all_pdf_links(self: &Rc<Self>) {
         for pdf in self.pdfs() {
             self.sync_pdf_links(&pdf);
         }
@@ -562,10 +597,7 @@ impl App {
 
     /// An image, in a tab that only looks at it.
     fn open_image(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
-        // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
-        // widget needs real bytes, and the protocol deliberately carries none.
-        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
-        let picture = gtk::Picture::for_filename(&path);
+        let picture = gtk::Picture::new();
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
         picture.set_can_shrink(true);
         let scroller = gtk::ScrolledWindow::builder()
@@ -591,23 +623,50 @@ impl App {
                 }
             ),
         );
+        // The picture widget needs real bytes, and the protocol deliberately carries none.
+        let (viewer, picture) = (Rc::downgrade(&image), picture.downgrade());
+        self.local_copy(key, path, move |app, copy| {
+            let (Some(image), Some(picture)) = (viewer.upgrade(), picture.upgrade()) else {
+                return;
+            };
+            match copy {
+                Ok(copy) => picture.set_filename(Some(copy)),
+                Err(e) => app.gone(image.key(), &image.page, e),
+            }
+        });
     }
 
-    /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
-    /// else: the PDF engine, an image, the preview's assets.
-    ///
-    /// ponytail: on a remote vault this downloads on the main thread, so a large PDF holds the
-    /// window for as long as the transfer takes. Move it to a worker thread with the opening
-    /// status the PDF tab already shows if that ever bites.
-    fn local_copy(&self, key: &str) -> Option<PathBuf> {
-        let vault = self.vault()?;
-        match vault.fetch(key) {
-            Ok(path) => Some(path),
-            Err(e) => {
-                tracing::warn!("fetching {key}: {e}");
-                None
+    /// Hand `landed` the path on *this* machine holding `key`'s bytes, for the readers that cannot
+    /// work with anything else: the PDF engine and an image. That is the file itself on a local
+    /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
+    /// takes, so the asking is on a worker; a loose key is already a path here.
+    fn local_copy(
+        self: &Rc<Self>,
+        key: &str,
+        path: &Path,
+        landed: impl FnOnce(&Rc<App>, std::io::Result<PathBuf>) + 'static,
+    ) {
+        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let (key, path) = (key.to_string(), path.to_path_buf());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let copy = gio::spawn_blocking(move || match vault {
+                Some(vault) => vault.fetch(&key),
+                None => Ok(path),
+            })
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("the fetch panicked")));
+            if let Some(app) = weak.upgrade() {
+                landed(&app, copy);
             }
-        }
+        });
+    }
+
+    /// A viewer whose bytes never came: its tab goes, the way a note that would not open never
+    /// gets one, and the reason is said.
+    fn gone(&self, key: String, page: &adw::TabPage, e: std::io::Error) {
+        self.close_page(page);
+        self.cannot_open(&key, e);
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
@@ -686,7 +745,7 @@ impl App {
             self.zoom.get(),
         );
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        self.select_new_page(&tab.page);
+        self.select_new_page(&tab.page, Opened::Preview);
         self.mark_opened(&tab.page, Opened::Preview);
         tab
     }
@@ -701,14 +760,14 @@ impl App {
         icon: &str,
         how: Opened,
     ) -> Rc<doc::Viewer> {
-        let page = self.tabs().append(child);
+        let page = self.tabs_for(key).append(child);
         page.set_title(doc::file_name(key));
         page.set_tooltip(&fileops::display_path(&self.root(), key));
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
         self.docs.borrow_mut().push(wrap(viewer.clone()));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
         viewer
@@ -789,22 +848,54 @@ impl App {
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
+    /// No name is the note on screen, as `[[#Heading]]` writes it.
     pub fn open_target(self: &Rc<Self>, target: &str) {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
         };
-        // `paper.pdf#page=3&selection=…` resolves by the path and lands by the anchor.
-        let (target, anchor) = split_pdf_anchor(target);
+        // `paper.pdf#page=3&selection=…` and `Note#Heading` resolve by the path and land by the
+        // anchor: a PDF's page, or a note's heading.
+        let (target, anchor) = target.split_once('#').unwrap_or((target, ""));
         // Where the link was, so Back returns to it. Before the open, and before the selection
         // change it causes records the same place, which coalesces into this one.
         self.mark();
-        match vault.resolve_link(target) {
-            Ok(Some(rel)) => {
-                self.open_preview(&rel);
-                self.show_pdf_anchor(&rel, anchor);
+        let anchor = anchor.to_string();
+        if target.is_empty() {
+            if let Some(rel) = self.active_key() {
+                self.land_on(&rel, &anchor);
             }
-            Ok(None) => self.toast(&format!("No note called {target}")),
-            Err(e) => self.cannot(&format!("resolve {target}"), e),
+            return;
+        }
+        // Resolved on a worker: the index that knows the name is on the host for a remote vault.
+        let (vault, target) = (vault.clone(), target.to_string());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let asked = target.clone();
+            let resolved = gio::spawn_blocking(move || vault.resolve_link(&asked)).await;
+            let Some(app) = weak.upgrade() else { return };
+            match resolved {
+                Ok(Ok(Some(rel))) => app.land_on(&rel, &anchor),
+                Ok(Ok(None)) => app.toast(&format!("No note called {target}")),
+                Ok(Err(e)) => app.cannot(&format!("resolve {target}"), e),
+                Err(_) => tracing::warn!("the link worker panicked on {target}"),
+            }
+        });
+    }
+
+    /// Open `rel` and land where `anchor` says: a PDF's page and selection, or a note's heading.
+    fn land_on(self: &Rc<Self>, rel: &str, anchor: &str) {
+        match accent_core::markdown::pdf_anchor(anchor) {
+            Some(at) => {
+                self.open_preview(rel);
+                self.show_pdf_anchor(rel, Some(at));
+            }
+            None if anchor.is_empty() => self.open_preview(rel),
+            None => {
+                let anchor = anchor.to_string();
+                self.with_tab(rel, Opened::Preview, move |_, tab| {
+                    tab.goto_heading(&anchor)
+                });
+            }
         }
     }
 
@@ -828,22 +919,31 @@ impl App {
     /// check is the vault's own lexical one: canonicalising would refuse a note reached through
     /// one of the directory symlinks a vault links in on purpose, which the walk indexed and the
     /// tree is already showing.
+    ///
+    /// Whether the file is there is not asked here: on a remote vault that is a round trip on the
+    /// main thread before every open. The reader's worker finds out anyway, and says so through
+    /// [`cannot_open`](Self::cannot_open).
     fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
         if doc::is_loose_key(key) {
             let path = PathBuf::from(key);
             return path.is_file().then(|| (key.to_string(), path));
         }
         // A window with no vault has nothing to be relative to, so only absolute keys open.
-        let vault = self.vault()?;
-        let path = vault.resolve(key).ok()?;
-        // Asked of the vault rather than of this machine: on a remote one the path is the host's
-        // and `exists()` here would answer about a file that was never meant to be here.
-        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
-        if !vault.exists(&key) {
-            return None;
-        }
+        let path = self.vault()?.resolve(key).ok()?;
         // Normalised, so `./a.md` and `a.md` are one tab rather than two.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
         Some((key, path))
+    }
+
+    /// A file that would not open. One that is not there reads the same whoever found out: the
+    /// session naming a note deleted since, or a link to one never written.
+    fn cannot_open(&self, key: &str, e: std::io::Error) {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                self.cannot(&format!("open {key}"), "not in this vault")
+            }
+            _ => self.cannot(&format!("open {key}"), e),
+        }
     }
 
     /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one
@@ -996,24 +1096,46 @@ impl App {
         let page = tab.page.clone();
         self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
-        if let Some(waiting) = self.awaiting.borrow_mut().remove(&tab.rel()) {
+        // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the
+        // restore's `put_back` asks what else is still waiting.
+        let waiting = self.awaiting.borrow_mut().remove(&tab.rel());
+        if let Some(waiting) = waiting {
             waiting(self, &tab);
         }
     }
 
-    /// Put a page that has just been added to the active pane in front.
+    /// The tab view a new tab for `key` goes into: the pane the session restore put it in, while
+    /// that pane is still open, and otherwise the active one. A restore is the one open that
+    /// knows its pane before the tab exists, and a text tab only exists once the worker's read
+    /// lands, so the pane is looked up here rather than the tab moved there afterwards.
+    fn tabs_for(&self, key: &str) -> adw::TabView {
+        let placed = self.placing.borrow_mut().remove(key);
+        match placed
+            .and_then(|pane| pane.upgrade())
+            .filter(|pane| self.panes.borrow().iter().any(|p| Rc::ptr_eq(p, pane)))
+        {
+            Some(pane) => pane.tabs.clone(),
+            None => self.tabs(),
+        }
+    }
+
+    /// Put a page that has just been added to a pane in front of it, unless the session restore
+    /// opened it: which tab is in front of a restored pane is [`App::put_back`]'s to say.
     ///
     /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
     /// pane is selected as it is added, before its document is in `docs`, so that one gets no
     /// notify from here and is synced by hand instead.
-    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage) {
-        let tabs = self.tabs();
-        match tabs.selected_page().as_ref() == Some(page) {
+    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        match pane.tabs.selected_page().as_ref() == Some(page) {
             true => self.sync_active(),
-            false => tabs.set_selected_page(page),
+            false if how == Opened::Restored => {}
+            false => pane.tabs.set_selected_page(page),
         }
     }
 

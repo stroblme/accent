@@ -24,7 +24,6 @@ use gtk::{gdk, gio, glib, pango};
 
 use crate::diff::{Compare, DiffTab, Side};
 
-use crate::fileops;
 use crate::highlight;
 
 mod actions;
@@ -63,6 +62,12 @@ const PAGE: usize = 200;
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How often the vault is searched for repositories again while it is being indexed. Discovery
+/// goes by the indexed directories, so a nested repository shows up this long after the walk has
+/// reached it rather than when the walk ends. Not every progress tick: each look is a whole
+/// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
+const REDISCOVER: Duration = Duration::from_secs(3);
+
 /// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
 /// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
 /// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
@@ -93,9 +98,9 @@ pub struct Hooks {
     /// side's title and text, and what to call once the comparison exists so a refresh can reach
     /// it.
     pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
-    /// Move a vault file to the trash. Vault keys only, which is what leaves an untracked file
-    /// outside the vault without a Discard button.
-    pub trash: Box<dyn Fn(&str)>,
+    /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
+    /// leaves an untracked file outside the vault without a Discard button.
+    pub trash: Box<dyn Fn(&[String])>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
     /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
@@ -116,6 +121,9 @@ struct State {
     selected: usize,
     /// One per repository, index-aligned with `repos`.
     statuses: Vec<Status>,
+    /// Git did not answer the last refresh's status of the selected repository, so what the pane
+    /// shows for it is the status before (see [`merge_statuses`]). The Sync tooltip says so.
+    status_kept: bool,
     /// The selected repository's history, as far as it has been paged in.
     commits: Vec<Commit>,
     /// The selected repository's branches, which is what the branch chooser lists.
@@ -176,6 +184,10 @@ pub struct Panel {
     again: Cell<Option<Depth>>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_depth: Cell<Option<Depth>>,
+    /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
+    /// starts at the pane's creation, which the window follows with a discovery of its own, so a
+    /// walk that is over within [`REDISCOVER`] asks for nothing more.
+    discovered: Cell<i64>,
     /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
     /// snapshot. Weak, so a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
@@ -212,6 +224,9 @@ pub struct Panel {
     /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
     /// schedules one and folding a folder must survive it.
     collapsed: RefCell<HashSet<String>>,
+    /// A press is down over the changes list, so its rows are held where they are until the
+    /// release (see [`Panel::rebuild_changes`]).
+    pressed: Cell<bool>,
 }
 
 impl Panel {
@@ -426,6 +441,7 @@ impl Panel {
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
+            pressed: Cell::new(false),
             hooks,
             root: root.upcast(),
             stack,
@@ -453,6 +469,7 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(None),
             pending_depth: Cell::new(None),
+            discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
@@ -515,8 +532,12 @@ impl Panel {
         self.tree.get()
     }
 
+    /// A move redraws every row: the view is the one thing a row's binding reads that the row
+    /// does not carry — a file at the root is the same row either way, indented only in the tree
+    /// — so [`Panel::rebuild_changes`] would keep it as it was.
     pub fn set_tree(&self, on: bool) {
         if self.tree.replace(on) != on {
+            self.changes.remove_all();
             self.rebuild_changes();
         }
     }
@@ -536,6 +557,18 @@ impl Panel {
             panel.refresh(depth);
         });
         self.pending.replace(Some(id));
+    }
+
+    /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
+    /// which arrives many times a second: [`Panel::schedule_refresh`] restarts its timer on every
+    /// call, so passing each tick on would put the refresh off until the walk was over.
+    pub fn rediscover(self: &Rc<Self>) {
+        let now = glib::monotonic_time();
+        if now - self.discovered.get() < REDISCOVER.as_micros() as i64 {
+            return;
+        }
+        self.discovered.set(now);
+        self.schedule_refresh(Depth::Discover);
     }
 
     fn wire_header(
@@ -685,14 +718,19 @@ impl Panel {
         });
 
         let selected = clamp(self.state.borrow().selected, repos.len());
+        let status_kept = fetched.statuses.get(selected).is_some_and(Option::is_none);
+        let statuses = {
+            let state = self.state.borrow();
+            merge_statuses(&repos, fetched.statuses, &state.repos, &state.statuses)
+        };
         let heads: HashMap<PathBuf, String> = repos
             .iter()
-            .zip(&fetched.statuses)
+            .zip(&statuses)
             .filter_map(|(repo, status)| Some((repo.git_dir.clone(), status.branch.oid.clone()?)))
             .collect();
         let ignored = repos
             .iter()
-            .zip(&fetched.statuses)
+            .zip(&statuses)
             .flat_map(|(repo, status)| {
                 status
                     .ignored
@@ -701,18 +739,24 @@ impl Panel {
             })
             .collect();
 
-        let head = fetched
-            .statuses
-            .get(selected)
-            .and_then(|s| branch_parts(&s.branch));
+        let head = statuses.get(selected).and_then(|s| branch_parts(&s.branch));
         self.counts
             .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
         let branches = match fetched.branches {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        let (rows, at) = branch_model(head.map(|(name, _)| name), &branches);
+        let name = statuses
+            .get(selected)
+            .and_then(|s| head_name(s, Some(&branches)));
+        let (rows, at) = branch_model(name, &branches);
         self.set_branches(&rows, at);
+        tracing::debug!(
+            repos = repos.len(),
+            status_kept,
+            branch = %self.branch_label.text(),
+            "git refresh landed"
+        );
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -740,7 +784,8 @@ impl Panel {
             state.heads = heads;
             state.ignored = ignored;
             state.repos = repos;
-            state.statuses = fetched.statuses;
+            state.statuses = statuses;
+            state.status_kept = status_kept;
             if let (true, Some(commits)) = (moved, fetched.commits) {
                 state.commits = commits;
             }
@@ -781,14 +826,23 @@ impl Panel {
         let state = self.state.borrow();
         let branch = state.statuses.get(state.selected).map(|s| &s.branch);
         self.sync.set_sensitive(branch.is_some());
-        let hint = branch.map(sync_hint).unwrap_or_else(|| "Sync".to_string());
+        // A branch git has said nothing about has no upstream anyone knows of, so it is not
+        // "Publish" either.
+        let mut tip = branch
+            .filter(|b| branch_parts(b).is_some())
+            .map(sync_hint)
+            .unwrap_or_else(|| "Sync".to_string());
         // Quiet, and only here: the button still works and a sync is still what it does. What a
-        // failed background fetch costs is the counts beside it, and this is the one surface that
+        // failed background fetch costs is the counts beside it, and what a status that did not
+        // come back costs is everything the pane shows beside it; this is the one surface that
         // can say so without interrupting anyone.
-        self.sync.set_tooltip_text(Some(&match self.fetch_failed.get() {
-            true => format!("{hint}\n\nThe last background fetch did not go through, so the counts may be out of date."),
-            false => hint,
-        }));
+        if state.status_kept {
+            tip.push_str("\n\nThe status could not be refreshed, so the branch and the changes shown may be out of date.");
+        }
+        if self.fetch_failed.get() {
+            tip.push_str("\n\nThe last background fetch did not go through, so the counts may be out of date.");
+        }
+        self.sync.set_tooltip_text(Some(&tip));
     }
 
     /// Put the branch popover on `rows` (see [`branch_model`]), `at` being the local row HEAD is
@@ -951,13 +1005,16 @@ impl Panel {
     }
 
     /// The branch line for the repository `key` lives in, or for the selected one when `key` is
-    /// `None`. What the status bar shows.
+    /// `None`. What the status bar shows: while git has given the repository no status, the bare
+    /// name the chooser falls back on too ([`head_name`]).
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
-        branch_line(state.statuses.get(index)?)
+        let status = state.statuses.get(index)?;
+        let listed = (index == state.selected).then_some(&state.branches);
+        branch_line(status).or_else(|| head_name(status, listed))
     }
 
     /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
@@ -1290,7 +1347,39 @@ fn branch_model(head: Option<String>, branches: &git::Branches) -> (git::Branche
             0,
         ),
     };
-    (git::Branches { local, remote }, Some(at))
+    let rows = git::Branches {
+        local,
+        remote,
+        ..git::Branches::default()
+    };
+    (rows, Some(at))
+}
+
+/// Each repository's status, index-aligned with `repos`: this refresh's answer, or where git gave
+/// none, the one the pane already had for that repository. A status that failed — a host too busy
+/// with its first index to answer in time, say — would otherwise take the branch, its counts and
+/// the changes off the pane. Matched by git dir rather than position, because a rediscovery can
+/// find a repository the last refresh did not; one seen for the first time has nothing to keep.
+fn merge_statuses(
+    repos: &[Repo],
+    fetched: Vec<Option<Status>>,
+    known: &[Repo],
+    kept: &[Status],
+) -> Vec<Status> {
+    repos
+        .iter()
+        .zip(fetched)
+        .map(|(repo, status)| {
+            status.unwrap_or_else(|| {
+                known
+                    .iter()
+                    .zip(kept)
+                    .find(|(known, _)| known.git_dir == repo.git_dir)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or_default()
+            })
+        })
+        .collect()
 }
 
 /// The local branch a remote-tracking one checks out as: `origin/topic` is `topic`. Cut at the
@@ -1318,6 +1407,16 @@ fn branch_parts(b: &Branch) -> Option<(String, String)> {
         .collect::<Vec<_>>()
         .join(" ");
     Some((name, counts))
+}
+
+/// The branch HEAD is on, as the chooser and the status bar both name it: what the status says,
+/// or while git has given the repository no status, the branch its branch list marks. Only the
+/// selected repository's branches are read, so `listed` is `None` for any other; a detached HEAD
+/// marks none, and stays unnamed until a status says where it is.
+fn head_name(status: &Status, listed: Option<&git::Branches>) -> Option<String> {
+    branch_parts(&status.branch)
+        .map(|(name, _)| name)
+        .or_else(|| listed?.head.clone())
 }
 
 /// The branch row on one line, for anywhere with room for one string.
@@ -1480,7 +1579,54 @@ mod tests {
         git::Branches {
             local: local.iter().map(|b| b.to_string()).collect(),
             remote: remote.iter().map(|b| b.to_string()).collect(),
+            head: None,
         }
+    }
+
+    #[test]
+    fn a_status_git_did_not_give_keeps_the_last_one_for_that_repository() {
+        let on = |name: &str| Status {
+            branch: Branch {
+                head: Some(name.to_string()),
+                ..Branch::default()
+            },
+            ..Status::default()
+        };
+        let (a, b, c) = (repo("/v"), repo("/v/b"), repo("/v/c"));
+        // The rediscovery found `c`, which moved `b` along: matched by git dir, not position.
+        let merged = merge_statuses(
+            &[a.clone(), c, b.clone()],
+            vec![None, None, Some(on("fresh"))],
+            &[a, b],
+            &[on("kept"), on("old")],
+        );
+        assert_eq!(
+            merged,
+            [on("kept"), Status::default(), on("fresh")],
+            "kept, nothing to keep for a new one, and an answer beats what was kept"
+        );
+    }
+
+    #[test]
+    fn head_name_falls_back_on_the_branch_list_only_while_there_is_no_status() {
+        let branches = git::Branches {
+            head: Some("side".to_string()),
+            ..listed(&["main", "side"], &[])
+        };
+        let status = Status {
+            branch: on_main(None, 0, 0),
+            ..Status::default()
+        };
+        assert_eq!(head_name(&status, Some(&branches)).as_deref(), Some("main"));
+        assert_eq!(
+            head_name(&Status::default(), Some(&branches)).as_deref(),
+            Some("side")
+        );
+        assert_eq!(
+            head_name(&Status::default(), None),
+            None,
+            "another repository's branches are not read"
+        );
     }
 
     #[test]

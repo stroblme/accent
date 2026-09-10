@@ -591,13 +591,11 @@ pub fn parse_refs(decorations: &str) -> Vec<Ref> {
                 (RefKind::LocalBranch, name)
             } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
                 (RefKind::Tag, name)
-            } else if let Some(name) = full
-                .strip_prefix("refs/remotes/")
-                .filter(|name| !name.ends_with("/HEAD"))
-            {
-                (RefKind::RemoteBranch, name)
             } else {
-                return None;
+                let name = full
+                    .strip_prefix("refs/remotes/")
+                    .filter(|name| !name.ends_with("/HEAD"))?;
+                (RefKind::RemoteBranch, name)
             };
             Some(Ref {
                 name: name.to_string(),
@@ -853,6 +851,11 @@ pub struct Branches {
     pub local: Vec<String>,
     /// Remote-tracking branches, `origin/main` and so on, as the last fetch left them.
     pub remote: Vec<String>,
+    /// The local branch HEAD is on; `None` when it is detached or its branch has no commit yet.
+    /// [`Status`] says the same, and this is what the pane falls back on when a status did not
+    /// come back. Defaulted, so an answer from a server that does not send it still reads.
+    #[serde(default)]
+    pub head: Option<String>,
 }
 
 /// The repository's local and remote-tracking branches, in one `for-each-ref`.
@@ -861,7 +864,7 @@ pub fn branches(repo: &Repo) -> Result<Branches, Error> {
         &repo.root,
         &[
             "for-each-ref",
-            "--format=%(refname)%00%(symref)",
+            "--format=%(refname)%00%(symref)%00%(HEAD)",
             "refs/heads/",
             "refs/remotes/",
         ],
@@ -870,16 +873,21 @@ pub fn branches(repo: &Repo) -> Result<Branches, Error> {
     Ok(parse_branches(&out))
 }
 
-/// Parse `<refname> NUL <symref>` lines. Whole ref names rather than `refname:short`, which is the
-/// only way a local branch called `origin/x` stays apart from the remote one. A symbolic ref —
-/// `origin/HEAD`, which a clone sets — names another branch rather than being one, so it goes.
+/// Parse `<refname> NUL <symref> NUL <HEAD>` lines. Whole ref names rather than `refname:short`,
+/// which is the only way a local branch called `origin/x` stays apart from the remote one. A
+/// symbolic ref — `origin/HEAD`, which a clone sets — names another branch rather than being one,
+/// so it goes. `%(HEAD)` is `*` on the branch HEAD is on and a space everywhere else.
 pub fn parse_branches(bytes: &[u8]) -> Branches {
     let mut branches = Branches::default();
     for line in String::from_utf8_lossy(bytes).lines() {
-        let Some((name, "")) = line.split_once('\0') else {
+        let mut fields = line.split('\0');
+        let (Some(name), Some("")) = (fields.next(), fields.next()) else {
             continue;
         };
         if let Some(local) = name.strip_prefix("refs/heads/") {
+            if fields.next() == Some("*") {
+                branches.head = Some(local.to_string());
+            }
             branches.local.push(local.to_string());
         } else if let Some(remote) = name.strip_prefix("refs/remotes/") {
             branches.remote.push(remote.to_string());

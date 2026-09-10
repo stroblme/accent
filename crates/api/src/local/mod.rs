@@ -55,8 +55,13 @@ impl Local {
         cfg: VaultConfig,
     ) -> Result<(Local, Receiver<Event>)> {
         // One spelling of the root for everything downstream: index paths, watcher events and
-        // symlink targets are all compared against it.
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        // symlink targets are all compared against it. A root that is not a folder is refused
+        // rather than opened as an empty vault: on a host, that is a mistyped address.
+        let root = root
+            .canonicalize()
+            .ok()
+            .filter(|r| r.is_dir())
+            .ok_or_else(|| anyhow::anyhow!("{} is not a folder", root.display()))?;
         // The reader opens first because it is the connection that may drop and recreate the
         // schema; the worker's must never see the database half-built.
         let index = Index::open(db)?;

@@ -63,7 +63,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .find(|t| &t.page == page)
                 .filter(|t| t.modified.get());
             if let Some(tab) = dirty
-                && let Err(e) = app.write_tab(&tab, tab.etag.get())
+                && let Err(e) = app.flush_tab(&tab)
             {
                 let (tabs, page) = (tabs.clone(), page.clone());
                 app.ask_unsaved(&tab, &e, move |app, close| {
@@ -103,6 +103,11 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     app.mark_page(left);
                 }
                 pane.touch(&page);
+                // A page with no document yet is still being opened, and was selected by being
+                // the first one added; any other is a tab someone picked.
+                if app.doc_for_page(&page).is_some() {
+                    app.reader_in(&pane);
+                }
             }
             // This pane's bar, whether or not this pane has the keyboard: a tab dragged out of a
             // background pane must not leave that pane's bar holding a tab it no longer has.
@@ -194,6 +199,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         #[weak]
         pane,
         move |_| {
+            app.reader_in(&pane);
             if app.set_active_pane(&pane) {
                 app.sync_active();
             }
@@ -410,7 +416,7 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         glib::Propagation::Proceed,
         move |_| {
             for tab in app.open_tabs().iter().filter(|t| t.modified.get()) {
-                let Err(e) = app.write_tab(tab, tab.etag.get()) else {
+                let Err(e) = app.flush_tab(tab) else {
                     continue;
                 };
                 app.ask_unsaved(tab, &e, |app, close| {

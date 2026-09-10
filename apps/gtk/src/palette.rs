@@ -82,7 +82,8 @@ pub struct Sources {
     pub commands: Vec<Item>,
     pub load_tags: Box<dyn Fn() -> Vec<String>>,
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
-    /// Short and already filtered, so it is passed whole rather than behind a loader.
+    /// Names the config already holds, pruned of folders that have gone, so it is passed whole
+    /// rather than behind a loader.
     pub vaults: Vec<String>,
     /// Chords no command of ours holds but that a widget does, each with the name of what it does
     /// there. They are not rows in the palette — nothing can run them — but the rebind dialog has

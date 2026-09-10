@@ -21,11 +21,10 @@ pub use transfer::{download, upload};
 use self::paths::{
     already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
-use crate::dialogs::{alert, choose, focus_entry, form, labelled};
+use crate::dialogs::{
+    CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
+};
 use crate::pathfield::{completions, look_again, path_field};
-// Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
-// this module, which is where they used to live.
-pub(crate) use crate::dialogs::{CONFIRM, name_dialog, name_entry};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
@@ -104,6 +103,14 @@ pub struct Ops {
 /// A name carrying `/` is a path relative to `dir`, exactly as it is in Rename, and the folders it
 /// names are created with it. The line under the entry says where the file will really land.
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
+    let dir = dir.to_string();
+    with_templates(ops, false, move |ops, templates| {
+        new_file_with(ops, &dir, templates)
+    });
+}
+
+/// [`new_file`] once the templates are in.
+fn new_file_with(ops: &Rc<Ops>, dir: &str, templates: Vec<String>) {
     let entry = name_entry("File name", "");
     let form = form();
     form.append(&vault_path_field(&entry, &ops.vault, dir));
@@ -113,7 +120,6 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
         move |typed| typed_path(&dir, typed)
     }));
 
-    let templates = ops.vault.templates().unwrap_or_default();
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
         let row = labelled("Template", picker);
@@ -213,13 +219,11 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
 /// naming a note that already exists opens it untouched, which is what makes a dated one a daily
 /// note.
 pub fn new_from_template(ops: &Rc<Ops>) {
-    let templates: Vec<String> = ops
-        .vault
-        .templates()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| matches!(ops.vault.template_target(t), Ok(Some(_))))
-        .collect();
+    with_templates(ops, true, new_from_template_with);
+}
+
+/// [`new_from_template`] once the templates that name a target are in.
+fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
         return (ops.toast)(&format!(
@@ -259,7 +263,33 @@ type Insert = Box<dyn Fn(&str, &[usize])>;
 /// stops. Every template is offered, target or not; a Meeting is something typed into the day's
 /// note, not a note of its own.
 pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
-    let templates = ops.vault.templates().unwrap_or_default();
+    let title = title.to_string();
+    with_templates(ops, false, move |ops, templates| {
+        insert_template_with(ops, &title, insert, templates)
+    });
+}
+
+/// Carry on with the vault's templates once a worker has them, all of them or only the ones that
+/// name a target: on a remote vault the asking is a round trip, and the dialog waits for it
+/// rather than the window.
+fn with_templates(
+    ops: &Rc<Ops>,
+    targets_only: bool,
+    then: impl FnOnce(&Rc<Ops>, Vec<String>) + 'static,
+) {
+    let (vault, ops) = (ops.vault.clone(), ops.clone());
+    glib::spawn_future_local(async move {
+        let listed = gio::spawn_blocking(move || match targets_only {
+            true => vault.template_targets(),
+            false => vault.templates(),
+        })
+        .await;
+        then(&ops, listed.ok().and_then(Result::ok).unwrap_or_default());
+    });
+}
+
+/// [`insert_template`] once the templates are in.
+fn insert_template_with(ops: &Rc<Ops>, title: &str, insert: Insert, templates: Vec<String>) {
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
         return (ops.toast)(&format!("No templates in {dir}"));
@@ -530,37 +560,57 @@ fn rename_message(verb: &str, name: &str, to: &str, failed: usize, unsaved: usiz
 /// The tab closes after the file is gone, not before: a trash that fails, or a permanent delete
 /// the user then cancels, must not leave the note open nowhere.
 pub fn trash(ops: &Rc<Ops>, rel: &str) {
-    let path = ops.vault.root().join(rel);
-    let name = basename(rel).to_string();
-    let (ops, rel) = (ops.clone(), rel.to_string());
+    trash_all(ops, vec![rel.to_string()]);
+}
+
+/// [`trash`] for several paths at once: one toast for all of them and, where there is no trash,
+/// one question. The Git pane's Discard on a folder takes its untracked files away through this,
+/// and a toast or a dialog per file would be one per file.
+pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
     // What lands in the trash should be what the user last saw, so every dirty tab under it is
     // written out before the file moves — a folder takes the notes inside it, and their unsaved
     // edits used to go with it in silence. Whatever cannot be written stays in its tab's banner.
-    (ops.flush)(std::slice::from_ref(&rel));
+    (ops.flush)(&rels);
     // A vault on another machine has no session bus to ask and no trash to ask it about, so the
     // only delete there is is the permanent one — which is exactly the case this already has a
     // dialog for, and it says so in the same words.
     if ops.vault.is_remote() {
-        return confirm_delete(&ops, &name, &rel);
+        return confirm_delete(ops, rels);
     }
+    let ops = ops.clone();
     // ponytail: the tree and the index catch up through the watcher rather than being told here.
     // Post the removal explicitly if a trashed file is ever seen lingering in the sidebar.
-    gio::File::for_path(&path).trash_async(
-        glib::Priority::DEFAULT,
-        gio::Cancellable::NONE,
-        move |result| match result {
-            Ok(()) => {
-                (ops.close)(&rel);
-                (ops.toast)(&format!("Moved {name} to Trash"));
+    glib::spawn_future_local(async move {
+        let (mut moved, mut refused) = (Vec::new(), Vec::new());
+        for rel in rels {
+            let file = gio::File::for_path(ops.vault.root().join(&rel));
+            match file.trash_future(glib::Priority::DEFAULT).await {
+                Ok(()) => {
+                    (ops.close)(&rel);
+                    moved.push(rel);
+                }
+                // What a sandbox without a working trash portal answers. There is nothing to fall
+                // back to but a permanent delete, and that has to be asked about.
+                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => refused.push(rel),
+                Err(e) => (ops.toast)(&format!("Cannot trash {}: {e}", basename(&rel))),
             }
-            // What a sandbox without a working trash portal answers. There is nothing to fall
-            // back to but a permanent delete, and that has to be asked about.
-            Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => {
-                confirm_delete(&ops, &name, &rel)
-            }
-            Err(e) => (ops.toast)(&format!("Cannot trash {name}: {e}")),
-        },
-    );
+        }
+        if !moved.is_empty() {
+            (ops.toast)(&format!("Moved {} to Trash", several(&moved)));
+        }
+        if !refused.is_empty() {
+            confirm_delete(&ops, refused);
+        }
+    });
+}
+
+/// How a toast or a dialog names the paths it is about: a single one by its name, several by
+/// their number.
+fn several(rels: &[String]) -> String {
+    match rels {
+        [one] => basename(one).to_string(),
+        many => format!("{} files", many.len()),
+    }
 }
 
 /// Whether an open document's key goes with `trashed`: the path itself, or anything inside it
@@ -578,14 +628,19 @@ pub fn trashed_with(trashed: &str, key: &str) -> bool {
 
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
-fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
+fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
     let dialog = alert(
         "Delete Permanently?",
         &format!(
-            "{name} cannot be moved to the trash{}. Deleting it cannot be undone.",
+            "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
+            several(&rels),
             match ops.vault.is_remote() {
                 true => " on the remote",
                 false => " on this system",
+            },
+            match rels.len() {
+                1 => "it",
+                _ => "them",
             }
         ),
         &[
@@ -595,22 +650,23 @@ fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
         "cancel",
     );
 
-    let (ops, name, rel, window) = (
-        ops.clone(),
-        name.to_string(),
-        rel.to_string(),
-        ops.window.clone(),
-    );
+    let (ops, window) = (ops.clone(), ops.window.clone());
     choose(&dialog, Some(&window), move |response| {
         if response != "delete" {
             return;
         }
-        match ops.vault.delete(&rel) {
-            Ok(()) => {
-                (ops.close)(&rel);
-                (ops.toast)(&format!("Deleted {name}"));
+        let mut deleted = Vec::new();
+        for rel in rels {
+            match ops.vault.delete(&rel) {
+                Ok(()) => {
+                    (ops.close)(&rel);
+                    deleted.push(rel);
+                }
+                Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
             }
-            Err(e) => (ops.toast)(&format!("Cannot delete {name}: {e}")),
+        }
+        if !deleted.is_empty() {
+            (ops.toast)(&format!("Deleted {}", several(&deleted)));
         }
     });
 }
@@ -840,6 +896,12 @@ mod tests {
             rename_message("Renamed", "a.md", "b.md", 2, 3),
             "Renamed a.md, but 2 notes could not be updated; 3 notes have unsaved changes and were not reloaded"
         );
+    }
+
+    #[test]
+    fn several_names_one_path_and_counts_more() {
+        assert_eq!(several(&["a/b.md".to_string()]), "b.md");
+        assert_eq!(several(&["a.md".to_string(), "b/".to_string()]), "2 files");
     }
 
     #[test]
