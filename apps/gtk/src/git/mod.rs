@@ -1260,6 +1260,7 @@ mod tests {
             branch: on_main(Some("origin/main"), 1, 2),
             entries: Vec::new(),
             ignored: vec!["build/".to_string()],
+            merging: false,
         };
         assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
 

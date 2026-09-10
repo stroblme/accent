@@ -60,6 +60,8 @@ pub struct Status {
     /// Ignored paths, as git reports them: a wholly ignored directory is one entry with a
     /// trailing slash rather than a row per file inside it.
     pub ignored: Vec<String>,
+    /// A merge stopped part way and is waiting for a commit or an abort.
+    pub merging: bool,
 }
 
 impl Status {
@@ -286,7 +288,16 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
         &["status", "--porcelain=v2", "-z", "--branch", "--ignored"],
         true,
     )?;
-    Ok(parse_status(&out))
+    Ok(Status {
+        merging: merging(repo),
+        ..parse_status(&out)
+    })
+}
+
+/// Whether a merge is under way, which porcelain does not say: git keeps `MERGE_HEAD` for exactly
+/// as long as one is waiting to be committed or aborted.
+fn merging(repo: &Repo) -> bool {
+    repo.git_dir.join("MERGE_HEAD").exists()
 }
 
 /// Parse `git status --porcelain=v2 -z --branch --ignored`.
@@ -806,6 +817,74 @@ pub fn unmerged(message: &str) -> bool {
     message.contains("not fully merged")
 }
 
+/// What a merge did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Merge {
+    /// HEAD already had everything the branch has.
+    UpToDate,
+    /// HEAD moved onto the branch and no commit was made.
+    FastForward,
+    /// A merge commit joins the two.
+    Commit,
+    /// The merge stopped on these paths and waits for a commit or an abort.
+    Conflicts(Vec<String>),
+}
+
+/// Merge a branch into HEAD, the way `git merge` would in a terminal.
+///
+/// No `--ff` or `--no-ff`: git's default applies, and so does the user's own `merge.ff`. Whether
+/// the working tree allows a merge is git's call too. The answer is read off the repository
+/// afterwards rather than off git's wording, which would also have to be read off stdout, where
+/// git reports a conflict.
+///
+/// Bounded like [`commit`], because a merge commit runs the same hooks.
+pub fn merge(repo: &Repo, branch: &str) -> Result<Merge, Error> {
+    let (before, under_way) = (rev(repo, "HEAD"), merging(repo));
+    let cmd = command(&repo.root, &["merge", "--no-edit", "--", branch], false);
+    if let Err(e) = bounded(cmd, None, TRANSFER_TIMEOUT, "merge") {
+        // Stopped part way rather than refused: the conflicts are what is left to do. A merge
+        // left waiting with none — a hook that refused its commit — has only git's words to say.
+        if under_way || !merging(repo) {
+            return Err(e);
+        }
+        let conflicts: Vec<String> = status(repo)?
+            .conflicts()
+            .map(|entry| entry.path.clone())
+            .collect();
+        return match conflicts.is_empty() {
+            true => Err(e),
+            false => Ok(Merge::Conflicts(conflicts)),
+        };
+    }
+    // Compared with the branch rather than by counting HEAD's parents: a fast-forward onto a
+    // branch whose tip is itself a merge commit would count two as well.
+    let after = rev(repo, "HEAD");
+    Ok(if after == before {
+        Merge::UpToDate
+    } else if after == rev(repo, branch) {
+        Merge::FastForward
+    } else {
+        Merge::Commit
+    })
+}
+
+/// Give up the merge under way and put the repository back where it was before it started.
+pub fn merge_abort(repo: &Repo) -> Result<(), Error> {
+    run(&repo.root, &["merge", "--abort"], false)?;
+    Ok(())
+}
+
+/// The commit `spec` names, or `None` where it names none — an unborn HEAD, a missing branch.
+fn rev(repo: &Repo, spec: &str) -> Option<String> {
+    let out = run(
+        &repo.root,
+        &["rev-parse", "--verify", "--quiet", spec],
+        true,
+    )
+    .ok()?;
+    Some(String::from_utf8_lossy(&out).trim().to_string())
+}
+
 pub fn stage(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
     write(repo, &["add"], paths)
 }
@@ -856,16 +935,24 @@ fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
 /// file's change goes in, deletions included, and an untracked file stays untracked. Deliberately
 /// not `git add -A`, which would sweep up whatever the user has not decided about yet.
 ///
+/// An empty message is git's own, which only a merge under way has: `MERGE_MSG`, with the
+/// commented `# Conflicts:` list stripped the way an editor session would strip it. Anywhere else
+/// git refuses it as it refuses an empty message in a terminal.
+///
 /// Bounded like the transfers, and for the same reason: a `pre-commit` hook is one of the user's
 /// own programs, and one that never returns would hold the thread — and the pane's Commit button
 /// — for the life of the process.
 pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
     let args: &[&str] = match all {
-        true => &["commit", "-a", "-F", "-"],
-        false => &["commit", "-F", "-"],
+        true => &["commit", "-a"],
+        false => &["commit"],
     };
-    let cmd = command(&repo.root, args, false);
-    bounded(cmd, Some(message.as_bytes()), TRANSFER_TIMEOUT, "commit")?;
+    let (from, stdin): (&[&str], _) = match message.trim().is_empty() {
+        true => (&["--no-edit", "--cleanup=strip"], None),
+        false => (&["-F", "-"], Some(message.as_bytes())),
+    };
+    let cmd = command(&repo.root, &[args, from].concat(), false);
+    bounded(cmd, stdin, TRANSFER_TIMEOUT, "commit")?;
     let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], true)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
