@@ -128,25 +128,32 @@ impl Url {
     pub fn label(&self) -> String {
         format!("{}:{}", self.host, self.path.display())
     }
+
+    /// `[user@]host[:port]`, an IPv6 literal bracketed: the address without its scheme and path,
+    /// which is what the Open Remote form's host field holds. `ssh://{authority}{path}` parses
+    /// back to this same [`Url`].
+    pub fn authority(&self) -> String {
+        let mut out = String::new();
+        if let Some(user) = &self.user {
+            out.push_str(user);
+            out.push('@');
+        }
+        match self.host.contains(':') {
+            true => out.push_str(&format!("[{}]", self.host)),
+            false => out.push_str(&self.host),
+        }
+        if let Some(port) = self.port {
+            out.push_str(&format!(":{port}"));
+        }
+        out
+    }
 }
 
 impl std::fmt::Display for Url {
     /// The canonical form, so that `parse(&url.to_string())` gives the same [`Url`] back and the
     /// string is safe to key a socket and a cache directory by.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ssh://")?;
-        if let Some(user) = &self.user {
-            write!(f, "{user}@")?;
-        }
-        if self.host.contains(':') {
-            write!(f, "[{}]", self.host)?;
-        } else {
-            write!(f, "{}", self.host)?;
-        }
-        if let Some(port) = self.port {
-            write!(f, ":{port}")?;
-        }
-        write!(f, "{}", self.path.display())
+        write!(f, "ssh://{}{}", self.authority(), self.path.display())
     }
 }
 
@@ -369,12 +376,15 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 ///
 /// `-t` forces a pty, which a remote command does not get by default and without which the shell
 /// runs non-interactive. No `BatchMode` here: a prompt is exactly what the tab is for.
+///
+/// `;` rather than `&&`: a root that is not there — a typo in the address — prints `cd`'s error
+/// and still gives a shell, at the login's home, which is where such a window is steered from.
 pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-t".to_string());
     argv.push(url.destination());
     argv.push(format!(
-        "cd {} && exec \"$SHELL\"",
+        "cd {}; exec \"$SHELL\"",
         quote(&url.path.to_string_lossy())
     ));
     argv
@@ -569,6 +579,26 @@ mod tests {
             assert_eq!(url.to_string(), text);
             assert_eq!(parse(&url.to_string()), Ok(url));
         }
+    }
+
+    #[test]
+    fn the_authority_and_the_path_make_the_address_again() {
+        for text in [
+            "ssh://box/srv/vault",
+            "ssh://me@box/srv/vault",
+            "ssh://box:2222/srv/vault",
+            "ssh://me@[::1]:22/srv/vault",
+        ] {
+            let url = parse(text).expect("the fixtures parse");
+            let again = format!("ssh://{}{}", url.authority(), url.path.display());
+            assert_eq!(parse(&again), Ok(url));
+        }
+        assert_eq!(ported().authority(), "me@box:2222");
+        assert_eq!(plain().authority(), "box");
+        assert_eq!(
+            parse("ssh://[::1]/srv").map(|u| u.authority()),
+            Ok("[::1]".to_string())
+        );
     }
 
     #[test]
@@ -840,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn an_interactive_shell_starts_in_the_vault_root() {
+    fn an_interactive_shell_starts_in_the_vault_root_or_else_at_home() {
         assert_eq!(
             shell(&plain(), ctl()),
             words(&[
@@ -849,7 +879,7 @@ mod tests {
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-t",
                 "box",
-                "cd '/srv/vault' && exec \"$SHELL\"",
+                "cd '/srv/vault'; exec \"$SHELL\"",
             ])
         );
         let spaced = parse("ssh://box:2222/srv/my vault").expect("a spaced path parses");
@@ -863,7 +893,7 @@ mod tests {
                 "2222",
                 "-t",
                 "box",
-                "cd '/srv/my vault' && exec \"$SHELL\"",
+                "cd '/srv/my vault'; exec \"$SHELL\"",
             ])
         );
     }
