@@ -170,7 +170,9 @@ pub fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-pub(super) fn percent_encode(s: &str) -> String {
+/// `s` with every byte but an ASCII letter or digit, `-._~` and `/` written as `%XX`: what a
+/// markdown link's destination can hold with no space or parenthesis to end it early.
+pub fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {

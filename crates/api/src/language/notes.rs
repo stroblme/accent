@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
-use accent_core::path::{basename, stem};
+use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
     Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
@@ -35,8 +35,12 @@ const HOVER_LINES: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trigger {
     Wiki,
+    /// `![[`: any file, an image or a PDF as readily as a note.
+    Embed,
     /// The `#` of a markdown link's destination, `[text](#`: a heading of this note.
     Anchor,
+    /// The rest of a markdown link's destination, `[text](` or `![alt](`: a file's path.
+    Path,
     Tag,
 }
 
@@ -46,15 +50,19 @@ pub(crate) enum Trigger {
 /// of the note. `[[` is tried first, which is what makes the `#` of `[[Note#Heading]]` an anchor
 /// rather than a tag, and a link's destination next, which does the same for `[text](#Heading)`.
 ///
-/// `None` means there is nothing to complete: no trigger on the line, a link destination that is
-/// not an anchor into this note, a `#` run that opens the line (an ATX heading marker), or a tag
-/// the caret has moved past.
+/// `None` means there is nothing to complete: no trigger on the line, a link destination that
+/// anchors into another note, a `#` run that opens the line (an ATX heading marker), or a tag the
+/// caret has moved past.
 pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     if let Some(start) = head.rfind("[[") {
         let prefix = &head[start + 2..];
         // `]` means the link was closed: the caret is past it, and the rest of the line decides.
         if !prefix.contains(']') {
-            return Some((Trigger::Wiki, start, prefix));
+            let trigger = match head[..start].ends_with('!') {
+                true => Trigger::Embed,
+                false => Trigger::Wiki,
+            };
+            return Some((trigger, start, prefix));
         }
     }
     if let Some(open) = head.rfind("](") {
@@ -62,9 +70,10 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
         // A `#` in a destination is never a tag. One after a path is an anchor into another
         // note, which is not offered.
         if !dest.contains(|c: char| c == ')' || c.is_whitespace()) {
-            return dest
-                .strip_prefix('#')
-                .map(|prefix| (Trigger::Anchor, open + 2, prefix));
+            return match dest.strip_prefix('#') {
+                Some(prefix) => Some((Trigger::Anchor, open + 2, prefix)),
+                None => (!dest.contains('#')).then_some((Trigger::Path, open + 2, dest)),
+            };
         }
     }
     let start = head.rfind('#')?;
@@ -92,24 +101,33 @@ pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
     out
 }
 
-/// Notes matching what has been typed, and whether there were more than fit.
+/// The two ways a `[[…]]` link names `rel`: by its bare name — a note's stem, any other file's
+/// whole name — and by its path, which drops a note's extension too.
+pub(crate) fn link_names(rel: &str) -> (String, String) {
+    match path::file_type(rel) {
+        FileType::Note => (stem(rel), markdown::strip_ext(rel)),
+        _ => (basename(rel).to_string(), rel.to_string()),
+    }
+}
+
+/// Paths matching what has been typed, and whether there were more than fit.
 ///
 /// The query is looked for *anywhere* in the path, not only at its start: `[[work]]` has to offer
 /// `Projects/Rework.md`, the way a link picker does everywhere else. What starts with the query
-/// still comes first — that is the note the reader most likely means — and after that the
+/// still comes first — that is the file the reader most likely means — and after that the
 /// shortest path wins, so a note at the root beats one buried under three directories.
 ///
 /// The `more` half is what makes the popup ask again as the word grows. It used to say the list
 /// was complete while handing back twenty of several hundred paths, so the popup narrowed those
 /// twenty client-side and everything else stayed unreachable however much was typed.
-pub(crate) fn note_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
+pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
     let query = query.to_lowercase();
     let mut hits: Vec<(bool, usize, &String)> = paths
         .iter()
         .filter_map(|rel| {
             let low = rel.to_lowercase();
-            let name = markdown::strip_ext(basename(&low)).to_string();
-            let opens = name.starts_with(&query) || low.starts_with(&query);
+            // The whole name, so that `logo.p` still opens `logo.png`.
+            let opens = basename(&low).starts_with(&query) || low.starts_with(&query);
             (opens || low.contains(&query)).then_some((!opens, rel.len(), rel))
         })
         .collect();
@@ -296,7 +314,7 @@ impl Notes {
         };
 
         match trigger {
-            Trigger::Wiki => {
+            Trigger::Wiki | Trigger::Embed => {
                 // `typing::pair` closed the `[` as it was typed, so the caret usually sits in
                 // front of the `]]` it left. The inserted link brings its own, so they go too.
                 let eaten = text[caret..]
@@ -309,35 +327,33 @@ impl Notes {
                     return self.heading_links(rel, note, replace);
                 }
 
-                let paths = locked(&self.index).note_paths()?;
-                // Which stems two notes share, over the whole vault and not only over the hits:
-                // a link written as the bare stem would then be ambiguous whatever is offered.
-                let mut stems: HashMap<String, usize> = HashMap::new();
-                for rel in &paths {
-                    *stems.entry(stem(rel)).or_default() += 1;
+                let index = locked(&self.index);
+                let paths = match trigger {
+                    Trigger::Wiki => index.note_paths()?,
+                    _ => index.file_paths(false)?,
+                };
+                let (hits, more) = path_candidates(&paths, prefix);
+                let mut items = Vec::with_capacity(hits.len());
+                for hit in hits {
+                    let (name, path) = link_names(&hit);
+                    // The bare name only while it reaches this file: where a shorter path
+                    // answers to it first, the link has to spell the path out.
+                    let bare = index.resolve_target(&name)?.as_ref() == Some(&hit);
+                    items.push(Completion {
+                        insert: match bare {
+                            true => format!("[[{name}]]"),
+                            false => format!("[[{path}]]"),
+                        },
+                        detail: (!bare).then(|| hit.clone()),
+                        // The popup narrows by what was typed since the `[[`, which a bare
+                        // name never matches; the path lets a folder narrow it too.
+                        filter: Some(format!("[[{path}")),
+                        label: name,
+                        kind: Kind::File,
+                        replace,
+                        ..empty_item()
+                    });
                 }
-                let (hits, more) = note_candidates(&paths, prefix);
-                let items = hits
-                    .into_iter()
-                    .map(|hit| {
-                        let label = stem(&hit);
-                        let ambiguous = stems.get(&label).is_some_and(|n| *n > 1);
-                        Completion {
-                            insert: match ambiguous {
-                                true => format!("[[{}]]", markdown::strip_ext(&hit)),
-                                false => format!("[[{label}]]"),
-                            },
-                            detail: ambiguous.then(|| hit.clone()),
-                            // The popup narrows by what was typed since the `[[`, which a bare
-                            // stem never matches; the path lets a folder narrow it too.
-                            filter: Some(format!("[[{}", markdown::strip_ext(&hit))),
-                            label,
-                            kind: Kind::File,
-                            replace,
-                            ..empty_item()
-                        }
-                    })
-                    .collect();
                 Ok(Completions {
                     items,
                     incomplete: more,
@@ -366,6 +382,35 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: false,
+                })
+            }
+            Trigger::Path => {
+                let paths = locked(&self.index).file_paths(false)?;
+                // Matched against vault paths, so what was typed loses its encoding, and the `./`
+                // and `../` a relative link opens with, which say where from rather than what.
+                let query = markdown::percent_decode(prefix);
+                let (hits, more) = path_candidates(&paths, query.trim_start_matches(['.', '/']));
+                let dir = parent_dir(rel);
+                let items = hits
+                    .into_iter()
+                    .map(|hit| {
+                        // From this note's folder, which is where the index resolves it from.
+                        let link = markdown::percent_encode(&path::relative(dir, &hit));
+                        Completion {
+                            label: basename(&hit).to_string(),
+                            // What goes in is not what the row reads, so it is shown as well.
+                            detail: Some(link.clone()),
+                            filter: Some(link.clone()),
+                            insert: link,
+                            kind: Kind::File,
+                            replace,
+                            ..empty_item()
+                        }
+                    })
+                    .collect();
+                Ok(Completions {
+                    items,
+                    incomplete: more,
                 })
             }
             Trigger::Tag => {
@@ -548,8 +593,9 @@ impl Language for Notes {
         self.publish(rel, &text);
         locked(&self.docs).insert(rel.to_string(), text);
         Ok(Support {
-            // One `[` offers nothing; `context` is what decides, and it wants the second one.
-            completion_triggers: vec!['[', '#'],
+            // One `[` offers nothing, and nor does a `(` outside a link; `context` is what
+            // decides, and it wants the second `[` or the `](` of a link's destination.
+            completion_triggers: vec!['[', '#', '('],
             ..Support::default()
         })
     }
@@ -696,6 +742,25 @@ mod tests {
     }
 
     #[test]
+    fn an_embed_offers_files_and_a_link_destination_offers_paths() {
+        assert_eq!(context("![[x"), Some((Trigger::Embed, 1, "x")));
+        assert_eq!(context("see ![[sub/"), Some((Trigger::Embed, 5, "sub/")));
+        assert_eq!(context("[t](Att"), Some((Trigger::Path, 4, "Att")));
+        assert_eq!(context("![a]("), Some((Trigger::Path, 5, "")));
+        assert_eq!(context("[t](#h"), Some((Trigger::Anchor, 4, "h")));
+
+        // A note goes by its stem, anything else by its whole name, and both by their path.
+        assert_eq!(
+            link_names("sub/Beta.md"),
+            ("Beta".to_string(), "sub/Beta".to_string())
+        );
+        assert_eq!(
+            link_names("Attachments/logo.png"),
+            ("logo.png".to_string(), "Attachments/logo.png".to_string())
+        );
+    }
+
+    #[test]
     fn heading_names_keep_their_order_once_each() {
         let a = markdown::analyze("# B\n## A\n#\n### B\n");
         assert_eq!(heading_names(&a.headings), ["B", "A"]);
@@ -748,17 +813,23 @@ mod tests {
     }
 
     #[test]
-    fn note_candidates_prefer_the_shortest_path_and_tags_keep_their_order() {
+    fn path_candidates_prefer_the_shortest_path_and_tags_keep_their_order() {
         let paths: Vec<String> = ["sub/Alphabet.md", "Alpha.md", "Beta.md"]
             .map(String::from)
             .into();
 
         assert_eq!(
-            note_candidates(&paths, "alp").0,
+            path_candidates(&paths, "alp").0,
             ["Alpha.md", "sub/Alphabet.md"]
         );
-        assert_eq!(note_candidates(&paths, "sub/").0, ["sub/Alphabet.md"]);
-        assert!(note_candidates(&paths, "zzz").0.is_empty());
+        assert_eq!(path_candidates(&paths, "sub/").0, ["sub/Alphabet.md"]);
+        assert!(path_candidates(&paths, "zzz").0.is_empty());
+        // A typed extension still opens the name.
+        let files: Vec<String> = ["b/xlogo.png", "a/deep/logo.png"].map(String::from).into();
+        assert_eq!(
+            path_candidates(&files, "logo.p").0,
+            ["a/deep/logo.png", "b/xlogo.png"]
+        );
 
         // The index counts them, so the order it hands them over in is the one to keep.
         let tags = [("alpha".to_string(), 2), ("alphabet".to_string(), 1)];
@@ -774,7 +845,7 @@ mod tests {
             .map(String::from)
             .into();
 
-        let (hits, more) = note_candidates(&paths, "work");
+        let (hits, more) = path_candidates(&paths, "work");
         assert_eq!(
             hits,
             ["Rework.md", "Projects/Groundwork.md"],
@@ -785,7 +856,7 @@ mod tests {
         let many: Vec<String> = (0..COMPLETIONS + 5)
             .map(|n| format!("Note{n}.md"))
             .collect();
-        let (hits, more) = note_candidates(&many, "note");
+        let (hits, more) = path_candidates(&many, "note");
         assert_eq!(hits.len(), COMPLETIONS);
         assert!(more, "the popup has to ask again as the word grows");
     }
