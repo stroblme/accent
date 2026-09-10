@@ -295,6 +295,9 @@ impl Notes {
                                 false => format!("[[{label}]]"),
                             },
                             detail: ambiguous.then(|| hit.clone()),
+                            // The popup narrows by what was typed since the `[[`, which a bare
+                            // stem never matches; the path lets a folder narrow it too.
+                            filter: Some(format!("[[{}", markdown::strip_ext(&hit))),
                             label,
                             kind: Kind::File,
                             replace,
