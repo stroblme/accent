@@ -97,10 +97,12 @@ impl Panel {
         if message.lines().count() < 2 {
             return (self.hooks.toast)(&format!("Cannot {what}: {}", reason(message)));
         }
-        let dialog = adw::AlertDialog::new(Some(&format!("Cannot {what}")), Some(message));
-        dialog.add_response("close", "Close");
-        dialog.set_default_response(Some("close"));
-        dialog.set_close_response("close");
+        let dialog = dialogs::alert(
+            &format!("Cannot {what}"),
+            message,
+            &[("close", "Close", adw::ResponseAppearance::Default)],
+            "close",
+        );
         dialog.present(Some(&self.hooks.window));
     }
 
@@ -226,15 +228,15 @@ impl Panel {
     /// which also brings the refresh.
     pub(super) fn create_branch(self: &Rc<Self>) {
         self.branch_menu.popdown();
-        let entry = fileops::name_entry("Branch name", "");
+        let entry = dialogs::name_entry("Branch name", "");
         let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
         form.append(&entry);
-        let dialog = fileops::name_dialog("Create Branch", "Create", &form);
+        let dialog = dialogs::name_dialog("Create Branch", "Create", &form);
 
         let (panel, field) = (self.clone(), entry.clone());
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
             let name = field.text().trim().to_string();
-            if response != fileops::CONFIRM || name.is_empty() {
+            if response != dialogs::CONFIRM || name.is_empty() {
                 return;
             }
             let asked = name.clone();
@@ -278,14 +280,15 @@ impl Panel {
 
     /// The one delete that loses commits, so it asks first (DESIGN.md, States).
     fn confirm_delete(self: &Rc<Self>, name: String) {
-        let dialog = adw::AlertDialog::new(
-            Some(&format!("Delete {name}?")),
-            Some("Its commits are not merged into any other branch and will be lost."),
+        let dialog = dialogs::alert(
+            &format!("Delete {name}?"),
+            "Its commits are not merged into any other branch and will be lost.",
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("delete", "Delete", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
         );
-        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
-        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
         let panel = self.clone();
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
             if response == "delete" {
@@ -538,11 +541,15 @@ impl Panel {
             (None, None) => return,
         };
         let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
-        let dialog = adw::AlertDialog::new(Some("Discard Changes?"), Some(&body));
-        dialog.add_responses(&[("cancel", "Cancel"), ("discard", "Discard")]);
-        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
+        let dialog = dialogs::alert(
+            "Discard Changes?",
+            &body,
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("discard", "Discard", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
+        );
 
         let root = self.hooks.vault.root();
         let keys: Vec<String> = untracked

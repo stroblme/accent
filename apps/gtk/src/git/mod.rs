@@ -24,7 +24,6 @@ use gtk::{gdk, gio, glib, pango};
 
 use crate::diff::{Compare, DiffTab, Side};
 
-use crate::fileops;
 use crate::highlight;
 
 mod actions;
