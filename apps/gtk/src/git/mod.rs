@@ -63,6 +63,12 @@ const PAGE: usize = 200;
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How often the vault is searched for repositories again while it is being indexed. Discovery
+/// goes by the indexed directories, so a nested repository shows up this long after the walk has
+/// reached it rather than when the walk ends. Not every progress tick: each look is a whole
+/// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
+const REDISCOVER: Duration = Duration::from_secs(3);
+
 /// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
 /// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
 /// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
@@ -179,6 +185,10 @@ pub struct Panel {
     again: Cell<Option<Depth>>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_depth: Cell<Option<Depth>>,
+    /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
+    /// starts at the pane's creation, which the window follows with a discovery of its own, so a
+    /// walk that is over within [`REDISCOVER`] asks for nothing more.
+    discovered: Cell<i64>,
     /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
     /// snapshot. Weak, so a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
@@ -456,6 +466,7 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(None),
             pending_depth: Cell::new(None),
+            discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
@@ -539,6 +550,18 @@ impl Panel {
             panel.refresh(depth);
         });
         self.pending.replace(Some(id));
+    }
+
+    /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
+    /// which arrives many times a second: [`Panel::schedule_refresh`] restarts its timer on every
+    /// call, so passing each tick on would put the refresh off until the walk was over.
+    pub fn rediscover(self: &Rc<Self>) {
+        let now = glib::monotonic_time();
+        if now - self.discovered.get() < REDISCOVER.as_micros() as i64 {
+            return;
+        }
+        self.discovered.set(now);
+        self.schedule_refresh(Depth::Discover);
     }
 
     fn wire_header(

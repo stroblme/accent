@@ -44,6 +44,14 @@ impl App {
                         tracing::debug!(t_ms = ms(), rows = tree.model().n_items(), "tree painted");
                     }
                 }
+                // The same batches are what put a nested repository's directory in the index,
+                // which is where discovery finds it: the Git pane looks again as the walk goes,
+                // throttling itself, rather than only once it is over.
+                if p.phase == Phase::Index
+                    && let Some(git) = self.git.get()
+                {
+                    git.rediscover();
+                }
             }
             Event::Busy { what, busy } => {
                 self.statusbar

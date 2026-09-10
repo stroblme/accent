@@ -388,6 +388,8 @@ fn bench_git(app: &Rc<App>) {
             "bench git_branch {}",
             git.branch_label(None).unwrap_or_default()
         );
+        // `false` on a cold vault: the pane answered while the walk was still going.
+        println!("bench git_indexed {}", app.reconciled.get());
         let (local, remote) = git.branch_counts();
         println!("bench git_branches local={local} remote={remote}");
         println!("bench git_not_pulled {}", git.not_pulled_rows());
