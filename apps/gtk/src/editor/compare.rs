@@ -87,12 +87,14 @@ impl Tab {
             move |_| tab.leave_compare()
         ));
         let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        holder.append(&diff::header(mine, Some(close.upcast_ref())));
+        let header = diff::header(mine, Some(close.upcast_ref()));
+        holder.append(&header);
         holder.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         self.content.remove(&self.document);
         holder.append(&self.document);
         let editor = diff::Pane {
             root: holder.clone().upcast(),
+            header: header.upcast(),
             view: self.view.clone(),
             buffer: self.buffer.clone(),
             scroller: self.scroller.clone(),

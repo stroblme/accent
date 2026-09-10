@@ -119,10 +119,11 @@ impl Side {
     }
 }
 
-/// One column of the comparison. `root` is what the paned shows; the scroller is named so the
-/// two columns can share one vertical adjustment.
+/// One column of the comparison. `root` is what the paned shows, `header` its title row; the
+/// scroller is named so the two columns can share one vertical adjustment.
 pub struct Pane {
     pub root: gtk::Widget,
+    pub header: gtk::Widget,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
     pub scroller: gtk::ScrolledWindow,
@@ -173,11 +174,13 @@ pub fn pane(
         .child(&view)
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.append(&header(title, None));
+    let header = header(title, None);
+    root.append(&header);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&scroller);
     Pane {
         root: root.upcast(),
+        header: header.upcast(),
         view,
         buffer,
         scroller,
@@ -643,6 +646,12 @@ impl Compare {
         // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
         new.scroller
             .set_vadjustment(Some(&old.scroller.vadjustment()));
+        // One height for both title rows: the editor's carries Stop Comparing and would stand
+        // taller, starting its column, and every row in it, that much lower. The group lives as
+        // long as the rows do.
+        let titles = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+        titles.add_widget(&old.header);
+        titles.add_widget(&new.header);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_start_child(Some(&old.root));
@@ -1144,6 +1153,18 @@ impl Compare {
             self.hidden.borrow().len(),
             self.overlays.borrow().len(),
         )
+    }
+
+    /// How many pixels lower the right column starts than the left one in the window: 0 is the
+    /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
+    pub fn skew(&self) -> i32 {
+        let top = |side: Side| {
+            self.pane(side)
+                .scroller
+                .compute_point(&self.paned, &gtk::graphene::Point::zero())
+                .map_or(0.0, |p| p.y())
+        };
+        (top(Side::New) - top(Side::Old)).round() as i32
     }
 
     /// Whether row `r` is in a hidden run right now.

@@ -1059,9 +1059,10 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// application so the bench always terminates.
 /// The note is given fifty lines, written out, then edited in two places: a rewrite near the
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
-/// hunks, hidden runs, buttons, and how many rows GTK lays out at a height other than the one
-/// the alignment asked for (0 is the claim) — before the first hunk is taken from Theirs, the
-/// hidden run is opened, and the same is read again. Then two blobs in a tab of their own, at a
+/// hunks, hidden runs, buttons, how many rows GTK lays out at a height other than the one the
+/// alignment asked for, and how much lower one column starts than the other (0 and 0 are the
+/// claim) — before the first hunk is taken from Theirs, the hidden run is opened, and the same
+/// is read again. Then two blobs in a tab of their own, at a
 /// zoom, for the same numbers. With the vault under git, last, the working tree against the index
 /// in the note's tab: whether it opened with the run before the first change folded and the caret
 /// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
@@ -1249,8 +1250,9 @@ fn bench_compare_type(tab: &Rc<Tab>, at: f64, then: impl FnOnce() + 'static) {
 fn bench_compare_line(compare: &diff::Compare) -> String {
     let (rows, hunks, hidden, buttons) = compare.counts();
     format!(
-        "rows={rows} hunks={hunks} hidden={hidden} buttons={buttons} misaligned={}",
-        compare.misaligned()
+        "rows={rows} hunks={hunks} hidden={hidden} buttons={buttons} misaligned={} skew={}",
+        compare.misaligned(),
+        compare.skew()
     )
 }
 
