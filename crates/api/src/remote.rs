@@ -224,6 +224,9 @@ impl Remote {
     }
 
     /// Tell a freshly started server about the documents the window still has open.
+    ///
+    /// All at once, a thread each: the server answers every request on a thread of its own, so
+    /// ten tabs cost the reconnect one round trip rather than ten.
     fn reopen(&self, client: &Client) {
         let open: Vec<(String, String, String)> = self
             .locked(&self.docs)
@@ -234,14 +237,19 @@ impl Remote {
             return;
         }
         self.say("Reopening the documents");
-        for (rel, language, text) in open {
-            // One that will not reopen is one tab without a language, not a failed connection.
-            if let Err(e) =
-                client.call::<serde_json::Value>("open_document", json!([rel, language, text]))
-            {
-                tracing::warn!("reopening {rel} on the new server: {e}");
+        std::thread::scope(|s| {
+            for (rel, language, text) in &open {
+                s.spawn(move || {
+                    // One that will not reopen is one tab without a language, not a failed
+                    // connection.
+                    if let Err(e) = client
+                        .call::<serde_json::Value>("open_document", json!([rel, language, text]))
+                    {
+                        tracing::warn!("reopening {rel} on the new server: {e}");
+                    }
+                });
             }
-        }
+        });
     }
 
     /// The client, or why there is not one.
