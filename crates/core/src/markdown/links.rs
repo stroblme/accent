@@ -1,8 +1,9 @@
 //! Link targets: what a `[[wikilink]]` or `[text](target)` points at, the keys a file answers
 //! to, and rewriting the targets that name a renamed note.
 
-use super::{LinkKind, Pending, analyze};
+use super::{Heading, LinkKind, Pending, analyze};
 use pulldown_cmark::LinkType;
+use std::collections::HashSet;
 use std::ops::Range;
 
 pub(super) fn pending(
@@ -82,6 +83,50 @@ pub fn pdf_anchor(anchor: &str) -> Option<(usize, Option<[usize; 4]>)> {
         }
     }
     Some((page?, selection))
+}
+
+/// The anchor GitHub gives a heading: lowercased, everything but a letter, a digit, a space, `-`
+/// and `_` dropped, and every space a `-`. `## Hello, World!` is `#hello-world`.
+fn slug(text: &str) -> String {
+    text.trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+/// Each heading's slug, in the order the note has them. A repeat gets the first free `-1`, `-2`,
+/// … the way GitHub tells two `## Notes` apart, so every heading has an anchor of its own.
+pub fn slugs<'a>(headings: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut taken = HashSet::new();
+    let mut out = Vec::new();
+    for text in headings {
+        let base = slug(text);
+        let (mut s, mut n) = (base.clone(), 0);
+        while taken.contains(&s) {
+            n += 1;
+            s = format!("{base}-{n}");
+        }
+        taken.insert(s.clone());
+        out.push(s);
+    }
+    out
+}
+
+/// The heading an anchor names: by its slug first, as `[text](#my-section)` writes it, then by
+/// its text, as `[[Note#My Section]]` and an older `[text](#My%20Section)` do.
+pub fn heading_for<'a>(headings: &'a [Heading], anchor: &str) -> Option<&'a Heading> {
+    let anchor = anchor.trim();
+    slugs(headings.iter().map(|h| h.text.as_str()))
+        .iter()
+        .position(|s| s.eq_ignore_ascii_case(anchor))
+        .map(|i| &headings[i])
+        .or_else(|| {
+            headings
+                .iter()
+                .find(|h| h.text.trim().eq_ignore_ascii_case(anchor))
+        })
 }
 
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
@@ -326,6 +371,39 @@ mod tests {
         let l = link("[s](dir/A%20B.md#Some%20Heading)", 0);
         assert_eq!(l.target, "dir/A B.md");
         assert_eq!(l.anchor.as_deref(), Some("Some Heading"));
+    }
+
+    #[test]
+    fn slugs_follow_github() {
+        assert_eq!(slug("Hello, World!"), "hello-world");
+        assert_eq!(slug("C++ & Rust"), "c--rust", "each space is a dash");
+        assert_eq!(slug("snake_case and-dash 2"), "snake_case-and-dash-2");
+        assert_eq!(
+            slug("Über Größe"),
+            "über-größe",
+            "letters are not only ASCII"
+        );
+        assert_eq!(
+            slugs(["Notes", "Intro", "Notes", "notes-1", "Notes"]),
+            ["notes", "intro", "notes-1", "notes-1-1", "notes-2"],
+            "a repeat takes the first free suffix"
+        );
+    }
+
+    /// The anchor completion inserts has to land, and so does what already resolved before it.
+    #[test]
+    fn an_anchor_finds_its_heading_by_slug_or_by_text() {
+        let a = analyze("# Intro\n## My Section\n## My Section\n");
+        let start = |anchor: &str| heading_for(&a.headings, anchor).map(|h| h.range.start);
+        assert_eq!(start("my-section"), Some(8));
+        assert_eq!(start("my-section-1"), Some(22), "the second of two");
+        assert_eq!(
+            start(&link("[x](#My%20Section)", 0).anchor.unwrap()),
+            Some(8),
+            "a percent-encoded heading text"
+        );
+        assert_eq!(start("intro"), Some(0));
+        assert_eq!(start("nowhere"), None);
     }
 
     #[test]

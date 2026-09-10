@@ -612,6 +612,46 @@ mod tests {
                 "the trigger and the `]]` the auto-pair left both go"
             );
 
+            // After a `#`, the headings of the note the link names.
+            f.vault
+                .change_document("a.md", "see [[Beta#]]".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("a.md", at(11), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].insert, "[[Beta#Beta]]");
+            assert_eq!(
+                items[0].replace,
+                Range {
+                    start: at(4),
+                    end: at(13)
+                }
+            );
+
+            // In a markdown link, this note's headings by the slug the link names them with.
+            f.vault
+                .change_document("a.md", "## My Section\n[x](#)".to_string())
+                .await
+                .unwrap();
+            let on_link = |character| Pos { line: 1, character };
+            let items = f.vault.completion("a.md", on_link(5), None).await.unwrap();
+            assert_eq!(items.items.len(), 1, "headings, not tags");
+            assert_eq!(items.items[0].label, "My Section");
+            assert_eq!(items.items[0].insert, "#my-section");
+            assert_eq!(
+                items.items[0].replace,
+                Range {
+                    start: on_link(4),
+                    end: on_link(5)
+                },
+                "the `)` the auto-pair left stays"
+            );
+
             f.vault
                 .change_document("a.md", "a #ru".to_string())
                 .await
@@ -672,6 +712,25 @@ mod tests {
                 .unwrap();
             let target = f.vault.definition("a.md", caret).await.unwrap();
             assert_eq!(target[0].range.start.line, 2);
+
+            // A markdown anchor into this note: the slug completion writes, and the heading text
+            // that resolved before it.
+            f.vault
+                .change_document(
+                    "a.md",
+                    "# Intro\n## My Section\n[x](#my-section) [y](#My%20Section)\n".to_string(),
+                )
+                .await
+                .unwrap();
+            for character in [1, 18] {
+                let target = f
+                    .vault
+                    .definition("a.md", Pos { line: 2, character })
+                    .await
+                    .unwrap();
+                assert_eq!(target[0].path, "a.md");
+                assert_eq!(target[0].range.start.line, 1, "from character {character}");
+            }
         });
     }
 

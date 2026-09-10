@@ -35,6 +35,8 @@ const HOVER_LINES: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Trigger {
     Wiki,
+    /// The `#` of a markdown link's destination, `[text](#`: a heading of this note.
+    Anchor,
     Tag,
 }
 
@@ -42,24 +44,52 @@ pub(crate) enum Trigger {
 ///
 /// `head` is the current line from its start up to the caret, so nothing here looks at the rest
 /// of the note. `[[` is tried first, which is what makes the `#` of `[[Note#Heading]]` an anchor
-/// rather than a tag.
+/// rather than a tag, and a link's destination next, which does the same for `[text](#Heading)`.
 ///
-/// `None` means there is nothing to complete: no trigger on the line, a wikilink already closed,
-/// a `#` run that opens the line (an ATX heading marker), or a tag the caret has moved past.
+/// `None` means there is nothing to complete: no trigger on the line, a link destination that is
+/// not an anchor into this note, a `#` run that opens the line (an ATX heading marker), or a tag
+/// the caret has moved past.
 pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     if let Some(start) = head.rfind("[[") {
         let prefix = &head[start + 2..];
-        // `]` means the link was closed; the caret is past it, not inside it.
-        return (!prefix.contains(']')).then_some((Trigger::Wiki, start, prefix));
+        // `]` means the link was closed: the caret is past it, and the rest of the line decides.
+        if !prefix.contains(']') {
+            return Some((Trigger::Wiki, start, prefix));
+        }
+    }
+    if let Some(open) = head.rfind("](") {
+        let dest = &head[open + 2..];
+        // A `#` in a destination is never a tag. One after a path is an anchor into another
+        // note, which is not offered.
+        if !dest.contains(|c: char| c == ')' || c.is_whitespace()) {
+            return dest
+                .strip_prefix('#')
+                .map(|prefix| (Trigger::Anchor, open + 2, prefix));
+        }
     }
     let start = head.rfind('#')?;
-    // A `#` run that opens the line, indented or not, is a heading marker.
-    if head[..start].trim_end_matches('#').trim().is_empty() {
+    let prefix = &head[start + 1..];
+    // A `#` run that opens the line, indented or not, is a heading marker, until a letter follows
+    // a single `#`: a heading needs `# `, so `#x` can only be a tag.
+    let opens_line = head[..start].trim_end_matches('#').trim().is_empty();
+    if opens_line && (head[..start].ends_with('#') || !prefix.starts_with(char::is_alphabetic)) {
         return None;
     }
-    let prefix = &head[start + 1..];
     // Whitespace ends a tag, so the caret is no longer inside one.
     (!prefix.contains(char::is_whitespace)).then_some((Trigger::Tag, start, prefix))
+}
+
+/// The headings a wikilink can name, by their text: each once, in the order the note has them.
+/// A heading with no text has nothing to be named by.
+pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for h in headings {
+        let name = h.text.trim();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Notes matching what has been typed, and whether there were more than fit.
@@ -275,6 +305,9 @@ impl Notes {
                     .take_while(|c| *c == ']')
                     .count();
                 replace.end.character += eaten as u32;
+                if let Some((note, _)) = prefix.split_once('#') {
+                    return self.heading_links(rel, note, replace);
+                }
 
                 let paths = locked(&self.index).note_paths()?;
                 // Which stems two notes share, over the whole vault and not only over the hits:
@@ -310,6 +343,31 @@ impl Notes {
                     incomplete: more,
                 })
             }
+            Trigger::Anchor => {
+                let headings = markdown::analyze(&text).headings;
+                let slugs = markdown::slugs(headings.iter().map(|h| h.text.as_str()));
+                let items = headings
+                    .iter()
+                    .zip(slugs)
+                    .filter(|(h, _)| !h.text.trim().is_empty())
+                    .map(|(h, slug)| {
+                        let anchor = format!("#{slug}");
+                        Completion {
+                            label: h.text.trim().to_string(),
+                            // What goes in is not what the row reads, so it is shown as well.
+                            detail: Some(anchor.clone()),
+                            filter: Some(anchor.clone()),
+                            insert: anchor,
+                            replace,
+                            ..empty_item()
+                        }
+                    })
+                    .collect();
+                Ok(Completions {
+                    items,
+                    incomplete: false,
+                })
+            }
             Trigger::Tag => {
                 let tags = locked(&self.index).tags()?;
                 let (hits, more) = tag_candidates(&tags, prefix);
@@ -328,6 +386,37 @@ impl Notes {
                 })
             }
         }
+    }
+
+    /// `[[note#Heading]]` for each heading of the note `note` names, or of this one when it names
+    /// none. The link keeps the note as it was typed; one the index cannot find offers nothing,
+    /// and neither does a file that is not a note.
+    fn heading_links(&self, rel: &str, note: &str, replace: Range) -> Result<Completions> {
+        let target = match note {
+            "" => rel.to_string(),
+            _ => match locked(&self.index).resolve_target(note)? {
+                Some(target) if target.ends_with(".md") => target,
+                _ => return Ok(Completions::default()),
+            },
+        };
+        let text = self.text_of(&target)?;
+        let items = heading_names(&markdown::analyze(&text).headings)
+            .into_iter()
+            .map(|name| {
+                let link = format!("[[{note}#{name}");
+                Completion {
+                    label: name.to_string(),
+                    insert: format!("{link}]]"),
+                    filter: Some(link),
+                    replace,
+                    ..empty_item()
+                }
+            })
+            .collect();
+        Ok(Completions {
+            items,
+            incomplete: false,
+        })
     }
 
     fn hover(&self, rel: &str, pos: Pos) -> Result<Option<Hover>> {
@@ -419,12 +508,8 @@ impl Notes {
     /// Where the heading an anchor names sits in `rel`, if it is there at all.
     fn heading(&self, rel: &str, anchor: &str) -> Option<Range> {
         let text = self.text_of(rel).ok()?;
-        let anchor = anchor.trim();
-        markdown::analyze(&text)
-            .headings
-            .iter()
-            .find(|h| h.text.trim().eq_ignore_ascii_case(anchor))
-            .map(|h| range_of(&text, &h.range))
+        let headings = markdown::analyze(&text).headings;
+        markdown::heading_for(&headings, anchor).map(|h| range_of(&text, &h.range))
     }
 
     fn symbols(&self, rel: &str) -> Result<Vec<Symbol>> {
@@ -590,6 +675,30 @@ mod tests {
         for head in ["# Heading", "##", "  #", "\t### "] {
             assert_eq!(context(head), None, "{head:?} is a heading marker");
         }
+    }
+
+    #[test]
+    fn a_link_destination_offers_headings_and_a_line_start_tag_needs_a_letter() {
+        assert_eq!(context("[A](#"), Some((Trigger::Anchor, 4, "")));
+        assert_eq!(context("see [A](#Se"), Some((Trigger::Anchor, 8, "Se")));
+        assert_eq!(
+            context("[x](Other.md#se"),
+            None,
+            "an anchor into another note"
+        );
+        // A closed link leaves the rest of the line to decide.
+        assert_eq!(context("[a](#x) #ta"), Some((Trigger::Tag, 8, "ta")));
+        assert_eq!(context("[[N]] #ta"), Some((Trigger::Tag, 6, "ta")));
+        // A heading needs `# `, so a letter straight after a single `#` makes a tag.
+        assert_eq!(context("#x"), Some((Trigger::Tag, 0, "x")));
+        assert_eq!(context("##x"), None);
+        assert_eq!(context("# "), None);
+    }
+
+    #[test]
+    fn heading_names_keep_their_order_once_each() {
+        let a = markdown::analyze("# B\n## A\n#\n### B\n");
+        assert_eq!(heading_names(&a.headings), ["B", "A"]);
     }
 
     #[test]
