@@ -505,8 +505,8 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     }
 }
 
-/// Port forwarding is ssh's, over the master that is already open: nothing is spawned and nothing
-/// is kept but the list the pane shows.
+/// Port forwarding is ssh's, over the master that is already open: nothing is spawned, and the
+/// connection keeps the list it puts back after a reconnect.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({

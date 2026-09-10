@@ -64,6 +64,11 @@ pub struct Remote {
     /// that tab was closed and opened again. Kept here rather than in the façade because this is
     /// the only place that knows a connection has been replaced.
     docs: Mutex<HashMap<String, (String, String)>>,
+    /// The forwards the window started and has not stopped. They live in the ssh master, so a
+    /// link that drops takes them with it and the master a reconnect makes has none of them;
+    /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it ends the
+    /// master and this list together.
+    forwards: Mutex<Vec<Forward>>,
     state: Mutex<State>,
     child: Mutex<Option<Child>>,
     events: Sender<Event>,
@@ -81,6 +86,7 @@ impl Remote {
             ghost: Mutex::new(true),
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
+            forwards: Mutex::new(Vec::new()),
             state: Mutex::new(State::Connecting),
             child: Mutex::new(None),
             events,
@@ -336,11 +342,37 @@ impl Remote {
     /// Ask ssh to start forwarding a port, either way, over the master that is already open.
     /// Nothing is spawned: the running master takes the instruction and keeps it.
     pub fn forward(&self, f: Forward) -> Result<(), String> {
-        self.control(ssh::forward(&self.url, &self.ctl, f))
+        self.control(ssh::forward(&self.url, &self.ctl, f))?;
+        let mut forwards = self.locked(&self.forwards);
+        if !forwards.contains(&f) {
+            forwards.push(f);
+        }
+        Ok(())
     }
 
+    /// Stop a forward. It is forgotten whatever ssh answers: a master that has died took the
+    /// forward with it, and a reconnect must not bring back one the window stopped.
     pub fn cancel_forward(&self, f: Forward) -> Result<(), String> {
+        self.locked(&self.forwards).retain(|kept| *kept != f);
         self.control(ssh::cancel(&self.url, &self.ctl, f))
+    }
+
+    /// Put the forwards back on the master [`connect`](Self::connect) found or made. A master that
+    /// survived the drop still holds them and answers OK to a forward it already has, so this is
+    /// the same call either way. One that will not come back is said, not fatal: the vault is up.
+    fn restore_forwards(&self) {
+        let forwards = self.locked(&self.forwards).clone();
+        if forwards.is_empty() {
+            return;
+        }
+        self.say("Restoring the forwards");
+        for f in forwards {
+            if let Err(e) = self.control(ssh::forward(&self.url, &self.ctl, f)) {
+                let _ = self
+                    .events
+                    .send(Event::Error(format!("Cannot restore a forward: {e}")));
+            }
+        }
     }
 
     fn control(&self, argv: Vec<String>) -> Result<(), String> {
@@ -452,7 +484,9 @@ impl Remote {
         }
 
         let hash = self.provision()?;
-        self.spawn_server(&hash)
+        self.spawn_server(&hash)?;
+        self.restore_forwards();
+        Ok(())
     }
 
     /// Put the right server binary on the host, if it is not already there, and answer with what

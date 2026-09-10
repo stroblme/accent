@@ -42,7 +42,8 @@ type DropForward = Rc<dyn Fn(Forward, &gtk::ListBoxRow)>;
 /// The forwards running over the window's ssh connection, and the row that starts another one.
 ///
 /// The pane keeps the list itself. Nothing asks ssh what it has open, so what the user added is
-/// what is drawn; the caller re-establishes them after a reconnect and the pane is only the list.
+/// what is drawn; the connection puts them back after a reconnect (`Remote::connect`) and the pane
+/// is only the list.
 pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
     let forwards: Rc<RefCell<Vec<Forward>>> = Rc::new(RefCell::new(Vec::new()));
 
