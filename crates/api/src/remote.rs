@@ -66,8 +66,8 @@ pub struct Remote {
     docs: Mutex<HashMap<String, (String, String)>>,
     /// The forwards the window started and has not stopped. They live in the ssh master, so a
     /// link that drops takes them with it and the master a reconnect makes has none of them;
-    /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it ends the
-    /// master and this list together.
+    /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it cancels
+    /// every one still here.
     forwards: Mutex<Vec<Forward>>,
     /// Shared with the rpc reader thread, which is the first to know the link has gone.
     state: Arc<Mutex<State>>,
@@ -646,18 +646,17 @@ impl Remote {
 }
 
 impl Drop for Remote {
-    /// Close the server, reap the ssh process, then take the master down with it.
+    /// Close the server, reap the ssh process, and cancel every forward, but leave the master.
     ///
-    /// `-O exit` is what takes the shells and the port forwards with it rather than leaving them
-    /// behind on the host, so it goes last and only here: a reconnect wants the master kept.
+    /// The master stays up for its ControlPersist minute on purpose, after the app has exited
+    /// too, so reopening the vault within it skips the handshake and any passphrase. Nothing of
+    /// the vault's rides it meanwhile: `serve` has had its EOF, and the forwards are cancelled one
+    /// by one, because a master that is only lingering still holds every forward it was given.
     fn drop(&mut self) {
         self.teardown();
-        let _ = self
-            .ssh(&ssh::exit(&self.url, &self.ctl))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        for f in std::mem::take(&mut *self.locked(&self.forwards)) {
+            let _ = self.control(ssh::cancel(&self.url, &self.ctl, f));
+        }
     }
 }
 
