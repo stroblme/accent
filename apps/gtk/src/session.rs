@@ -68,6 +68,8 @@ impl App {
                 recent.push(rel);
             }
         }
+        // Pruned before the config is borrowed for the rest: dropping a gone folder writes it.
+        let vaults = start::recent_vaults(&self.config);
         let used = self.recent_commands.borrow();
         let config = self.config.borrow();
         let sources = palette::Sources {
@@ -94,7 +96,7 @@ impl App {
             // Filtered here rather than in the dialog: the window is the only thing that knows
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.
-            vaults: start::other_vaults(&config.recent_vaults, self.vault().map(|v| v.key())),
+            vaults: start::other_vaults(&vaults, self.vault().map(|v| v.key())),
             // The tab bar's own chords: no command runs them, so they are not rows, but a
             // rebind that took one would be shadowed by a controller the dialog cannot see.
             taken: panes::widget_chords()

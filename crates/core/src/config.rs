@@ -82,7 +82,8 @@ pub enum FocusMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Most recent first, capped at 10.
+    /// Most recent first, and not capped: a vault leaves the list when it is removed from it, or,
+    /// for a folder on this machine, when the app finds the folder gone.
     pub recent_vaults: Vec<PathBuf>,
     /// `None` follows the GNOME document font.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -358,12 +359,11 @@ impl Config {
         self.vaults.insert(vault_key(root), cfg);
     }
 
-    /// Move `root` to the front of the recent list, deduplicated and capped at 10.
+    /// Move `root` to the front of the recent list, deduplicated.
     pub fn touch_recent(&mut self, root: &Path) {
         let path = PathBuf::from(vault_key(root));
         self.recent_vaults.retain(|v| v != &path);
         self.recent_vaults.insert(0, path);
-        self.recent_vaults.truncate(10);
     }
 }
 
@@ -744,13 +744,13 @@ daily_dir = "Daily"
     }
 
     #[test]
-    fn touch_recent_dedups_and_caps_at_ten() {
+    fn touch_recent_dedups_and_keeps_every_vault() {
         let mut c = Config::default();
         for i in 0..12 {
             c.touch_recent(Path::new(&format!("/vault/{i}")));
         }
         c.touch_recent(Path::new("/vault/5"));
-        assert_eq!(c.recent_vaults.len(), 10);
+        assert_eq!(c.recent_vaults.len(), 12);
         assert_eq!(c.recent_vaults[0], PathBuf::from("/vault/5"));
         assert_eq!(c.recent_vaults[1], PathBuf::from("/vault/11"));
         assert_eq!(
