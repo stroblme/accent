@@ -1,7 +1,7 @@
 //! Comparing: the tab hosts a diff beside its own document, and the read-only companion view the
 //! other side of one is rendered in.
 
-use super::{Flavour, Tab, build, line_numbers, sync_scheme};
+use super::{Alert, Flavour, Tab, build, line_numbers, sync_scheme};
 use crate::{diff, highlight};
 use adw::prelude::*;
 use gtk::glib;
@@ -16,6 +16,8 @@ pub(super) struct Comparing {
     /// The box the document sits in, on its side of the paned.
     holder: gtk::Box,
     pub(super) label: String,
+    /// The banner question this comparison is the answer to, see [`Tab::comparing_answers`].
+    pub(super) answers: Option<Alert>,
 }
 
 /// A read-only view over `text` for a comparison, built the way the editor builds its own so the
@@ -87,12 +89,14 @@ impl Tab {
             move |_| tab.leave_compare()
         ));
         let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        holder.append(&diff::header(mine, Some(close.upcast_ref())));
+        let header = diff::header(mine, Some(close.upcast_ref()));
+        holder.append(&header);
         holder.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         self.content.remove(&self.document);
         holder.append(&self.document);
         let editor = diff::Pane {
             root: holder.clone().upcast(),
+            header: header.upcast(),
             view: self.view.clone(),
             buffer: self.buffer.clone(),
             scroller: self.scroller.clone(),
@@ -125,6 +129,7 @@ impl Tab {
             shown,
             holder,
             label: label.to_string(),
+            answers: None,
         });
         self.set_clamp();
         self.page.set_title(&self.tab_title());
@@ -148,5 +153,7 @@ impl Tab {
         self.content.append(&self.document);
         self.set_clamp();
         self.page.set_title(&self.tab_title());
+        // The banner's button comes back, if the comparison had taken it.
+        self.render_banner();
     }
 }

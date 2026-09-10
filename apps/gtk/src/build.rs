@@ -505,8 +505,8 @@ fn tags_data(vault: &Arc<Vault>) -> sidebar::TagsData {
     }
 }
 
-/// Port forwarding is ssh's, over the master that is already open: nothing is spawned and nothing
-/// is kept but the list the pane shows.
+/// Port forwarding is ssh's, over the master that is already open: nothing is spawned, and the
+/// connection keeps the list it puts back after a reconnect.
 fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({
@@ -682,6 +682,7 @@ fn retired_daily_keys(app: &Rc<App>) {
 /// outlive nothing, and a strong capture here would keep a closed window's vault open.
 fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
+    let transferring = Rc::downgrade(app);
     let open = Rc::downgrade(app);
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
@@ -694,6 +695,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         toast: Box::new(move |message| {
             if let Some(app) = toast.upgrade() {
                 app.toast(message);
+            }
+        }),
+        transferring: Box::new(move |what, running| {
+            if let Some(app) = transferring.upgrade() {
+                app.statusbar.set_transfer(what, running);
             }
         }),
         open: Box::new(move |rel, stops| {
@@ -883,6 +889,13 @@ fn install_chrome_css() {
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
+             .git-ref {{ padding: 0 4px; border-radius: 4px; \
+               background-color: color-mix(in srgb, currentColor 10%, transparent); }} \
+             .git-ref.head {{ color: var(--accent-color); \
+               background-color: color-mix(in srgb, var(--accent-bg-color) 15%, transparent); }} \
+             .git-ref.remote {{ opacity: 0.6; }} \
+             .git-ref.tag {{ background-color: transparent; \
+               box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent); }} \
              popover.git-menu > contents {{ background-color: var(--popover-bg-color); }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \

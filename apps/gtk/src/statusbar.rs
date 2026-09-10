@@ -19,9 +19,12 @@ use gtk::prelude::*;
 pub struct Bar {
     row: gtk::Box,
     progress: gtk::Label,
-    /// What the two writers of the [`Bar::progress`] label have each said, so neither erases the
-    /// other: the vault's own work, and a background job in a language provider.
+    /// What the writers of the [`Bar::progress`] label have each said, so none erases another:
+    /// the vault's own work, the copies to and from a host, and a background job in a language
+    /// provider. The copies are a list because two can overlap, and the first to finish must not
+    /// clear the other.
     vault_busy: RefCell<Option<String>>,
+    transfers: RefCell<Vec<String>>,
     provider_busy: RefCell<Option<String>>,
     /// The branch readout, which is also the Sync control.
     branch: gtk::Button,
@@ -92,6 +95,7 @@ impl Bar {
             row,
             progress,
             vault_busy: RefCell::new(None),
+            transfers: RefCell::new(Vec::new()),
             provider_busy: RefCell::new(None),
             branch,
             branch_label,
@@ -121,13 +125,35 @@ impl Bar {
         self.show_busy();
     }
 
-    /// One line for both, and the vault's own work wins: opening a document or reading the vault
-    /// is what the reader is waiting for, while a suggestion index is a convenience they did not
-    /// ask about.
+    /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". Its
+    /// size is not asked for, so it says that it runs rather than how far it has got.
+    pub fn set_transfer(&self, text: &str, running: bool) {
+        {
+            let mut transfers = self.transfers.borrow_mut();
+            match running {
+                true => transfers.push(text.to_string()),
+                false => {
+                    if let Some(at) = transfers.iter().position(|t| t == text) {
+                        transfers.remove(at);
+                    }
+                }
+            }
+        }
+        self.show_busy();
+    }
+
+    /// One line for all of them, and the vault's own work wins: opening a document or reading the
+    /// vault is what the reader is waiting for. A copy they asked for comes next, the latest one
+    /// still running, and a suggestion index last, being a convenience nobody asked about.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
+        let transfers = self.transfers.borrow();
         let provider = self.provider_busy.borrow();
-        set(&self.progress, vault.as_deref().or(provider.as_deref()));
+        let transfer = transfers.last().map(String::as_str);
+        set(
+            &self.progress,
+            vault.as_deref().or(transfer).or(provider.as_deref()),
+        );
     }
 
     /// The branch of the repository holding the active document, "• main ↑1 ↓2": the branch, how

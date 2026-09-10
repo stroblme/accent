@@ -16,7 +16,7 @@ use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::{Rc, Weak};
 
@@ -29,6 +29,11 @@ const TAG_REMOVED_EMPH: &str = "diff-removed-emph";
 /// The runs of unchanged lines a changes-only view hides. Its own tag rather than `fold.rs`'s,
 /// so the editor's fold bookkeeping never mistakes a hidden run for a block it folded.
 pub(crate) const TAG_GAP: &str = "diff-gap";
+/// The blank space above a paragraph, and below the last, that keeps the two columns level: one
+/// tag per pixel count, named this plus the count, so a paragraph's padding can be read back off
+/// the buffer. See [`carried`].
+const PAD_ABOVE: &str = "diff-pad-above-";
+const PAD_BELOW: &str = "diff-pad-below-";
 /// Unchanged lines kept on each side of a change, as `git diff` keeps them.
 const CONTEXT: usize = 3;
 
@@ -114,10 +119,11 @@ impl Side {
     }
 }
 
-/// One column of the comparison. `root` is what the paned shows; the scroller is named so the
-/// two columns can share one vertical adjustment.
+/// One column of the comparison. `root` is what the paned shows, `header` its title row; the
+/// scroller is named so the two columns can share one vertical adjustment.
 pub struct Pane {
     pub root: gtk::Widget,
+    pub header: gtk::Widget,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
     pub scroller: gtk::ScrolledWindow,
@@ -168,11 +174,13 @@ pub fn pane(
         .child(&view)
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.append(&header(title, None));
+    let header = header(title, None);
+    root.append(&header);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&scroller);
     Pane {
         root: root.upcast(),
+        header: header.upcast(),
         view,
         buffer,
         scroller,
@@ -195,6 +203,8 @@ struct Slot {
     /// The gap button itself, to relabel; a hunk row has nothing to relabel.
     label: Option<gtk::Button>,
     role: Rc<RefCell<Role>>,
+    /// Whether the refresh under way has handed this slot out.
+    claimed: Cell<bool>,
 }
 
 /// The buttons laid over one view, kept for reuse.
@@ -204,6 +214,10 @@ struct Slot {
 /// a button that is not needed is hidden, and the next refresh picks it up again. The pool is
 /// owned by the pane and not by the comparison, because the editor's view outlives every
 /// comparison it hosts and the buttons parented to it have to as well.
+///
+/// A refresh hands the buttons out again in order, [`Pool::unclaim`] to [`Pool::hide_unclaimed`],
+/// so the button a hunk or a run had is the one it gets back, and one still wanted is never
+/// hidden in between: a keystroke re-diffs, and must not take every button off and put it back.
 #[derive(Default)]
 pub struct Pool {
     /// The comparison the buttons act on right now.
@@ -212,8 +226,8 @@ pub struct Pool {
 }
 
 impl Pool {
-    /// A shown button for `role`: a hidden one of the same kind is reused, or a new one is laid
-    /// over `view`.
+    /// A shown button for `role`: the first one of the same kind this refresh has not handed out
+    /// yet, or a new one laid over `view`.
     fn claim(self: &Rc<Self>, view: &sourceview5::View, role: Role) -> gtk::Widget {
         let same_kind = |slot: &Slot| {
             matches!(
@@ -224,7 +238,7 @@ impl Pool {
         let mut slots = self.slots.borrow_mut();
         let at = match slots
             .iter()
-            .position(|slot| !slot.widget.is_visible() && same_kind(slot))
+            .position(|slot| !slot.claimed.get() && same_kind(slot))
         {
             Some(at) => at,
             None => {
@@ -237,13 +251,24 @@ impl Pool {
             button.set_label(&format!("⋯ {rows} unchanged lines"));
         }
         *slot.role.borrow_mut() = role;
+        slot.claimed.set(true);
         slot.widget.set_visible(true);
         slot.widget.clone()
     }
 
-    fn release_all(&self) {
+    /// Every button up for claiming again. None is hidden yet.
+    fn unclaim(&self) {
         for slot in self.slots.borrow().iter() {
-            slot.widget.set_visible(false);
+            slot.claimed.set(false);
+        }
+    }
+
+    /// Hide every button nothing has claimed since [`Pool::unclaim`].
+    fn hide_unclaimed(&self) {
+        for slot in self.slots.borrow().iter() {
+            if !slot.claimed.get() {
+                slot.widget.set_visible(false);
+            }
         }
     }
 
@@ -289,6 +314,7 @@ impl Pool {
             widget,
             label,
             role,
+            claimed: Cell::new(false),
         }
     }
 
@@ -334,6 +360,17 @@ fn line_starts(text: &str) -> Vec<i32> {
     starts
 }
 
+/// Where the first change starts on `side`, in characters: its first line of the first hunk, or,
+/// where that hunk only takes lines away from `side`, its next line after it. `starts` is `side`'s
+/// [`line_starts`]. `None` when nothing differs.
+fn first_change(lines: &[DiffLine], rows: &[Row], starts: &[i32], side: Side) -> Option<i32> {
+    let hunk = diff::hunks(lines, rows).into_iter().next()?;
+    let next = rows[hunk.start..]
+        .iter()
+        .find_map(|r| side.of(r).and_then(|i| side.number(&lines[i])));
+    Some(next.map_or(*starts.last()?, |n| starts[n - 1]))
+}
+
 /// Where the overlaid buttons sit, in rows.
 #[derive(Clone, Copy)]
 enum Anchor {
@@ -355,7 +392,7 @@ struct Grid {
 
 /// Blank space above each row of one column, and below its last, that keeps it in step with the
 /// other column. See [`padding`].
-#[derive(Debug, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq)]
 struct Pads {
     above: Vec<i32>,
     below_last: i32,
@@ -433,6 +470,121 @@ fn measure(
     (b.y() + b.height() - a.y() + margins, true)
 }
 
+/// The padding the paragraph starting at `at` carries, above and below, over the view's own
+/// margins.
+///
+/// Read off the buffer rather than remembered, because it is what GTK's figure for the line
+/// includes: a line keeps the height it was last laid out at until GTK lays it out again, even
+/// after an edit or a tag change, so taking off anything but the padding it really carries
+/// measures it wrong. Rows renumber after an edit, but the tags move with the text.
+fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32) {
+    let (mut above, mut below) = (0, 0);
+    // Lowest priority first, so where a paste has left two, the one GTK uses is read last.
+    for tag in at.tags() {
+        let Some(name) = tag.name() else { continue };
+        if name.starts_with(PAD_ABOVE) {
+            above = tag.pixels_above_lines() - view.pixels_above_lines();
+        } else if name.starts_with(PAD_BELOW) {
+            below = tag.pixels_below_lines() - view.pixels_below_lines();
+        }
+    }
+    (above, below)
+}
+
+/// Give the paragraph `from..to` (its newline included) `above` pixels of padding above it and
+/// `below` under it, where its first character does not carry exactly that already: a paragraph
+/// left alone is not laid out again.
+///
+/// GTK reads a paragraph's spacing off its first character alone, but the tags cover the newline
+/// before the paragraph and the paragraph itself up to its own newline. Text typed at its start
+/// lands inside them — text inserted where a tag begins does not take the tag — and so does the
+/// character left when the first is deleted, where tags on the first character alone were lost
+/// to either edit and the line was laid out bare for a frame. The paragraph's own newline is left
+/// out because a tag ending at the next line's start is taken by text typed there. The first
+/// paragraph has no newline before it: [`reclaim_start`] makes up for that.
+fn pad(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+    from: i32,
+    to: i32,
+    above: i32,
+    below: i32,
+) {
+    let first = buffer.iter_at_offset(from);
+    let (start, end) = (
+        buffer.iter_at_offset((from - 1).max(0)),
+        buffer.iter_at_offset((to - 1).max(from + 1)),
+    );
+    let (had_above, had_below) = carried(view, &first);
+    for (px, had, prefix, base) in [
+        (above, had_above, PAD_ABOVE, view.pixels_above_lines()),
+        (below, had_below, PAD_BELOW, view.pixels_below_lines()),
+    ] {
+        if px == had {
+            continue;
+        }
+        for tag in first.tags() {
+            if tag.name().is_some_and(|name| name.starts_with(prefix)) {
+                buffer.remove_tag(&tag, &start, &end);
+            }
+        }
+        if px > 0 {
+            buffer.apply_tag(&pad_tag(buffer, prefix, base + px), &start, &end);
+        }
+    }
+}
+
+fn is_pad(tag: &gtk::TextTag) -> bool {
+    tag.name()
+        .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
+}
+
+/// Put text typed at the very start of the buffer back under the first paragraph's padding.
+///
+/// That paragraph has no newline before it for [`pad`] to start its tags from, so a character
+/// typed ahead of it went in outside them: GTK laid the line out bare for a frame, and the
+/// relayout, finding no padding on its first character, measured it at the height it had last
+/// been laid out at, padding and all. Stretched back over what was typed, the tags cover the
+/// first character again and say what GTK last laid the line out with. The first pad tag that
+/// begins inside the line is the one the typing moved: the next paragraph's begins at the
+/// line's own newline. A first line that was empty is left alone, for that reason: its tags sit
+/// on that newline beside the next paragraph's.
+fn reclaim_start(buffer: &sourceview5::Buffer) {
+    let start = buffer.start_iter();
+    if start.tags().iter().any(is_pad) {
+        return;
+    }
+    let mut end = start;
+    end.forward_to_line_end();
+    let mut at = start;
+    while at.forward_to_tag_toggle(None::<&gtk::TextTag>) && at < end {
+        let moved: Vec<gtk::TextTag> = at.toggled_tags(true).into_iter().filter(is_pad).collect();
+        if !moved.is_empty() {
+            for tag in &moved {
+                buffer.apply_tag(tag, &start, &at);
+            }
+            return;
+        }
+    }
+}
+
+/// The tag named `prefix` plus `px`, which sets that many pixels above or below a paragraph.
+/// `pixels-above-lines` on a tag replaces the view's default rather than adding to it, so `px`
+/// is the base margin plus the pad.
+fn pad_tag(buffer: &sourceview5::Buffer, prefix: &str, px: i32) -> gtk::TextTag {
+    let name = format!("{prefix}{px}");
+    let table = buffer.tag_table();
+    table.lookup(&name).unwrap_or_else(|| {
+        let tag = gtk::TextTag::new(Some(&name));
+        match prefix {
+            PAD_BELOW => tag.set_pixels_below_lines(px),
+            _ => tag.set_pixels_above_lines(px),
+        }
+        table.add(&tag);
+        tag
+    })
+}
+
 fn install_tags(buffer: &sourceview5::Buffer) {
     let table = buffer.tag_table();
     for name in [TAG_ADDED, TAG_REMOVED, TAG_ADDED_EMPH, TAG_REMOVED_EMPH] {
@@ -503,10 +655,6 @@ pub struct Compare {
     /// survives the edits that move everything else. A run holding one stays open.
     opened: RefCell<HashSet<usize>>,
     overlays: RefCell<Vec<(Side, gtk::Widget, Anchor)>>,
-    /// The `pixels-above-lines` (and, for the last line, `-below-`) tags in use, by pixel count,
-    /// and the padding each row currently carries, so an unchanged row is not re-tagged.
-    pad_tags: RefCell<[HashMap<(bool, i32), gtk::TextTag>; 2]>,
-    applied: RefCell<[Pads; 2]>,
     /// The grid the last relayout laid down, kept for [`Compare::misaligned`].
     grid: RefCell<Grid>,
     pending: RefCell<Option<glib::SourceId>>,
@@ -533,6 +681,12 @@ impl Compare {
         // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
         new.scroller
             .set_vadjustment(Some(&old.scroller.vadjustment()));
+        // One height for both title rows: the editor's carries Stop Comparing and would stand
+        // taller, starting its column, and every row in it, that much lower. The group lives as
+        // long as the rows do.
+        let titles = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+        titles.add_widget(&old.header);
+        titles.add_widget(&new.header);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_start_child(Some(&old.root));
@@ -564,8 +718,6 @@ impl Compare {
             hidden: RefCell::new(Vec::new()),
             opened: RefCell::new(HashSet::new()),
             overlays: RefCell::new(Vec::new()),
-            pad_tags: RefCell::new([HashMap::new(), HashMap::new()]),
-            applied: RefCell::new([Pads::default(), Pads::default()]),
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
             settling: Cell::new(0),
@@ -618,11 +770,19 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
+        // Text typed ahead of the first line's padding goes back under it on the keystroke itself:
+        // above 16 KB the editor refreshes the comparison only on its debounce, and the line
+        // would be laid out bare until then.
+        if let Some(mine) = editable {
+            let buffer = this.pane(mine).buffer.clone();
+            let id = buffer.connect_changed(reclaim_start);
+            connect(buffer.upcast(), id);
+        }
 
         for pane in &this.panes {
             *pane.pool.owner.borrow_mut() = this.weak.clone();
         }
-        this.refresh();
+        this.lay(true);
         this
     }
 
@@ -661,12 +821,19 @@ impl Compare {
     /// Re-read both buffers and lay the diff over them: the tints, the emphasis, the hidden runs
     /// and the buttons. Nothing in either buffer's text is touched.
     pub fn refresh(&self) {
+        self.lay(false);
+    }
+
+    /// [`Compare::refresh`], and with `opening`, the one [`Compare::new`] makes: that one also
+    /// puts the editor's caret on the first change, so the comparison opens on what changed
+    /// with every unchanged run folded, the one the caret was in included.
+    fn lay(&self, opening: bool) {
         let (old, new) = (self.text(Side::Old), self.text(Side::New));
         let lines = diff::lines(&old, &new);
         let rows = diff::align(&lines);
         let starts = [line_starts(&old), line_starts(&new)];
         for side in [Side::Old, Side::New] {
-            self.clear(side);
+            self.clear_marks(side);
         }
 
         for side in [Side::Old, Side::New] {
@@ -707,6 +874,13 @@ impl Compare {
             (st[number(range.start) - 1], st[number(range.end - 1)])
         };
         let keyed = self.editable.map(Side::other).unwrap_or(Side::Old);
+        if opening
+            && let Some(side) = self.editable
+            && let Some(at) = first_change(&lines, &rows, &starts[side.idx()], side)
+        {
+            let buffer = &self.pane(side).buffer;
+            buffer.place_cursor(&buffer.iter_at_offset(at));
+        }
         let caret = self.editable.map(|side| {
             let buffer = &self.pane(side).buffer;
             (side, buffer.iter_at_mark(&buffer.get_insert()).offset())
@@ -750,6 +924,9 @@ impl Compare {
             hidden.push((gap, key));
         }
 
+        for pane in &self.panes {
+            pane.pool.unclaim();
+        }
         let mut overlays = Vec::new();
         if self.hunk_buttons
             && let Some(mine) = self.editable
@@ -771,6 +948,9 @@ impl Compare {
                 let widget = pane.pool.claim(&pane.view, role);
                 overlays.push((side, widget, Anchor::Gap(gap.start)));
             }
+        }
+        for pane in &self.panes {
+            pane.pool.hide_unclaimed();
         }
 
         *self.lines.borrow_mut() = lines;
@@ -823,10 +1003,13 @@ impl Compare {
         }
     }
 
-    /// Take everything this module put on `side` back off: the tags, the padding, the buttons.
-    fn clear(&self, side: Side) {
-        let pane = self.pane(side);
-        let (start, end) = pane.buffer.bounds();
+    /// Take the tints, the emphasis and the hidden runs off `side`, which a refresh lays down
+    /// again. The padding stays, and the relayout changes only the rows whose padding moved:
+    /// taking it all off made GTK lay every padded row out without it for a frame, which is what
+    /// flashed on every keystroke and nudged the scroll range.
+    fn clear_marks(&self, side: Side) {
+        let buffer = &self.pane(side).buffer;
+        let (start, end) = buffer.bounds();
         for tag in [
             TAG_ADDED,
             TAG_REMOVED,
@@ -834,21 +1017,29 @@ impl Compare {
             TAG_REMOVED_EMPH,
             TAG_GAP,
         ] {
-            pane.buffer.remove_tag_by_name(tag, &start, &end);
+            buffer.remove_tag_by_name(tag, &start, &end);
         }
-        for tag in self.pad_tags.borrow()[side.idx()].values() {
-            pane.buffer.remove_tag(tag, &start, &end);
-        }
-        self.applied.borrow_mut()[side.idx()] = Pads::default();
-        pane.pool.release_all();
-        self.overlays.borrow_mut().retain(|(s, ..)| *s != side);
     }
 
     /// Everything off both panes: what leaving a comparison does before the panes part.
     pub fn leave(&self) {
         for side in [Side::Old, Side::New] {
-            self.clear(side);
+            self.clear_marks(side);
+            let pane = self.pane(side);
+            let (start, end) = pane.buffer.bounds();
+            let mut pads = Vec::new();
+            pane.buffer.tag_table().foreach(|tag| {
+                if is_pad(tag) {
+                    pads.push(tag.clone());
+                }
+            });
+            for tag in pads {
+                pane.buffer.remove_tag(&tag, &start, &end);
+            }
+            pane.pool.unclaim();
+            pane.pool.hide_unclaimed();
         }
+        self.overlays.borrow_mut().clear();
         if let Some(id) = self.pending.borrow_mut().take() {
             id.remove();
         }
@@ -892,6 +1083,11 @@ impl Compare {
         if !views.iter().all(|v| v.is_mapped()) {
             return;
         }
+        // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
+        // `changed` handler.
+        if let Some(mine) = self.editable {
+            reclaim_start(&self.pane(mine).buffer);
+        }
         // The companion takes the editor's page margins, so the first row of each starts level.
         if let Some(mine) = self.editable {
             let (from, to) = (&self.pane(mine).view, &self.pane(mine.other()).view);
@@ -911,10 +1107,6 @@ impl Compare {
         let heights: [Vec<Option<i32>>; 2] = [Side::Old, Side::New].map(|side| {
             let pane = self.pane(side);
             let st = &starts[side.idx()];
-            let applied = self.applied.borrow();
-            let last = (0..rows.len())
-                .rev()
-                .find(|&r| !is_hidden(r) && side.of(&rows[r]).is_some());
             rows.iter()
                 .enumerate()
                 .map(|(r, row)| {
@@ -922,12 +1114,10 @@ impl Compare {
                         return None;
                     }
                     let n = side.of(row).and_then(|i| side.number(&lines[i]))?;
-                    // What this module has on the line right now, which GTK's figure includes.
-                    let pads = &applied[side.idx()];
-                    let padded = pads.above.get(r).copied().unwrap_or(0)
-                        + if last == Some(r) { pads.below_last } else { 0 };
+                    let (above, below) =
+                        carried(&pane.view, &pane.buffer.iter_at_offset(st[n - 1]));
                     let (height, estimate) =
-                        measure(&pane.view, &pane.buffer, st[n - 1], st[n], padded);
+                        measure(&pane.view, &pane.buffer, st[n - 1], st[n], above + below);
                     estimated.set(estimated.get() || estimate);
                     Some(height)
                 })
@@ -942,61 +1132,27 @@ impl Compare {
         for side in [Side::Old, Side::New] {
             let pane = self.pane(side);
             let st = &starts[side.idx()];
-            let first_char = |r: usize| {
-                let n = side.of(&rows[r]).and_then(|i| side.number(&lines[i]))?;
-                Some((
-                    pane.buffer.iter_at_offset(st[n - 1]),
-                    pane.buffer.iter_at_offset(st[n - 1] + 1),
-                ))
-            };
-            let mut applied = self.applied.borrow_mut();
-            let was = std::mem::take(&mut applied[side.idx()]);
             let now = &pads[side.idx()];
-            let (base_above, base_below) = (
-                pane.view.pixels_above_lines(),
-                pane.view.pixels_below_lines(),
-            );
-            for (r, &new) in now.above.iter().enumerate() {
-                let old = was.above.get(r).copied().unwrap_or(0);
-                if old == new || heights[side.idx()][r].is_none() {
-                    continue;
-                }
-                let Some((from, to)) = first_char(r) else {
-                    continue;
-                };
-                if old > 0 {
-                    pane.buffer.remove_tag(
-                        &self.pad_tag(side, false, base_above + old),
-                        &from,
-                        &to,
-                    );
-                }
-                if new > 0 {
-                    pane.buffer
-                        .apply_tag(&self.pad_tag(side, false, base_above + new), &from, &to);
-                }
-            }
             // Below the last visible line, which is where trailing rows of the other side fall.
             let last = (0..rows.len())
                 .rev()
                 .find(|&r| heights[side.idx()][r].is_some());
-            if let Some(r) = last
-                && was.below_last != now.below_last
-                && let Some((from, to)) = first_char(r)
-            {
-                if was.below_last > 0 {
-                    let tag = self.pad_tag(side, true, base_below + was.below_last);
-                    pane.buffer.remove_tag(&tag, &from, &to);
-                }
-                if now.below_last > 0 {
-                    let tag = self.pad_tag(side, true, base_below + now.below_last);
-                    pane.buffer.apply_tag(&tag, &from, &to);
-                }
+            // Every line on this side, hidden ones included, so a row that is hidden now or was
+            // the last one before an edit does not keep what it carried then.
+            for (r, row) in rows.iter().enumerate() {
+                let Some(n) = side.of(row).and_then(|i| side.number(&lines[i])) else {
+                    continue;
+                };
+                let below = if last == Some(r) { now.below_last } else { 0 };
+                pad(
+                    &pane.view,
+                    &pane.buffer,
+                    st[n - 1],
+                    st[n],
+                    now.above[r],
+                    below,
+                );
             }
-            applied[side.idx()] = Pads {
-                above: now.above.clone(),
-                below_last: now.below_last,
-            };
         }
 
         // Buffer coordinates, which start at the first paragraph — the view's top margin is
@@ -1042,6 +1198,30 @@ impl Compare {
             self.hidden.borrow().len(),
             self.overlays.borrow().len(),
         )
+    }
+
+    /// How many pixels lower the right column starts than the left one in the window: 0 is the
+    /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
+    pub fn skew(&self) -> i32 {
+        let top = |side: Side| {
+            self.pane(side)
+                .scroller
+                .compute_point(&self.paned, &gtk::graphene::Point::zero())
+                .map_or(0.0, |p| p.y())
+        };
+        (top(Side::New) - top(Side::Old)).round() as i32
+    }
+
+    /// Whether row `r` is in a hidden run right now.
+    pub fn hides_row(&self, r: usize) -> bool {
+        self.hidden.borrow().iter().any(|(gap, _)| gap.contains(&r))
+    }
+
+    /// Where the first change starts on the editor's side, in characters.
+    pub fn opens_at(&self) -> Option<i32> {
+        let side = self.editable?;
+        let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+        first_change(&lines, &rows, &self.starts.borrow()[side.idx()], side)
     }
 
     /// How many rows GTK lays out at a different height than the last relayout meant them to
@@ -1140,22 +1320,6 @@ impl Compare {
         }
     }
 
-    /// The tag that puts `px` pixels above (or, with `below`, under) a paragraph on `side`.
-    fn pad_tag(&self, side: Side, below: bool, px: i32) -> gtk::TextTag {
-        self.pad_tags.borrow_mut()[side.idx()]
-            .entry((below, px))
-            .or_insert_with(|| {
-                let tag = gtk::TextTag::new(None);
-                match below {
-                    true => tag.set_pixels_below_lines(px),
-                    false => tag.set_pixels_above_lines(px),
-                }
-                self.pane(side).buffer.tag_table().add(&tag);
-                tag
-            })
-            .clone()
-    }
-
     /// Put the other side's lines of `hunk` into the editable buffer: in place of its own lines,
     /// or after them with `keep_own`. One undo step, and one edit like any the user makes, so
     /// the host's own change handling runs and lays the diff over the result.
@@ -1231,6 +1395,9 @@ pub struct DiffTab {
     pub page: adw::TabPage,
     key: String,
     compare: Rc<Compare>,
+    /// Both panes' views. They take the page's margins from the zoom here, having no editor
+    /// beside them for [`Compare::relayout`] to copy them from.
+    views: [sourceview5::View; 2],
     flavour: Flavour,
     name: String,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -1258,6 +1425,7 @@ impl DiffTab {
         };
         let old = pane(old.0, flavour, old.1, &name, language.as_ref());
         let new = pane(new.0, flavour, new.1, &name, language.as_ref());
+        let views = [old.view.clone(), new.view.clone()];
         let compare = Compare::new(old, new, None, false);
         let page = tabs.append(compare.widget());
         page.set_title(title);
@@ -1266,6 +1434,7 @@ impl DiffTab {
             page,
             key: key.to_string(),
             compare,
+            views,
             flavour,
             name,
             font: RefCell::new(None),
@@ -1278,8 +1447,20 @@ impl DiffTab {
         self.key.clone()
     }
 
+    /// The font and the page at `zoom`, as `Tab::set_font` sets them for an editor.
     pub fn set_font(&self, font: Option<&str>, zoom: f64) {
+        for view in &self.views {
+            editor::set_margins(view, zoom);
+        }
         editor::install_font(&self.font, self.flavour, font, zoom, &self.name);
+        // Heading markers hang in the left margin and are measured in the font, so they are
+        // measured again once the font has reached the views, as `Tab::rehang` does.
+        let compare = Rc::downgrade(&self.compare);
+        glib::idle_add_local_once(move || {
+            if let Some(compare) = compare.upgrade() {
+                compare.restyle();
+            }
+        });
     }
 
     pub fn restyle(&self) {
@@ -1317,6 +1498,18 @@ mod tests {
             vec![0, 0],
             "an empty text still has an end"
         );
+    }
+
+    #[test]
+    fn a_comparison_opens_on_the_first_change_or_the_line_after_a_deletion() {
+        let at = |old: &str, new: &str| {
+            let lines = diff::lines(old, new);
+            first_change(&lines, &diff::align(&lines), &line_starts(new), Side::New)
+        };
+        assert_eq!(at("a\nb\nc\n", "a\nB\nc\n"), Some(2), "line 2");
+        assert_eq!(at("a\nb\nc\n", "a\nc\n"), Some(2), "b is gone, so c");
+        assert_eq!(at("a\nb\n", "a\n"), Some(2), "gone at the end, so the end");
+        assert_eq!(at("a\n", "a\n"), None);
     }
 
     #[test]

@@ -38,7 +38,7 @@ use follow::Follow;
 use lines::line_clipboard;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
-pub(crate) use page::{font_css, install_font, next_view_name};
+pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
 use search::mute;
 pub(crate) use text::{caret, line_end, line_prefix};
 

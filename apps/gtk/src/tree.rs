@@ -769,15 +769,19 @@ pub fn build(
         ),
         Some("empty"),
     );
-    let show_rows = {
-        let body = body.clone();
+    // Weak: `body` holds the list, the list the model, and the model this store, so a strong
+    // handle is a cycle that keeps the tree, and the vault in the model's create-func, alive after
+    // the window has closed.
+    let show_rows = glib::clone!(
+        #[weak]
+        body,
         move |rows: u32| {
             body.set_visible_child_name(match rows {
                 0 => "empty",
                 _ => "list",
             });
         }
-    };
+    );
     show_rows(root.n_items());
     root.connect_items_changed(move |store, _, _, _| show_rows(store.n_items()));
 

@@ -55,7 +55,7 @@ impl Panel {
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, Box::new(register));
             }
-            Sides::Staged | Sides::Commit { .. } => {
+            Sides::Staged | Sides::Deleted | Sides::Commit { .. } => {
                 let key = format!("diff:{}:{}", what.sides.tag(), what.key);
                 let tab = (self.hooks.open_diff)(
                     &key,
@@ -65,7 +65,7 @@ impl Panel {
                     (&right_title, &right),
                 );
                 // A commit never changes; the index does.
-                if let (Some(tab), Sides::Staged) = (tab, &what.sides) {
+                if let (Some(tab), Sides::Staged | Sides::Deleted) = (tab, &what.sides) {
                     self.watch(what, Target::Diff(Rc::downgrade(&tab)));
                 }
             }
@@ -132,6 +132,9 @@ pub(super) enum Sides {
     Staged,
     /// The index against the file on disk: what is not staged yet.
     Worktree,
+    /// The index against nothing: a file deleted from the working tree, which has no tab to
+    /// compare inside, so this is a tab of its own the way a staged change is.
+    Deleted,
     /// One commit against its first parent, which is what a file under an expanded history row
     /// shows. `parent` is `None` on a root commit, whose left side is simply empty.
     Commit { oid: String, parent: Option<String> },
@@ -142,7 +145,7 @@ impl Sides {
     fn left_rev(&self) -> Option<&str> {
         match self {
             Sides::Staged => Some("HEAD"),
-            Sides::Worktree => Some(""),
+            Sides::Worktree | Sides::Deleted => Some(""),
             Sides::Commit { parent, .. } => parent.as_deref(),
         }
     }
@@ -150,7 +153,7 @@ impl Sides {
     fn left_title(&self) -> String {
         match self {
             Sides::Staged => "HEAD".to_string(),
-            Sides::Worktree => "Index".to_string(),
+            Sides::Worktree | Sides::Deleted => "Index".to_string(),
             Sides::Commit { parent, .. } => match parent {
                 Some(parent) => short(parent),
                 None => "Nothing".to_string(),
@@ -162,6 +165,7 @@ impl Sides {
         match self {
             Sides::Staged => "Index".to_string(),
             Sides::Worktree => "Working Tree".to_string(),
+            Sides::Deleted => "Deleted".to_string(),
             Sides::Commit { oid, .. } => short(oid),
         }
     }
@@ -172,6 +176,7 @@ impl Sides {
         match self {
             Sides::Staged => "index".to_string(),
             Sides::Worktree => "worktree".to_string(),
+            Sides::Deleted => "deleted".to_string(),
             Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
         }
     }
@@ -227,6 +232,7 @@ impl What {
             // as here. It is read even though the tab shows its own buffer, so that the same
             // hop answers "is this binary" for both.
             Sides::Worktree => self.worktree(vault),
+            Sides::Deleted => Blob::Text(String::new()),
             Sides::Commit { oid, .. } => side(vault.git_show(&self.repo, oid, &self.rel)),
         };
         (left, right)

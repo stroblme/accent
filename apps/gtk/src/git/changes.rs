@@ -126,12 +126,22 @@ impl Panel {
         else {
             return;
         };
-        match section {
-            // A conflict is resolved in the file, not in a diff of two sides that both lost.
-            Section::Conflicts => (self.hooks.open)(key),
-            Section::Staged => self.compare(&entry.path, key, Sides::Staged),
-            Section::Changes => self.compare(&entry.path, key, Sides::Worktree),
+        match sides_for(*section, entry) {
+            Some(sides) => self.compare(&entry.path, key, sides),
+            None => (self.hooks.open)(key),
         }
+    }
+}
+
+/// What activating a changed file compares, or `None` for a conflict, which is resolved in the
+/// file rather than in a diff of two sides that both lost. A file deleted from the working tree
+/// has no tab to compare inside, so it gets one of its own: the index against nothing.
+fn sides_for(section: Section, entry: &Entry) -> Option<Sides> {
+    match section {
+        Section::Conflicts => None,
+        Section::Staged => Some(Sides::Staged),
+        Section::Changes if entry.y == 'D' => Some(Sides::Deleted),
+        Section::Changes => Some(Sides::Worktree),
     }
 }
 
@@ -324,9 +334,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 .collapsed
                 .borrow()
                 .contains(&folder_key(section, &path));
+            // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
             chevron.set_icon_name(Some(match shut {
-                true => "pan-end-symbolic",
-                false => "pan-down-symbolic",
+                true => "go-next-symbolic",
+                false => "go-down-symbolic",
             }));
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
@@ -339,7 +350,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             depth,
         } => {
             stack.set_visible_child_name("entry");
-            entry.set_margin_start(inset(depth));
+            entry.set_margin_start(inset(depth, panel.tree.get()));
             let directory = match depth {
                 0 => split_name(&e.path).0,
                 _ => "",
@@ -438,11 +449,13 @@ fn rows_of(
     rows
 }
 
-/// How far in a file row of the tree view starts. Flat rows are not indented at all.
-fn inset(depth: usize) -> i32 {
-    match depth {
-        0 => 0,
-        depth => depth as i32 * INDENT + FILE_INSET,
+/// How far in a file row starts. In the folder view every file clears the chevron, the root's
+/// included, so its icon lands under a sibling folder's; flat rows are not indented at all, and
+/// share depth 0 with the root's files, which is why the view is asked rather than the depth.
+fn inset(depth: usize, tree: bool) -> i32 {
+    match tree {
+        true => depth as i32 * INDENT + FILE_INSET,
+        false => 0,
     }
 }
 
@@ -701,6 +714,31 @@ mod tests {
             shape(&rows[1..]),
             [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
         );
+    }
+
+    #[test]
+    fn a_file_deleted_from_the_working_tree_is_compared_against_nothing() {
+        let sides = |section, x, y| sides_for(section, &entry("f.md", x, y));
+        assert!(matches!(
+            sides(Section::Changes, '.', 'D'),
+            Some(Sides::Deleted)
+        ));
+        assert!(matches!(
+            sides(Section::Changes, '.', 'M'),
+            Some(Sides::Worktree)
+        ));
+        assert!(matches!(
+            sides(Section::Staged, 'D', '.'),
+            Some(Sides::Staged)
+        ));
+        assert!(sides(Section::Conflicts, 'U', 'U').is_none());
+    }
+
+    #[test]
+    fn a_file_at_the_root_of_the_folder_view_is_inset_like_every_other_file() {
+        assert_eq!(inset(0, true), FILE_INSET, "under a root folder's icon");
+        assert_eq!(inset(2, true), 2 * INDENT + FILE_INSET);
+        assert_eq!(inset(0, false), 0, "the flat view is not indented");
     }
 
     #[test]

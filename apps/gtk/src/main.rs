@@ -316,6 +316,12 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// Whether `key` is a file on another machine, where no file manager here can show it. A
+    /// loose tab's key is a path on this one, whatever the vault is.
+    fn on_host(&self, key: &str) -> bool {
+        !doc::is_loose_key(key) && self.vault().is_some_and(|v| v.is_remote())
+    }
+
     /// Whether this window's vault is one on another machine that has not answered yet. Nothing
     /// it holds can be read while that is true, and everything asked for while it was is asked
     /// again on `Event::Connected`.

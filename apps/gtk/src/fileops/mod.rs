@@ -53,6 +53,8 @@ pub struct Ops {
     pub vault: Arc<Vault>,
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
+    /// Say in the status bar that a copy to or from the host is running (`true`) or over.
+    pub transferring: Box<dyn Fn(&str, bool)>,
     /// Open a note in a tab, putting the caret at the first of these byte offsets and making the
     /// rest Tab stops — which is where a template's `{{cursor}}`s land.
     pub open: Box<dyn Fn(&str, &[usize])>,

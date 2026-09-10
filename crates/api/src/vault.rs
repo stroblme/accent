@@ -329,8 +329,9 @@ methods! {
     git git_show = show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
     git git_changed_files = changed_files(repo: ref Repo, oid: ref str) -> Vec<(char, String)>;
     git git_submodules = submodules(repo: ref Repo) -> Vec<Submodule>;
-    git git_branches = branches(repo: ref Repo) -> Vec<String>;
+    git git_branches = branches(repo: ref Repo) -> git::Branches;
     git git_checkout = checkout(repo: ref Repo, branch: ref str) -> ();
+    git git_track = track(repo: ref Repo, remote: ref str) -> ();
     git git_checkout_commit = checkout_commit(repo: ref Repo, oid: ref str) -> ();
     git git_create_branch = create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> ();
     git git_delete_branch = delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();

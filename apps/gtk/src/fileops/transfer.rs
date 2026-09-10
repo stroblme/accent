@@ -1,5 +1,6 @@
 //! Copying files in and out of a vault on another machine. Bytes travel over ssh, so every one
-//! of these runs on a worker thread and reports once, when it is over.
+//! of these runs on a worker thread, is said in the status bar while it does, and reports once,
+//! when it is over.
 
 use super::Ops;
 use super::paths::child_path;
@@ -34,10 +35,13 @@ pub fn download(ops: &Rc<Ops>, rel: &str) {
             return;
         };
         let vault = ops.vault.clone();
+        let busy = format!("Downloading {name}…");
+        (ops.transferring)(&busy, true);
         // Bytes over ssh, so off the main thread: a large PDF would otherwise freeze the window
         // for as long as the copy takes.
         glib::spawn_future_local(async move {
             let done = gio::spawn_blocking(move || vault.download(&rel, &dest)).await;
+            (ops.transferring)(&busy, false);
             (ops.toast)(&match done {
                 Ok(Ok(())) => format!("Downloaded {name}"),
                 Ok(Err(e)) => format!("Cannot download {name}: {e}"),
@@ -144,6 +148,8 @@ fn replace_body(existing: &[String]) -> String {
 /// Send the chosen files, off the main thread, and report once.
 fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
+    let busy = uploading(&chosen);
+    (ops.transferring)(&busy, true);
     glib::spawn_future_local(async move {
         let done = gio::spawn_blocking(move || {
             let (mut uploaded, mut failed) = (0, Vec::new());
@@ -159,6 +165,7 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
             (uploaded, failed)
         })
         .await;
+        (ops.transferring)(&busy, false);
         // Neither the tree nor the index is poked here: the watcher on the host reports what
         // landed, the same way it reports anything else written there.
         (ops.toast)(&match done {
@@ -166,6 +173,16 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
             Err(_) => "Cannot upload".to_string(),
         });
     });
+}
+
+/// What the status bar says while an upload runs: the file by name when there is one, otherwise
+/// how many.
+fn uploading(chosen: &[PathBuf]) -> String {
+    let what = match chosen {
+        [one] => local_name(one).unwrap_or_else(|| file_count(1)),
+        many => file_count(many.len()),
+    };
+    format!("Uploading {what}…")
 }
 
 /// What the toast says after an upload: how many landed, then the ones that did not, by name.
@@ -220,6 +237,16 @@ mod tests {
         assert!(clashes("Other", &files, have).is_empty());
         // "" is the vault root, and must not become a leading slash.
         assert_eq!(clashes("", &files, |rel| rel == "b.png"), ["b.png"]);
+    }
+
+    #[test]
+    fn a_running_upload_names_one_file_and_counts_several() {
+        assert_eq!(
+            uploading(&[PathBuf::from("/tmp/a.png")]),
+            "Uploading a.png…"
+        );
+        let two = [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")];
+        assert_eq!(uploading(&two), "Uploading 2 files…");
     }
 
     #[test]

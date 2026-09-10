@@ -211,7 +211,8 @@ fn base(url: &Url, ctl: &Path) -> Vec<String> {
 ///
 /// `ControlPersist=60` rather than `yes` because a crashed app must not leak a master forever. The
 /// timer only counts idle time, and `serve` holds a session for as long as the vault is open, so a
-/// working remote never reaches it.
+/// working remote never reaches it. Closing the vault leaves the master that minute on purpose, so
+/// a reopen within it is quick.
 pub fn master(url: &Url, ctl: &Path) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend(
@@ -273,7 +274,8 @@ pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "check")
 }
 
-/// Tell the master to shut down, so closing a vault leaves no process behind.
+/// Tell the master to shut down, as the Open Remote dialog does with its probe's when it closes.
+/// A vault's own master is not told: it lingers its ControlPersist minute for a quick reopen.
 pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "exit")
 }
