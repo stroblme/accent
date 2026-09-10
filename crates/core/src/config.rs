@@ -38,6 +38,7 @@ pen_width = 2.0
 highlighter_width = 14.0
 highlighter_color = [0, 0, 0]
 eraser_radius = 4.0
+eraser_partial = true
 
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
@@ -138,6 +139,9 @@ pub struct DrawingConfig {
     pub highlighter_color: Option<[u8; 3]>,
     /// How close the eraser has to pass to a stroke to take it, in page points.
     pub eraser_radius: f32,
+    /// Whether the eraser takes only the part of a stroke it passes over, leaving the rest as
+    /// strokes of their own, rather than the whole stroke.
+    pub eraser_partial: bool,
 }
 
 impl Default for DrawingConfig {
@@ -150,6 +154,7 @@ impl Default for DrawingConfig {
             pen_color: None,
             highlighter_color: None,
             eraser_radius: 4.0,
+            eraser_partial: false,
         }
     }
 }
@@ -590,6 +595,7 @@ daily_template = "DailyNote.md"
         assert_eq!(c.drawing.pen_color, None);
         assert_eq!(c.drawing.highlighter_color, Some([0, 0, 0]));
         assert_eq!(c.drawing.eraser_radius, 4.0);
+        assert!(c.drawing.eraser_partial);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();

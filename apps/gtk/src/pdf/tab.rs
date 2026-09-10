@@ -861,7 +861,12 @@ impl PdfTab {
         view.connect_erase(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, id, joined| tab.ask(Request::Erase { page, id, joined })
+            move |page, id, partial, joined| tab.ask(Request::Erase {
+                page,
+                id,
+                joined,
+                partial
+            })
         ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
@@ -1115,7 +1120,7 @@ impl PdfTab {
                 }
                 self.save_soon();
             }
-            Reply::Inks { page, inks } => self.view.set_inks(page, inks),
+            Reply::Inks { page, inks, erases } => self.view.set_inks(page, inks, erases),
             Reply::History { undo, redo } => {
                 self.history.set((undo, redo));
                 self.emit(&self.on_history);
