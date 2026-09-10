@@ -1062,7 +1062,8 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// hunks, hidden runs, buttons, how many rows GTK lays out at a height other than the one the
 /// alignment asked for, and how much lower one column starts than the other (0 and 0 are the
 /// claim) — before the first hunk is taken from Theirs, the hidden run is opened, and the same
-/// is read again. Then two blobs in a tab of their own, at a
+/// is read again, with the button of the changed-on-disk banner that stands over it (none while
+/// the comparison is up, Compare once it has gone). Then two blobs in a tab of their own, at a
 /// zoom, for the same numbers. With the vault under git, last, the working tree against the index
 /// in the note's tab: whether it opened with the run before the first change folded and the caret
 /// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
@@ -1095,13 +1096,20 @@ fn bench_compare(app: &Rc<App>, rel: &str) {
         tab.buffer.insert(&mut a, "line three\n");
         tab.buffer
             .insert(&mut tab.buffer.end_iter(), "added at the end\n");
+        // The question a watcher raises when the note moves under unsaved edits, whose Compare
+        // button is read while the comparison it opens is up and once it has gone.
+        tab.show_alert(Alert::Compare);
         app.compare_with_disk(&tab);
         glib::timeout_add_local_once(Duration::from_millis(600), move || {
             let Some(compare) = tab.comparison() else {
                 println!("bench compare none");
                 return bench_quit(&app);
             };
-            println!("bench compare {}", bench_compare_line(&compare));
+            println!(
+                "bench compare {} banner_button={:?}",
+                bench_compare_line(&compare),
+                bench_banner_button(&tab)
+            );
             compare.take_hunk(0, false);
             compare.open_gap(0);
             glib::timeout_add_local_once(Duration::from_millis(300), move || {
@@ -1120,9 +1128,12 @@ fn bench_compare(app: &Rc<App>, rel: &str) {
                 );
                 tab.leave_compare();
                 println!(
-                    "bench compare_left comparing={}",
-                    tab.comparison().is_some()
+                    "bench compare_left comparing={} banner_button={:?}",
+                    tab.comparison().is_some(),
+                    bench_banner_button(&tab)
                 );
+                // Taken down again, so the rest of the drill runs with nothing standing.
+                tab.clear_alert(Alert::Compare);
                 let new = body.replace("line 10\n", "line ten\n");
                 let diff = app.open_diff(
                     "diff:bench",
@@ -1246,6 +1257,11 @@ fn bench_compare_type(tab: &Rc<Tab>, at: f64, then: impl FnOnce() + 'static) {
             });
         });
     });
+}
+
+/// The banner's button as it reads on screen: `None` for none.
+fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
+    tab.banner.button_label().filter(|label| !label.is_empty())
 }
 
 fn bench_compare_line(compare: &diff::Compare) -> String {
