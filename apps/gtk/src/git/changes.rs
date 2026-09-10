@@ -42,6 +42,8 @@ enum Row {
         label: String,
         section: Section,
         depth: usize,
+        /// Whether what is under it is listed, which is what its chevron says.
+        open: bool,
     },
     Entry {
         entry: Entry,
@@ -84,6 +86,12 @@ impl Panel {
 
     /// Draw the changes list from what the last refresh learned, and nothing else: what the tree
     /// toggle and a folder row both need, neither of them being a reason to ask git again.
+    ///
+    /// Only the run of rows that differs is spliced, as the log compares before it draws: a save,
+    /// a watcher event and the `.git` write a Stage makes each land a refresh that mostly says
+    /// what is on screen already, and a row spliced out from under a press loses its release —
+    /// which is how Stage clicks went missing. So a row has to carry everything its binding
+    /// draws; the one thing it does not, the view, empties the list in [`Panel::set_tree`].
     pub(super) fn rebuild_changes(&self) {
         let rows = {
             let state = self.state.borrow();
@@ -101,9 +109,20 @@ impl Panel {
                 _ => Vec::new(),
             }
         };
-        let items: Vec<glib::BoxedAnyObject> =
-            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
-        self.changes.splice(0, self.changes.n_items(), &items);
+        let held: Vec<Row> = (0..self.changes.n_items())
+            .filter_map(|i| boxed(self.changes.item(i)))
+            .collect();
+        let (at, removed, added) = changed_run(&held, &rows);
+        if removed == 0 && added == 0 {
+            return;
+        }
+        let items: Vec<glib::BoxedAnyObject> = rows
+            .into_iter()
+            .skip(at)
+            .take(added)
+            .map(glib::BoxedAnyObject::new)
+            .collect();
+        self.changes.splice(at as u32, removed as u32, &items);
     }
 
     fn activate(self: &Rc<Self>, row: &Row) {
@@ -194,11 +213,11 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             return;
         };
         let on = button.is_active();
-        if panel.tree.replace(on) == on {
+        if panel.tree.get() == on {
             return;
         }
+        panel.set_tree(on);
         (panel.hooks.set_tree)(on);
-        panel.rebuild_changes();
     });
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -319,9 +338,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
         }
         Row::Folder {
             label,
-            section,
             depth,
             path,
+            open,
+            ..
         } => {
             stack.set_visible_child_name("folder");
             let (Some(chevron), Some(text)) = (
@@ -330,14 +350,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             ) else {
                 return;
             };
-            let shut = panel
-                .collapsed
-                .borrow()
-                .contains(&folder_key(section, &path));
             // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
-            chevron.set_icon_name(Some(match shut {
-                true => "go-next-symbolic",
-                false => "go-down-symbolic",
+            chevron.set_icon_name(Some(match open {
+                true => "go-down-symbolic",
+                false => "go-next-symbolic",
             }));
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
@@ -512,13 +528,15 @@ fn group_level(
             label = format!("{label}/{only}");
         }
         let path = format!("{prefix}{label}");
+        let open = !collapsed.contains(&folder_key(section, &path));
         rows.push(Row::Folder {
             label,
             section,
             depth,
             path: path.clone(),
+            open,
         });
-        if !collapsed.contains(&folder_key(section, &path)) {
+        if open {
             let under = format!("{path}/");
             group_level(rows, &group, &under, depth + 1, section, collapsed, key);
         }
@@ -549,6 +567,20 @@ fn only_segment(group: &[&Entry], prefix: &str) -> Option<String> {
     heads
         .all(|head| head == Some(first))
         .then(|| first.to_string())
+}
+
+/// The one run of `rows` that differs from `held`: where it starts, how many of `held` it replaces
+/// and how many of `rows` replace them. What the rows before and after it share is left out, so
+/// their widgets stay where they are.
+fn changed_run<T: PartialEq>(held: &[T], rows: &[T]) -> (usize, usize, usize) {
+    let head = held.iter().zip(rows).take_while(|(a, b)| a == b).count();
+    let tail = held[head..]
+        .iter()
+        .rev()
+        .zip(rows[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (head, held.len() - head - tail, rows.len() - head - tail)
 }
 
 /// The one letter a row shows: the side of porcelain's two that the section is about.
@@ -692,10 +724,13 @@ mod tests {
         let held = entries(&["src/x.md", "a.md"]);
         let refs: Vec<&Entry> = held.iter().collect();
         let collapsed = HashSet::from([folder_key(Section::Changes, "src")]);
+        let rows = grouped(&refs, Section::Changes, &collapsed, &identity);
         assert_eq!(
-            shape(&grouped(&refs, Section::Changes, &collapsed, &identity)),
+            shape(&rows),
             [(0, "src".to_string()), (0, "a.md".to_string())]
         );
+        // The row says so itself, so a refresh that keeps it cannot keep a stale chevron.
+        assert!(matches!(rows[0], Row::Folder { open: false, .. }));
         assert_eq!(
             shape(&grouped(&refs, Section::Staged, &collapsed, &identity)).len(),
             3,
@@ -714,6 +749,20 @@ mod tests {
             shape(&rows[1..]),
             [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
         );
+    }
+
+    #[test]
+    fn changed_run_leaves_the_rows_either_side_of_a_change_alone() {
+        assert_eq!(changed_run(&[1, 2, 3], &[1, 2, 3]), (3, 0, 0), "nothing");
+        // Staging `b` opens a Staged section above and takes `b` out of Changes: the rows after
+        // it keep their widgets.
+        assert_eq!(
+            changed_run(&["C", "a", "b", "c", "d"], &["S", "b", "C", "a", "c", "d"]),
+            (0, 3, 4)
+        );
+        assert_eq!(changed_run(&[1, 2, 3], &[1, 3]), (1, 1, 0), "a row gone");
+        assert_eq!(changed_run(&[1, 3], &[1, 2, 3]), (1, 0, 1), "a row come");
+        assert_eq!(changed_run(&[1, 1], &[1, 1, 1]), (2, 0, 1), "no overlap");
     }
 
     #[test]

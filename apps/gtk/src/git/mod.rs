@@ -529,8 +529,12 @@ impl Panel {
         self.tree.get()
     }
 
+    /// A move redraws every row: the view is the one thing a row's binding reads that the row
+    /// does not carry — a file at the root is the same row either way, indented only in the tree
+    /// — so [`Panel::rebuild_changes`] would keep it as it was.
     pub fn set_tree(&self, on: bool) {
         if self.tree.replace(on) != on {
+            self.changes.remove_all();
             self.rebuild_changes();
         }
     }

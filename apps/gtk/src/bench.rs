@@ -9,7 +9,8 @@ use super::*;
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
-/// pulled yet.
+/// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
+/// Stage clicks.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
@@ -402,9 +403,90 @@ fn bench_git(app: &Rc<App>) {
             if let Some(git) = app.git.get() {
                 println!("bench git_rows {}", git.log_rows());
             }
-            bench_quit(&app);
+            bench_git_stage(&app);
         });
     });
+}
+
+/// The changes list's splices, printed as they happen, across a refresh that changes nothing and
+/// two Stage clicks, and whether a row below the staged one kept its widget. A row that is spliced
+/// out from under a press loses its release, so this is the headless half of "rapid Stage clicks
+/// all land". Point it at a repository with `b.md` and `c.md` modified and `new.md` untracked at
+/// its root, and nothing staged; elsewhere it prints the splices and the clicks it could not make.
+fn bench_git_stage(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        git.set_tree(true);
+        let list = git.divider().start_child();
+        let view = list
+            .as_ref()
+            .and_then(|w| find_widget(w, &|w| w.is::<gtk::ListView>()))
+            .and_downcast::<gtk::ListView>();
+        if let Some(model) = view.and_then(|v| v.model()) {
+            model.connect_items_changed(|_, at, removed, added| {
+                println!("bench git_splice at={at} removed={removed} added={added}");
+            });
+        }
+        let row = |path: &str| {
+            list.as_ref().and_then(|list| {
+                // A header row keeps whatever tooltip its widget last had, so the layout is asked.
+                find_widget(list, &|w| {
+                    w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
+                        matches!(s.visible_child_name().as_deref(), Some("entry" | "folder"))
+                            && s.tooltip_text().as_deref() == Some(path)
+                    })
+                })
+            })
+        };
+        let click = |path: &str, tooltip: &str| {
+            let button = row(path)
+                .and_then(|r| {
+                    find_widget(&r, &|w| {
+                        w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
+                    })
+                })
+                .and_downcast::<gtk::Button>();
+            println!("bench git_click {path} {tooltip} {}", button.is_some());
+            if let Some(button) = button {
+                button.emit_clicked();
+            }
+        };
+        // The command's own refresh and the one its `.git` write schedules both land in this.
+        let settle = || glib::timeout_future(Duration::from_millis(1500));
+
+        println!("bench git_step refresh_unchanged");
+        git.schedule_refresh(git::Depth::Everything);
+        settle().await;
+
+        for (staged, below) in [("b.md", "c.md"), ("c.md", "new.md")] {
+            println!("bench git_step stage {staged}");
+            let before = row(below);
+            click(staged, "Stage");
+            settle().await;
+            let kept = before.is_some() && before == row(below);
+            println!("bench git_kept {below} {kept}");
+        }
+        println!("bench git_changes_rows {}", git.changes_rows());
+        bench_quit(&app);
+    });
+}
+
+/// The first widget in `root`'s subtree, `root` included, that `found` accepts.
+fn find_widget(root: &gtk::Widget, found: &dyn Fn(&gtk::Widget) -> bool) -> Option<gtk::Widget> {
+    if found(root) {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(hit) = find_widget(&c, found) {
+            return Some(hit);
+        }
+        child = c.next_sibling();
+    }
+    None
 }
 
 /// Drive the key semantics [`multicaret::View`] corrects — the wordwise deletes, logical-line
