@@ -1112,14 +1112,19 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
 }
 
 /// The heading over the branch popover's remote rows. A row that is not a branch, so nothing
-/// activates it and the keyboard passes it by.
+/// activates it and the keyboard passes it by. Inset by the 17 px Adwaita gives a text button
+/// either side of its label, so it sits over the names below it rather than out at the row's
+/// edge; small and dim, because every name under it is already a bold button label.
 fn remote_heading() -> gtk::ListBoxRow {
     let label = gtk::Label::builder()
         .label("Remote")
         .xalign(0.0)
+        .margin_start(17)
         .margin_top(6)
         .build();
-    label.add_css_class("heading");
+    for class in ["caption-heading", "dim-label"] {
+        label.add_css_class(class);
+    }
     gtk::ListBoxRow::builder()
         .child(&label)
         .activatable(false)
