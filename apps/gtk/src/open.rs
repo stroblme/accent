@@ -163,7 +163,7 @@ impl App {
             }
             Err(e) => {
                 self.awaiting.borrow_mut().remove(key);
-                return self.cannot(&format!("open {key}"), e);
+                return self.cannot_open(key, e);
             }
         };
         let prefs = self.prefs();
@@ -187,9 +187,8 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
-        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
         let pdf = pdftab::open(
-            &path,
+            path,
             key,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
@@ -296,10 +295,20 @@ impl App {
         ));
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
+        let reader = Rc::downgrade(&pdf);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
+        // The tab is up and says it is opening; the bytes follow, which on a remote vault is a
+        // transfer of however long the file takes.
+        self.local_copy(key, path, move |app, copy| {
+            let Some(pdf) = reader.upgrade() else { return };
+            match copy {
+                Ok(copy) => pdf.load(&copy),
+                Err(e) => app.gone(pdf.key(), &pdf.page, e),
+            }
+        });
     }
 
     /// The PDF in the active tab, for the actions that only mean something in one.
@@ -501,19 +510,35 @@ impl App {
         }
     }
 
-    /// Tell a PDF tab which note links highlight it.
-    fn sync_pdf_links(&self, pdf: &Rc<pdftab::PdfTab>) {
+    /// Tell a PDF tab which note links highlight it. The index is asked on a worker: this runs
+    /// after every save while a PDF is open, and on a remote vault the asking is a round trip.
+    fn sync_pdf_links(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         let key = pdf.key();
         // A file outside every vault has no index to ask.
         if doc::is_loose_key(&key) {
             return;
         }
-        let Some(vault) = self.vault() else { return };
-        match vault.pdf_links(&key) {
-            Ok(links) => pdf.set_note_links(links),
-            Err(e) => tracing::warn!("pdf links for {key}: {e:#}"),
-        }
-        self.sync_export();
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let (app, reader) = (Rc::downgrade(self), Rc::downgrade(pdf));
+        glib::spawn_future_local(async move {
+            let asked = key.clone();
+            let links = gio::spawn_blocking(move || vault.pdf_links(&asked)).await;
+            let (Some(app), Some(pdf)) = (app.upgrade(), reader.upgrade()) else {
+                return;
+            };
+            // Renamed while the index was asked: the answer is about a name it no longer has.
+            if pdf.key() != key {
+                return;
+            }
+            match links {
+                Ok(Ok(links)) => pdf.set_note_links(links),
+                Ok(Err(e)) => tracing::warn!("pdf links for {key}: {e:#}"),
+                Err(_) => tracing::warn!("the pdf links worker panicked on {key}"),
+            }
+            app.sync_export();
+        });
     }
 
     /// Export Highlights is offered only where there is a highlight to export: over a PDF no note
@@ -564,7 +589,7 @@ impl App {
     }
 
     /// The same for every open PDF, after something changed the notes.
-    fn sync_all_pdf_links(&self) {
+    fn sync_all_pdf_links(self: &Rc<Self>) {
         for pdf in self.pdfs() {
             self.sync_pdf_links(&pdf);
         }
@@ -572,10 +597,7 @@ impl App {
 
     /// An image, in a tab that only looks at it.
     fn open_image(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
-        // `fetch` is the file itself locally and a cached copy from the host remotely: a picture
-        // widget needs real bytes, and the protocol deliberately carries none.
-        let path = self.local_copy(key).unwrap_or_else(|| path.to_path_buf());
-        let picture = gtk::Picture::for_filename(&path);
+        let picture = gtk::Picture::new();
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
         picture.set_can_shrink(true);
         let scroller = gtk::ScrolledWindow::builder()
@@ -601,23 +623,50 @@ impl App {
                 }
             ),
         );
+        // The picture widget needs real bytes, and the protocol deliberately carries none.
+        let (viewer, picture) = (Rc::downgrade(&image), picture.downgrade());
+        self.local_copy(key, path, move |app, copy| {
+            let (Some(image), Some(picture)) = (viewer.upgrade(), picture.upgrade()) else {
+                return;
+            };
+            match copy {
+                Ok(copy) => picture.set_filename(Some(copy)),
+                Err(e) => app.gone(image.key(), &image.page, e),
+            }
+        });
     }
 
-    /// Where `key`'s bytes are on *this* machine, for the readers that cannot work with anything
-    /// else: the PDF engine, an image, the preview's assets.
-    ///
-    /// ponytail: on a remote vault this downloads on the main thread, so a large PDF holds the
-    /// window for as long as the transfer takes. Move it to a worker thread with the opening
-    /// status the PDF tab already shows if that ever bites.
-    fn local_copy(&self, key: &str) -> Option<PathBuf> {
-        let vault = self.vault()?;
-        match vault.fetch(key) {
-            Ok(path) => Some(path),
-            Err(e) => {
-                tracing::warn!("fetching {key}: {e}");
-                None
+    /// Hand `landed` the path on *this* machine holding `key`'s bytes, for the readers that cannot
+    /// work with anything else: the PDF engine and an image. That is the file itself on a local
+    /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
+    /// takes, so the asking is on a worker; a loose key is already a path here.
+    fn local_copy(
+        self: &Rc<Self>,
+        key: &str,
+        path: &Path,
+        landed: impl FnOnce(&Rc<App>, std::io::Result<PathBuf>) + 'static,
+    ) {
+        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        let (key, path) = (key.to_string(), path.to_path_buf());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let copy = gio::spawn_blocking(move || match vault {
+                Some(vault) => vault.fetch(&key),
+                None => Ok(path),
+            })
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("the fetch panicked")));
+            if let Some(app) = weak.upgrade() {
+                landed(&app, copy);
             }
-        }
+        });
+    }
+
+    /// A viewer whose bytes never came: its tab goes, the way a note that would not open never
+    /// gets one, and the reason is said.
+    fn gone(&self, key: String, page: &adw::TabPage, e: std::io::Error) {
+        self.close_page(page);
+        self.cannot_open(&key, e);
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
@@ -808,14 +857,23 @@ impl App {
         // Where the link was, so Back returns to it. Before the open, and before the selection
         // change it causes records the same place, which coalesces into this one.
         self.mark();
-        match vault.resolve_link(target) {
-            Ok(Some(rel)) => {
-                self.open_preview(&rel);
-                self.show_pdf_anchor(&rel, anchor);
+        // Resolved on a worker: the index that knows the name is on the host for a remote vault.
+        let (vault, target) = (vault.clone(), target.to_string());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let asked = target.clone();
+            let resolved = gio::spawn_blocking(move || vault.resolve_link(&asked)).await;
+            let Some(app) = weak.upgrade() else { return };
+            match resolved {
+                Ok(Ok(Some(rel))) => {
+                    app.open_preview(&rel);
+                    app.show_pdf_anchor(&rel, anchor);
+                }
+                Ok(Ok(None)) => app.toast(&format!("No note called {target}")),
+                Ok(Err(e)) => app.cannot(&format!("resolve {target}"), e),
+                Err(_) => tracing::warn!("the link worker panicked on {target}"),
             }
-            Ok(None) => self.toast(&format!("No note called {target}")),
-            Err(e) => self.cannot(&format!("resolve {target}"), e),
-        }
+        });
     }
 
     /// Show the page and selection an anchor names, if the tab just opened is that PDF.
@@ -838,22 +896,31 @@ impl App {
     /// check is the vault's own lexical one: canonicalising would refuse a note reached through
     /// one of the directory symlinks a vault links in on purpose, which the walk indexed and the
     /// tree is already showing.
+    ///
+    /// Whether the file is there is not asked here: on a remote vault that is a round trip on the
+    /// main thread before every open. The reader's worker finds out anyway, and says so through
+    /// [`cannot_open`](Self::cannot_open).
     fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
         if doc::is_loose_key(key) {
             let path = PathBuf::from(key);
             return path.is_file().then(|| (key.to_string(), path));
         }
         // A window with no vault has nothing to be relative to, so only absolute keys open.
-        let vault = self.vault()?;
-        let path = vault.resolve(key).ok()?;
-        // Asked of the vault rather than of this machine: on a remote one the path is the host's
-        // and `exists()` here would answer about a file that was never meant to be here.
-        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
-        if !vault.exists(&key) {
-            return None;
-        }
+        let path = self.vault()?.resolve(key).ok()?;
         // Normalised, so `./a.md` and `a.md` are one tab rather than two.
+        let key = path.strip_prefix(self.root()).ok()?.to_str()?.to_string();
         Some((key, path))
+    }
+
+    /// A file that would not open. One that is not there reads the same whoever found out: the
+    /// session naming a note deleted since, or a link to one never written.
+    fn cannot_open(&self, key: &str, e: std::io::Error) {
+        match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                self.cannot(&format!("open {key}"), "not in this vault")
+            }
+            _ => self.cannot(&format!("open {key}"), e),
+        }
     }
 
     /// Open File…: anything, from anywhere. A file inside this vault opens as a vault tab; one

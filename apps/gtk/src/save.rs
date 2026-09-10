@@ -126,15 +126,34 @@ impl App {
     /// vault a dropped ssh connection would report a conflict over a diff holding nothing but the
     /// user's own edits. Nothing is lost by waiting — a real change fires the watcher again, and
     /// the etag gate refuses any save that would clobber one in the meantime.
+    ///
+    /// The stat runs on a worker, being a round trip on a remote vault.
     pub fn file_changed(self: &Rc<Self>, tab: &Rc<Tab>) {
-        let looked = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
-            Some(vault) => vault.stat(&tab.rel()),
-            None => match Etag::of(&tab.path()) {
-                Ok(etag) => Ok(Some(etag)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e),
-            },
-        };
+        let vault = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned();
+        let (rel, path) = (tab.rel(), tab.path());
+        let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let looked = gio::spawn_blocking(move || match vault {
+                Some(vault) => vault.stat(&rel),
+                None => match Etag::of(&path) {
+                    Ok(etag) => Ok(Some(etag)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e),
+                },
+            })
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::other("the stat worker panicked")));
+            if let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) {
+                app.compare_disk(&tab, looked);
+            }
+        });
+    }
+
+    /// What [`file_changed`](Self::file_changed) does once the stat is in.
+    fn compare_disk(self: &Rc<Self>, tab: &Rc<Tab>, looked: std::io::Result<Option<Etag>>) {
         let disk = match looked {
             Ok(disk) => disk,
             Err(e) => {
@@ -385,24 +404,34 @@ impl App {
     /// `trashed` is a copy this window has just sent to the trash. The index is a worker thread
     /// and a batch behind, so it still lists the file and the banner would otherwise linger until
     /// `FileRemoved` caught up a few hundred milliseconds later.
-    pub fn sync_conflict_banner(&self, rel: &str, trashed: Option<&str>) {
+    ///
+    /// The index is asked on a worker, because every note that opens asks, and on a remote vault
+    /// the asking is a round trip. A failed question is not an answer and changes nothing.
+    pub fn sync_conflict_banner(self: &Rc<Self>, rel: &str, trashed: Option<&str>) {
         // Conflict copies are a vault idea: they are found by the index.
-        if self.vault.is_none() {
-            return;
-        }
-        let Some(tab) = self.tab_for(rel) else {
+        let Some(vault) = self.vault().cloned() else {
             return;
         };
-        let standing = self
-            .vault()
-            .and_then(|v| v.conflicts_of(rel).ok())
-            .unwrap_or_default()
-            .iter()
-            .any(|copy| Some(copy.as_str()) != trashed);
-        match standing {
-            true => tab.show_alert(Alert::Conflict),
-            false => tab.clear_alert(Alert::Conflict),
+        if self.tab_for(rel).is_none() {
+            return;
         }
+        let (rel, trashed) = (rel.to_string(), trashed.map(str::to_string));
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let asked = rel.clone();
+            let copies = gio::spawn_blocking(move || vault.conflicts_of(&asked)).await;
+            let (Some(app), Ok(Ok(copies))) = (weak.upgrade(), copies) else {
+                return;
+            };
+            // The tab may have closed while the index was asked.
+            let Some(tab) = app.tab_for(&rel) else {
+                return;
+            };
+            match copies.iter().any(|copy| Some(copy) != trashed.as_ref()) {
+                true => tab.show_alert(Alert::Conflict),
+                false => tab.clear_alert(Alert::Conflict),
+            }
+        });
     }
 
     /// A sync conflict copy beside the note it was copied from, in the note's own tab: the editor
@@ -478,7 +507,7 @@ impl App {
     }
 
     /// The copy goes to the trash, and the banner is told before the index has seen it go.
-    fn finish_conflict(&self, original: &str, conflict: &str) {
+    fn finish_conflict(self: &Rc<Self>, original: &str, conflict: &str) {
         if let Some(ops) = self.ops() {
             fileops::trash(ops, conflict);
         }

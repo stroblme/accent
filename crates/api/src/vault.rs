@@ -365,10 +365,13 @@ impl Vault {
 
     /// A path on *this* machine holding `rel`'s current bytes: the file itself when the vault is
     /// local, a cached copy fetched over ssh when it is not. For the readers that need a real
-    /// file — the PDF viewer, an image, the preview's assets.
+    /// file — the PDF viewer, an image, the preview's assets. `NotFound` when there is nothing at
+    /// `rel`, on either backend.
     pub fn fetch(&self, rel: &str) -> io::Result<PathBuf> {
         match &self.backend {
-            Backend::Local(v) => v.resolve(rel),
+            Backend::Local(v) => v
+                .resolve(rel)
+                .and_then(|path| std::fs::metadata(&path).map(|_| path)),
             Backend::Remote(r) => r.fetch(rel),
         }
     }
@@ -554,6 +557,22 @@ mod tests {
             Some("Attachments/img.png")
         );
         assert_eq!(f.vault.asset("nowhere.png"), None);
+    }
+
+    /// A reader learns that a file is missing from the fetch itself, the way a remote vault
+    /// already said it, rather than from a path to nothing.
+    #[test]
+    fn fetching_a_missing_file_is_not_found() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.png", "not really a png");
+        assert_eq!(
+            f.vault.fetch("a.png").unwrap(),
+            f.vault.root().join("a.png")
+        );
+        assert_eq!(
+            f.vault.fetch("gone.png").unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     /// The notes provider through the façade: what the editor sees when a note is opened.
