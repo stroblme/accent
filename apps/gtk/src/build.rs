@@ -159,9 +159,34 @@ pub fn build_window(
         .visible(false)
         .build();
     drawing.add_css_class("flat");
+    // Undo and Redo for the drawing, beside the toggle that puts the tools out and shown as a
+    // pair while one is in hand with something to walk (`App::sync_history`). A click fires the
+    // action rather than the button being one of its actionables, which would tie the button's
+    // sensitivity to the action — and the actions stay enabled, so a key pressed while the
+    // render thread is busy still queues its step. A click leaves the keyboard on the page,
+    // where `Ctrl+Z` is.
+    let history = |icon: &str, action: &'static str| {
+        let button = gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(label_of(action))
+            .valign(gtk::Align::Center)
+            .focus_on_click(false)
+            .visible(false)
+            .build();
+        button.connect_clicked(move |button| {
+            let _ = button.activate_action(action, None);
+        });
+        button
+    };
+    let (undo, redo) = (
+        history("edit-undo-symbolic", "win.pdf-undo"),
+        history("edit-redo-symbolic", "win.pdf-redo"),
+    );
     let menu = menu_button();
     header.pack_end(&menu);
     header.pack_end(&drawing);
+    header.pack_end(&redo);
+    header.pack_end(&undo);
 
     // The two headers must end at the same height or the switcher row and the tab bar under them
     // cannot line up. They do at the default font (both 40 px), but the sidebar header is empty
@@ -259,6 +284,8 @@ pub fn build_window(
         header,
         modes: modes.clone(),
         drawing_button: drawing.clone(),
+        undo_button: undo,
+        redo_button: redo,
         drawing: Cell::new(false),
         tool: Cell::new(pdfview::Mode::Pen),
         ring_at: Cell::new(None),
@@ -484,18 +511,18 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
     sidebar::PortsData {
         add_forward: Arc::new({
             let vault = vault.clone();
-            move |local, remote| match vault.remote() {
-                Some(r) => r.forward(local, remote),
+            move |f| match vault.remote() {
+                Some(r) => r.forward(f),
                 None => Err("this vault is not remote".to_string()),
             }
         }),
-        remove_forward: Box::new({
+        remove_forward: Arc::new({
             let vault = vault.clone();
-            move |local, remote| {
+            move |f| {
                 if let Some(r) = vault.remote()
-                    && let Err(e) = r.cancel_forward(local, remote)
+                    && let Err(e) = r.cancel_forward(f)
                 {
-                    tracing::warn!("cancelling the forward {local} -> {remote}: {e}");
+                    tracing::warn!("cancelling the forward {f:?}: {e}");
                 }
             }
         }),
@@ -617,7 +644,7 @@ fn adopt_sidebar(
     // is built rather than discovered later, so unlike the Git pane this needs no refresh to say.
     pane.set_ports_visible(app.vault().is_some_and(|v| v.is_remote()));
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
-    // The panes dim rather than hide while the user types, on the same transition as the bars.
+    // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
@@ -818,8 +845,9 @@ thread_local! {
 // dragged is invisible, so it is the cheaper of the two.
 /// Registers the icons compiled into the binary and points the theme at them.
 ///
-/// A GResource rather than hicolor: the completion list needs the kind icons long before anyone
-/// runs `make install`, and the theme keeps answering for every Adwaita name as it did.
+/// A GResource rather than hicolor: the completion list and the file lists need their icons
+/// long before anyone runs `make install`, and the theme keeps answering for every Adwaita name
+/// as it did.
 fn install_icons() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -841,13 +869,16 @@ fn install_chrome_css() {
             return;
         };
         let fade = match gtk::Settings::for_display(&display).is_gtk_enable_animations() {
-            true => ".chrome-fade { transition: opacity 250ms ease; } ",
-            false => "",
+            true => format!(
+                ".chrome-fade {{ transition: opacity {}ms ease; }} ",
+                fade::RAMP_MS
+            ),
+            false => String::new(),
         };
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
-             .chrome-dimmed {{ opacity: 0.5; }} \
+             .chrome-away {{ opacity: {away}; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
@@ -880,7 +911,8 @@ fn install_chrome_css() {
              GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
              GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
                margin-left: 12px; }} \
-             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}"
+             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}",
+            away = fade::FLOOR,
         ));
         gtk::style_context_add_provider_for_display(
             &display,

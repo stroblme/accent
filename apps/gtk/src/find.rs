@@ -65,8 +65,8 @@ pub struct Bar {
     matches: gtk::Label,
     line: gtk::Entry,
     lines: gtk::Label,
-    /// The tab being searched, with the handler watching its match count.
-    target: RefCell<Option<(Rc<Tab>, glib::SignalHandlerId)>>,
+    /// The tab being searched, with the handlers watching its match count and its line count.
+    target: RefCell<Option<(Rc<Tab>, glib::SignalHandlerId, glib::SignalHandlerId)>>,
     /// Set while the bar itself moves the caret, so the resulting count notification does not
     /// walk the label back to the value it had before the jump.
     busy: Cell<bool>,
@@ -264,62 +264,67 @@ impl Bar {
     /// Point the bar at the tab that just came to the front of its pane.
     ///
     /// The old tab keeps its query and its marks: they are the tab's, not the bar's, so a note
-    /// opened from a search hit is still marked after a switch away and back. Only the handler
-    /// watching its match count goes, or one accumulates per tab switch.
+    /// opened from a search hit is still marked after a switch away and back. Only the handlers
+    /// watching its match count and its length go, or they accumulate one per tab switch.
     pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
-        if let Some((old, handler)) = self.target.borrow_mut().take() {
-            old.search_context().disconnect(handler);
+        if let Some((old, matches, lines)) = self.target.borrow_mut().take() {
+            old.search_context().disconnect(matches);
+            old.buffer.disconnect(lines);
         }
-        let Some(tab) = tab else { return };
-        let handler = tab
+        let Some(tab) = tab else {
+            return self.refresh_count();
+        };
+        let matches = tab
             .search_context()
             .connect_occurrences_count_notify(glib::clone!(
                 #[weak(rename_to = bar)]
                 self,
                 move |_| bar.refresh_matches()
             ));
-        if self.is_open() && self.rows.visible_child_name().as_deref() == Some("find") {
+        let lines = tab.buffer.connect_changed(glib::clone!(
+            #[weak(rename_to = bar)]
+            self,
+            move |_| bar.refresh_count()
+        ));
+        if self.showing("find") {
             tab.set_query(&self.query.text());
             tab.set_highlight(true);
         }
-        *self.target.borrow_mut() = Some((tab, handler));
+        *self.target.borrow_mut() = Some((tab, matches, lines));
         self.refresh_matches();
+        self.refresh_count();
     }
 
     /// Reveal the bar in `mode`, prefilled from the selection when there is one worth searching.
+    /// Replace over such a selection starts in the replacement box, the query being given already.
     pub fn open(self: &Rc<Self>, mode: Mode) {
         self.marked.set(false);
         match mode {
             Mode::Goto => {
-                // A PDF is counted in pages and everything else in lines, and the row says so
-                // in both places: a "Line[:column]" prompt over a page count is nonsense.
-                let (label, placeholder) = match self.wiring.get().and_then(|w| (w.pages)()) {
-                    Some(pages) => (format!("of {pages} pages"), "Page"),
-                    None => {
-                        let count = self.tab().map(|tab| tab.line_count()).unwrap_or(0);
-                        (format!("of {count} lines"), "Line[:column]")
-                    }
-                };
-                self.lines.set_text(&label);
-                self.line.set_placeholder_text(Some(placeholder));
                 self.rows.set_visible_child_name("goto");
                 self.bar.set_search_mode(true);
+                self.refresh_count();
                 self.line.grab_focus();
                 self.line.select_region(0, -1);
             }
             _ => {
-                if let Some(selected) = self.tab().and_then(|tab| tab.selected_query()) {
-                    self.query.set_text(&selected);
+                let selected = self.tab().and_then(|tab| tab.selected_query());
+                if let Some(selected) = &selected {
+                    self.query.set_text(selected);
                 }
                 // Nothing behind a presented preview or PDF can be rewritten, so the row is
                 // not offered there: it used to appear and quietly do nothing.
-                self.replace_row
-                    .set_visible(mode == Mode::Replace && !self.presenting());
+                let replacing = mode == Mode::Replace && !self.presenting();
+                self.replace_row.set_visible(replacing);
                 self.rows.set_visible_child_name("find");
                 self.bar.set_search_mode(true);
                 self.search(&self.query.text());
-                self.query.grab_focus();
-                self.query.select_region(0, -1);
+                let entry: &gtk::Editable = match replacing && selected.is_some() {
+                    true => self.replace.upcast_ref(),
+                    false => self.query.upcast_ref(),
+                };
+                entry.grab_focus();
+                entry.select_region(0, -1);
             }
         }
     }
@@ -372,11 +377,16 @@ impl Bar {
     // --- internals -------------------------------------------------------------------------
 
     fn tab(&self) -> Option<Rc<Tab>> {
-        self.target.borrow().as_ref().map(|(tab, _)| tab.clone())
+        self.target.borrow().as_ref().map(|(tab, _, _)| tab.clone())
     }
 
     fn presenting(&self) -> bool {
         self.wiring.get().is_some_and(|w| (w.presenting)())
+    }
+
+    /// Whether the bar is up on the `"find"` or the `"goto"` row.
+    fn showing(&self, row: &str) -> bool {
+        self.is_open() && self.rows.visible_child_name().as_deref() == Some(row)
     }
 
     fn to_preview(&self, op: PreviewOp) {
@@ -426,6 +436,25 @@ impl Bar {
             .map(|tab| tab.matches_label())
             .unwrap_or_default();
         self.matches.set_text(&label);
+    }
+
+    /// The go-to row's "of N lines", read again whenever it can have changed while the row is up:
+    /// on opening it, on every edit, and when another tab comes to the front.
+    fn refresh_count(&self) {
+        if !self.showing("goto") {
+            return;
+        }
+        // A PDF is counted in pages and everything else in lines, and the row says so in both
+        // places: a "Line[:column]" prompt over a page count is nonsense.
+        let (label, placeholder) = match self.wiring.get().and_then(|w| (w.pages)()) {
+            Some(pages) => (format!("of {pages} pages"), "Page"),
+            None => {
+                let count = self.tab().map(|tab| tab.line_count()).unwrap_or(0);
+                (format!("of {count} lines"), "Line[:column]")
+            }
+        };
+        self.lines.set_text(&label);
+        self.line.set_placeholder_text(Some(placeholder));
     }
 
     fn preview_line(&self, text: &str) {

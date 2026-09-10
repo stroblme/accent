@@ -278,18 +278,38 @@ pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "exit")
 }
 
-/// Add a forward to the running master: `localhost:<local>` on this machine reaches `<remote>` on
-/// the far side.
-pub fn forward(url: &Url, ctl: &Path, local: u16, remote: u16) -> Vec<String> {
+/// Which machine listens for a forward's connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// This machine listens on the local port and what connects there reaches the remote one:
+    /// `ssh -L`.
+    ToRemote,
+    /// The host listens on the remote port and what connects there reaches this machine:
+    /// `ssh -R`. The host's sshd binds it to its loopback only, unless its own `GatewayPorts`
+    /// says otherwise.
+    ToLocal,
+}
+
+/// One port forward over the master: a port on this machine, a port on the host, and which of the
+/// two listens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Forward {
+    pub local: u16,
+    pub remote: u16,
+    pub direction: Direction,
+}
+
+/// Add a forward to the running master.
+pub fn forward(url: &Url, ctl: &Path, f: Forward) -> Vec<String> {
     let mut argv = control(url, ctl, "forward");
-    insert_forward(&mut argv, local, remote);
+    insert_forward(&mut argv, f);
     argv
 }
 
-/// Take a forward back off the running master.
-pub fn cancel(url: &Url, ctl: &Path, local: u16, remote: u16) -> Vec<String> {
+/// Take a forward back off the running master. ssh matches it by the same spec it was added with.
+pub fn cancel(url: &Url, ctl: &Path, f: Forward) -> Vec<String> {
     let mut argv = control(url, ctl, "cancel");
-    insert_forward(&mut argv, local, remote);
+    insert_forward(&mut argv, f);
     argv
 }
 
@@ -303,11 +323,16 @@ fn control(url: &Url, ctl: &Path, op: &str) -> Vec<String> {
     argv
 }
 
-/// `-L` belongs with the options, ahead of the destination that [`control`] already appended.
-fn insert_forward(argv: &mut Vec<String>, local: u16, remote: u16) {
+/// `-L` or `-R` belongs with the options, ahead of the destination that [`control`] already
+/// appended. Either spec leads with the port that listens, which for `-R` is the host's.
+fn insert_forward(argv: &mut Vec<String>, f: Forward) {
+    let (flag, spec) = match f.direction {
+        Direction::ToRemote => ("-L", format!("{}:localhost:{}", f.local, f.remote)),
+        Direction::ToLocal => ("-R", format!("{}:localhost:{}", f.remote, f.local)),
+    };
     let at = argv.len() - 1;
-    argv.insert(at, "-L".to_string());
-    argv.insert(at + 1, format!("{local}:localhost:{remote}"));
+    argv.insert(at, flag.to_string());
+    argv.insert(at + 1, spec);
 }
 
 /// Run one command on the remote over the existing master and collect its output.
@@ -678,8 +703,13 @@ mod tests {
 
     #[test]
     fn a_forward_and_its_cancellation_name_the_same_pair() {
+        let out = Forward {
+            local: 8080,
+            remote: 80,
+            direction: Direction::ToRemote,
+        };
         assert_eq!(
-            forward(&plain(), ctl(), 8080, 80),
+            forward(&plain(), ctl(), out),
             words(&[
                 "ssh",
                 "-o",
@@ -692,7 +722,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            cancel(&ported(), ctl(), 8080, 80),
+            cancel(&ported(), ctl(), out),
             words(&[
                 "ssh",
                 "-o",
@@ -706,6 +736,29 @@ mod tests {
                 "me@box",
             ])
         );
+        // The other way round the host listens, so its port leads the spec.
+        let back = Forward {
+            direction: Direction::ToLocal,
+            ..out
+        };
+        for (op, argv) in [
+            ("forward", forward(&plain(), ctl(), back)),
+            ("cancel", cancel(&plain(), ctl(), back)),
+        ] {
+            assert_eq!(
+                argv,
+                words(&[
+                    "ssh",
+                    "-o",
+                    "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                    "-O",
+                    op,
+                    "-R",
+                    "80:localhost:8080",
+                    "box",
+                ])
+            );
+        }
     }
 
     #[test]

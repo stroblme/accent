@@ -136,6 +136,8 @@ pub struct Panel {
     root: gtk::Widget,
     /// "empty" (no repository) or "repo".
     stack: gtk::Stack,
+    /// Over the pane while the selected repository is part way through a merge.
+    banner: adw::Banner,
     /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
     /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
     /// (`fileops::context_menu` documents the symptom).
@@ -247,6 +249,8 @@ impl Panel {
         branch_list.add_css_class("navigation-sidebar");
         let create = gtk::Button::builder().label("Create Branch…").build();
         create.add_css_class("flat");
+        let merge = gtk::Button::builder().label("Merge Branch…").build();
+        merge.add_css_class("flat");
         let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // A repository with fifty branches is a list that scrolls, not a popover taller than the
         // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
@@ -260,6 +264,7 @@ impl Panel {
         );
         branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         branch_box.append(&create);
+        branch_box.append(&merge);
         let branch_menu = gtk::Popover::builder().child(&branch_box).build();
         let branch = gtk::MenuButton::builder()
             .hexpand(true)
@@ -404,12 +409,23 @@ impl Panel {
         stack.add_named(&column, Some("repo"));
         stack.set_visible_child_name("empty");
 
+        // A banner and not a toast (DESIGN.md, States): a merge that stopped is a state that
+        // lasts until it is committed or aborted, and Abort is the one decision it can offer.
+        let banner = adw::Banner::builder()
+            .title("A merge is in progress")
+            .button_label("Abort")
+            .build();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&banner);
+        root.append(&stack);
+
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
             hooks,
-            root: stack.clone().upcast(),
+            root: root.upcast(),
             stack,
+            banner,
             column,
             names,
             chooser,
@@ -445,7 +461,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check, &create);
+        panel.wire_header(&check, &create, &merge);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -517,10 +533,22 @@ impl Panel {
         self.pending.replace(Some(id));
     }
 
-    fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
+    fn wire_header(
+        self: &Rc<Self>,
+        check: &gtk::Button,
+        create: &gtk::Button,
+        merge: &gtk::Button,
+    ) {
         on_click(self, &self.sync, |panel| panel.sync(None));
         on_click(self, check, |panel| panel.refresh(Depth::Discover));
         on_click(self, create, |panel| panel.create_branch());
+        on_click(self, merge, |panel| panel.merge_branch());
+        let weak = Rc::downgrade(self);
+        self.banner.connect_button_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.abort_merge();
+            }
+        });
 
         let weak = Rc::downgrade(self);
         self.chooser.connect_selected_notify(move |chooser| {
@@ -721,6 +749,7 @@ impl Panel {
             state.selected = selected;
         }
         self.sync_state();
+        self.banner.set_revealed(self.merging());
         // git has answered for the first time since the window opened this vault, so there is a
         // repository to fetch at last. Everything after this is the timer's.
         if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
@@ -827,13 +856,43 @@ impl Panel {
         (staged, staged || status.changes().next().is_some())
     }
 
+    /// Whether the selected repository is part way through a merge.
+    fn merging(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| s.merging)
+    }
+
+    /// Whether the selected repository still has a conflict that is not staged as resolved. git
+    /// refuses a commit over one, so Commit is not offered until there is none.
+    pub(super) fn unresolved(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| s.conflicts().next().is_some())
+    }
+
     /// The placeholder, the Commit button and whether the box is there at all.
+    ///
+    /// A merge under way always has its commit to make — resolved to "ours", it may stage nothing
+    /// at all — and a message of its own already, so neither an index nor a message is needed.
     fn sync_commit(&self) {
         let message = self.message_text();
+        let merging = self.merging();
         self.placeholder.set_visible(message.is_empty());
-        let anything = self.to_commit().1;
+        self.placeholder.set_label(match merging {
+            true => "Merge message (optional)",
+            false => "Commit message",
+        });
+        let anything = merging || self.to_commit().1;
+        let unresolved = self.unresolved();
         self.commit
-            .set_sensitive(anything && !message.trim().is_empty());
+            .set_sensitive(anything && !unresolved && (merging || !message.trim().is_empty()));
+        self.commit
+            .set_tooltip_text(unresolved.then_some("Stage the resolved conflicts first"));
         // A clean tree has nothing to say, so the box goes — but never out from under a message
         // being written: a refresh fires on every save, and one of those would take it away
         // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
@@ -884,6 +943,12 @@ impl Panel {
         self.sync.tooltip_text().map(|t| t.to_string())
     }
 
+    /// Whether Commit can be pressed, and its tooltip. `ACCENT_BENCH_GIT` and nothing else.
+    pub fn commit_hint(&self) -> (bool, Option<String>) {
+        let tip = self.commit.tooltip_text().map(|t| t.to_string());
+        (self.commit.is_sensitive(), tip)
+    }
+
     /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
     /// Anything drawn against HEAD is stale when this is true.
     pub fn head_changed(&self) -> bool {
@@ -912,10 +977,13 @@ fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
 
-/// The line one changed file is shown on — status letter, name, directory — in the changes list
-/// and under an expanded history row alike. Whatever comes after the directory, the changes list's
-/// action buttons, is appended by the caller, and the binders find all four by sibling order.
+/// The line one changed file is shown on — icon, status letter, name, directory — in the changes
+/// list and under an expanded history row alike. Whatever comes after the directory, the changes
+/// list's action buttons, is appended by the caller, and the binders find all five by sibling
+/// order. The icon leads so that under a folder row it lands in the column a sibling folder
+/// draws its own icon in (`changes::FILE_INSET`).
 fn file_line() -> gtk::Box {
+    let icon = gtk::Image::new();
     let letter = gtk::Label::builder().width_chars(1).build();
     for class in ["dim-label", "numeric", "monospace"] {
         letter.add_css_class(class);
@@ -934,7 +1002,8 @@ fn file_line() -> gtk::Box {
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     for child in [
-        letter.upcast_ref::<gtk::Widget>(),
+        icon.upcast_ref::<gtk::Widget>(),
+        letter.upcast_ref(),
         name.upcast_ref(),
         dir.upcast_ref(),
     ] {
@@ -943,16 +1012,20 @@ fn file_line() -> gtk::Box {
     row
 }
 
-/// Put one changed file on a [`file_line`]: its status letter, its name, and the directory it
-/// sits in. Both lists that show a file — the changes list and an expanded commit — bind their
-/// row through here, so the two read the same way.
+/// Put one changed file on a [`file_line`]: its icon, its status letter, its name, and the
+/// directory it sits in. Both lists that show a file — the changes list and an expanded commit —
+/// bind their row through here, so the two read the same way.
 ///
 /// `dir` is what the directory label shows rather than where the file is: a row under a folder
 /// leaves it empty, the path being on screen above it already.
-fn bind_file_line(row: &gtk::Box, letter: char, path: &str, dir: &str) {
-    let Some(mark) = row.first_child().and_downcast::<gtk::Label>() else {
+fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &str) {
+    let Some(image) = row.first_child().and_downcast::<gtk::Image>() else {
         return;
     };
+    let Some(mark) = image.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    image.set_icon_name(Some(icon));
     let (Some(name), Some(directory)) = (
         mark.next_sibling().and_downcast::<gtk::Label>(),
         mark.next_sibling()
@@ -1260,6 +1333,7 @@ mod tests {
             branch: on_main(Some("origin/main"), 1, 2),
             entries: Vec::new(),
             ignored: vec!["build/".to_string()],
+            merging: false,
         };
         assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
 

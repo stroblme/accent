@@ -5,7 +5,7 @@
 //! the shared config, the vault it is editing and one callback, which is what lets `main` wire it
 //! up without a cycle.
 
-use accent_core::config::{Config, Theme, VaultConfig};
+use accent_core::config::{Config, FocusMode, Theme, VaultConfig};
 use adw::prelude::*;
 use gtk::pango;
 use std::cell::{Cell, RefCell};
@@ -18,6 +18,21 @@ const THEMES: [(Theme, &str); 4] = [
     (Theme::Light, "Light"),
     (Theme::Dark, "Dark"),
     (Theme::Solarized, "Solarized"),
+];
+
+/// The focus mode levels, in the order the combo row lists them, each with what it fades.
+const FOCUS_MODES: [(FocusMode, &str, &str); 3] = [
+    (FocusMode::None, "None", "Nothing fades while you type"),
+    (
+        FocusMode::Medium,
+        "Medium",
+        "The bars and the sidebar fade while you type",
+    ),
+    (
+        FocusMode::High,
+        "High",
+        "The text away from the caret and the other panes fade too",
+    ),
 ];
 
 /// `root` identifies which vault's per-vault settings are being edited, and is `None` in a window
@@ -105,12 +120,42 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
         }
     });
     group.add(&row);
+
+    // The subtitle follows the pick, so the row says what the chosen level will fade.
+    let chosen = focus_index(config.borrow().focus_mode);
+    let names: Vec<&str> = FOCUS_MODES.iter().map(|(_, name, _)| *name).collect();
+    let focus = adw::ComboRow::builder()
+        .title("Focus Mode")
+        .subtitle(FOCUS_MODES[chosen as usize].2)
+        .model(&gtk::StringList::new(&names))
+        .selected(chosen)
+        .build();
+    focus.connect_selected_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            let Some((mode, _, what)) = FOCUS_MODES.get(r.selected() as usize) else {
+                return;
+            };
+            r.set_subtitle(what);
+            config.borrow_mut().focus_mode = *mode;
+            save();
+        }
+    });
+    group.add(&focus);
     group
 }
 
 /// Where `theme` sits in [`THEMES`], which is the row's selected index.
 fn index_of(theme: Theme) -> u32 {
     THEMES.iter().position(|(t, _)| *t == theme).unwrap_or(0) as u32
+}
+
+/// Where `mode` sits in [`FOCUS_MODES`].
+fn focus_index(mode: FocusMode) -> u32 {
+    FOCUS_MODES
+        .iter()
+        .position(|(m, ..)| *m == mode)
+        .unwrap_or(0) as u32
 }
 
 // ----------------------------------------------------------------------------------- editor
@@ -479,6 +524,13 @@ mod tests {
     fn every_theme_has_a_row_to_pick_it_with() {
         for (theme, _) in THEMES {
             assert_eq!(THEMES[index_of(theme) as usize].0, theme);
+        }
+    }
+
+    #[test]
+    fn every_focus_mode_has_a_row_to_pick_it_with() {
+        for (mode, _, _) in FOCUS_MODES {
+            assert_eq!(FOCUS_MODES[focus_index(mode) as usize].0, mode);
         }
     }
 

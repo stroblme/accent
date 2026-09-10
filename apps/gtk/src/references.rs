@@ -168,6 +168,12 @@ pub fn reference_target(row: &str) -> Option<Location> {
     })
 }
 
+/// The icon a References row leads with: its file's, the `:line` after the path set aside the
+/// way [`reference_target`] sets it aside.
+pub fn reference_icon(row: &str) -> &'static str {
+    crate::doc::icon_for(row.rsplit_once(':').map_or(row, |(path, _)| path))
+}
+
 /// What the References pane says when it has nothing to list. A note has backlinks; a source file
 /// has references to whatever the caret is on.
 fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
@@ -247,6 +253,8 @@ mod tests {
         assert_eq!(target.path, "src/main.rs");
         assert_eq!(target.range.start.line, 11);
         assert!(reference_target("no-line-here").is_none());
+        // The icon is the file's, not the line number's.
+        assert_eq!(reference_icon("notes/a.md:3"), crate::doc::icon_for("a.md"));
     }
 
     #[test]

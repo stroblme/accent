@@ -421,7 +421,8 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         LogItem::Commit(row) => row,
         LogItem::File { letter, path, .. } => {
             stack.set_visible_child_name("file");
-            bind_file_line(&file, letter, &path, split_name(&path).0);
+            let icon = crate::doc::icon_for(&path);
+            bind_file_line(&file, icon, letter, &path, split_name(&path).0);
             stack.set_tooltip_text(Some(&path));
             return;
         }

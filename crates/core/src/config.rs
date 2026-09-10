@@ -24,6 +24,7 @@ line_numbers = false
 git_tree = true
 column_width = 50
 theme = "solarized"
+focus_mode = "high"
 
 [shortcuts]
 "win.find-next" = ["F3"]
@@ -38,6 +39,7 @@ pen_width = 2.0
 highlighter_width = 14.0
 highlighter_color = [0, 0, 0]
 eraser_radius = 4.0
+eraser_partial = true
 
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
@@ -59,6 +61,19 @@ pub enum Theme {
     Light,
     Dark,
     Solarized,
+}
+
+/// How much of the window recedes while the user types (DESIGN.md, Chrome auto-hide).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusMode {
+    /// Nothing fades.
+    None,
+    /// The bars, the sidebar and the minimap fade away.
+    #[default]
+    Medium,
+    /// As Medium, and the other panes and the text away from the caret fade too.
+    High,
 }
 
 /// The global config file.
@@ -89,6 +104,7 @@ pub struct Config {
     /// window keeps a readable line.
     pub column_width: u32,
     pub theme: Theme,
+    pub focus_mode: FocusMode,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
     /// list means the action is deliberately unbound.
@@ -138,6 +154,9 @@ pub struct DrawingConfig {
     pub highlighter_color: Option<[u8; 3]>,
     /// How close the eraser has to pass to a stroke to take it, in page points.
     pub eraser_radius: f32,
+    /// Whether the eraser takes only the part of a stroke it passes over, leaving the rest as
+    /// strokes of their own, rather than the whole stroke.
+    pub eraser_partial: bool,
 }
 
 impl Default for DrawingConfig {
@@ -150,6 +169,7 @@ impl Default for DrawingConfig {
             pen_color: None,
             highlighter_color: None,
             eraser_radius: 4.0,
+            eraser_partial: false,
         }
     }
 }
@@ -166,6 +186,7 @@ impl Default for Config {
             git_tree: true,
             column_width: 50,
             theme: Theme::System,
+            focus_mode: FocusMode::default(),
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
@@ -576,6 +597,7 @@ daily_template = "DailyNote.md"
         assert!(c.git_tree);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.theme, Theme::Solarized);
+        assert_eq!(c.focus_mode, FocusMode::High);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.templates_dir, "Templates");
@@ -590,12 +612,14 @@ daily_template = "DailyNote.md"
         assert_eq!(c.drawing.pen_color, None);
         assert_eq!(c.drawing.highlighter_color, Some([0, 0, 0]));
         assert_eq!(c.drawing.eraser_radius, 4.0);
+        assert!(c.drawing.eraser_partial);
 
         let back = tmp.path().join("written.toml");
         c.write(&back).unwrap();
         let again = Config::read(&back).unwrap();
         assert_eq!(again.recent_vaults, c.recent_vaults);
         assert_eq!(again.theme, Theme::Solarized);
+        assert_eq!(again.focus_mode, FocusMode::High);
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
@@ -640,6 +664,7 @@ daily_template = "DailyNote.md"
         let tmp = tempfile::tempdir().unwrap();
         let c = with_xdg(tmp.path(), Config::load);
         assert!(c.spellcheck);
+        assert_eq!(c.focus_mode, FocusMode::Medium);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));
     }

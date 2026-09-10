@@ -26,6 +26,64 @@ pub fn stem(rel: &str) -> String {
     markdown::strip_ext(basename(rel))
 }
 
+/// What a file is, as far as its name says. It decides the icon a file list gives the row, and
+/// nothing about how the file opens: whether a file is really text is a question for its bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    Note,
+    Pdf,
+    Table,
+    Image,
+    Code,
+    Config,
+    Text,
+    Other,
+}
+
+/// Source files, by extension. Short on purpose: an unknown one is `Other`, which costs nothing
+/// but a generic icon.
+const CODE_EXT: &[&str] = &[
+    "rs", "py", "c", "h", "cc", "cpp", "hpp", "js", "mjs", "jsx", "ts", "tsx", "go", "java", "kt",
+    "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "r", "jl", "hs", "ml", "scala", "cs",
+    "zig", "sql", "html", "css", "scss", "vue", "svelte", "tex", "vim", "el", "nix", "mk", "cmake",
+];
+/// Source files named for the tool that reads them rather than by an extension.
+const CODE_NAMES: &[&str] = &[
+    "makefile",
+    "gnumakefile",
+    "dockerfile",
+    "containerfile",
+    "justfile",
+    "cmakelists.txt",
+];
+const CONFIG_EXT: &[&str] = &[
+    "json", "jsonc", "toml", "yaml", "yml", "ini", "cfg", "conf", "env", "xml", "lock",
+];
+const TEXT_EXT: &[&str] = &["txt", "log", "rst", "org", "adoc"];
+
+/// What `rel` is by its name alone. The extension is the file name's, lowercased, with a leading
+/// dot counted as part of the name, as [`markdown::strip_ext`] has it: `LICENSE` and `.gitignore`
+/// have none, and a file with no extension is text.
+pub fn file_type(rel: &str) -> FileType {
+    let name = basename(rel).to_ascii_lowercase();
+    if CODE_NAMES.contains(&name.as_str()) {
+        return FileType::Code;
+    }
+    let Some((_, ext)) = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) else {
+        return FileType::Text;
+    };
+    match ext {
+        "md" | "markdown" => FileType::Note,
+        "pdf" => FileType::Pdf,
+        "csv" | "tsv" => FileType::Table,
+        _ if markdown::is_image(&name) => FileType::Image,
+        _ if CODE_EXT.contains(&ext) => FileType::Code,
+        _ if CONFIG_EXT.contains(&ext) => FileType::Config,
+        _ if TEXT_EXT.contains(&ext) => FileType::Text,
+        _ => FileType::Other,
+    }
+}
+
 /// Where a link written inside the note at `dir` points, as a vault-relative path: `../a.md`
 /// from `sub/deep` is `sub/a.md`, `./a.md` from `sub` is `sub/a.md`. A `..` past the root is
 /// dropped rather than kept, and a leading `/` means the root, the way a site-absolute link does.
@@ -67,6 +125,35 @@ mod tests {
         assert_eq!(stem("sub/Rev 1.2.md"), "Rev 1.2");
         assert_eq!(stem("Makefile"), "Makefile");
         assert_eq!(subtree_range("a/b"), ("a/b/".into(), "a/b0".into()));
+    }
+
+    #[test]
+    fn a_file_type_is_read_off_the_name() {
+        for (rel, want) in [
+            ("Notes/A.MD", FileType::Note),
+            ("a.markdown", FileType::Note),
+            ("Attachments/paper.pdf", FileType::Pdf),
+            ("data.csv", FileType::Table),
+            ("data.tsv", FileType::Table),
+            ("shot.PNG", FileType::Image),
+            ("logo.svg", FileType::Image),
+            ("src/main.rs", FileType::Code),
+            ("tool.py", FileType::Code),
+            ("Makefile", FileType::Code),
+            ("sub/justfile", FileType::Code),
+            ("package.json", FileType::Config),
+            ("Cargo.toml", FileType::Config),
+            ("notes.txt", FileType::Text),
+            ("LICENSE", FileType::Text),
+            // The dot belongs to the directory, so the file has no extension.
+            ("v1.2/README", FileType::Text),
+            // A leading dot is part of the name, as `strip_ext` has it.
+            (".gitignore", FileType::Text),
+            ("archive.zip", FileType::Other),
+            ("mystery.xyz", FileType::Other),
+        ] {
+            assert_eq!(file_type(rel), want, "{rel}");
+        }
     }
 
     #[test]

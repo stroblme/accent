@@ -12,9 +12,11 @@ use super::*;
 /// pulled yet.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
-/// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
-/// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
+/// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
+/// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
+/// drives a path entry's completion, and prints widths and the text its keys apply.
+/// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
+/// was styled on the keystroke or on the debounce.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up.
@@ -25,7 +27,11 @@ use super::*;
 /// PDF is wholly on screen whatever the scroll offset was.
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
-/// switch and the last tab's close leave behind.
+/// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
+/// eye first, and its title and indicator are printed either side of that.
+/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
+/// held, and prints what the Ctrl+hover underline covers.
+///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
@@ -35,7 +41,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
-    let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
+    let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
@@ -44,6 +50,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -52,9 +59,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && pdf.is_none()
         && tabs.is_none()
         && occur.is_none()
+        && follow.is_none()
         && !git
         && !keys
-        && !chrome
+        && chrome.is_none()
         && !templates
         && !paths
         && !shell_keys
@@ -79,6 +87,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = occur {
             return bench_occurrences(&app, &rel);
         }
+        if let Some(rel) = follow {
+            return bench_follow(&app, &rel);
+        }
         if shell_keys {
             return bench_shell_keys(&app);
         }
@@ -88,8 +99,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if templates {
             return bench_templates(&app);
         }
-        if chrome {
-            return bench_chrome(&app);
+        if let Some(notes) = chrome {
+            return bench_chrome(&app, &notes);
         }
         if keys {
             return bench_keys(&app);
@@ -207,6 +218,8 @@ fn bench_git(app: &Rc<App>) {
         );
         println!("bench git_not_pulled {}", git.not_pulled_rows());
         println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
+        let (live, tip) = git.commit_hint();
+        println!("bench git_commit live={live} {}", tip.unwrap_or_default());
         git.activate_last_log_row();
         let app = app.clone();
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
@@ -420,16 +433,130 @@ fn selected_offer(field: &gtk::Widget) -> Option<String> {
         .map(|label| label.label().into())
 }
 
+/// Focus mode, headless: [`bench_chrome_actions`] first, then — when `notes` is `<relA>,<relB>` —
+/// both notes open, one of them split off to the right so the left pane is the one being written
+/// in and the right one has something to recede, and [`bench_chrome_levels`] and
+/// [`bench_chrome_veil`] run over them. `1` stops after the actions.
+///
+/// The actions go first because one of them is `win.save`, and an explicit save writes whatever
+/// the active tab holds, clean or not: run over the notes it would write them back into the vault.
+fn bench_chrome(app: &Rc<App>, notes: &str) {
+    bench_chrome_actions(app);
+    let Some((a, b)) = notes.split_once(',') else {
+        return bench_quit(app);
+    };
+    // The actions end on a find, whose open bar would suspend the fade.
+    app.pane().find.close();
+    app.open_path(a);
+    app.open_path(b);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let left = app.pane();
+        let _ = WidgetExt::activate_action(&app.window, "win.split-right", None);
+        // The split hands the keyboard to the note it moved, from an idle; this takes it back
+        // once that has run, since nothing headless can click into the left note.
+        glib::timeout_future(Duration::from_millis(200)).await;
+        app.set_active_pane(&left);
+        bench_chrome_levels(&app);
+        bench_chrome_veil(&app).await;
+        bench_quit(&app);
+    });
+}
+
+/// Show and then hide the chrome at each focus level, printing what that faded. The level is set
+/// in memory only; nothing is saved.
+fn bench_chrome_levels(app: &Rc<App>) {
+    let was = app.config.borrow().focus_mode;
+    for level in [FocusMode::None, FocusMode::Medium, FocusMode::High] {
+        app.config.borrow_mut().focus_mode = level;
+        app.show_chrome();
+        app.hide_chrome();
+        println!("bench chrome_level {level:?} {}", chrome_state(app));
+    }
+    app.show_chrome();
+    println!("bench chrome_level shown {}", chrome_state(app));
+    app.config.borrow_mut().focus_mode = was;
+}
+
+/// What the chrome and the panes carry: the header's and the sidebar's fade, the active note's
+/// minimap, how many panes recede, and whether the active note's line fade is on.
+fn chrome_state(app: &Rc<App>) -> String {
+    let hidden = |w: &gtk::Widget| w.has_css_class("chrome-hidden");
+    let tab = app.active();
+    let away = app
+        .panes
+        .borrow()
+        .iter()
+        .filter(|pane| pane.widget().has_css_class("chrome-away"))
+        .count();
+    format!(
+        "hidden={} sidebar={} map={} away={away} fade={}",
+        hidden(app.header.upcast_ref()),
+        app.sidebar.get().is_some_and(|s| hidden(s.widget())),
+        tab.as_ref().is_some_and(|t| hidden(t.minimap())),
+        tab.as_ref()
+            .and_then(|t| t.ghost_view())
+            .is_some_and(|view| view.fading()),
+    )
+}
+
+/// The line fade on the active note at High: held for a second and a half with the caret on line
+/// 8 and the line numbers on, which is long enough for `import -window root` to see the veil and
+/// the gutter it leaves alone, then [`fade::paint`] timed over a 2 KB and a 64 KB note. The veil is
+/// a rectangle per line on screen, so the two should cost the same.
+///
+/// `Tab::set_text` leaves the tab clean and the note's own text goes back at the end, so the
+/// tab closes as it opened and nothing asks to write it.
+async fn bench_chrome_veil(app: &Rc<App>) {
+    let Some(tab) = app.active() else {
+        return;
+    };
+    let was = app.config.borrow().focus_mode;
+    app.config.borrow_mut().focus_mode = FocusMode::High;
+    tab.set_line_numbers(true);
+    if let Some(iter) = tab.buffer.iter_at_line(8) {
+        tab.buffer.place_cursor(&iter);
+    }
+    app.hide_chrome();
+    println!("bench chrome_veil {} caret_line=8", tab.rel());
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    let own = tab.text();
+    for chars in [2 * 1024, 64 * 1024] {
+        // Exactly 32 bytes, so the body is exactly the size the numbers are labelled with.
+        let body = "filler text for a long-ish note\n";
+        tab.set_text(&body.repeat(chars / body.len()));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        // A frame to lay the new text out, which is what the veil measures its lines against.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(view) = tab.ghost_view() else {
+            break;
+        };
+        const PAINTS: u32 = 200;
+        let snapshot = gtk::Snapshot::new();
+        let t0 = Instant::now();
+        for _ in 0..PAINTS {
+            fade::paint(view, &snapshot, 1.0);
+        }
+        let us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(PAINTS);
+        drop(snapshot.to_node());
+        println!("bench fade_paint_us chars={chars} {us:.1}");
+    }
+    tab.set_text(&own);
+    app.show_chrome();
+    app.config.borrow_mut().focus_mode = was;
+}
+
 /// Fire the actions the chords go through at a faded window, and print whether the chrome came
-/// back. An action on its own must not bring it back: focus mode ends on pointer motion, Escape,
-/// a focus change or a view-mode change, and an action is none of those (DESIGN.md, Chrome
-/// auto-hide). Find is the counter-example that proves the rule — its bar takes the keyboard, so
-/// the chrome returns through `focus-widget` rather than through the activation.
+/// back. An action on its own must not bring it back: focus mode ends on pointer motion, a scroll,
+/// Escape, a focus change or a view-mode change, and an action is none of those (DESIGN.md,
+/// Chrome auto-hide). Find is the counter-example that proves the rule — its bar takes the
+/// keyboard, so the chrome returns through `focus-widget` rather than through the activation.
 ///
 /// `Ctrl+Left` and `Ctrl+Right` are printed alongside as the accelerators they are not: nothing in
 /// [`ACTIONS`] claims either chord, so they activate nothing and reach no `show_chrome` at all. If
 /// focus mode still drops on them, the cause is elsewhere.
-fn bench_chrome(app: &Rc<App>) {
+fn bench_chrome_actions(app: &Rc<App>) {
     // Find last: it leaves its bar open, and an open find bar suspends the fade entirely.
     for action in ["win.save", "win.scroll-down", "win.zoom-in", "win.find"] {
         app.hide_chrome();
@@ -444,7 +571,6 @@ fn bench_chrome(app: &Rc<App>) {
             );
         }
     }
-    bench_quit(app);
 }
 
 /// Open the two notes `rels` names in one pane, then split the second one off to the right, move
@@ -530,9 +656,18 @@ fn bench_tabs(app: &Rc<App>, rels: &str) {
         return bench_quit(app);
     };
     let (note, pdf) = (note.to_string(), pdf.to_string());
-    app.open_path(&note);
+    // Looked at rather than named, so the note arrives as a preview and says so on its tab.
+    app.open_preview(&note);
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(tab) = app.tab_for(&note) {
+            println!("bench tab_preview {}", bench_tab_line(&tab.page));
+            // A click on the eye: the one way to keep a preview that does not go through the app.
+            app.pane()
+                .tabs
+                .emit_by_name::<()>("indicator-activated", &[&tab.page]);
+            println!("bench tab_kept {}", bench_tab_line(&tab.page));
+        }
         let _ = WidgetExt::activate_action(&app.window, "win.find", None);
         println!("bench find_over_note {}", app.pane().find.is_open());
         app.open_terminal();
@@ -568,6 +703,19 @@ fn bench_tabs(app: &Rc<App>, rels: &str) {
             });
         });
     });
+}
+
+/// A tab as its bar draws it: the title, and what the indicator slot holds and says.
+fn bench_tab_line(page: &adw::TabPage) -> String {
+    let icon = page
+        .indicator_icon()
+        .and_then(|icon| IconExt::to_string(&icon));
+    format!(
+        "title={} indicator={} tip={:?}",
+        page.title(),
+        icon.as_deref().unwrap_or("none"),
+        page.indicator_tooltip()
+    )
 }
 
 /// What the Outline pane holds, by widget type — or by title where that is one of its status
@@ -674,6 +822,44 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// The buffer is filled with text of its own first: the ranges are the point, and they have to be
 /// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
 /// well inside the one-second autosave.
+/// What a Ctrl+hover underlines. The link half only: a plain word is a question for a language
+/// server, and the vault a drill runs against holds notes rather than code.
+fn bench_follow(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        // ASCII throughout, so `find` gives the character offset the buffer counts in.
+        let text = "See [[Other Note]] and a plain word here.\n";
+        tab.set_text(text);
+        // The link table is filled by the analysis debounce, not by the edit.
+        glib::timeout_add_local_once(Duration::from_millis(400), move || {
+            let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
+            let probe = |label: &str, needle: &str, ctrl: bool| {
+                let where_ = tab
+                    .view
+                    .iter_location(&tab.buffer.iter_at_offset(at(needle)));
+                let (x, y) = tab.view.buffer_to_window_coords(
+                    gtk::TextWindowType::Widget,
+                    where_.x() + 1,
+                    where_.y() + 1,
+                );
+                tab.follow_hint(x as f64, y as f64, ctrl);
+                println!("bench follow {label} underlined={:?}", tab.follow_shown());
+            };
+            // The link underlines whole, markers and all; the prose beside it does not.
+            probe("wikilink", "Other", true);
+            probe("plain_word", "plain", true);
+            probe("wikilink_again", "Other", true);
+            // Ctrl up over the same link takes it off again.
+            probe("ctrl_released", "Other", false);
+            bench_quit(&app);
+        });
+    });
+}
+
 fn bench_occurrences(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();

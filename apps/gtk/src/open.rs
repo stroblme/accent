@@ -233,7 +233,15 @@ impl App {
         pdf.connect_mode(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |_| app.sync_status()
+            move |_| {
+                app.sync_status();
+                app.sync_history();
+            }
+        ));
+        pdf.connect_history(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_history()
         ));
         pdf.connect_note(glib::clone!(
             #[weak(rename_to = app)]
@@ -443,6 +451,22 @@ impl App {
         // Only a PDF can be drawn on, so the button goes with the tab.
         self.drawing_button.set_visible(self.active_pdf().is_some());
         self.drawing_button.set_active(self.drawing.get());
+        self.sync_history();
+    }
+
+    /// Undo and Redo in the header, while a tool is in hand over the PDF in front — the same
+    /// condition `Ctrl+Z` answers under — and either has something to walk. They come and go as a
+    /// pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside the
+    /// Drawing toggle pushed Undo out from under the pointer.
+    pub fn sync_history(&self) {
+        let (undo, redo) = self
+            .active_pdf()
+            .filter(|pdf| pdf.mode() != pdfview::Mode::Select)
+            .map_or((false, false), |pdf| pdf.history());
+        for (button, walks) in [(&self.undo_button, undo), (&self.redo_button, redo)] {
+            button.set_visible(undo || redo);
+            button.set_sensitive(walks);
+        }
     }
 
     /// Write the note links that highlight the open PDF into the file, as real annotations.

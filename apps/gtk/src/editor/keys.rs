@@ -34,6 +34,20 @@ pub(super) fn install(tab: &Rc<Tab>) {
         glib::Propagation::Proceed,
         move |_, key, _, state| dispatch(&tab, key, state)
     ));
+    // Ctrl pressed over a word the pointer is already resting on: the motion controller hears
+    // nothing until the pointer moves again, so the underline would wait for a jiggle.
+    keys.connect_modifiers(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, state| {
+            if let Some((x, y)) = tab.follow_pointer() {
+                tab.follow_hint(x, y, state.contains(gdk::ModifierType::CONTROL_MASK));
+            }
+            glib::Propagation::Proceed
+        }
+    ));
     tab.view.add_controller(keys);
 
     // Whether the popup is up is two signals away and is asked for by three of the steps above,

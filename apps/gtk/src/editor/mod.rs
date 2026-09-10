@@ -24,6 +24,7 @@ use std::time::Duration;
 
 mod banner;
 mod compare;
+mod follow;
 mod keys;
 mod lines;
 mod page;
@@ -33,6 +34,7 @@ mod text;
 pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, restyle_companion, style_companion};
+use follow::Follow;
 use lines::line_clipboard;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
@@ -180,6 +182,10 @@ pub struct Tab {
     /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
     /// pointer each time.
     links: RefCell<Vec<(Range<i32>, Link)>>,
+    /// The underline under what a Ctrl+click would follow, and what it is showing. See
+    /// [`follow`].
+    follow_tag: gtk::TextTag,
+    follow: RefCell<Follow>,
     /// What the language server last said about this file, and the provider that shows the loud
     /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
     /// both read it back after the paint.
@@ -402,6 +408,8 @@ pub fn open(
     map.set_view(&view);
     map.set_vexpand(true);
     map.set_visible(false);
+    // It goes with the chrome while the user types (`App::hide_chrome`).
+    map.add_css_class("chrome-fade");
     let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     document.append(&overlay);
     document.append(&map);
@@ -413,6 +421,11 @@ pub fn open(
     let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
     buffer.tag_table().add(&occurrence_tag);
     mute(&buffer, &occurrence_tag);
+    // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
+    // underline that says a Ctrl+click would land somewhere.
+    let follow_tag = gtk::TextTag::new(Some("follow"));
+    follow_tag.set_underline(pango::Underline::Single);
+    buffer.tag_table().add(&follow_tag);
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
@@ -423,7 +436,7 @@ pub fn open(
     column.append(&banner);
     column.append(&document);
     let page = tabs.append(&column);
-    page.set_title(tab_name(key, flavour));
+    page.set_title(crate::doc::file_name(key));
     // The title is only the file name, so where the note really lives is a hover away.
     page.set_tooltip(&crate::fileops::display_path(root, key));
 
@@ -461,6 +474,8 @@ pub fn open(
         occurrence_query: RefCell::new(None),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        follow_tag,
+        follow: RefCell::new(Follow::default()),
         diagnostics: RefCell::new(Vec::new()),
         annotations,
         folds: RefCell::new(Vec::new()),
@@ -616,30 +631,30 @@ pub fn open(
                 tab.buffer.place_cursor(&iter);
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            tab.clear_follow();
             tab.emit(&tab.on_follow);
         }
     ));
     view.add_controller(click);
 
-    // The pointer only changes when the answer changes: setting a cursor on every motion event
-    // would be a GDK call per pixel of travel.
-    let hot = Rc::new(Cell::new(false));
+    // The pointer and the underline only change when the answer does: `follow_hint` compares
+    // what it is about to show with what is already showing, so an ordinary drag across the view
+    // costs a lookup in the link table and nothing else.
     let motion = gtk::EventControllerMotion::new();
     motion.connect_motion(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        #[strong]
-        hot,
         move |controller, x, y| {
-            let over = controller
+            let ctrl = controller
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK)
-                && tab.link_at(x, y).is_some();
-            if hot.replace(over) != over {
-                tab.view
-                    .set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
-            }
+                .contains(gdk::ModifierType::CONTROL_MASK);
+            tab.follow_hint(x, y, ctrl);
         }
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.clear_follow()
     ));
     view.add_controller(motion);
 
@@ -656,14 +671,6 @@ fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
     sourceview5::LanguageManager::default().guess_language(Some(path), Some(&content_type))
 }
 
-/// A tab's label: the file name, with `.md` dropped for a note because every note has it.
-fn tab_name(key: &str, flavour: Flavour) -> &str {
-    match flavour {
-        Flavour::Note => title_of(key),
-        _ => crate::doc::file_name(key),
-    }
-}
-
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
@@ -672,11 +679,6 @@ pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
-}
-
-fn title_of(rel: &str) -> &str {
-    let name = accent_core::path::basename(rel);
-    name.strip_suffix(".md").unwrap_or(name)
 }
 
 /// The language a file called `key` holding `text` is coloured as.
@@ -1018,7 +1020,7 @@ impl Tab {
 
     fn tab_title(&self) -> String {
         let rel = self.rel();
-        let name = tab_name(&rel, self.flavour);
+        let name = crate::doc::file_name(&rel);
         let name = match self.comparing.borrow().as_ref() {
             Some(comparing) => format!("{name} ({})", comparing.label),
             None => name.to_string(),
@@ -1062,6 +1064,18 @@ impl Tab {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
             view.add_caret(below);
         }
+    }
+
+    /// Focus mode's line fade, which the view subclass paints (`fade.rs`).
+    pub fn set_fade(&self, on: bool) {
+        if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
+            view.set_fade(on);
+        }
+    }
+
+    /// The minimap, which fades with the chrome.
+    pub fn minimap(&self) -> &gtk::Widget {
+        self.map.upcast_ref()
     }
 
     /// Park `snippet` in the view at `at` and remember it, so a Tab pressed while its stops are

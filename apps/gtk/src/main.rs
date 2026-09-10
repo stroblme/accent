@@ -18,6 +18,7 @@ mod diff;
 mod doc;
 mod editor;
 mod events;
+mod fade;
 mod fileops;
 mod find;
 mod fold;
@@ -56,7 +57,7 @@ mod wire;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
-use accent_core::config::PdfZoom;
+use accent_core::config::{FocusMode, PdfZoom};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
@@ -238,6 +239,9 @@ struct App {
     modes: gtk::ToggleButton,
     /// The header's Drawing toggle, shown only over a PDF.
     drawing_button: gtk::ToggleButton,
+    /// Undo and Redo beside it, shown as a pair while either has something to walk.
+    undo_button: gtk::Button,
+    redo_button: gtk::Button,
     /// Whether the ring of tools is out, which is the window's state and not the tab's.
     drawing: Cell<bool>,
     /// The tool the ring offers when it comes back.
@@ -636,14 +640,15 @@ impl App {
             };
             return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
-        sidebar.set_outline(Some(&sidebar::outline_list(
+        sidebar.set_outline_rows(
+            &doc.key(),
             &rows,
             glib::clone!(
                 #[weak]
                 tab,
                 move |at| tab.goto_pos(at)
             ),
-        )));
+        );
     }
 
     /// The file's own facts in the status bar: what it is, whether it is saved, and its one

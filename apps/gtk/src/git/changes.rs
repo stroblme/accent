@@ -207,7 +207,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .build();
     let folder = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     folder.append(&chevron);
-    folder.append(&gtk::Image::from_icon_name("folder-symbolic"));
+    folder.append(&gtk::Image::from_icon_name(crate::doc::FOLDER_ICON));
     folder.append(&folder_name);
 
     let entry = file_line();
@@ -344,7 +344,8 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 0 => split_name(&e.path).0,
                 _ => "",
             };
-            bind_file_line(&entry, status_letter(&e, section), &e.path, directory);
+            let icon = crate::doc::icon_for(&e.path);
+            bind_file_line(&entry, icon, status_letter(&e, section), &e.path, directory);
             stack.set_tooltip_text(Some(&e.path));
             actions.set_visible(true);
             let Some((stage, unstage, discard)) = triple(&actions) else {
@@ -368,7 +369,13 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 .describe
                 .as_deref()
                 .unwrap_or_else(|| split_name(&sub.path).0);
-            bind_file_line(&entry, sub.state, &sub.path, directory);
+            bind_file_line(
+                &entry,
+                crate::doc::FOLDER_ICON,
+                sub.state,
+                &sub.path,
+                directory,
+            );
             stack.set_tooltip_text(Some(&sub.oid));
             actions.set_visible(false);
         }

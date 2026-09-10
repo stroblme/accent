@@ -32,12 +32,21 @@ const WIDTHS: [(Mode, [f32; 3]); 3] = [
 /// Told which tool was in hand and what was picked for it.
 type OnChoice = Box<dyn Fn(Mode, Choice)>;
 
+/// The eraser's two ways, on the first two of the slots the other tools give their colours to:
+/// whole strokes, or only what it passes over.
+const ERASERS: [(bool, &str, &str); 2] = [
+    (false, "edit-delete-symbolic", "Erase Whole Strokes"),
+    (true, "edit-cut-symbolic", "Erase Only What It Passes Over"),
+];
+
 /// What an option button picks for the tool in hand.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Choice {
     Width(f32),
     /// `None` is the accent.
     Colour(Option<[u8; 3]>),
+    /// The eraser's: partial, or whole strokes.
+    Partial(bool),
 }
 
 impl Choice {
@@ -46,7 +55,8 @@ impl Choice {
     pub fn apply(self, tool: Mode, config: &mut DrawingConfig) {
         match (tool.style_owner(), self) {
             (Mode::Eraser, Choice::Width(w)) => config.eraser_radius = w,
-            (Mode::Eraser, Choice::Colour(_)) => {}
+            (Mode::Eraser, Choice::Partial(p)) => config.eraser_partial = p,
+            (Mode::Eraser, Choice::Colour(_)) | (_, Choice::Partial(_)) => {}
             (Mode::Highlighter, Choice::Width(w)) => config.highlighter_width = w,
             (Mode::Highlighter, Choice::Colour(c)) => config.highlighter_color = c,
             (_, Choice::Width(w)) => config.pen_width = w,
@@ -71,9 +81,11 @@ const TOOLS: [(Mode, &str); 7] = [
 pub struct Ring {
     root: RingBox,
     buttons: Vec<(Mode, gtk::ToggleButton)>,
-    /// The outer orbit: three widths, then six colours, shown for the tool in hand.
+    /// The outer orbit: three widths, then six colours, shown for the tool in hand — or for the
+    /// eraser, its two ways where the colours would be.
     widths: Vec<gtk::ToggleButton>,
     swatches: Vec<gtk::ToggleButton>,
+    erasers: Vec<gtk::ToggleButton>,
     tool: Cell<Mode>,
     config: RefCell<DrawingConfig>,
     on_choice: RefCell<Option<OnChoice>>,
@@ -128,9 +140,9 @@ impl Ring {
 
         // Nine slots outside the tools: the widths at the top, the colours after them.
         let slots = 3 + crate::theme::swatches().len();
-        let option = |i: usize, dot: gtk::DrawingArea| {
+        let option = |i: usize, child: &gtk::Widget| {
             let button = gtk::ToggleButton::new();
-            button.set_child(Some(&dot));
+            button.set_child(Some(child));
             button.add_css_class("circular");
             button.add_css_class("osd");
             button.add_css_class("accent-ring-tool");
@@ -141,17 +153,24 @@ impl Ring {
         let widths: Vec<_> = [5.0, 8.0, 12.0]
             .into_iter()
             .enumerate()
-            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color())))
+            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
             .collect();
         let swatches: Vec<_> = (0..crate::theme::swatches().len())
             .map(|i| {
-                option(
-                    3 + i,
-                    dot(14.0, move |_| match crate::theme::swatches()[i] {
-                        Some(rgb) => crate::theme::rgba(rgb, 1.0),
-                        None => crate::theme::accent(),
-                    }),
-                )
+                let colour = move |_: &gtk::DrawingArea| match crate::theme::swatches()[i] {
+                    Some(rgb) => crate::theme::rgba(rgb, 1.0),
+                    None => crate::theme::accent(),
+                };
+                option(3 + i, dot(14.0, colour).upcast_ref())
+            })
+            .collect();
+        let erasers: Vec<_> = ERASERS
+            .iter()
+            .enumerate()
+            .map(|(i, (_, icon, label))| {
+                let button = option(3 + i, gtk::Image::from_icon_name(icon).upcast_ref());
+                button.set_tooltip_text(Some(label));
+                button
             })
             .collect();
 
@@ -160,6 +179,7 @@ impl Ring {
             buttons,
             widths,
             swatches,
+            erasers,
             tool: Cell::new(Mode::Select),
             config: RefCell::new(DrawingConfig::default()),
             on_choice: RefCell::new(None),
@@ -196,6 +216,13 @@ impl Ring {
                     let tool = ring.tool.get();
                     ring.choose(tool, Choice::Colour(crate::theme::swatches()[i]));
                 }
+            ));
+        }
+        for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = ring)]
+                self,
+                move |_| ring.choose(ring.tool.get(), Choice::Partial(partial))
             ));
         }
     }
@@ -255,6 +282,10 @@ impl Ring {
         let shown = widths.is_some() && colour.is_some();
         for (i, button) in self.swatches.iter().enumerate() {
             check(button, shown, shown && colour == Some(swatches[i]));
+        }
+        let erasing = self.tool.get() == Mode::Eraser;
+        for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
+            check(button, erasing, erasing && config.eraser_partial == partial);
         }
     }
 
@@ -470,5 +501,9 @@ mod tests {
         assert_eq!(config.pen_color, None);
         Choice::Colour(Some([1, 2, 3])).apply(Mode::Eraser, &mut config);
         assert_eq!(config.pen_color, None, "the eraser has no colour");
+        Choice::Partial(true).apply(Mode::Pen, &mut config);
+        assert!(!config.eraser_partial, "only the eraser has two ways");
+        Choice::Partial(true).apply(Mode::Eraser, &mut config);
+        assert!(config.eraser_partial);
     }
 }

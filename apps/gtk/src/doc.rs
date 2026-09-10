@@ -10,6 +10,8 @@ use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
+use accent_core::path::{FileType, file_type};
+
 use crate::diff::DiffTab;
 use crate::editor::Tab;
 use crate::fileops;
@@ -154,18 +156,30 @@ pub enum Kind {
 }
 
 pub fn kind_of(key: &str) -> Kind {
-    // The extension of the file name, never of a directory along the way: `v1.2/README` has no
-    // extension at all.
-    let name = file_name(key);
-    match name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()) {
-        Some(ext) => match ext.as_str() {
-            "md" | "markdown" => Kind::Note,
-            "pdf" => Kind::Pdf,
-            _ if accent_core::markdown::is_image(name) => Kind::Image,
-            _ => Kind::Text,
-        },
-        // No extension: LICENSE, Makefile, Dockerfile and friends are all text.
-        None => Kind::Text,
+    match file_type(key) {
+        FileType::Note => Kind::Note,
+        FileType::Pdf => Kind::Pdf,
+        FileType::Image => Kind::Image,
+        // A table, a source file, LICENSE and anything unknown open as text, if the bytes agree.
+        _ => Kind::Text,
+    }
+}
+
+/// The icon every file list leads a directory's row with.
+pub const FOLDER_ICON: &str = "filetype-folder-symbolic";
+
+/// The icon every file list leads `key`'s row with. The `filetype-*` set is shipped in the app's
+/// GResource (`data/accent.gresource.xml`); tabs keep the icons their documents give them.
+pub fn icon_for(key: &str) -> &'static str {
+    match file_type(key) {
+        FileType::Note => "filetype-markdown-symbolic",
+        FileType::Pdf => "filetype-pdf-symbolic",
+        FileType::Table => "filetype-table-symbolic",
+        FileType::Image => "filetype-image-symbolic",
+        FileType::Code => "filetype-code-symbolic",
+        FileType::Config => "filetype-config-symbolic",
+        FileType::Text => "filetype-text-symbolic",
+        FileType::Other => "filetype-file-symbolic",
     }
 }
 
@@ -184,6 +198,27 @@ mod tests {
         assert_eq!(kind_of("LICENSE"), Kind::Text);
         // The dot belongs to the directory, so the file has no extension.
         assert_eq!(kind_of("v1.2/README"), Kind::Text);
+    }
+
+    /// An icon name the theme cannot resolve draws nothing and says nothing, so every name a file
+    /// list can ask for has to be in the GResource.
+    #[test]
+    fn every_file_icon_is_shipped() {
+        let xml = include_str!("../data/accent.gresource.xml");
+        let keys = [
+            "a.md", "a.pdf", "a.csv", "a.png", "a.rs", "a.toml", "a.txt", "a.zip",
+        ];
+        let mut names: Vec<&str> = keys.into_iter().map(icon_for).collect();
+        names.push(FOLDER_ICON);
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 9, "one name per file type, and the folder");
+        for name in names {
+            assert!(
+                xml.contains(&format!("icons/scalable/actions/{name}.svg")),
+                "{name} is not in the GResource"
+            );
+        }
     }
 
     #[test]

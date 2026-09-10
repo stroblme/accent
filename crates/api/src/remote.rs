@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use serde_json::json;
 
 use crate::rpc::{Client, Hello, RpcError};
-use crate::ssh::{self, Url};
+use crate::ssh::{self, Forward, Url};
 use crate::{Event, VaultConfig};
 
 /// How much of the server binary goes out per write, and therefore how often the progress bar
@@ -333,14 +333,14 @@ impl Remote {
         cmd
     }
 
-    /// Ask ssh to start forwarding a local port to one on the remote, over the master that is
-    /// already open. Nothing is spawned: the running master takes the instruction and keeps it.
-    pub fn forward(&self, local: u16, remote: u16) -> Result<(), String> {
-        self.control(ssh::forward(&self.url, &self.ctl, local, remote))
+    /// Ask ssh to start forwarding a port, either way, over the master that is already open.
+    /// Nothing is spawned: the running master takes the instruction and keeps it.
+    pub fn forward(&self, f: Forward) -> Result<(), String> {
+        self.control(ssh::forward(&self.url, &self.ctl, f))
     }
 
-    pub fn cancel_forward(&self, local: u16, remote: u16) -> Result<(), String> {
-        self.control(ssh::cancel(&self.url, &self.ctl, local, remote))
+    pub fn cancel_forward(&self, f: Forward) -> Result<(), String> {
+        self.control(ssh::cancel(&self.url, &self.ctl, f))
     }
 
     fn control(&self, argv: Vec<String>) -> Result<(), String> {

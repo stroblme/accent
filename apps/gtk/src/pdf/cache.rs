@@ -49,9 +49,18 @@ pub struct Cache {
     bytes: usize,
     lowres_bytes: usize,
     tick: u64,
+    /// How many times a page's renders have been declared out of date. See [`Cache::generation`].
+    generation: u64,
 }
 
 impl Cache {
+    /// Which generation of the document's renders this is: a page that changed starts a new one.
+    /// A view asks for a list of tiles again when this has moved even if the list has not, since
+    /// the same tiles are now wanted for what the page says after the change.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn get(&mut self, key: &TileKey) -> Option<gdk::MemoryTexture> {
         self.tick += 1;
         let tick = self.tick;
@@ -109,6 +118,7 @@ impl Cache {
     /// the flash this exists to avoid. Everything else is going spare: nobody is looking at a
     /// render at another zoom, and keeping it would paint the old page after the next one.
     pub fn forget_page_except(&mut self, page: u32, scale_milli: u32, dark: bool) {
+        self.generation += 1;
         let (tiles, lowres) = (&mut self.bytes, &mut self.lowres_bytes);
         self.tiles.retain(|key, (texture, _)| {
             let keep = key.page != page || (key.scale_milli == scale_milli && key.dark == dark);
@@ -230,5 +240,16 @@ mod tests {
         let mut used = entries(11);
         used[0].0 = 99;
         assert!(!overflowing(used, 110, 100).contains(&0));
+    }
+
+    /// A page that changed makes the cache a generation newer, which is what tells a view that
+    /// the same tiles it asked for before are wanted again: a stroke and then an erase on one
+    /// part of a page make the one list twice.
+    #[test]
+    fn a_changed_page_is_a_new_generation() {
+        let mut cache = Cache::default();
+        let before = cache.generation();
+        cache.forget_page_except(0, 1000, false);
+        assert_ne!(cache.generation(), before);
     }
 }
