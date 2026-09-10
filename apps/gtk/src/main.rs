@@ -137,8 +137,10 @@ fn main() -> glib::ExitCode {
         // The vault comes from argv, which GApplication would otherwise try to parse itself.
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
+    let config = Config::load();
     let shell = Rc::new(Shell {
-        config: Rc::new(RefCell::new(Config::load())),
+        applied: RefCell::new(config.clone()),
+        config: Rc::new(RefCell::new(config)),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
@@ -1022,9 +1024,9 @@ impl App {
     /// Put a config into effect in this window: everything an edit in the preferences dialog, a
     /// Restore Defaults, a re-read from disk or [`Self::config_changed`] can have changed.
     /// Reached through [`Shell::apply_config`], which does this for every window and puts the
-    /// theme on screen first.
-    fn apply_config(self: &Rc<Self>, config: &Config) {
-        if let Some(vault) = self.vault() {
+    /// theme on screen first. The costly parts run only where `changed` says their inputs moved.
+    fn apply_config(self: &Rc<Self>, config: &Config, changed: &shell::Changed) {
+        if let Some(vault) = self.vault().filter(|_| changed.vault) {
             // Both of these are a `hello` round trip on a remote vault, and this runs from the
             // preferences dialog, on the main loop. Sent from a worker and not waited for: the
             // server takes the config on `hello` too, so one that does not land is corrected by
@@ -1036,17 +1038,23 @@ impl App {
                 vault.set_ghost(ghost);
             });
         }
-        self.apply_accels();
+        if changed.shortcuts {
+            self.apply_accels();
+        }
         for tab in self.open_tabs() {
-            tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            if changed.font {
+                tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            }
             tab.set_spellcheck(config.spellcheck);
             lang::set_ghost(&tab, config.ghost_text);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
         }
-        for diff in self.diffs() {
-            diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+        if changed.font {
+            for diff in self.diffs() {
+                diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+            }
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());
@@ -1067,7 +1075,9 @@ impl App {
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
-        self.restyle_all();
+        if changed.theme {
+            self.restyle_all();
+        }
     }
 
     fn preferences(self: &Rc<Self>) {

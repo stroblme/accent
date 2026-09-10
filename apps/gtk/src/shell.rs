@@ -6,6 +6,9 @@ use super::*;
 /// One process, one config, one window per vault.
 pub struct Shell {
     pub config: Rc<RefCell<Config>>,
+    /// The config as it was last put into effect, so the next one can tell what moved
+    /// ([`Changed`]). `config` itself is edited in place before it is applied.
+    pub applied: RefCell<Config>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
     /// `None` for the one window opened on files rather than on a folder.
@@ -36,6 +39,30 @@ pub struct Landing {
     app: Rc<App>,
     pane: Rc<Pane>,
     zone: Zone,
+}
+
+/// The costly parts of putting a config into effect, each true only where its inputs moved. The
+/// theme swaps the display's style provider and restyles every widget, a font re-measures every
+/// tab, the vault settings are a `hello` to each remote host, and the shortcuts are the whole
+/// accelerator table; everything else is a cheap switch that is simply set again.
+#[derive(Debug, Default, PartialEq)]
+pub struct Changed {
+    pub theme: bool,
+    pub font: bool,
+    pub vault: bool,
+    pub shortcuts: bool,
+}
+
+impl Changed {
+    pub fn between(old: &Config, new: &Config) -> Changed {
+        Changed {
+            theme: old.theme != new.theme,
+            font: old.editor_font != new.editor_font,
+            // Every vault's entries, not this window's: a `hello` too many is harmless.
+            vault: old.vaults != new.vaults || old.ghost_text != new.ghost_text,
+            shortcuts: old.shortcuts != new.shortcuts,
+        }
+    }
 }
 
 impl Shell {
@@ -104,10 +131,14 @@ impl Shell {
 
     /// Put a config into effect in every window. There is one config per process, so a preference
     /// changed in one window — in its dialog or anywhere else (`App::config_changed`) — is the
-    /// same preference in all of them.
+    /// same preference in all of them. Measured against the last one applied, so a switch does
+    /// not restyle every widget the way a theme change has to.
     pub fn apply_config(&self, config: &Config) {
+        let changed = Changed::between(&self.applied.replace(config.clone()), config);
         // The theme is the display's rather than a window's, so it goes on once.
-        theme::apply(config.theme);
+        if changed.theme {
+            theme::apply(config.theme);
+        }
         // Cloned out of the borrow: applying a config reaches a long way into each window.
         let apps: Vec<Rc<App>> = self
             .windows
@@ -116,7 +147,7 @@ impl Shell {
             .map(|(_, app)| app.clone())
             .collect();
         for app in apps {
-            app.apply_config(config);
+            app.apply_config(config, &changed);
         }
     }
 
@@ -599,5 +630,40 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    #[test]
+    fn a_config_change_redoes_only_what_it_moved() {
+        use accent_core::config::Theme;
+        let old = Config::default();
+        // A switch or a ring pick is none of the expensive parts.
+        let minimap = Config {
+            minimap: true,
+            ..Config::default()
+        };
+        assert_eq!(Changed::between(&old, &minimap), Changed::default());
+        let theme = Config {
+            theme: Theme::Solarized,
+            ..Config::default()
+        };
+        assert_eq!(
+            Changed::between(&old, &theme),
+            Changed {
+                theme: true,
+                ..Changed::default()
+            }
+        );
+        // Ghost text is carried to the vault alongside its settings.
+        let ghost = Config {
+            ghost_text: false,
+            ..Config::default()
+        };
+        assert_eq!(
+            Changed::between(&old, &ghost),
+            Changed {
+                vault: true,
+                ..Changed::default()
+            }
+        );
     }
 }
