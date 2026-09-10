@@ -309,7 +309,8 @@ impl PdfView {
         }
         // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
         // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
-        // exactly the thing that will not happen.
+        // exactly the thing that will not happen. A stylus's next move puts its dot back.
+        self.imp().dot.set(false);
         self.set_cursor_from_name(match mode {
             Mode::Select => None,
             _ => Some("default"),
@@ -361,9 +362,6 @@ impl PdfView {
         if mode == Mode::Select {
             return mode;
         }
-        // A pen is known by its tool: on Wayland a tablet's events arrive on a logical device
-        // whose source is a mouse, and only the tool says otherwise. X11 without libwacom has
-        // no tool, and there the device's source is what says pen.
         let tool = controller.current_event().and_then(|e| e.device_tool());
         if tool
             .as_ref()
@@ -371,16 +369,30 @@ impl PdfView {
         {
             return Mode::Eraser;
         }
-        let source = controller.current_event_device().map(|d| d.source());
-        if tool.is_some() || source == Some(gdk::InputSource::Pen) {
+        if from_stylus(controller) {
             return mode;
         }
+        let source = controller.current_event_device().map(|d| d.source());
         if source == Some(gdk::InputSource::Touchscreen) {
             return Mode::Select;
         }
         match self.imp().style.borrow().mouse || !stylus_attached() {
             true => mode,
             false => Mode::Select,
+        }
+    }
+
+    /// Under a stylus with a tool in hand the pointer is a dot where the ink will go; under
+    /// anything else it is the arrow a tool shows. Set only when that changes: a cursor per event
+    /// of travel is what the link hover avoids too.
+    fn show_dot(&self, controller: &impl IsA<gtk::EventController>) {
+        let dot = self.imp().mode.get() != Mode::Select && from_stylus(controller);
+        if self.imp().dot.replace(dot) == dot {
+            return;
+        }
+        match dot {
+            true => self.set_cursor(Some(&dot_cursor())),
+            false => self.set_cursor_from_name(Some("default")),
         }
     }
 
@@ -826,6 +838,48 @@ fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
+/// Whether the event in hand is a stylus's, its tip or its eraser. A pen is known by its tool: on
+/// Wayland a tablet's events arrive on a logical device whose source is a mouse, and only the tool
+/// says otherwise. X11 without libwacom has no tool, and there the device's source is what says
+/// pen.
+fn from_stylus(controller: &impl IsA<gtk::EventController>) -> bool {
+    controller
+        .current_event()
+        .and_then(|e| e.device_tool())
+        .is_some()
+        || controller.current_event_device().map(|d| d.source()) == Some(gdk::InputSource::Pen)
+}
+
+/// The stylus's pointer: a dark dot ringed in white so it reads on any paper, its hotspot in the
+/// middle. Drawn here because no cursor theme names a dot, and built once per thread.
+fn dot_cursor() -> gdk::Cursor {
+    const SIZE: i32 = 7;
+    thread_local! {
+        static DOT: gdk::Cursor = {
+            let middle = (SIZE / 2) as f32;
+            let pixels: Vec<u8> = (0..SIZE * SIZE)
+                .flat_map(|at| {
+                    let d = ((at % SIZE) as f32 - middle).hypot((at / SIZE) as f32 - middle);
+                    // How much of the pixel the ring and the dot inside it cover: a soft pixel
+                    // at each edge rather than a jagged one.
+                    let (ring, dot) = ((3.5 - d).clamp(0.0, 1.0), (2.5 - d).clamp(0.0, 1.0));
+                    let grey = (255.0 * (1.0 - dot)) as u8;
+                    [grey, grey, grey, (255.0 * ring) as u8]
+                })
+                .collect();
+            let texture = gdk::MemoryTexture::new(
+                SIZE,
+                SIZE,
+                gdk::MemoryFormat::R8g8b8a8,
+                &glib::Bytes::from_owned(pixels),
+                SIZE as usize * 4,
+            );
+            gdk::Cursor::from_texture(&texture, SIZE / 2, SIZE / 2, None)
+        };
+    }
+    DOT.with(Clone::clone)
+}
+
 mod imp {
     use super::*;
     use std::cell::OnceCell;
@@ -901,6 +955,8 @@ mod imp {
         /// Whether the drag under way has taken a stroke yet: every later one is part of the
         /// same step for Undo.
         pub erased: Cell<bool>,
+        /// Whether the pointer is the stylus's dot rather than the arrow a tool otherwise shows.
+        pub dot: Cell<bool>,
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
@@ -958,6 +1014,7 @@ mod imp {
                 adjust: RefCell::new(None),
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
+                dot: Cell::new(false),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, false, 0)),
@@ -1067,7 +1124,8 @@ mod imp {
             motion.connect_motion(glib::clone!(
                 #[weak]
                 obj,
-                move |_, x, y| {
+                move |motion, x, y| {
+                    obj.show_dot(motion);
                     let handler = obj.imp().on_motion.borrow();
                     if let Some(f) = handler.as_ref() {
                         f(&obj, x, y);
