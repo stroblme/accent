@@ -44,6 +44,8 @@ enum Row {
         depth: usize,
         /// Whether what is under it is listed, which is what its chevron says.
         open: bool,
+        /// Whether Discard can take every entry under it ([`discardable`]).
+        discardable: bool,
     },
     Entry {
         entry: Entry,
@@ -225,7 +227,7 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             else {
                 return;
             };
-            let paths = panel.section_paths(section);
+            let paths = panel.section_paths(section, "");
             match section {
                 Section::Staged => panel.unstage(paths),
                 _ => panel.stage(paths),
@@ -273,38 +275,10 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     folder.append(&chevron);
     folder.append(&gtk::Image::from_icon_name(crate::doc::FOLDER_ICON));
     folder.append(&folder_name);
+    folder.append(&actions(item, panel));
 
     let entry = file_line();
-
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    actions.add_css_class("git-actions");
-    for (icon, tooltip, act) in [
-        ("list-add-symbolic", "Stage", Act::Stage),
-        ("list-remove-symbolic", "Unstage", Act::Unstage),
-        ("document-revert-symbolic", "Discard", Act::Discard),
-    ] {
-        let button = icon_button(icon, tooltip);
-        let weak = panel.clone();
-        button.connect_clicked(glib::clone!(
-            #[weak]
-            item,
-            move |_| {
-                let (Some(panel), Some(Row::Entry { entry, key, .. })) =
-                    (weak.upgrade(), boxed(item.item()))
-                else {
-                    return;
-                };
-                match act {
-                    Act::Stage => panel.stage(vec![entry.path]),
-                    Act::Unstage => panel.unstage(vec![entry.path]),
-                    Act::Discard => panel.discard(&entry, &key),
-                }
-            }
-        ));
-        actions.append(&button);
-    }
-
-    entry.append(&actions);
+    entry.append(&actions(item, panel));
 
     // Not homogeneous: the header's button is taller than an entry row, and every row taking that
     // height would turn the list into a ladder.
@@ -324,6 +298,53 @@ enum Act {
     Stage,
     Unstage,
     Discard,
+}
+
+/// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
+/// on the row's hover and `:focus-within` (`.git-actions`), and the binder picks which of them the
+/// row offers.
+fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    actions.add_css_class("git-actions");
+    for (icon, tooltip, act) in [
+        ("list-add-symbolic", "Stage", Act::Stage),
+        ("list-remove-symbolic", "Unstage", Act::Unstage),
+        ("document-revert-symbolic", "Discard", Act::Discard),
+    ] {
+        let button = icon_button(icon, tooltip);
+        let weak = panel.clone();
+        button.connect_clicked(glib::clone!(
+            #[weak]
+            item,
+            move |_| {
+                if let (Some(panel), Some(row)) = (weak.upgrade(), boxed::<Row>(item.item())) {
+                    panel.act(act, row);
+                }
+            }
+        ));
+        actions.append(&button);
+    }
+    actions
+}
+
+impl Panel {
+    /// What one of a row's buttons does. A folder's buttons act on every entry of its section
+    /// under it, picked the way the section header's Stage All and Unstage All pick theirs.
+    fn act(self: &Rc<Self>, act: Act, row: Row) {
+        let (entries, folder) = match &row {
+            Row::Entry { entry, .. } => (vec![entry.clone()], None),
+            Row::Folder { path, section, .. } => (
+                self.section_entries(*section, &format!("{path}/")),
+                Some(path.as_str()),
+            ),
+            _ => return,
+        };
+        match act {
+            Act::Stage => self.stage(entries.into_iter().map(|e| e.path).collect()),
+            Act::Unstage => self.unstage(entries.into_iter().map(|e| e.path).collect()),
+            Act::Discard => self.discard(folder, entries),
+        }
+    }
 }
 
 fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
@@ -373,18 +394,26 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
         }
         Row::Folder {
             label,
+            section,
             depth,
             path,
             open,
-            ..
+            discardable,
         } => {
             stack.set_visible_child_name("folder");
-            let (Some(chevron), Some(text)) = (
-                folder.first_child().and_downcast::<gtk::Image>(),
-                folder.last_child().and_downcast::<gtk::Label>(),
-            ) else {
+            let buttons = folder.last_child().and_downcast::<gtk::Box>();
+            let (Some(chevron), Some(buttons)) =
+                (folder.first_child().and_downcast::<gtk::Image>(), buttons)
+            else {
                 return;
             };
+            let Some(text) = buttons.prev_sibling().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            // None in Merge Conflicts, for the reason its header has no Stage All: a conflict is
+            // resolved one file at a time.
+            buttons.set_visible(section != Section::Conflicts);
+            offer(&buttons, section, discardable);
             // The fold chevrons' pair rather than `pan-*`, for the reason the branch button gives.
             chevron.set_icon_name(Some(match open {
                 true => "go-down-symbolic",
@@ -410,19 +439,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             bind_file_line(&entry, icon, status_letter(&e, section), &e.path, directory);
             stack.set_tooltip_text(Some(&e.path));
             actions.set_visible(true);
-            let Some((stage, unstage, discard)) = triple(&actions) else {
-                return;
-            };
-            // Staging a conflicted file is how git is told it is resolved, so the button is there
-            // for it too; unstaging one is not a thing the pane offers.
-            stage.set_visible(section != Section::Staged);
-            unstage.set_visible(section == Section::Staged);
-            // ponytail: an untracked file outside the vault has no Discard, because the only
-            // thing to do with it is delete it and the trash hook takes vault keys. `git clean`
-            // is the upgrade, and it wants a confirmation naming the file it removes for good.
-            discard.set_visible(
-                section == Section::Changes && (e.x != '?' || !Path::new(&key).is_absolute()),
-            );
+            offer(&actions, section, discardable(&e, &key));
         }
         Row::Submodule(sub) => {
             stack.set_visible_child_name("entry");
@@ -444,12 +461,30 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     }
 }
 
-/// The Stage / Unstage / Discard buttons of a row, in the order [`change_row`] appended them.
-fn triple(actions: &gtk::Box) -> Option<(gtk::Widget, gtk::Widget, gtk::Widget)> {
-    let stage = actions.first_child()?;
-    let unstage = stage.next_sibling()?;
-    let discard = unstage.next_sibling()?;
-    Some((stage, unstage, discard))
+/// Which of the [`actions`] a file or folder row offers in `section`. Staging a conflicted file
+/// is how git is told it is resolved, so Stage is there for it too; unstaging one is not a thing
+/// the pane offers. Discard is for the working tree alone, and only where everything the row
+/// stands for can go ([`discardable`]).
+fn offer(actions: &gtk::Box, section: Section, discardable: bool) {
+    let Some(stage) = actions.first_child() else {
+        return;
+    };
+    let (unstage, discard) = (stage.next_sibling(), actions.last_child());
+    stage.set_visible(section != Section::Staged);
+    if let (Some(unstage), Some(discard)) = (unstage, discard) {
+        unstage.set_visible(section == Section::Staged);
+        discard.set_visible(section == Section::Changes && discardable);
+    }
+}
+
+/// Whether Discard can take `entry` back, `key` being its path as the app names it.
+///
+/// ponytail: an untracked file outside the vault cannot, because the only thing to do with it is
+/// delete it and the trash hook takes vault keys; a folder with one under it offers no Discard
+/// either. `git clean` is the upgrade, and it wants a confirmation naming the files it removes
+/// for good.
+fn discardable(entry: &Entry, key: &str) -> bool {
+    entry.x != '?' || !Path::new(key).is_absolute()
 }
 
 /// The changes list: the four sections in order, each behind a header, empty ones dropped.
@@ -570,6 +605,7 @@ fn group_level(
             depth,
             path: path.clone(),
             open,
+            discardable: group.iter().all(|e| discardable(e, &key(&e.path))),
         });
         if open {
             let under = format!("{path}/");
@@ -771,6 +807,19 @@ mod tests {
             3,
             "the same folder under another section is its own row"
         );
+    }
+
+    #[test]
+    fn a_folder_offers_discard_only_where_every_file_under_it_can_go() {
+        let held = [entry("src/a.md", '.', 'M'), entry("src/new.md", '?', '?')];
+        let refs: Vec<&Entry> = held.iter().collect();
+        let outside = |path: &str| format!("/elsewhere/{path}");
+        let offered = |key: &dyn Fn(&str) -> String| {
+            let rows = grouped(&refs, Section::Changes, &HashSet::new(), key);
+            matches!(rows[0], Row::Folder { discardable, .. } if discardable)
+        };
+        assert!(offered(&identity), "trashed, being in the vault");
+        assert!(!offered(&outside), "nowhere to go outside it");
     }
 
     #[test]

@@ -530,37 +530,57 @@ fn rename_message(verb: &str, name: &str, to: &str, failed: usize, unsaved: usiz
 /// The tab closes after the file is gone, not before: a trash that fails, or a permanent delete
 /// the user then cancels, must not leave the note open nowhere.
 pub fn trash(ops: &Rc<Ops>, rel: &str) {
-    let path = ops.vault.root().join(rel);
-    let name = basename(rel).to_string();
-    let (ops, rel) = (ops.clone(), rel.to_string());
+    trash_all(ops, vec![rel.to_string()]);
+}
+
+/// [`trash`] for several paths at once: one toast for all of them and, where there is no trash,
+/// one question. The Git pane's Discard on a folder takes its untracked files away through this,
+/// and a toast or a dialog per file would be one per file.
+pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
     // What lands in the trash should be what the user last saw, so every dirty tab under it is
     // written out before the file moves — a folder takes the notes inside it, and their unsaved
     // edits used to go with it in silence. Whatever cannot be written stays in its tab's banner.
-    (ops.flush)(std::slice::from_ref(&rel));
+    (ops.flush)(&rels);
     // A vault on another machine has no session bus to ask and no trash to ask it about, so the
     // only delete there is is the permanent one — which is exactly the case this already has a
     // dialog for, and it says so in the same words.
     if ops.vault.is_remote() {
-        return confirm_delete(&ops, &name, &rel);
+        return confirm_delete(ops, rels);
     }
+    let ops = ops.clone();
     // ponytail: the tree and the index catch up through the watcher rather than being told here.
     // Post the removal explicitly if a trashed file is ever seen lingering in the sidebar.
-    gio::File::for_path(&path).trash_async(
-        glib::Priority::DEFAULT,
-        gio::Cancellable::NONE,
-        move |result| match result {
-            Ok(()) => {
-                (ops.close)(&rel);
-                (ops.toast)(&format!("Moved {name} to Trash"));
+    glib::spawn_future_local(async move {
+        let (mut moved, mut refused) = (Vec::new(), Vec::new());
+        for rel in rels {
+            let file = gio::File::for_path(ops.vault.root().join(&rel));
+            match file.trash_future(glib::Priority::DEFAULT).await {
+                Ok(()) => {
+                    (ops.close)(&rel);
+                    moved.push(rel);
+                }
+                // What a sandbox without a working trash portal answers. There is nothing to fall
+                // back to but a permanent delete, and that has to be asked about.
+                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => refused.push(rel),
+                Err(e) => (ops.toast)(&format!("Cannot trash {}: {e}", basename(&rel))),
             }
-            // What a sandbox without a working trash portal answers. There is nothing to fall
-            // back to but a permanent delete, and that has to be asked about.
-            Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => {
-                confirm_delete(&ops, &name, &rel)
-            }
-            Err(e) => (ops.toast)(&format!("Cannot trash {name}: {e}")),
-        },
-    );
+        }
+        if !moved.is_empty() {
+            (ops.toast)(&format!("Moved {} to Trash", several(&moved)));
+        }
+        if !refused.is_empty() {
+            confirm_delete(&ops, refused);
+        }
+    });
+}
+
+/// How a toast or a dialog names the paths it is about: a single one by its name, several by
+/// their number.
+fn several(rels: &[String]) -> String {
+    match rels {
+        [one] => basename(one).to_string(),
+        many => format!("{} files", many.len()),
+    }
 }
 
 /// Whether an open document's key goes with `trashed`: the path itself, or anything inside it
@@ -578,14 +598,19 @@ pub fn trashed_with(trashed: &str, key: &str) -> bool {
 
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
-fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
+fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
     let dialog = alert(
         "Delete Permanently?",
         &format!(
-            "{name} cannot be moved to the trash{}. Deleting it cannot be undone.",
+            "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
+            several(&rels),
             match ops.vault.is_remote() {
                 true => " on the remote",
                 false => " on this system",
+            },
+            match rels.len() {
+                1 => "it",
+                _ => "them",
             }
         ),
         &[
@@ -595,22 +620,23 @@ fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
         "cancel",
     );
 
-    let (ops, name, rel, window) = (
-        ops.clone(),
-        name.to_string(),
-        rel.to_string(),
-        ops.window.clone(),
-    );
+    let (ops, window) = (ops.clone(), ops.window.clone());
     choose(&dialog, Some(&window), move |response| {
         if response != "delete" {
             return;
         }
-        match ops.vault.delete(&rel) {
-            Ok(()) => {
-                (ops.close)(&rel);
-                (ops.toast)(&format!("Deleted {name}"));
+        let mut deleted = Vec::new();
+        for rel in rels {
+            match ops.vault.delete(&rel) {
+                Ok(()) => {
+                    (ops.close)(&rel);
+                    deleted.push(rel);
+                }
+                Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
             }
-            Err(e) => (ops.toast)(&format!("Cannot delete {name}: {e}")),
+        }
+        if !deleted.is_empty() {
+            (ops.toast)(&format!("Deleted {}", several(&deleted)));
         }
     });
 }
@@ -840,6 +866,12 @@ mod tests {
             rename_message("Renamed", "a.md", "b.md", 2, 3),
             "Renamed a.md, but 2 notes could not be updated; 3 notes have unsaved changes and were not reloaded"
         );
+    }
+
+    #[test]
+    fn several_names_one_path_and_counts_more() {
+        assert_eq!(several(&["a/b.md".to_string()]), "b.md");
+        assert_eq!(several(&["a.md".to_string(), "b/".to_string()]), "2 files");
     }
 
     #[test]

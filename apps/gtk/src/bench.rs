@@ -458,6 +458,34 @@ fn bench_git_stage(app: &Rc<App>) {
             println!("bench git_kept {below} {kept}");
         }
         println!("bench git_changes_rows {}", git.changes_rows());
+
+        // A folder's own buttons: all of `src` into the index and out again, then its Discard,
+        // whose question is printed and answered — and the permanent delete's too, where the
+        // scratch directory has no trash.
+        for tooltip in ["Stage", "Unstage"] {
+            println!("bench git_step folder {tooltip}");
+            click("src", tooltip);
+            settle().await;
+            println!("bench git_changes_rows {}", git.changes_rows());
+        }
+        println!("bench git_step folder Discard");
+        click("src", "Discard");
+        for answer in ["discard", "delete"] {
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let Some(dialog) = app
+                .window
+                .visible_dialog()
+                .and_downcast::<adw::AlertDialog>()
+            else {
+                continue;
+            };
+            let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
+            println!("bench git_dialog {heading:?} {body:?}");
+            dialog.emit_by_name::<()>("response", &[&answer]);
+            dialog.close();
+            settle().await;
+        }
+        println!("bench git_changes_rows {}", git.changes_rows());
         bench_quit(&app);
     });
 }

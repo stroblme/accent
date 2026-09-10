@@ -578,9 +578,9 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 register(Rc::downgrade(&compare));
             });
         }),
-        trash: Box::new(move |key| {
+        trash: Box::new(move |keys| {
             if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
-                fileops::trash(&ops, key);
+                fileops::trash_all(&ops, keys.to_vec());
             }
         }),
         changed: Box::new(move || {

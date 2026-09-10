@@ -99,9 +99,9 @@ pub struct Hooks {
     /// side's title and text, and what to call once the comparison exists so a refresh can reach
     /// it.
     pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
-    /// Move a vault file to the trash. Vault keys only, which is what leaves an untracked file
-    /// outside the vault without a Discard button.
-    pub trash: Box<dyn Fn(&str)>,
+    /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
+    /// leaves an untracked file outside the vault without a Discard button.
+    pub trash: Box<dyn Fn(&[String])>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
     /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
