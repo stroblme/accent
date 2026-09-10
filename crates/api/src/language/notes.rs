@@ -101,6 +101,15 @@ pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
     out
 }
 
+/// What the index knows a link in the note `rel` by. A markdown link names its file from the
+/// note's own folder, so it becomes a vault path first, as it did when the index stored it.
+fn target_of(rel: &str, link: &markdown::Link) -> String {
+    match link.kind {
+        LinkKind::Markdown => path::resolve(parent_dir(rel), &link.target),
+        _ => link.target.clone(),
+    }
+}
+
 /// The two ways a `[[…]]` link names `rel`: by its bare name — a note's stem, any other file's
 /// whole name — and by its path, which drops a note's extension too.
 pub(crate) fn link_names(rel: &str) -> (String, String) {
@@ -476,7 +485,7 @@ impl Notes {
             if link.kind == LinkKind::External || link.target.is_empty() {
                 return Ok(None);
             }
-            let Some(target) = locked(&self.index).resolve_target(&link.target)? else {
+            let Some(target) = locked(&self.index).resolve_target(&target_of(rel, link))? else {
                 return Ok(None);
             };
             // A link to something that is not a note has nothing to preview but its place.
@@ -524,7 +533,7 @@ impl Notes {
         // `[[#Heading]]` has no target: it points into the note the caret is in.
         let target = match link.target.is_empty() {
             true => rel.to_string(),
-            false => match locked(&self.index).resolve_target(&link.target)? {
+            false => match locked(&self.index).resolve_target(&target_of(rel, link))? {
                 Some(target) => target,
                 // A dangling link goes nowhere; offering to create the note is the app's business.
                 None => return Ok(Vec::new()),

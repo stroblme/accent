@@ -737,6 +737,15 @@ mod tests {
                 .items;
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].label, "My Logo.png");
+
+            // And what it writes is followed from the same folder.
+            f.vault
+                .change_document("sub/n.md", "[t](../Attachments/My%20Logo.png)".to_string())
+                .await
+                .unwrap();
+            let target = f.vault.definition("sub/n.md", at(1)).await.unwrap();
+            assert_eq!(target.len(), 1);
+            assert_eq!(target[0].path, "Attachments/My Logo.png");
         });
     }
 
