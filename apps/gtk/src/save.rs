@@ -376,6 +376,7 @@ impl App {
             Some(choice_row(&keep_theirs, &keep_mine)),
             "Changed on Disk",
         );
+        tab.comparing_answers(Alert::Compare);
     }
 
     /// Raise or drop the conflict question on the tab showing `rel`, from what is on disk now.
@@ -476,6 +477,7 @@ impl App {
                 Some(choice_row(&keep_theirs, &keep_mine)),
                 "Sync Conflict",
             );
+            tab.comparing_answers(Alert::Conflict);
         });
     }
 

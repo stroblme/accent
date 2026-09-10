@@ -231,6 +231,10 @@ impl App {
             // one file is opened again the same way.
             return;
         };
+        let session = match self.restored.get() {
+            true => session,
+            false => unrestored(vault.session(), session),
+        };
         if let Err(e) = vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
         }
@@ -304,5 +308,61 @@ fn sidebar_width(stored: i32) -> i32 {
     match stored >= 50 {
         true => stored,
         false => Session::default().sidebar_width,
+    }
+}
+
+/// What a window may write before it has put the stored session back.
+///
+/// Until then its tabs, zoom and layout are the defaults it was built with, not anything the
+/// reader chose, so the stored session stands and only what the window added since is merged in.
+/// A remote window closed before its host ever answered used to write its empty tab list over
+/// the tabs it was waiting to open.
+fn unrestored(mut stored: Session, now: Session) -> Session {
+    for key in now.open {
+        if !stored.open.contains(&key) {
+            stored.open.push(key);
+        }
+    }
+    stored.active = stored.active.or(now.active);
+    for rel in now.recent_notes.iter().rev() {
+        accent_core::config::touch(&mut stored.recent_notes, rel, RECENT_NOTES);
+    }
+    for action in now.recent_commands.iter().rev() {
+        accent_core::config::touch(&mut stored.recent_commands, action, RECENT_COMMANDS);
+    }
+    stored.pdf.extend(now.pdf);
+    stored
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A window that never restored keeps what was stored, and adds what it opened itself.
+    #[test]
+    fn a_window_that_never_restored_keeps_the_stored_tabs() {
+        let stored = Session {
+            open: vec!["a.md".into(), "b.md".into()],
+            active: Some("b.md".into()),
+            zoom: 1.5,
+            recent_commands: vec!["win.find".into()],
+            ..Session::default()
+        };
+        let merged = unrestored(stored.clone(), Session::default());
+        assert_eq!(merged.open, stored.open);
+        assert_eq!(merged.active, stored.active);
+        assert_eq!(merged.zoom, 1.5);
+        assert_eq!(merged.recent_commands, stored.recent_commands);
+
+        let now = Session {
+            open: vec!["b.md".into(), "c.md".into()],
+            active: Some("c.md".into()),
+            recent_commands: vec!["win.palette".into()],
+            ..Session::default()
+        };
+        let merged = unrestored(stored, now);
+        assert_eq!(merged.open, ["a.md", "b.md", "c.md"]);
+        assert_eq!(merged.active.as_deref(), Some("b.md"));
+        assert_eq!(merged.recent_commands, ["win.palette", "win.find"]);
     }
 }

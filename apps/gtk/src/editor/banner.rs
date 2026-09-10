@@ -33,8 +33,12 @@ impl Alert {
     }
 
     /// `None` for a banner that only reports, which DESIGN.md allows: a banner is a state that
-    /// persists, and not every state has an answer.
-    fn button(self) -> Option<&'static str> {
+    /// persists, and not every state has an answer. `None` too while the tab shows the comparison
+    /// the button opens, which `shown` names: pressing it again only built the same one.
+    fn button(self, shown: Option<Alert>) -> Option<&'static str> {
+        if shown == Some(self) {
+            return None;
+        }
         match self {
             Alert::Compare => Some("Compare"),
             Alert::Restore => Some("Save"),
@@ -96,15 +100,25 @@ impl Tab {
         self.render_banner();
     }
 
-    fn render_banner(&self) {
+    pub(super) fn render_banner(&self) {
         match self.alert() {
             Some(alert) => {
+                let shown = self.comparing.borrow().as_ref().and_then(|c| c.answers);
                 self.banner.set_title(alert.title());
-                self.banner.set_button_label(alert.button());
+                self.banner.set_button_label(alert.button(shown));
                 self.banner.set_revealed(true);
             }
             None => self.banner.set_revealed(false),
         }
+    }
+
+    /// Say that the comparison on screen is what the banner's `alert` button opens, so the button
+    /// goes until the comparison does.
+    pub fn comparing_answers(&self, alert: Alert) {
+        if let Some(comparing) = self.comparing.borrow_mut().as_mut() {
+            comparing.answers = Some(alert);
+        }
+        self.render_banner();
     }
 
     /// Take down the questions about the file on disk, and only those. A save or a reload answers
@@ -142,5 +156,17 @@ mod tests {
             "a report never displaces a question"
         );
         assert_eq!(banner_alert(&[Alert::ReadOnly]), Some(Alert::ReadOnly));
+    }
+
+    /// Pressing Compare while the comparison it opens is on screen only built it again.
+    #[test]
+    fn the_button_goes_while_the_tab_shows_what_it_opens() {
+        assert_eq!(Alert::Compare.button(None), Some("Compare"));
+        assert_eq!(Alert::Compare.button(Some(Alert::Compare)), None);
+        assert_eq!(
+            Alert::Compare.button(Some(Alert::Conflict)),
+            Some("Compare"),
+            "a conflict being resolved is not the disk being compared"
+        );
     }
 }

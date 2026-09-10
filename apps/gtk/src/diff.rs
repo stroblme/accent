@@ -119,10 +119,11 @@ impl Side {
     }
 }
 
-/// One column of the comparison. `root` is what the paned shows; the scroller is named so the
-/// two columns can share one vertical adjustment.
+/// One column of the comparison. `root` is what the paned shows, `header` its title row; the
+/// scroller is named so the two columns can share one vertical adjustment.
 pub struct Pane {
     pub root: gtk::Widget,
+    pub header: gtk::Widget,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
     pub scroller: gtk::ScrolledWindow,
@@ -173,11 +174,13 @@ pub fn pane(
         .child(&view)
         .build();
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.append(&header(title, None));
+    let header = header(title, None);
+    root.append(&header);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&scroller);
     Pane {
         root: root.upcast(),
+        header: header.upcast(),
         view,
         buffer,
         scroller,
@@ -497,7 +500,8 @@ fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32) {
 /// lands inside them — text inserted where a tag begins does not take the tag — and so does the
 /// character left when the first is deleted, where tags on the first character alone were lost
 /// to either edit and the line was laid out bare for a frame. The paragraph's own newline is left
-/// out because a tag ending at the next line's start is taken by text typed there.
+/// out because a tag ending at the next line's start is taken by text typed there. The first
+/// paragraph has no newline before it: [`reclaim_start`] makes up for that.
 fn pad(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
@@ -526,6 +530,40 @@ fn pad(
         }
         if px > 0 {
             buffer.apply_tag(&pad_tag(buffer, prefix, base + px), &start, &end);
+        }
+    }
+}
+
+fn is_pad(tag: &gtk::TextTag) -> bool {
+    tag.name()
+        .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
+}
+
+/// Put text typed at the very start of the buffer back under the first paragraph's padding.
+///
+/// That paragraph has no newline before it for [`pad`] to start its tags from, so a character
+/// typed ahead of it went in outside them: GTK laid the line out bare for a frame, and the
+/// relayout, finding no padding on its first character, measured it at the height it had last
+/// been laid out at, padding and all. Stretched back over what was typed, the tags cover the
+/// first character again and say what GTK last laid the line out with. The first pad tag that
+/// begins inside the line is the one the typing moved: the next paragraph's begins at the
+/// line's own newline. A first line that was empty is left alone, for that reason: its tags sit
+/// on that newline beside the next paragraph's.
+fn reclaim_start(buffer: &sourceview5::Buffer) {
+    let start = buffer.start_iter();
+    if start.tags().iter().any(is_pad) {
+        return;
+    }
+    let mut end = start;
+    end.forward_to_line_end();
+    let mut at = start;
+    while at.forward_to_tag_toggle(None::<&gtk::TextTag>) && at < end {
+        let moved: Vec<gtk::TextTag> = at.toggled_tags(true).into_iter().filter(is_pad).collect();
+        if !moved.is_empty() {
+            for tag in &moved {
+                buffer.apply_tag(tag, &start, &at);
+            }
+            return;
         }
     }
 }
@@ -643,6 +681,12 @@ impl Compare {
         // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
         new.scroller
             .set_vadjustment(Some(&old.scroller.vadjustment()));
+        // One height for both title rows: the editor's carries Stop Comparing and would stand
+        // taller, starting its column, and every row in it, that much lower. The group lives as
+        // long as the rows do.
+        let titles = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+        titles.add_widget(&old.header);
+        titles.add_widget(&new.header);
 
         let paned = gtk::Paned::new(gtk::Orientation::Horizontal);
         paned.set_start_child(Some(&old.root));
@@ -726,6 +770,14 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
+        // Text typed ahead of the first line's padding goes back under it on the keystroke itself:
+        // above 16 KB the editor refreshes the comparison only on its debounce, and the line
+        // would be laid out bare until then.
+        if let Some(mine) = editable {
+            let buffer = this.pane(mine).buffer.clone();
+            let id = buffer.connect_changed(reclaim_start);
+            connect(buffer.upcast(), id);
+        }
 
         for pane in &this.panes {
             *pane.pool.owner.borrow_mut() = this.weak.clone();
@@ -977,10 +1029,7 @@ impl Compare {
             let (start, end) = pane.buffer.bounds();
             let mut pads = Vec::new();
             pane.buffer.tag_table().foreach(|tag| {
-                if tag
-                    .name()
-                    .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
-                {
+                if is_pad(tag) {
                     pads.push(tag.clone());
                 }
             });
@@ -1033,6 +1082,11 @@ impl Compare {
         let views = [&self.panes[0].view, &self.panes[1].view];
         if !views.iter().all(|v| v.is_mapped()) {
             return;
+        }
+        // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
+        // `changed` handler.
+        if let Some(mine) = self.editable {
+            reclaim_start(&self.pane(mine).buffer);
         }
         // The companion takes the editor's page margins, so the first row of each starts level.
         if let Some(mine) = self.editable {
@@ -1144,6 +1198,18 @@ impl Compare {
             self.hidden.borrow().len(),
             self.overlays.borrow().len(),
         )
+    }
+
+    /// How many pixels lower the right column starts than the left one in the window: 0 is the
+    /// claim, and what [`Compare::misaligned`] cannot see, being in buffer coordinates.
+    pub fn skew(&self) -> i32 {
+        let top = |side: Side| {
+            self.pane(side)
+                .scroller
+                .compute_point(&self.paned, &gtk::graphene::Point::zero())
+                .map_or(0.0, |p| p.y())
+        };
+        (top(Side::New) - top(Side::Old)).round() as i32
     }
 
     /// Whether row `r` is in a hidden run right now.
@@ -1329,6 +1395,9 @@ pub struct DiffTab {
     pub page: adw::TabPage,
     key: String,
     compare: Rc<Compare>,
+    /// Both panes' views. They take the page's margins from the zoom here, having no editor
+    /// beside them for [`Compare::relayout`] to copy them from.
+    views: [sourceview5::View; 2],
     flavour: Flavour,
     name: String,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -1356,6 +1425,7 @@ impl DiffTab {
         };
         let old = pane(old.0, flavour, old.1, &name, language.as_ref());
         let new = pane(new.0, flavour, new.1, &name, language.as_ref());
+        let views = [old.view.clone(), new.view.clone()];
         let compare = Compare::new(old, new, None, false);
         let page = tabs.append(compare.widget());
         page.set_title(title);
@@ -1364,6 +1434,7 @@ impl DiffTab {
             page,
             key: key.to_string(),
             compare,
+            views,
             flavour,
             name,
             font: RefCell::new(None),
@@ -1376,8 +1447,20 @@ impl DiffTab {
         self.key.clone()
     }
 
+    /// The font and the page at `zoom`, as `Tab::set_font` sets them for an editor.
     pub fn set_font(&self, font: Option<&str>, zoom: f64) {
+        for view in &self.views {
+            editor::set_margins(view, zoom);
+        }
         editor::install_font(&self.font, self.flavour, font, zoom, &self.name);
+        // Heading markers hang in the left margin and are measured in the font, so they are
+        // measured again once the font has reached the views, as `Tab::rehang` does.
+        let compare = Rc::downgrade(&self.compare);
+        glib::idle_add_local_once(move || {
+            if let Some(compare) = compare.upgrade() {
+                compare.restyle();
+            }
+        });
     }
 
     pub fn restyle(&self) {
