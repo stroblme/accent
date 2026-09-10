@@ -21,7 +21,7 @@ pub use transfer::{download, upload};
 use self::paths::{
     already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
-use crate::dialogs::{alert, choose, form, labelled};
+use crate::dialogs::{alert, choose, focus_entry, form, labelled};
 use crate::pathfield::{completions, look_again, path_field};
 // Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
 // this module, which is where they used to live.
@@ -30,7 +30,7 @@ use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::{gio, glib};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -745,22 +745,13 @@ fn name_preview(
 
 /// Put the caret in the entry, optionally selecting only the first `stem` characters. Called
 /// after `choose` has presented the dialog, so the entry is in a window that can focus it.
-///
-/// Every grab of the entry selects the whole name (`gtk-entry-select-on-focus`), and the dialog
-/// grabs it once more on its second frame, when it opens its sheet (libadwaita's `map_tick_cb`).
-/// So the narrower selection waits for the frame after that, or it would be thrown away.
 fn focus_name(entry: &gtk::Entry, stem: Option<i32>) {
-    entry.grab_focus();
-    let Some(stem) = stem else { return };
-    let frames = Cell::new(0);
-    entry.add_tick_callback(move |entry, _| {
-        frames.set(frames.get() + 1);
-        if frames.get() < 3 {
-            return glib::ControlFlow::Continue;
+    match stem {
+        Some(stem) => focus_entry(entry, move |entry| entry.select_region(0, stem)),
+        None => {
+            entry.grab_focus();
         }
-        entry.select_region(0, stem);
-        glib::ControlFlow::Break
-    });
+    }
 }
 
 /// A refresh that is only known once the field holding it exists, which is the knot a completion

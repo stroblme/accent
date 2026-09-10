@@ -31,6 +31,25 @@ pub(crate) fn choose(
     dialog.present(parent);
 }
 
+/// Put the keyboard in `entry`, and then let `place` set its caret or its selection. Called after
+/// `choose` has presented the dialog, so the entry is in a window that can focus it.
+///
+/// Every grab of the entry selects its whole text (`gtk-entry-select-on-focus`), and the dialog
+/// grabs it once more on its second frame, when it opens its sheet (libadwaita's `map_tick_cb`).
+/// So `place` waits for the frame after that, or what it did would be thrown away.
+pub(crate) fn focus_entry(entry: &gtk::Entry, place: impl Fn(&gtk::Entry) + 'static) {
+    entry.grab_focus();
+    let frames = Cell::new(0);
+    entry.add_tick_callback(move |entry, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 3 {
+            return glib::ControlFlow::Continue;
+        }
+        place(entry);
+        glib::ControlFlow::Break
+    });
+}
+
 /// An alert with its responses in one call. `responses` are `(id, label, appearance)` in the
 /// order they are shown; the first one is also what closing the dialog answers, which is why it
 /// is Cancel everywhere this is called. `default` is the response Return activates.
