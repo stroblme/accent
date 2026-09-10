@@ -459,7 +459,7 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     area.set_content_width(lane_width(&row));
     area.queue_draw();
     refs.set_visible(!row.commit.refs.is_empty());
-    refs.set_text(&row.commit.refs.join(", "));
+    refs.set_text(&decorations(&row.commit.refs));
     summary.set_text(&row.commit.summary);
     meta.set_text(&format!(
         "{} · {}",
@@ -586,13 +586,25 @@ fn ago(now: i64, then: i64) -> String {
 fn commit_tooltip(c: &Commit) -> String {
     let head = match c.refs.is_empty() {
         true => short(&c.id),
-        false => format!("{}\n{}", c.refs.join(", "), short(&c.id)),
+        false => format!("{}\n{}", decorations(&c.refs), short(&c.id)),
     };
     let message = match c.body.is_empty() {
         true => c.summary.clone(),
         false => format!("{}\n\n{}", c.summary, c.body),
     };
     format!("{head}\n\n{message}")
+}
+
+/// The decorations as `git log` words them: `HEAD -> main, origin/main, tag: v1`.
+fn decorations(refs: &[git::Ref]) -> String {
+    refs.iter()
+        .map(|r| match (r.kind, r.head) {
+            (git::RefKind::Tag, _) => format!("tag: {}", r.name),
+            (git::RefKind::LocalBranch, true) => format!("HEAD -> {}", r.name),
+            _ => r.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether a freshly-read first page says the history has not moved: the same commits, whole and
@@ -648,11 +660,23 @@ mod tests {
             "abcdef1\n\nsubject\n\nwhy it happened\nand a second line"
         );
 
-        c.refs = vec!["HEAD -> main".to_string(), "origin/main".to_string()];
+        c.refs = vec![
+            ref_to("main", git::RefKind::LocalBranch, true),
+            ref_to("origin/main", git::RefKind::RemoteBranch, false),
+            ref_to("v1", git::RefKind::Tag, false),
+        ];
         assert_eq!(
             commit_tooltip(&c),
-            "HEAD -> main, origin/main\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
+            "HEAD -> main, origin/main, tag: v1\nabcdef1\n\nsubject\n\nwhy it happened\nand a second line"
         );
+    }
+
+    fn ref_to(name: &str, kind: git::RefKind, head: bool) -> git::Ref {
+        git::Ref {
+            name: name.to_string(),
+            kind,
+            head,
+        }
     }
 
     #[test]
@@ -675,7 +699,7 @@ mod tests {
         );
 
         let mut decorated = page.clone();
-        decorated[0].refs = vec!["main".to_string()];
+        decorated[0].refs = vec![ref_to("main", git::RefKind::LocalBranch, false)];
         assert!(!same_head(&page, &decorated), "a branch moved onto it");
     }
 }
