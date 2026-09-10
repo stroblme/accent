@@ -29,9 +29,9 @@ type AppAction = fn(&Rc<Shell>, &adw::Application);
 ///
 /// libadwaita detaches a dragged page from its view for the length of the drag, and neither
 /// `attach_page` nor the page's own view is public, so nothing can give a page a view back except
-/// the `create-window` handler, which libadwaita calls on the source view the moment a drop is
-/// declined. Our drop zones therefore record where the drop landed and decline it; the handler
-/// hands back the tab view named here and libadwaita does the attaching.
+/// the `create-window` handler, which libadwaita calls on the source view when a drop outside its
+/// own tab bars has finished. Our drop zones therefore take the drop and record where it landed;
+/// the handler hands back the tab view named here and libadwaita does the attaching.
 pub struct Landing {
     app: Rc<App>,
     pane: Rc<Pane>,
@@ -99,6 +99,24 @@ impl Shell {
     fn record(&self, gtk_app: &adw::Application, action: &str) {
         if let Some(app) = gtk_app.active_window().and_then(|w| self.app_at(&w)) {
             app.command_used(action);
+        }
+    }
+
+    /// Put a config into effect in every window. There is one config per process, so a preference
+    /// changed in one window — in its dialog or anywhere else (`App::config_changed`) — is the
+    /// same preference in all of them.
+    pub fn apply_config(&self, config: &Config) {
+        // The theme is the display's rather than a window's, so it goes on once.
+        theme::apply(config.theme);
+        // Cloned out of the borrow: applying a config reaches a long way into each window.
+        let apps: Vec<Rc<App>> = self
+            .windows
+            .borrow()
+            .iter()
+            .map(|(_, app)| app.clone())
+            .collect();
+        for app in apps {
+            app.apply_config(config);
         }
     }
 
@@ -249,19 +267,37 @@ impl Shell {
     /// It used to land on the start screen, which then showed a button that opened this dialog —
     /// a screen in the way of the thing it was asking for. The start screen is still what a bare
     /// launch with no vault lands on, where it also lists the recent ones.
+    ///
+    /// A remote window's folders are on its host, so there the picker is the Open Remote form,
+    /// filled in with this window's address: a vault opened at a mistyped path is steered from
+    /// here. What it picks replaces this window — one window per vault, and the vault this one
+    /// was on is the one being corrected — unless it is the same vault, which only raises it.
     fn choose_vault(self: &Rc<Self>, gtk_app: &adw::Application) {
-        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
         let parent = gtk_app.active_window();
+        let asking = parent.as_ref().and_then(|w| self.app_at(w));
+        if let Some(app) = asking
+            && let Some(vault) = app.vault()
+            && let Some(remote) = vault.remote()
+        {
+            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+            let (from, here) = (app.window.downgrade(), vault.key().to_owned());
+            start::connect_dialog(&app.window, Some(remote.url()), move |address| {
+                let root = PathBuf::from(address);
+                let replace = root != here;
+                shell.open_from_start(&gtk_app, root);
+                // Once the new one is up, so the application never stands at zero windows.
+                if let Some(window) = from.upgrade().filter(|_| replace) {
+                    window.close();
+                }
+            });
+            return;
+        }
+        let dialog = gtk::FileDialog::builder().title("Open Vault").build();
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
         dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |result| {
             // A dismissed chooser is an error here, and not one worth saying anything about.
-            let Some(path) = result.ok().and_then(|folder| folder.path()) else {
-                return;
-            };
-            shell.open_vault(&gtk_app, path, None);
-            // The start screen has done its job if it was what asked.
-            if let Some(window) = shell.start.upgrade() {
-                window.close();
+            if let Some(path) = result.ok().and_then(|folder| folder.path()) {
+                shell.open_from_start(&gtk_app, path);
             }
         });
     }
@@ -274,12 +310,8 @@ impl Shell {
             return;
         };
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-        start::connect_dialog(&window, move |address| {
-            shell.open_vault(&gtk_app, PathBuf::from(address), None);
-            // The start screen has done its job if it was what asked.
-            if let Some(window) = shell.start.upgrade() {
-                window.close();
-            }
+        start::connect_dialog(&window, None, move |address| {
+            shell.open_from_start(&gtk_app, PathBuf::from(address));
         });
     }
 
@@ -290,16 +322,20 @@ impl Shell {
         }
         let window = start::present(gtk_app, self.config.clone(), {
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |root| {
-                shell.open_vault(&gtk_app, root, None);
-                // The start window has done its job. It is reached through the shell rather than
-                // captured, which is what keeps the closure it lives in out of its own cycle.
-                if let Some(window) = shell.start.upgrade() {
-                    window.close();
-                }
-            }
+            move |root| shell.open_from_start(&gtk_app, root)
         });
         self.start.set(Some(&window));
+    }
+
+    /// Open a vault picked on the start screen or in one of the dialogs that stand in for it, and
+    /// close the start screen if one is up: it has done its job whichever window asked. It is
+    /// reached through the shell rather than captured, which keeps the start screen's own
+    /// callback out of a cycle with the window it lives in.
+    fn open_from_start(self: &Rc<Self>, gtk_app: &adw::Application, root: PathBuf) {
+        self.open_vault(gtk_app, root, None);
+        if let Some(window) = self.start.upgrade() {
+            window.close();
+        }
     }
 
     /// One vault, one window (VS Code's rule): a vault that already has a window raises it rather
@@ -375,19 +411,15 @@ impl Shell {
     }
 
     /// A dragged tab was let go over `pane`. Recorded rather than moved: see [`Landing`].
-    pub fn aim(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
+    ///
+    /// Spent by `landed`, at whichever attach ends the drag. That is a round trip away, through
+    /// the X server or the compositor, so nothing here times it out; `App::set_drop_active`
+    /// drops one left over when the next drag begins.
+    pub fn aim(&self, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
         *self.landing.borrow_mut() = Some(Landing {
             app: app.clone(),
             pane: pane.clone(),
             zone,
-        });
-        // Spent by `create-window` in the same turn of the main loop; this is only so a drop that
-        // never reaches one cannot misdirect the next drag.
-        let shell = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(shell) = shell.upgrade() {
-                *shell.landing.borrow_mut() = None;
-            }
         });
     }
 
@@ -410,24 +442,25 @@ impl Shell {
     }
 
     /// A page has been attached to `pane`, which is where a drag ends. Two things may be owed:
-    /// the split the drop asked for, and — for a page out of another window — the move into this
-    /// window's bookkeeping.
+    /// what the drop asked for — a split at an edge, the end of the bar in the middle — and, for
+    /// a page out of another window, the move into this window's bookkeeping.
     ///
-    /// The split waits for an idle because this runs inside libadwaita's drag handling, and
-    /// re-parenting the pane it is emitting from fails GTK's own assertion.
+    /// Either waits for an idle, because this runs inside libadwaita's drag handling: re-parenting
+    /// the pane it is emitting from fails GTK's own assertion, and the attach has not selected
+    /// the page yet.
     pub fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
-        let side = self
+        let zone = self
             .landing
             .borrow_mut()
             .take()
             .filter(|l| Rc::ptr_eq(&l.pane, pane))
-            .and_then(|l| match l.zone {
-                Zone::Split(side) => Some(side),
-                Zone::Here => None,
-            });
-        if let Some(side) = side {
+            .map(|l| l.zone);
+        if let Some(zone) = zone {
             let (app, pane, page) = (app.clone(), pane.clone(), page.clone());
-            glib::idle_add_local_once(move || app.split_page(&pane, side, &page));
+            glib::idle_add_local_once(move || match zone {
+                Zone::Split(side) => app.split_page(&pane, side, &page),
+                Zone::Here => app.move_in(&pane, &page),
+            });
         }
         // Before the adoption, which is queued behind it: the note is reopened in whichever pane
         // the window is working in, and a split has just made that the new one.

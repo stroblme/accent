@@ -92,7 +92,7 @@ impl Remote {
             child: Mutex::new(None),
             events,
         });
-        remote.clone().start();
+        remote.clone().start(false);
         remote
     }
 
@@ -133,11 +133,24 @@ impl Remote {
     /// Try again after a failure. The master usually survives whatever killed the server, so the
     /// second attempt is normally the fast one.
     pub fn reconnect(self: &Arc<Self>) {
-        if matches!(self.state(), State::Connecting) {
+        self.retry(false);
+    }
+
+    /// The same, for an attempt nobody asked for: the window's own retries after a dropped link.
+    /// It never prompts, so a key that wants a passphrase fails it instead of raising a dialog;
+    /// the attempt that may ask is [`reconnect`](Self::reconnect).
+    pub fn reconnect_quietly(self: &Arc<Self>) {
+        self.retry(true);
+    }
+
+    fn retry(self: &Arc<Self>, quiet: bool) {
+        let mut state = self.locked(&self.state);
+        if *state == State::Connecting {
             return;
         }
-        *self.locked(&self.state) = State::Connecting;
-        self.clone().start();
+        *state = State::Connecting;
+        drop(state);
+        self.clone().start(quiet);
     }
 
     // ------------------------------------------------------------- calling
@@ -211,6 +224,9 @@ impl Remote {
     }
 
     /// Tell a freshly started server about the documents the window still has open.
+    ///
+    /// All at once, a thread each: the server answers every request on a thread of its own, so
+    /// ten tabs cost the reconnect one round trip rather than ten.
     fn reopen(&self, client: &Client) {
         let open: Vec<(String, String, String)> = self
             .locked(&self.docs)
@@ -221,14 +237,19 @@ impl Remote {
             return;
         }
         self.say("Reopening the documents");
-        for (rel, language, text) in open {
-            // One that will not reopen is one tab without a language, not a failed connection.
-            if let Err(e) =
-                client.call::<serde_json::Value>("open_document", json!([rel, language, text]))
-            {
-                tracing::warn!("reopening {rel} on the new server: {e}");
+        std::thread::scope(|s| {
+            for (rel, language, text) in &open {
+                s.spawn(move || {
+                    // One that will not reopen is one tab without a language, not a failed
+                    // connection.
+                    if let Err(e) = client
+                        .call::<serde_json::Value>("open_document", json!([rel, language, text]))
+                    {
+                        tracing::warn!("reopening {rel} on the new server: {e}");
+                    }
+                });
             }
-        }
+        });
     }
 
     /// The client, or why there is not one.
@@ -425,15 +446,31 @@ impl Remote {
 
     // ----------------------------------------------------------- connect
 
-    fn start(self: Arc<Self>) {
+    fn start(self: Arc<Self>, quiet: bool) {
         let _ = std::thread::Builder::new()
             .name("accent-connect".to_string())
-            .spawn(move || match self.connect() {
+            .spawn(move || match self.connect(quiet) {
                 Ok(()) => {
                     // Said under the lock, so a loss the reader reports at once lands after it.
+                    // One it saw before now, while the documents were reopened or the forwards
+                    // put back, found the state still Connecting, which it does not speak for;
+                    // the client it left dead is what says so here instead.
                     let mut state = self.locked(&self.state);
-                    *state = State::Connected;
-                    let _ = self.events.send(Event::Connected);
+                    let dead = self
+                        .locked(&self.client)
+                        .as_ref()
+                        .is_none_or(|c| c.is_dead());
+                    let event = match dead {
+                        false => {
+                            *state = State::Connected;
+                            Event::Connected
+                        }
+                        true => {
+                            *state = State::Disconnected(self.lost());
+                            Event::Disconnected(self.lost())
+                        }
+                    };
+                    let _ = self.events.send(event);
                 }
                 Err(e) => self.disconnect(&e),
             });
@@ -472,7 +509,7 @@ impl Remote {
     /// It holds the state and the channel rather than the `Remote`: were it the last holder,
     /// dropping it there would run [`teardown`](Self::teardown), which joins the very thread it is
     /// on. Only a connection that was up can be lost: one still being made fails its own `hello`
-    /// and says why, or is found dead by the first call after [`Event::Connected`].
+    /// and says why, or is found dead where [`start`](Self::start) would have said it was up.
     fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
         let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
         Box::new(move || {
@@ -484,7 +521,7 @@ impl Remote {
         })
     }
 
-    fn connect(&self) -> Result<(), String> {
+    fn connect(&self, quiet: bool) -> Result<(), String> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
         self.teardown();
@@ -493,7 +530,7 @@ impl Remote {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let out = self
-            .ssh(&ssh::master(&self.url, &self.ctl))
+            .ssh(&ssh::master(&self.url, &self.ctl, quiet))
             // The master must not read our stdin, and its own prompts go through SSH_ASKPASS.
             .stdin(Stdio::null())
             .output()

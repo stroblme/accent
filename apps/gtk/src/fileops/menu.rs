@@ -15,7 +15,8 @@ const GROUP: &str = "fileops";
 ///
 /// `row` is the row that was clicked, as (path, is a directory), or `None` where the click landed
 /// on no row at all — the blank area below the last one. Creating is offered in all three cases,
-/// and everything else needs a path, so a menu opened over nothing holds the create items alone.
+/// and everything else but [`listing`] needs a path, so a menu opened over nothing holds the create
+/// items and that alone.
 ///
 /// ponytail: the popover is parented to the box rather than to the `GtkListView` inside it,
 /// because GTK only re-presents a popover from its parent's `allocate_native_children`, which a
@@ -52,6 +53,7 @@ pub fn context_menu(
     // blank space. Splitting is not here at all: it opens a note beside the active tab, which is
     // what the tab's own menu and `win.split-*` are for, not something done to a path.
     let Some((rel, is_dir)) = row else {
+        menu.append_section(None, &listing());
         return popup(host, &menu, anchor);
     };
     // Rename is the move as well as the name: a path typed into it carries the file, which is
@@ -81,7 +83,18 @@ pub fn context_menu(
     let danger = gio::Menu::new();
     danger.append_item(&item("Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
+    menu.append_section(None, &listing());
     popup(host, &menu, anchor);
+}
+
+/// The section every tree menu ends with, blank area included, as GTK's own file chooser has it:
+/// how the listing looks, which is no single row's business. A window action, so it resolves up
+/// from the host and is the same preference the palette toggles.
+fn listing() -> gio::Menu {
+    let action = "win.show-hidden-files";
+    let section = gio::Menu::new();
+    section.append(Some(crate::actions::label_of(action)), Some(action));
+    section
 }
 
 /// The folder a row stands for: the folder itself, the one holding the file, and the vault root

@@ -2,6 +2,7 @@
 //! where a drop may land, and what to call the move afterwards. Pure, and tested as such.
 
 use accent_core::path::{basename, parent_dir};
+use accent_core::walk::out_of_reach;
 
 /// Every level of `dir`, outermost first: `a/b/c` yields `a`, `a/b`, `a/b/c`. What a `mkdir -p`
 /// would have had to make, so a failure can say how far it got.
@@ -56,9 +57,9 @@ pub fn move_dest(from: &str, dir: &str) -> Option<String> {
 /// The folder a half-typed path points into and the last segment, which is the file's own name.
 ///
 /// `base` is the folder the path is typed in: the file's own for Rename, the clicked row's for
-/// New File. `..` walks back up out of it and stops at the vault root, and a segment starting with
-/// a dot is refused because the tree hides one. The name comes back as typed, empty included, so
-/// that completion can read a path that is still being written.
+/// New File. `..` walks back up out of it and stops at the vault root. A dot-named folder is taken
+/// like any other, and one the vault never lists (`.git`, `.trash`) is refused. The name comes back
+/// as typed, empty included, so that completion can read a path that is still being written.
 pub(super) fn split_typed(base: &str, typed: &str) -> Result<(String, String), &'static str> {
     let typed = typed.trim();
     let (dirs, name) = typed.rsplit_once('/').unwrap_or(("", typed));
@@ -73,7 +74,7 @@ pub(super) fn split_typed(base: &str, typed: &str) -> Result<(String, String), &
             ".." => {
                 parts.pop().ok_or("That path leaves this vault.")?;
             }
-            dir if dir.starts_with('.') => return Err("Names cannot start with a dot."),
+            dir if out_of_reach(dir) => return Err(RESERVED),
             dir => parts.push(dir),
         }
     }
@@ -82,20 +83,23 @@ pub(super) fn split_typed(base: &str, typed: &str) -> Result<(String, String), &
 
 /// Where a typed name puts the file, vault-relative: a plain name lands in `dir`, and one carrying
 /// `/` is a path relative to it, `..` walking back up out of it. `Err` where the path would leave
-/// the vault or name something the tree hides.
+/// the vault or name something the vault never lists.
 ///
 /// The extension is whatever was typed, in both dialogs. A note renamed out of `.md` stops being
 /// one, which the dialog asks about rather than quietly preventing.
 pub(super) fn typed_path(dir: &str, typed: &str) -> Result<String, &'static str> {
     let (dest, name) = split_typed(dir, typed)?;
-    if name.is_empty() || name == ".." {
+    if name.is_empty() || name == "." || name == ".." {
         return Err("Enter a name.");
     }
-    if name.starts_with('.') {
-        return Err("Names cannot start with a dot.");
+    if out_of_reach(&name) {
+        return Err(RESERVED);
     }
     Ok(child_path(&dest, &name))
 }
+
+/// Why a typed path may not name `.git`, `.trash` or a temporary: see [`out_of_reach`].
+const RESERVED: &str = "That name is reserved.";
 
 /// [`typed_path`] from the folder `rel` is in, which is what Rename types against.
 pub(super) fn renamed_path(rel: &str, typed: &str) -> Result<String, &'static str> {
@@ -181,12 +185,23 @@ mod tests {
         assert!(to("../../../tue.md").is_err());
         assert!(renamed_path("mon.md", "../tue.md").is_err());
         assert_eq!(renamed_path("a/x.pdf", "b/y.pdf"), Ok("a/b/y.pdf".into()));
-        // Nothing typed, nothing but separators, and a hidden name at either end.
+        // Nothing typed, nothing but separators, and no name at all.
         assert!(to("").is_err());
         assert!(to("  ").is_err());
         assert!(to("..").is_err());
-        assert!(to(".hidden.md").is_err());
-        assert!(to(".config/tue.md").is_err());
+        assert!(to(".").is_err());
+    }
+
+    #[test]
+    fn typed_path_takes_a_dot_named_name_but_nothing_the_vault_never_lists() {
+        assert_eq!(typed_path("", ".gitignore"), Ok(".gitignore".into()));
+        assert_eq!(
+            typed_path("Code", ".config/init.lua"),
+            Ok("Code/.config/init.lua".into())
+        );
+        // What is made under `.git` or `.trash` is never listed, whatever Show Hidden Files says.
+        assert!(typed_path("", ".git/hooks/x").is_err());
+        assert!(typed_path("Notes", ".trash").is_err());
     }
 
     #[test]

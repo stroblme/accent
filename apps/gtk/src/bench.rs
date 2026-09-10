@@ -16,7 +16,8 @@ use super::*;
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
-/// was styled on the keystroke or on the debounce.
+/// was styled on the keystroke or on the debounce, then whether a copy and paste out of a styled
+/// line brings its styling along.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up.
@@ -36,8 +37,12 @@ use super::*;
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
 ///
-/// `ACCENT_BENCH_CLOSE=1` opens a note, quits, and prints how many references to the vault the
-/// closed window left behind; it exits 1 unless that is 0.
+/// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
+/// and prints how many references to the vault the closed window left behind and whether either
+/// dialog outlived it; it exits 1 unless nothing did.
+///
+/// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
+/// Show Hidden Files off and on again, printing them after each.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -55,6 +60,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
+    let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -71,6 +77,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !paths
         && !shell_keys
         && !close
+        && !hidden
     {
         return;
     }
@@ -100,6 +107,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if close {
             return bench_close(&app);
+        }
+        if hidden {
+            return bench_hidden(&app);
         }
         if paths {
             return bench_paths(&app);
@@ -190,10 +200,11 @@ fn bench_templates(app: &Rc<App>) {
     bench_quit(app);
 }
 
-/// Quit with a note open, the way Ctrl+Q does, and count the vault's references once the window
-/// is gone. The application is held so the process outlives its last window, and the main loop
-/// gets up to three seconds to let go of whatever was still in flight. Every reference left is a
-/// closed window keeping its vault open — on a remote one, its `serve` session and its forwards.
+/// Cancel two dialogs and say whether either outlived its close, then quit with a note open, the
+/// way Ctrl+Q does, and count the vault's references once the window is gone. The application is
+/// held so the process outlives its last window, and the main loop gets up to three seconds to let
+/// go of whatever was still in flight. Every reference left is a closed window keeping its vault
+/// open — on a remote one, its `serve` session and its forwards.
 fn bench_close(app: &Rc<App>) {
     let (Some(vault), Some(gtk_app)) = (app.vault(), app.window.application()) else {
         return bench_quit(app);
@@ -208,9 +219,23 @@ fn bench_close(app: &Rc<App>) {
         app.open_path(&note.rel_path);
     }
     // Nothing below holds the `App`: the close has to be what lets it go.
-    let vault = Arc::downgrade(vault);
+    let (app, vault) = (Rc::downgrade(app), Arc::downgrade(vault));
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
+        let dialogs = app
+            .upgrade()
+            .map_or_else(Vec::new, |app| bench_dialogs(&app));
+        // Past the close animation, so a dialog still alive is one its close did not let go of.
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let mut kept = 0;
+        for (heading, dialog) in dialogs {
+            let alive = dialog.upgrade().is_some();
+            println!(
+                "bench dialog_kept_after_cancel {heading:?} {}",
+                u8::from(alive)
+            );
+            kept += usize::from(alive);
+        }
         println!("bench vault_refs_open {}", vault.strong_count());
         let _hold = gtk_app.hold();
         gtk_app.activate_action("quit", None);
@@ -222,8 +247,93 @@ fn bench_close(app: &Rc<App>) {
         }
         let held = vault.strong_count();
         println!("bench vault_refs_after_close {held}");
-        std::process::exit(i32::from(held > 0));
+        std::process::exit(i32::from(held > 0 || kept > 0));
     });
+}
+
+/// Cancel a New File dialog and, over the open note, an Unsaved Changes one: a dialog that
+/// outlives its close keeps whatever its handlers hold, and New File's path field completes from
+/// the vault.
+fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+    let _ = WidgetExt::activate_action(&app.window, "win.new-file", None);
+    let mut dialogs = vec![bench_cancel(app)];
+    if let Some(tab) = app.open_tabs().into_iter().next() {
+        app.ask_unsaved(&tab, &SaveError::Offline, |_, _| {});
+        dialogs.push(bench_cancel(app));
+    }
+    dialogs.into_iter().flatten().collect()
+}
+
+/// Close the window's topmost dialog the way Escape does, printing the response that answers,
+/// and keep its heading and a weak reference to it.
+fn bench_cancel(app: &App) -> Option<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+    let dialog = app
+        .window
+        .visible_dialog()?
+        .downcast::<adw::AlertDialog>()
+        .ok()?;
+    let heading = dialog.heading()?;
+    dialog.connect_response(None, {
+        let heading = heading.clone();
+        move |_, response| println!("bench dialog_response {heading:?} {response}")
+    });
+    dialog.close();
+    Some((heading, dialog.downgrade()))
+}
+
+/// Print the tree's rows as drawn, then fire Show Hidden Files twice, the way its menu item and
+/// the palette do, and print them after each. The headless image has no pointer, so this is how
+/// "dot-named rows are dimmed, `.git` is never there, and the toggle takes them away and brings
+/// them back" is seen rather than claimed.
+fn bench_hidden(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for step in 0..3 {
+            if step > 0 {
+                let _ = WidgetExt::activate_action(&app.window, "win.show-hidden-files", None);
+                // The listing is asked for again and lands from a worker thread.
+                glib::timeout_future(Duration::from_millis(500)).await;
+            }
+            let state = app
+                .window
+                .lookup_action("show-hidden-files")
+                .and_then(|a| a.state())
+                .and_then(|s| s.get::<bool>());
+            println!("bench show_hidden {state:?}");
+            if let Some(tree) = app.tree.get() {
+                for (rel, dim) in drawn_rows(tree.view()) {
+                    println!("bench tree_row {rel} dim={}", u8::from(dim));
+                }
+            }
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Every row the list has a widget bound to, as its path and whether its label is dimmed.
+fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
+    let mut rows = Vec::new();
+    let mut todo = vec![view.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if let Some(expander) = widget.downcast_ref::<gtk::TreeExpander>() {
+            let row = expander.list_row().and_then(|row| row.item());
+            let dim = expander
+                .child()
+                .and_then(|row| row.last_child())
+                .is_some_and(|label| label.has_css_class("dim-label"));
+            if let Some(row) = row.as_ref().and_then(tree::decode) {
+                rows.push((row.rel, dim));
+            }
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    rows.sort();
+    rows
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the
@@ -526,7 +636,8 @@ fn bench_chrome_levels(app: &Rc<App>) {
 }
 
 /// What the chrome and the panes carry: the header's and the sidebar's fade, the active note's
-/// minimap, how many panes recede, and whether the active note's line fade is on.
+/// minimap, how many panes recede, whether the active note's line fade is on, and whether the
+/// dividers are gone.
 fn chrome_state(app: &Rc<App>) -> String {
     let hidden = |w: &gtk::Widget| w.has_css_class("chrome-hidden");
     let tab = app.active();
@@ -537,13 +648,14 @@ fn chrome_state(app: &Rc<App>) -> String {
         .filter(|pane| pane.widget().has_css_class("chrome-away"))
         .count();
     format!(
-        "hidden={} sidebar={} map={} away={away} fade={}",
+        "hidden={} sidebar={} map={} away={away} fade={} dividers={}",
         hidden(app.header.upcast_ref()),
         app.sidebar.get().is_some_and(|s| hidden(s.widget())),
         tab.as_ref().is_some_and(|t| hidden(t.minimap())),
         tab.as_ref()
             .and_then(|t| t.ghost_view())
             .is_some_and(|view| view.fading()),
+        !app.window.has_css_class("dividers-hidden"),
     )
 }
 
@@ -800,9 +912,63 @@ fn bench_style(app: &Rc<App>, rel: &str) {
         println!("bench style_far_sync {}", bench_heading_at(&tab, 0));
         glib::timeout_add_local_once(Duration::from_millis(300), move || {
             println!("bench style_debounced {}", bench_heading_at(&tab, 0));
-            bench_quit(&app);
+            glib::spawn_future_local(async move {
+                bench_style_paste(&tab).await;
+                bench_quit(&app);
+            });
         });
     });
+}
+
+/// Copy part of a styled line, paste it into a plain one, and print whether the pasted text still
+/// carries a heading's or a bold's tags. GTK's own copy is rich text, and pasting it back inserts
+/// the copy run by run with each run's tags applied after `changed` has re-tagged the text, so the
+/// last run kept its tags: a selection ending one character into a bold word left that character
+/// bold. Every paste lands mid-line, so nothing it brings can start a heading of its own.
+async fn bench_style_paste(tab: &Rc<Tab>) {
+    const HEADING: &str = "# Heading here\nplain line\n";
+    const BOLD: &str = "Some **bold** words\nplain line\n";
+    for (case, text, selected, middle_click) in [
+        ("heading", HEADING, "ading he", false),
+        ("bold_tail", BOLD, "Some **b", false),
+        // The primary selection a middle click pastes is still GTK's rich copy.
+        ("primary", BOLD, "Some **b", true),
+    ] {
+        tab.set_text(text);
+        // ASCII throughout, so a byte offset is also the character offset the buffer counts in.
+        let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
+        let len = selected.len() as i32;
+        tab.buffer.select_range(
+            &tab.buffer.iter_at_offset(at(selected)),
+            &tab.buffer.iter_at_offset(at(selected) + len),
+        );
+        let into = at("line");
+        if middle_click {
+            // What the view does on a middle click: the selection stays, the text goes in where
+            // the click was.
+            let clipboard = tab.view.primary_clipboard();
+            let iter = tab.buffer.iter_at_offset(into);
+            tab.buffer.paste_clipboard(&clipboard, Some(&iter), true);
+        } else {
+            tab.view.emit_copy_clipboard();
+            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(into));
+            tab.view.emit_paste_clipboard();
+        }
+        // The clipboard is read asynchronously, even when it is this process that owns it.
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let over = |name: &str| {
+            tab.buffer.tag_table().lookup(name).is_some_and(|tag| {
+                (into..into + len).any(|at| tab.buffer.iter_at_offset(at).has_tag(&tag))
+            })
+        };
+        // The line it landed in, so a paste that brought nothing cannot pass for a clean one.
+        let line = tab.text().lines().nth(1).unwrap_or_default().to_string();
+        println!(
+            "bench style_paste case={case} line={line:?} h1={} strong={}",
+            over("h1"),
+            over("strong")
+        );
+    }
 }
 
 /// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a
@@ -1064,13 +1230,14 @@ fn bench_shell_keys(app: &Rc<App>) {
 /// claim) — before the first hunk is taken from Theirs, the hidden run is opened, and the same
 /// is read again, with the button of the changed-on-disk banner that stands over it (none while
 /// the comparison is up, Compare once it has gone). Then two blobs in a tab of their own, at a
-/// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under git, last, the working tree against the index
-/// in the note's tab: whether it opened with the run before the first change folded and the caret
-/// on that change, and then a character typed into it, see [`bench_compare_type`]. That half wants
-/// a scratch repository whose committed note differs from the fifty lines in a few places, one of
-/// them a long line where the drill writes a short one, so the change is padded and the view has
-/// room to scroll. With that long line the first, typing at the start of the change is typing at
-/// the start of the buffer, which is the one place a padding tag has no newline before it.
+/// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under
+/// git, last, the working tree against the index in the note's tab: whether it opened with the run
+/// before the first change folded and the caret on that change, and then a character typed into
+/// it, see [`bench_compare_type`]. That half wants a scratch repository whose committed note
+/// differs from the fifty lines in a few places, one of them a long line where the drill writes a
+/// short one, so the change is padded and the view has room to scroll. With that long line the
+/// first, typing at the start of the change is typing at the start of the buffer, which is the one
+/// place a padding tag has no newline before it.
 fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();

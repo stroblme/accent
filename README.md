@@ -1,7 +1,7 @@
 # Accent
 
 An opinionated text editor which can serve as a knowledge management system and IDE in one software as a result of my personal frustration with other software.
-The core engine is written in [Rust]() ensuring that Accent never takes longer than a second to start and stays stable even being faced with huge vaults.
+The core engine is written in [Rust]() ensuring that Accent never takes longer than a second to start and stays stable even when being faced with huge vaults.
 UI and UX focus on efficiency paired with a aggressively minimal design aimed to remove all the clutter.
 
 Some features:

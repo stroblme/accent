@@ -104,6 +104,17 @@ pub fn resolve(dir: &str, target: &str) -> String {
     parts.join("/")
 }
 
+/// The link from a note at `dir` to the vault path `rel`, which [`resolve`] turns back into
+/// `rel`: `sub/a.md` from `sub/deep` is `../a.md`, and from the root it is `sub/a.md`.
+pub fn relative(dir: &str, rel: &str) -> String {
+    let from: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+    let to: Vec<&str> = rel.split('/').collect();
+    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - shared];
+    parts.extend(&to[shared..]);
+    parts.join("/")
+}
+
 /// The half-open `rel_path` range that is exactly the descendants of `rel`: `[rel/, rel0)`,
 /// because `'0'` is the byte after `'/'`. Keeps a subtree query on the `rel_path` index where a
 /// `LIKE` would fall back to a scan.
@@ -164,5 +175,23 @@ mod tests {
         assert_eq!(resolve("", "a.md"), "a.md");
         assert_eq!(resolve("sub", "../../a.md"), "a.md");
         assert_eq!(resolve("sub", "/a.md"), "a.md");
+    }
+
+    #[test]
+    fn a_relative_link_resolves_back_to_its_path() {
+        assert_eq!(relative("sub/deep", "sub/a.md"), "../a.md");
+        assert_eq!(relative("sub", "sub/a.md"), "a.md");
+        assert_eq!(relative("", "Attachments/x.png"), "Attachments/x.png");
+        // A shared prefix of the names is not a shared folder.
+        assert_eq!(relative("sub", "sub2/a.md"), "../sub2/a.md");
+        for (dir, rel) in [
+            ("a/b/c", "a/x/y.md"),
+            ("a", "b.md"),
+            ("", "b.md"),
+            ("x/y", "x/y.md"),
+            ("a/b", "a/b/c/d.pdf"),
+        ] {
+            assert_eq!(resolve(dir, &relative(dir, rel)), rel, "{rel} from {dir:?}");
+        }
     }
 }

@@ -232,27 +232,23 @@ impl Panel {
         let dialog = fileops::name_dialog("Create Branch", "Create", &form);
 
         let (panel, field) = (self.clone(), entry.clone());
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                let name = field.text().trim().to_string();
-                if response != fileops::CONFIRM || name.is_empty() {
-                    return;
-                }
-                let asked = name.clone();
-                panel.command(
-                    format!("create {name}"),
-                    None,
-                    Fail::Say,
-                    move |vault, repo| {
-                        vault
-                            .git_create_branch(repo, &asked, true)
-                            .map(|()| format!("Switched to {asked}"))
-                    },
-                );
-            },
-        );
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            let name = field.text().trim().to_string();
+            if response != fileops::CONFIRM || name.is_empty() {
+                return;
+            }
+            let asked = name.clone();
+            panel.command(
+                format!("create {name}"),
+                None,
+                Fail::Say,
+                move |vault, repo| {
+                    vault
+                        .git_create_branch(repo, &asked, true)
+                        .map(|()| format!("Switched to {asked}"))
+                },
+            );
+        });
         // After `choose` has presented the dialog: the entry is mapped only by then.
         entry.grab_focus();
     }
@@ -291,15 +287,11 @@ impl Panel {
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
         let panel = self.clone();
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                if response == "delete" {
-                    panel.delete_branch(name, true);
-                }
-            },
-        );
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response == "delete" {
+                panel.delete_branch(name, true);
+            }
+        });
     }
 
     /// Pick one of the selected repository's other local branches and delete it: the palette's
@@ -326,18 +318,14 @@ impl Panel {
         dialog.set_extra_child(Some(&form));
 
         let panel = self.clone();
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                if response != "delete" {
-                    return;
-                }
-                if let Some(branch) = others.get(picker.selected() as usize) {
-                    panel.delete_branch(branch.clone(), false);
-                }
-            },
-        );
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response != "delete" {
+                return;
+            }
+            if let Some(branch) = others.get(picker.selected() as usize) {
+                panel.delete_branch(branch.clone(), false);
+            }
+        });
     }
 
     /// The selected repository's local branches other than the one HEAD is on: what Merge
@@ -386,18 +374,14 @@ impl Panel {
         let dialog = dialogs::name_dialog(&format!("Merge into {into}"), "Merge", &form);
 
         let panel = self.clone();
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                if response != dialogs::CONFIRM {
-                    return;
-                }
-                if let Some(branch) = others.get(picker.selected() as usize) {
-                    panel.merge(branch.clone());
-                }
-            },
-        );
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response != dialogs::CONFIRM {
+                return;
+            }
+            if let Some(branch) = others.get(picker.selected() as usize) {
+                panel.merge(branch.clone());
+            }
+        });
     }
 
     /// Merge `branch` into HEAD. What git made of it is the toast; conflicts land in the Merge
@@ -438,25 +422,21 @@ impl Panel {
             "cancel",
         );
         let panel = self.clone();
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                if response != "abort" {
-                    return;
-                }
-                panel.command(
-                    "abort the merge".to_string(),
-                    None,
-                    Fail::Say,
-                    |vault, repo| {
-                        vault
-                            .git_merge_abort(repo)
-                            .map(|()| "Merge aborted".to_string())
-                    },
-                );
-            },
-        );
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response != "abort" {
+                return;
+            }
+            panel.command(
+                "abort the merge".to_string(),
+                None,
+                Fail::Say,
+                |vault, repo| {
+                    vault
+                        .git_merge_abort(repo)
+                        .map(|()| "Merge aborted".to_string())
+                },
+            );
+        });
     }
 
     /// Put HEAD on one commit, detached, so the repository can be read at that point.
@@ -542,26 +522,22 @@ impl Panel {
         dialog.set_close_response("cancel");
 
         let (panel, path, key) = (self.clone(), entry.path.clone(), key.to_string());
-        dialog.choose(
-            Some(&self.hooks.window),
-            gio::Cancellable::NONE,
-            move |response| {
-                if response != "discard" {
-                    return;
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response != "discard" {
+                return;
+            }
+            match untracked {
+                true => {
+                    (panel.hooks.trash)(&key);
+                    panel.schedule_refresh(Depth::Status);
                 }
-                match untracked {
-                    true => {
-                        (panel.hooks.trash)(&key);
-                        panel.schedule_refresh(Depth::Status);
-                    }
-                    false => panel.write("discard", vec![path], move |vault, repo, paths| {
-                        vault
-                            .git_discard(repo, paths)
-                            .map(|()| format!("Discarded {name}"))
-                    }),
-                }
-            },
-        );
+                false => panel.write("discard", vec![path], move |vault, repo, paths| {
+                    vault
+                        .git_discard(repo, paths)
+                        .map(|()| format!("Discarded {name}"))
+                }),
+            }
+        });
     }
 }
 

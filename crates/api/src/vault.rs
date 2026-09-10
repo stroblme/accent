@@ -574,7 +574,7 @@ mod tests {
             "markdown",
             "see [[Beta]] and [[Nope]] #rust\n".to_string(),
         ));
-        assert_eq!(support.unwrap().completion_triggers, ['[', '#']);
+        assert_eq!(support.unwrap().completion_triggers, ['[', '#', '(']);
 
         let Some(Event::Diagnostics { rel, items }) =
             f.wait(|e| matches!(e, Event::Diagnostics { .. }))
@@ -599,12 +599,57 @@ mod tests {
             assert_eq!(items[0].label, "Beta");
             assert_eq!(items[0].insert, "[[Beta]]");
             assert_eq!(
+                items[0].filter.as_deref(),
+                Some("[[sub/Beta"),
+                "the popup narrows by what was typed, `[[` and all"
+            );
+            assert_eq!(
                 items[0].replace,
                 Range {
                     start: at(4),
                     end: at(10)
                 },
                 "the trigger and the `]]` the auto-pair left both go"
+            );
+
+            // After a `#`, the headings of the note the link names.
+            f.vault
+                .change_document("a.md", "see [[Beta#]]".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("a.md", at(11), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].insert, "[[Beta#Beta]]");
+            assert_eq!(
+                items[0].replace,
+                Range {
+                    start: at(4),
+                    end: at(13)
+                }
+            );
+
+            // In a markdown link, this note's headings by the slug the link names them with.
+            f.vault
+                .change_document("a.md", "## My Section\n[x](#)".to_string())
+                .await
+                .unwrap();
+            let on_link = |character| Pos { line: 1, character };
+            let items = f.vault.completion("a.md", on_link(5), None).await.unwrap();
+            assert_eq!(items.items.len(), 1, "headings, not tags");
+            assert_eq!(items.items[0].label, "My Section");
+            assert_eq!(items.items[0].insert, "#my-section");
+            assert_eq!(
+                items.items[0].replace,
+                Range {
+                    start: on_link(4),
+                    end: on_link(5)
+                },
+                "the `)` the auto-pair left stays"
             );
 
             f.vault
@@ -615,6 +660,108 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].insert, "#rust");
             assert_eq!(items[0].kind, Kind::Tag);
+        });
+    }
+
+    /// `![[` offers every file, and a markdown link's destination offers paths from the note's
+    /// own folder; each writes what the index resolves back to the file its row named.
+    #[test]
+    fn notes_provider_completes_embeds_and_link_paths() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("sub/n.md", "\n");
+        f.write("Attachments/My Logo.png", "not really a png");
+        f.write("a/x.md", "## My Part\n");
+        f.write("b/c/x.md", "\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        accent_lsp::runtime().block_on(async {
+            let at = |character| Pos { line: 0, character };
+            f.vault
+                .open_document("sub/n.md", "markdown", "![[]]".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(3), None)
+                .await
+                .unwrap()
+                .items;
+            let mut inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
+            inserts.sort();
+            assert_eq!(
+                inserts,
+                ["[[My Logo.png]]", "[[b/c/x]]", "[[n]]", "[[x]]"],
+                "`x` reaches a/x.md, the shorter path, so b/c/x.md is written out"
+            );
+            assert_eq!(
+                items[0].replace,
+                Range {
+                    start: at(1),
+                    end: at(5)
+                },
+                "the `!` stays, the `]]` the auto-pair left goes"
+            );
+
+            f.vault
+                .change_document("sub/n.md", "[t]()".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(4), None)
+                .await
+                .unwrap()
+                .items;
+            let logo = items.iter().find(|i| i.label == "My Logo.png").unwrap();
+            assert_eq!(logo.insert, "../Attachments/My%20Logo.png");
+            assert_eq!(
+                logo.replace,
+                Range {
+                    start: at(4),
+                    end: at(4)
+                },
+                "the `)` the auto-pair left stays"
+            );
+
+            // What was typed is a relative, encoded path; the files it names are found anywhere.
+            f.vault
+                .change_document("sub/n.md", "[t](../My%20L)".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(13), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "My Logo.png");
+
+            // And what it writes is followed from the same folder.
+            f.vault
+                .change_document("sub/n.md", "[t](../Attachments/My%20Logo.png)".to_string())
+                .await
+                .unwrap();
+            let target = f.vault.definition("sub/n.md", at(1)).await.unwrap();
+            assert_eq!(target.len(), 1);
+            assert_eq!(target[0].path, "Attachments/My Logo.png");
+
+            // After a `#`, the headings of the note the path names, by their slugs.
+            f.vault
+                .change_document("sub/n.md", "[t](../a/x.md#)".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(14), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "My Part");
+            assert_eq!(items[0].insert, "../a/x.md#my-part");
+            assert_eq!(items[0].replace.start, at(4));
         });
     }
 
@@ -667,6 +814,25 @@ mod tests {
                 .unwrap();
             let target = f.vault.definition("a.md", caret).await.unwrap();
             assert_eq!(target[0].range.start.line, 2);
+
+            // A markdown anchor into this note: the slug completion writes, and the heading text
+            // that resolved before it.
+            f.vault
+                .change_document(
+                    "a.md",
+                    "# Intro\n## My Section\n[x](#my-section) [y](#My%20Section)\n".to_string(),
+                )
+                .await
+                .unwrap();
+            for character in [1, 18] {
+                let target = f
+                    .vault
+                    .definition("a.md", Pos { line: 2, character })
+                    .await
+                    .unwrap();
+                assert_eq!(target[0].path, "a.md");
+                assert_eq!(target[0].range.start.line, 1, "from character {character}");
+            }
         });
     }
 

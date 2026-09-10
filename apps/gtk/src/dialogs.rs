@@ -3,9 +3,52 @@
 //! button; header capitalisation on the buttons.
 
 use adw::prelude::*;
+use gtk::glib;
+use std::cell::Cell;
 
 /// The response id the name dialogs confirm with.
 pub(crate) const CONFIRM: &str = "confirm";
+
+/// Present `dialog` over `parent` and call `callback` once, with the response it closes on: what
+/// `AlertDialogExtManual::choose` does, without its leak.
+///
+/// libadwaita-rs 0.9.2's `choose` hands `adw_alert_dialog_choose` a full reference where the C side
+/// takes `self` as `transfer none`, so every dialog shown with it outlived its close, and with it
+/// whatever its handlers held: New File's path field completes from the vault, which kept a closed
+/// window's vault open. Once a release of the bindings passes `self` borrowed, this can go and the
+/// callers can call `choose` again.
+pub(crate) fn choose(
+    dialog: &adw::AlertDialog,
+    parent: Option<&impl IsA<gtk::Widget>>,
+    callback: impl FnOnce(glib::GString) + 'static,
+) {
+    let callback = Cell::new(Some(callback));
+    dialog.connect_response(None, move |_, response| {
+        if let Some(callback) = callback.take() {
+            callback(response.into());
+        }
+    });
+    dialog.present(parent);
+}
+
+/// Put the keyboard in `entry`, and then let `place` set its caret or its selection. Called after
+/// `choose` has presented the dialog, so the entry is in a window that can focus it.
+///
+/// Every grab of the entry selects its whole text (`gtk-entry-select-on-focus`), and the dialog
+/// grabs it once more on its second frame, when it opens its sheet (libadwaita's `map_tick_cb`).
+/// So `place` waits for the frame after that, or what it did would be thrown away.
+pub(crate) fn focus_entry(entry: &gtk::Entry, place: impl Fn(&gtk::Entry) + 'static) {
+    entry.grab_focus();
+    let frames = Cell::new(0);
+    entry.add_tick_callback(move |entry, _| {
+        frames.set(frames.get() + 1);
+        if frames.get() < 3 {
+            return glib::ControlFlow::Continue;
+        }
+        place(entry);
+        glib::ControlFlow::Break
+    });
+}
 
 /// An alert with its responses in one call. `responses` are `(id, label, appearance)` in the
 /// order they are shown; the first one is also what closing the dialog answers, which is why it

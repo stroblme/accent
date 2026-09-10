@@ -4,7 +4,7 @@
 
 use super::Ops;
 use super::paths::child_path;
-use crate::dialogs::alert;
+use crate::dialogs::{alert, choose};
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -125,7 +125,7 @@ fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: &[S
     );
 
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response == "replace" {
             send(&ops, &dir, chosen);
         }

@@ -21,7 +21,7 @@ pub use transfer::{download, upload};
 use self::paths::{
     already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
 };
-use crate::dialogs::{alert, form, labelled};
+use crate::dialogs::{alert, choose, focus_entry, form, labelled};
 use crate::pathfield::{completions, look_again, path_field};
 // Re-exported rather than imported plainly: the Git pane's Create Branch asks for them through
 // this module, which is where they used to live.
@@ -30,7 +30,7 @@ use accent_api::{FileKind, FileRow, RenamePlan, Vault};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::{gio, glib};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
@@ -45,6 +45,22 @@ const LISTED: usize = 20;
 fn why(e: &anyhow::Error) -> String {
     e.root_cause().to_string()
 }
+
+/// What a toast adds when a file lands where the tree does not list it, so that one just made or
+/// renamed does not seem to have vanished.
+const HIDDEN: &str = "it is hidden while Show Hidden Files is off";
+
+/// Whether the tree leaves `rel` out right now: a dot-named path while Show Hidden Files is off,
+/// read off the window's own toggle.
+fn hidden_now(ops: &Ops, rel: &str) -> bool {
+    let showing = ops
+        .window
+        .lookup_action("show-hidden-files")
+        .and_then(|action| action.state())
+        .and_then(|state| state.get::<bool>());
+    showing == Some(false) && crate::tree::dot_named(rel)
+}
+
 /// Everything the operations need from the app, without depending on it.
 // Boxed closures are the whole point of this struct; a type alias per field would only hide the
 // signature the caller has to write anyway.
@@ -112,7 +128,7 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
     let dialog = name_dialog("New File", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -132,7 +148,13 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&why);
         }
         match ops.vault.create_note(&rel, template.map(String::as_str)) {
-            Ok((created, stops)) => (ops.open)(&created, &stops),
+            Ok((created, stops)) => {
+                (ops.open)(&created, &stops);
+                // The tab is the report, unless the tree is not going to list what it holds.
+                if hidden_now(&ops, &created) {
+                    (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+                }
+            }
             Err(e) if already_exists(&e) => {
                 (ops.toast)(&format!("Cannot create {name}: it already exists"))
             }
@@ -159,7 +181,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
     let dialog = name_dialog("New Folder", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -176,6 +198,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
             return (ops.toast)(&format!("Cannot create {name}: it already exists"));
         }
         match ops.vault.create_dir(&rel) {
+            Ok(()) if hidden_now(&ops, &rel) => (ops.toast)(&format!("Created {name}; {HIDDEN}")),
             Ok(()) => (ops.toast)(&format!("Created {name}")),
             Err(e) => (ops.toast)(&made_what_it_could(&ops, &rel, &e.to_string())),
         }
@@ -211,7 +234,7 @@ pub fn new_from_template(ops: &Rc<Ops>) {
 
     let dialog = name_dialog("New from Template", "Create", &form);
     let (ops, window) = (ops.clone(), ops.window.clone());
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -248,7 +271,7 @@ pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
 
     let dialog = name_dialog("Insert Template", "Insert", &form);
     let (ops, window, title) = (ops.clone(), ops.window.clone(), title.to_string());
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -306,7 +329,7 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
     let note = is_markdown(&current);
     let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
     let typed = entry.clone();
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -352,7 +375,7 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
         to.to_string(),
         ops.window.clone(),
     );
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response == "rename" {
             plan(&ops, &from, &to, verb(&from, &to));
         }
@@ -419,15 +442,13 @@ fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
     );
 
     let (ops, window) = (ops.clone(), ops.window.clone());
-    dialog.choose(
-        Some(&window),
-        gio::Cancellable::NONE,
-        move |response| match response.as_str() {
+    choose(&dialog, Some(&window), move |response| {
+        match response.as_str() {
             "keep" => apply(&ops, plan, false, verb),
             "update" => apply(&ops, plan, true, verb),
             _ => {}
-        },
-    );
+        }
+    });
 }
 
 /// Body of the "Update Links?" dialog: the count, then the paths, then what it stopped listing.
@@ -473,13 +494,11 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
         match done {
             Ok(Ok(report)) => {
                 let unsaved = (ops.reload)(&report.rewritten);
-                (ops.toast)(&rename_message(
-                    verb,
-                    &name,
-                    &to,
-                    report.failed.len(),
-                    unsaved,
-                ));
+                let mut message = rename_message(verb, &name, &to, report.failed.len(), unsaved);
+                if hidden_now(&ops, &to) {
+                    message.push_str(&format!("; {HIDDEN}"));
+                }
+                (ops.toast)(&message);
             }
             Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
             Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
@@ -582,7 +601,7 @@ fn confirm_delete(ops: &Rc<Ops>, name: &str, rel: &str) {
         rel.to_string(),
         ops.window.clone(),
     );
-    dialog.choose(Some(&window), gio::Cancellable::NONE, move |response| {
+    choose(&dialog, Some(&window), move |response| {
         if response != "delete" {
             return;
         }
@@ -726,22 +745,13 @@ fn name_preview(
 
 /// Put the caret in the entry, optionally selecting only the first `stem` characters. Called
 /// after `choose` has presented the dialog, so the entry is in a window that can focus it.
-///
-/// Every grab of the entry selects the whole name (`gtk-entry-select-on-focus`), and the dialog
-/// grabs it once more on its second frame, when it opens its sheet (libadwaita's `map_tick_cb`).
-/// So the narrower selection waits for the frame after that, or it would be thrown away.
 fn focus_name(entry: &gtk::Entry, stem: Option<i32>) {
-    entry.grab_focus();
-    let Some(stem) = stem else { return };
-    let frames = Cell::new(0);
-    entry.add_tick_callback(move |entry, _| {
-        frames.set(frames.get() + 1);
-        if frames.get() < 3 {
-            return glib::ControlFlow::Continue;
+    match stem {
+        Some(stem) => focus_entry(entry, move |entry| entry.select_region(0, stem)),
+        None => {
+            entry.grab_focus();
         }
-        entry.select_region(0, stem);
-        glib::ControlFlow::Break
-    });
+    }
 }
 
 /// A refresh that is only known once the field holding it exists, which is the knot a completion
@@ -798,13 +808,12 @@ fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::
     })
 }
 
-/// The folder names directly inside a listing. Hidden ones are left out because the tree hides
-/// them and a typed path refuses them anyway.
+/// The folder names directly inside a listing, dot-named ones included: a typed path may name them
+/// whatever Show Hidden Files says. `.git` is never in a listing to begin with.
 fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
     rows.into_iter()
         .filter(|row| row.kind == FileKind::Dir)
         .map(|row| basename(&row.rel_path).to_string())
-        .filter(|name| !name.starts_with('.'))
         .collect()
 }
 

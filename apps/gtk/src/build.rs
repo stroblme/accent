@@ -76,12 +76,9 @@ pub fn build_window(
     // would slide it away instead if that ever reads as a jump.
     let statusbar = statusbar::Bar::new();
 
-    // An empty vault window should say so rather than showing a blank rectangle.
-    let placeholder = adw::StatusPage::builder()
-        .icon_name("text-x-generic-symbolic")
-        .title("No Note Open")
-        .description("Pick one in the sidebar, or press Ctrl+E to go to a file.")
-        .build();
+    // An empty vault window should say so rather than showing a blank rectangle; what it says is
+    // `App::sync_placeholder`'s.
+    let placeholder = adw::StatusPage::new();
     // The panes hang off a bin, so a split can swap the whole arrangement for a `GtkPaned` the
     // same way it swaps one branch of it (`panes::split`).
     let panes_root = adw::Bin::builder().child(first.widget()).build();
@@ -243,6 +240,10 @@ pub fn build_window(
         .resize_end_child(true)
         .position(Session::default().sidebar_width)
         .build();
+    // The handle between the columns is the paned's own pixel, not either column's, so the paned
+    // is flat too: at High, where the handle fades (`.dividers-hidden`), the gap it leaves would
+    // otherwise be a stripe of the window's background.
+    split.add_css_class("accent-flat");
 
     let window = adw::ApplicationWindow::builder()
         .application(gtk_app)
@@ -263,6 +264,7 @@ pub fn build_window(
         title,
         toasts,
         connection,
+        retry: Default::default(),
         connect,
         corpus: RefCell::new(Corpus::default()),
         statusbar,
@@ -311,15 +313,13 @@ pub fn build_window(
     if let Some(vault) = &vault {
         let _ = app.ops.set(build_ops(&app, vault));
     }
+    app.sync_placeholder();
 
     // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
     // between its notes. A window without one is tabs and nothing else.
     match &vault {
         Some(vault) => {
-            // Populate straight from the index: the window must be up before reconcile finishes.
             let rows = gio::ListStore::new::<gtk::StringObject>();
-            tree::fill(&rows, vault, "");
-            tracing::debug!(t_ms = ms(), rows = rows.n_items(), "tree populated");
             build_sidebar(&app, &rows, vault);
         }
         // Outline only, and collapsed: a window opened on one file is that file, and the
@@ -330,19 +330,14 @@ pub fn build_window(
         }
     }
 
-    // The banner's one button, which until now was a label with nothing behind it. `reconnect`
-    // returns before the connection exists and reports itself through the events, so the banner
-    // is what says it is working — and stops taking presses — until `Event::Connected` takes it
-    // down or `Event::Disconnected` puts a fresh reason on it.
+    // The banner's one button. `reconnect` returns before the connection exists and reports
+    // itself through the events, so the banner is what says it is working — and stops taking
+    // presses — until `Event::Connected` takes it down or `Event::Disconnected` puts a fresh
+    // reason, or the next automatic attempt's countdown, on it.
     app.connection.connect_button_clicked(glib::clone!(
         #[weak(rename_to = app)]
         app,
-        move |banner| {
-            let Some(vault) = app.vault() else { return };
-            banner.set_title("Reconnecting…");
-            banner.set_sensitive(false);
-            vault.reconnect();
-        }
+        move |_| app.reconnect_now()
     ));
 
     wire_pane(&app, &first);
@@ -369,10 +364,10 @@ pub fn build_window(
             {
                 tracing::warn!("saving config: {e:#}");
             }
-            // A remote vault that is still connecting has nothing to read a tab out of yet, so
-            // the restore waits for `Event::Connected` rather than filling the window with
-            // failures. Everything else restores here, before the first frame anyone looks at.
-            if !app.connecting() {
+            // A remote vault that has not answered has nothing to read a tab out of yet, so the
+            // restore waits for `Event::Connected` rather than filling the window with failures.
+            // Everything else restores here, before the first frame anyone looks at.
+            if !app.offline() {
                 app.restore_session();
             }
             if let Some(rel) = note {
@@ -392,6 +387,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
         vault.clone(),
         rows,
+        app.config.borrow().show_hidden,
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
         // one click is looking, not keeping.
@@ -595,14 +591,14 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                 app.statusbar.set_syncing(on);
             }
         }),
-        // The pane has already redrawn itself; this only writes the preference the Preferences
-        // switch edits, so the two surfaces stay one value.
+        // The pane has already redrawn itself; this writes the preference the Preferences switch
+        // edits, so the two surfaces stay one value, and hands it to every other window's pane.
         set_tree: Box::new(move |on| {
             let Some(app) = set_tree.upgrade() else {
                 return;
             };
             app.config.borrow_mut().git_tree = on;
-            settings::save(&app.config.borrow());
+            app.config_changed();
         }),
     })
 }
@@ -740,11 +736,9 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 }
                 config.search.exclude.push(dir.to_string());
             }
-            settings::save(&app.config.borrow());
-            // The one path that turns git's answer and this list into the set the tree dims and
-            // the index leaves out. Called whole rather than half-copied here; what it repeats on
-            // top of the exclusions is a branch readout and a `git show` per tab.
-            app.on_git_changed();
+            // The list is every vault's, so every window re-derives the set its tree dims and its
+            // index leaves out (`App::sync_excluded`).
+            app.config_changed();
             app.toast(&format!("Left {dir} out of search"));
         }),
         close: Box::new(move |rel| {
@@ -809,7 +803,11 @@ thread_local! {
 /// The app's own rules. The chrome fade (DESIGN.md) is opacity only, so the layout never
 /// shifts and neither the focus order nor accessibility notices; with `gtk-enable-animations` off
 /// the class still toggles but there is no transition, so the chrome snaps instead of fading and
-/// nothing becomes unreachable. `.accent-flat` puts the two columns on the note's own background
+/// nothing becomes unreachable. `.dividers-hidden` is High's addition, on the window: every paned
+/// handle, and the undershoot line a scrolled window draws where it meets a flat bar, since a
+/// divider left at full strength frames the panes that recede. The undershoot is a CSS node of the
+/// scrolled window's own rather than a widget, so it takes its line and gradient away where
+/// everything else takes opacity. `.accent-flat` puts the two columns on the note's own background
 /// so nothing bands against it, on a class of ours rather than on `headerbar` globally.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
@@ -876,8 +874,10 @@ fn install_chrome_css() {
         };
         let fade = match gtk::Settings::for_display(&display).is_gtk_enable_animations() {
             true => format!(
-                ".chrome-fade {{ transition: opacity {}ms ease; }} ",
-                fade::RAMP_MS
+                ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
+                 scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
+                   background-image {ms}ms ease; }} ",
+                ms = fade::RAMP_MS
             ),
             false => String::new(),
         };
@@ -885,6 +885,9 @@ fn install_chrome_css() {
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-away {{ opacity: {away}; }} \
+             .dividers-hidden paned > separator {{ opacity: 0; }} \
+             .dividers-hidden scrolledwindow > undershoot {{ box-shadow: none; \
+               background-image: none; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \

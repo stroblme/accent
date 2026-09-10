@@ -863,7 +863,7 @@ mod tests {
             .client
             .call("open_document", json!(["a.md", "markdown", text]))
             .unwrap();
-        assert_eq!(support.completion_triggers, ['[', '#']);
+        assert_eq!(support.completion_triggers, ['[', '#', '(']);
 
         let symbols: Vec<crate::Symbol> = w.client.call("symbols", json!(["a.md"])).unwrap();
         assert_eq!(symbols.len(), 1);

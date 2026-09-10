@@ -47,22 +47,26 @@ pub(super) fn line_bounds(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::Text
     (start, end)
 }
 
-/// VS Code's whole-line cut and copy: with nothing selected, `Ctrl+X` and `Ctrl+C` take the
-/// caret's whole line, its newline with it, so a later paste puts a line back instead of a
-/// fragment.
+/// Cut and copy, always as plain text, and VS Code's whole-line cut and copy: with nothing
+/// selected, `Ctrl+X` and `Ctrl+C` take the caret's whole line, its newline with it, so a later
+/// paste puts a line back instead of a fragment.
 ///
 /// No key handling, and no accelerator either — DESIGN.md's never-bind list keeps `Ctrl+X`/`C`
-/// for the widget. Both chords emit these two signals, and `gtk_text_buffer_cut_clipboard` and
-/// `..._copy_clipboard` do nothing at all without a selection, so each handler runs before an
-/// inherited one that is then a no-op and does the work itself. Selecting the line and letting
-/// the default handler have it instead would work for the cut and leave the copy selected.
+/// for the widget. Both chords and the context menu emit these two signals, and each handler runs
+/// before the inherited one. With a selection it stops that one, which would put a `GtkTextBuffer`
+/// on the clipboard: pasting that back applies the copy's tags after the highlighter has re-tagged
+/// the text, so a heading's or a bold's stayed on the paste's last run. Without a selection the
+/// inherited one does nothing at all; selecting the line and letting it have the line instead
+/// would work for the cut and leave the copy selected.
 ///
-/// After a cut the caret is where the deletion left it, at the start of the following line;
-/// VS Code lands on the same line but keeps the column.
+/// After a whole-line cut the caret is where the deletion left it, at the start of the following
+/// line; VS Code lands on the same line but keeps the column.
 pub(super) fn line_clipboard(view: &sourceview5::View) {
     view.connect_copy_clipboard(|view| {
         let buffer = view.buffer();
-        if buffer.has_selection() {
+        if let Some((start, end)) = buffer.selection_bounds() {
+            view.clipboard().set_text(&buffer.text(&start, &end, true));
+            view.stop_signal_emission_by_name("copy-clipboard");
             return;
         }
         let (start, end) = line_bounds(&buffer);
@@ -71,7 +75,15 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
     });
     view.connect_cut_clipboard(|view| {
         let buffer = view.buffer();
-        if buffer.has_selection() || !view.is_editable() {
+        if let Some((start, end)) = buffer.selection_bounds() {
+            view.clipboard().set_text(&buffer.text(&start, &end, true));
+            // Refused on a read-only view, where a cut is a copy: what GTK's own cut does.
+            buffer.delete_selection(true, view.is_editable());
+            view.scroll_mark_onscreen(&buffer.get_insert());
+            view.stop_signal_emission_by_name("cut-clipboard");
+            return;
+        }
+        if !view.is_editable() {
             return;
         }
         let (mut start, mut end) = line_bounds(&buffer);

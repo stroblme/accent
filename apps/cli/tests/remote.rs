@@ -34,12 +34,13 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let p = ssh::quote(&url.path.to_string_lossy());
 
     // A vault of known shape, made over the same connection the app will use: two notes, a
-    // dependency tree the index leaves out, and a repository whose origin takes 20 s to answer a
-    // fetch, which is past both the fetch's own cap and the RPC's deadline.
+    // folder with one more, a dependency tree the index leaves out, and a repository whose origin
+    // takes 20 s to answer a fetch, which is past both the fetch's own cap and the RPC's deadline.
     on_host(
         &url,
         &format!(
-            "rm -rf {p} && mkdir -p {p}/node_modules/pkg && printf 'hello [[b]]\\n' > {p}/a.md \
+            "rm -rf {p} && mkdir -p {p}/node_modules/pkg {p}/sub \
+             && printf 'hello [[b]]\\n' > {p}/a.md && printf 'old\\n' > {p}/sub/old.md \
              && printf '#tag\\n' > {p}/b.md && printf '1\\n' > {p}/node_modules/pkg/index.js \
              && git -C {p} init -q && git -C {p} remote add origin {p} \
              && git -C {p} config remote.origin.uploadpack 'sleep 20; git-upload-pack'"
@@ -79,7 +80,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let rows = vault.list_dir("").unwrap();
     let mut names: Vec<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["a.md", "b.md", "node_modules"]);
+    assert_eq!(names, ["a.md", "b.md", "node_modules", "sub"]);
     assert!(
         rows.iter()
             .any(|r| r.rel_path == "node_modules" && r.id == 0)
@@ -126,6 +127,40 @@ fn a_remote_vault_connects_indexes_and_answers() {
         std::fs::read(&got).unwrap() == bytes,
         "the download differs"
     );
+
+    // A file that lands in a folder reaches the window as that folder changing, which is what
+    // refreshes its rows in the tree, however it got there: made by the app, uploaded, or written
+    // on the host by something else.
+    let made = changes_dir(&events, "sub", || {
+        vault.create_note("sub/made.md", None).unwrap();
+    });
+    let small = scratch.join("small.txt");
+    std::fs::write(&small, "up\n").unwrap();
+    let uploaded = changes_dir(&events, "sub", || {
+        vault.upload(&small, "sub/uploaded.txt").unwrap();
+    });
+    let outside = changes_dir(&events, "sub", || {
+        on_host(&url, &format!("printf 'there\\n' > {p}/sub/outside.md"));
+    });
+    let listed: Vec<String> = vault
+        .list_dir("sub")
+        .unwrap()
+        .into_iter()
+        .map(|r| r.rel_path)
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            "sub/made.md",
+            "sub/old.md",
+            "sub/outside.md",
+            "sub/uploaded.txt"
+        ]
+    );
+    eprintln!(
+        "`sub` changed {made:?} after create_note, {uploaded:?} after an upload, \
+         {outside:?} after a write on the host"
+    );
     std::fs::remove_dir_all(&scratch).unwrap();
 
     // A fetch whose origin does not answer in time. The host's cap has to answer before the RPC
@@ -165,6 +200,42 @@ fn a_remote_vault_connects_indexes_and_answers() {
     );
     vault.git_fetch(&repos[0]).unwrap();
 
+    // The branch popover and the history's labels, whose types changed on the wire. The origin is
+    // the repository itself, so a branch fetched and then deleted is one that only a
+    // remote-tracking ref still names.
+    on_host(
+        &url,
+        &format!(
+            "cd {p} && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m one \
+             && git switch -q -c x \
+             && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m two \
+             && git switch -q - && git fetch -q origin && git branch -q -D x"
+        ),
+    );
+    let branches = vault.git_branches(&repos[0]).unwrap();
+    assert!(
+        branches.remote.contains(&"origin/x".to_string()),
+        "{branches:?}"
+    );
+    assert!(!branches.local.contains(&"x".to_string()), "{branches:?}");
+    vault.git_track(&repos[0], "origin/x").unwrap();
+    let branches = vault.git_branches(&repos[0]).unwrap();
+    assert!(branches.local.contains(&"x".to_string()), "{branches:?}");
+    let log = vault.git_log(&repos[0], 0, 10).unwrap();
+    let tip = log.iter().find(|c| c.summary == "two").expect("x's commit");
+    let label = |name: &str, kind, head| git::Ref {
+        name: name.to_string(),
+        kind,
+        head,
+    };
+    assert_eq!(
+        tip.refs,
+        [
+            label("x", git::RefKind::LocalBranch, true),
+            label("origin/x", git::RefKind::RemoteBranch, false),
+        ]
+    );
+
     // And a delete, which on a remote vault is permanent by design.
     vault.delete("b.md").unwrap();
     assert!(!vault.exists("b.md"));
@@ -185,35 +256,10 @@ fn a_remote_vault_connects_indexes_and_answers() {
 
     // A dropped link: the master dies, and the server and the forward go with it. The window
     // hears of it at once, without having to ask the host for anything first.
-    let check = std::process::Command::new("ssh")
-        .arg("-o")
-        .arg(format!("ControlPath={}", remote.control_path().display()))
-        .args(["-O", "check", &url.destination()])
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&check.stderr);
-    let pid = said
-        .split("pid=")
-        .nth(1)
-        .and_then(|rest| rest.split(')').next())
-        .unwrap_or_else(|| panic!("ssh -O check said {said:?}"));
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-9", pid])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let t = Instant::now();
-    let why = loop {
-        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
-            Ok(Event::Disconnected(why)) => break why,
-            Ok(_) => {}
-            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
-        }
-    };
+    kill_master(&url, remote.control_path());
+    let (why, took) = wait_lost(&events);
     assert!(why.contains(&url.host), "{why}");
-    eprintln!("lost link said in {:?}: {why}", t.elapsed());
+    eprintln!("lost link said in {took:?}: {why}");
     assert!(
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the forward outlived its master"
@@ -235,6 +281,51 @@ fn a_remote_vault_connects_indexes_and_answers() {
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the cancel left it up"
     );
+
+    // Documents open when the link drops are open again on the new server, with the text they
+    // were sent, by the time it says it is connected. The attempt is a quiet one, as the window's
+    // own retries are, so nothing on the way may prompt.
+    let docs = ["One", "Two", "Three"];
+    for name in docs {
+        remote
+            .call::<serde_json::Value>(
+                "open_document",
+                serde_json::json!([format!("{name}.md"), "markdown", format!("# {name}\n")]),
+            )
+            .unwrap();
+    }
+    kill_master(&url, remote.control_path());
+    wait_lost(&events);
+    let t = Instant::now();
+    remote.reconnect_quietly();
+    let mut reopening = None;
+    let reopened = loop {
+        match events.recv_timeout(BUDGET.saturating_sub(t.elapsed())) {
+            Ok(Event::Connected) => break reopening.map(|at: Instant| at.elapsed()),
+            Ok(Event::Connecting { what, .. }) => {
+                eprintln!("  {what}");
+                if what == "Reopening the documents" {
+                    reopening = Some(Instant::now());
+                }
+            }
+            Ok(Event::Disconnected(why)) => panic!("disconnected: {why}"),
+            Ok(_) => {}
+            Err(_) => panic!("no quiet reconnect in {BUDGET:?}"),
+        }
+    };
+    let reopened = reopened.expect("the documents were never reopened");
+    eprintln!(
+        "quiet reconnect with {} documents in {:?}, reopening them {reopened:?} of it",
+        docs.len(),
+        t.elapsed()
+    );
+    for name in docs {
+        let symbols: Vec<accent_api::Symbol> = remote
+            .call("symbols", serde_json::json!([format!("{name}.md")]))
+            .unwrap_or_else(|e| panic!("{name}.md after the reconnect: {e}"));
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [name]);
+    }
 
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
@@ -280,6 +371,56 @@ fn host_serves(url: &Url) -> bool {
     !on_host(url, &format!("pgrep -f {pattern} || true"))
         .trim()
         .is_empty()
+}
+
+/// `kill -9` the master behind `ctl`, which is a link dropped without a word to either end.
+fn kill_master(url: &Url, ctl: &std::path::Path) {
+    let check = std::process::Command::new("ssh")
+        .arg("-o")
+        .arg(format!("ControlPath={}", ctl.display()))
+        .args(["-O", "check", &url.destination()])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&check.stderr);
+    let pid = said
+        .split("pid=")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_else(|| panic!("ssh -O check said {said:?}"));
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// The lost link as the window hears it, with no call made: within three seconds of the kill.
+fn wait_lost(events: &Receiver<Event>) -> (String, Duration) {
+    let t = Instant::now();
+    loop {
+        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
+            Ok(Event::Disconnected(why)) => return (why, t.elapsed()),
+            Ok(_) => {}
+            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
+        }
+    }
+}
+
+/// Run `action`, then wait up to five seconds from its start for a `DirsChanged` naming `dir`.
+/// What an earlier step left in the channel is dropped first, so it cannot answer for this one.
+fn changes_dir(events: &Receiver<Event>, dir: &str, action: impl FnOnce()) -> Duration {
+    for _ in events.try_iter() {}
+    let t = Instant::now();
+    action();
+    loop {
+        match events.recv_timeout(Duration::from_secs(5).saturating_sub(t.elapsed())) {
+            Ok(Event::DirsChanged(dirs)) if dirs.iter().any(|d| d == dir) => return t.elapsed(),
+            Ok(_) => {}
+            Err(_) => panic!("no DirsChanged naming {dir} within 5 s"),
+        }
+    }
 }
 
 /// Whether `probe` comes true within ten seconds.

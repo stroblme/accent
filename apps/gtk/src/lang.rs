@@ -258,6 +258,14 @@ pub fn retarget(tab: &Rc<Tab>, old_rel: &str) {
     });
 }
 
+/// The server behind this tab was replaced. The reconnect reopened the document with the last
+/// text the tab tried to send, and an edit refused while that connection was still being made is
+/// newer: refreshing now sends it and re-reads what the new server says, rather than leaving both
+/// to the next keystroke.
+pub fn resync(tab: &Rc<Tab>) {
+    restart(tab, Duration::ZERO);
+}
+
 /// Send the pending edit and wait for the server to have it. Every positional request awaits
 /// this first: an answer about a text the server has not been given is an answer about the wrong
 /// characters.

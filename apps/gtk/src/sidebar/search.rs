@@ -7,7 +7,7 @@
 //! and an answer arriving under a newer number is dropped rather than painted.
 
 use super::OnOpen;
-use crate::dialogs::alert;
+use crate::dialogs::{alert, choose};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
 use accent_core::path::{basename, parent_dir};
@@ -418,7 +418,7 @@ impl Search {
                 "cancel",
             );
             let search = self.clone();
-            return dialog.choose(Some(&self.apply), gio::Cancellable::NONE, move |response| {
+            return choose(&dialog, Some(&self.apply), move |response| {
                 if response == "replace" {
                     search.run_replace_all();
                 }

@@ -128,25 +128,32 @@ impl Url {
     pub fn label(&self) -> String {
         format!("{}:{}", self.host, self.path.display())
     }
+
+    /// `[user@]host[:port]`, an IPv6 literal bracketed: the address without its scheme and path,
+    /// which is what the Open Remote form's host field holds. `ssh://{authority}{path}` parses
+    /// back to this same [`Url`].
+    pub fn authority(&self) -> String {
+        let mut out = String::new();
+        if let Some(user) = &self.user {
+            out.push_str(user);
+            out.push('@');
+        }
+        match self.host.contains(':') {
+            true => out.push_str(&format!("[{}]", self.host)),
+            false => out.push_str(&self.host),
+        }
+        if let Some(port) = self.port {
+            out.push_str(&format!(":{port}"));
+        }
+        out
+    }
 }
 
 impl std::fmt::Display for Url {
     /// The canonical form, so that `parse(&url.to_string())` gives the same [`Url`] back and the
     /// string is safe to key a socket and a cache directory by.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ssh://")?;
-        if let Some(user) = &self.user {
-            write!(f, "{user}@")?;
-        }
-        if self.host.contains(':') {
-            write!(f, "[{}]", self.host)?;
-        } else {
-            write!(f, "{}", self.host)?;
-        }
-        if let Some(port) = self.port {
-            write!(f, ":{port}")?;
-        }
-        write!(f, "{}", self.path.display())
+        write!(f, "ssh://{}{}", self.authority(), self.path.display())
     }
 }
 
@@ -213,14 +220,26 @@ fn base(url: &Url, ctl: &Path) -> Vec<String> {
 /// timer only counts idle time, and `serve` holds a session for as long as the vault is open, so a
 /// working remote never reaches it. Closing the vault leaves the master that minute on purpose, so
 /// a reopen within it is quick.
-pub fn master(url: &Url, ctl: &Path) -> Vec<String> {
+///
+/// `quiet` is for an attempt nobody asked for, the window's own reconnect after a dropped link:
+/// `BatchMode=yes` makes a key that wants a passphrase fail that attempt rather than raise a
+/// dialog over whatever the reader is doing. An attempt someone asked for may prompt.
+pub fn master(url: &Url, ctl: &Path, quiet: bool) -> Vec<String> {
     let mut argv = base(url, ctl);
+    if quiet {
+        argv.extend(["-o", "BatchMode=yes"].map(String::from));
+    }
     argv.extend(
         [
             "-o",
             "ControlMaster=auto",
             "-o",
             "ControlPersist=60",
+            // A host that does not answer fails the attempt in ten seconds, rather than after
+            // the kernel's own connect timeout of a minute or two. It covers the handshake too,
+            // but not a prompt, which waits for the person answering it.
+            "-o",
+            "ConnectTimeout=10",
             // A dropped link must surface as an error in 15 seconds rather than a hung read.
             "-o",
             "ServerAliveInterval=5",
@@ -357,12 +376,15 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 ///
 /// `-t` forces a pty, which a remote command does not get by default and without which the shell
 /// runs non-interactive. No `BatchMode` here: a prompt is exactly what the tab is for.
+///
+/// `;` rather than `&&`: a root that is not there — a typo in the address — prints `cd`'s error
+/// and still gives a shell, at the login's home, which is where such a window is steered from.
 pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-t".to_string());
     argv.push(url.destination());
     argv.push(format!(
-        "cd {} && exec \"$SHELL\"",
+        "cd {}; exec \"$SHELL\"",
         quote(&url.path.to_string_lossy())
     ));
     argv
@@ -560,6 +582,26 @@ mod tests {
     }
 
     #[test]
+    fn the_authority_and_the_path_make_the_address_again() {
+        for text in [
+            "ssh://box/srv/vault",
+            "ssh://me@box/srv/vault",
+            "ssh://box:2222/srv/vault",
+            "ssh://me@[::1]:22/srv/vault",
+        ] {
+            let url = parse(text).expect("the fixtures parse");
+            let again = format!("ssh://{}{}", url.authority(), url.path.display());
+            assert_eq!(parse(&again), Ok(url));
+        }
+        assert_eq!(ported().authority(), "me@box:2222");
+        assert_eq!(plain().authority(), "box");
+        assert_eq!(
+            parse("ssh://[::1]/srv").map(|u| u.authority()),
+            Ok("[::1]".to_string())
+        );
+    }
+
+    #[test]
     fn an_ipv6_literal_keeps_its_brackets_only_in_the_url() {
         let url = parse("ssh://me@[::1]:22/srv/vault").expect("a bracketed literal parses");
         assert_eq!(url.host, "::1");
@@ -636,7 +678,7 @@ mod tests {
     #[test]
     fn the_master_command_reuses_a_socket_and_notices_a_dead_link() {
         assert_eq!(
-            master(&plain(), ctl()),
+            master(&plain(), ctl(), false),
             words(&[
                 "ssh",
                 "-o",
@@ -645,6 +687,8 @@ mod tests {
                 "ControlMaster=auto",
                 "-o",
                 "ControlPersist=60",
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=5",
                 "-o",
@@ -653,8 +697,9 @@ mod tests {
                 "true",
             ])
         );
+        // An attempt nobody asked for never prompts.
         assert_eq!(
-            master(&ported(), ctl()),
+            master(&ported(), ctl(), true),
             words(&[
                 "ssh",
                 "-o",
@@ -662,9 +707,13 @@ mod tests {
                 "-p",
                 "2222",
                 "-o",
+                "BatchMode=yes",
+                "-o",
                 "ControlMaster=auto",
                 "-o",
                 "ControlPersist=60",
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=5",
                 "-o",
@@ -821,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn an_interactive_shell_starts_in_the_vault_root() {
+    fn an_interactive_shell_starts_in_the_vault_root_or_else_at_home() {
         assert_eq!(
             shell(&plain(), ctl()),
             words(&[
@@ -830,7 +879,7 @@ mod tests {
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-t",
                 "box",
-                "cd '/srv/vault' && exec \"$SHELL\"",
+                "cd '/srv/vault'; exec \"$SHELL\"",
             ])
         );
         let spaced = parse("ssh://box:2222/srv/my vault").expect("a spaced path parses");
@@ -844,7 +893,7 @@ mod tests {
                 "2222",
                 "-t",
                 "box",
-                "cd '/srv/my vault' && exec \"$SHELL\"",
+                "cd '/srv/my vault'; exec \"$SHELL\"",
             ])
         );
     }

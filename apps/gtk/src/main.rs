@@ -38,6 +38,7 @@ mod panes;
 mod pathfield;
 mod pdf;
 mod preview;
+mod reconnect;
 mod references;
 mod ring;
 mod save;
@@ -191,6 +192,8 @@ struct App {
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
     connection: adw::Banner,
+    /// The automatic reconnect that banner counts down to.
+    retry: reconnect::Retry,
     /// How far a remote vault has got in coming up, across the top of the document column. Only
     /// a remote vault's window puts it in the layout at all.
     connect: connect::Bar,
@@ -322,19 +325,20 @@ impl App {
         !doc::is_loose_key(key) && self.vault().is_some_and(|v| v.is_remote())
     }
 
-    /// Whether this window's vault is one on another machine that has not answered yet. Nothing
-    /// it holds can be read while that is true, and everything asked for while it was is asked
-    /// again on `Event::Connected`.
-    fn connecting(&self) -> bool {
+    /// Whether this window's vault is one on another machine that is not answering: still being
+    /// connected to, or dropped. Nothing it holds can be read while that is true, and everything
+    /// asked for meanwhile is asked again on `Event::Connected`.
+    fn offline(&self) -> bool {
         self.vault()
             .and_then(|v| v.remote())
-            .is_some_and(|r| r.state() == accent_api::remote::State::Connecting)
+            .is_some_and(|r| r.state() != accent_api::remote::State::Connected)
     }
 
     /// The connection to a remote vault went away. Every tab keeps what it holds — the buffer is
     /// the only copy of an unsaved edit — and saving fails with a toast until this clears.
     fn show_connection_banner(&self, why: &str) {
         self.connection.set_title(why);
+        self.connection.set_button_label(Some("Reconnect"));
         // Pressable again: an attempt that ended here is one the reader may want to repeat.
         self.connection.set_sensitive(true);
         self.connection.set_revealed(true);
@@ -705,7 +709,24 @@ impl App {
         self.sync_branch();
     }
 
-    fn restyle_terminals(&self) {
+    /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or
+    /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
+    /// the preview and the shells.
+    fn restyle_all(&self) {
+        for tab in self.open_tabs() {
+            tab.restyle();
+        }
+        for diff in self.diffs() {
+            diff.restyle();
+        }
+        // A PDF is rendered in the theme's colours rather than recoloured, so this is a re-render
+        // of whatever is on screen.
+        for pdf in self.pdfs() {
+            pdf.restyle();
+        }
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.restyle();
+        }
         for term in self.terminals() {
             term.restyle();
         }
@@ -795,9 +816,15 @@ impl App {
         };
         // A vault under no version control keeps the switcher it had (DESIGN.md, Layout map).
         sidebar.set_git_visible(git.has_repos());
-        // What search leaves out: git's answer and the `[search] exclude` list, as one set. This
-        // is where the two meet, and it is also what gives a vault with no repository an exclusion
-        // mechanism at all — a refresh lands here whether or not it found one.
+        self.sync_excluded(git);
+        self.after_git_changed(git);
+    }
+
+    /// What search leaves out: git's answer and the `[search] exclude` list, as one set. This is
+    /// where the two meet, so a git refresh and a change to the list both come here, and it is
+    /// also what gives a vault with no repository an exclusion mechanism at all — a refresh lands
+    /// whether or not it found one.
+    fn sync_excluded(self: &Rc<Self>, git: &git::Panel) {
         let mut excluded = git.ignored();
         excluded.extend(self.config.borrow().search.exclude.iter().cloned());
         // Only where it really moved. A refresh lands on every save and the write below is a few
@@ -806,7 +833,7 @@ impl App {
         // the question can be asked at all, and it starts as `None` rather than empty: the first
         // refresh of a window has to clear whatever the last session recorded.
         if self.excluded.borrow().as_ref() == Some(&excluded) {
-            return self.after_git_changed(git);
+            return;
         }
         if let Some(tree) = self.tree.get() {
             tree.set_ignored(excluded.clone());
@@ -817,7 +844,7 @@ impl App {
         // without the box being touched.
         let Some(vault) = self.vault.clone() else {
             self.excluded.replace(Some(excluded));
-            return self.after_git_changed(git);
+            return;
         };
         let ignored: Vec<String> = excluded.iter().cloned().collect();
         let weak = Rc::downgrade(self);
@@ -838,7 +865,6 @@ impl App {
                 }
             }
         });
-        self.after_git_changed(git);
     }
 
     /// What follows every git refresh, whether or not the exclusion set moved with it.
@@ -887,18 +913,14 @@ impl App {
         }
     }
 
-    /// The minimap is a global preference with no accelerator, so the palette and the preferences
-    /// dialog are the two ways to it. Both end up here.
-    fn toggle_minimap(self: &Rc<Self>) {
-        let on = {
+    /// The palette's Toggle Minimap. The switch in Preferences is the other way to the same
+    /// preference, and both reach every window.
+    fn toggle_minimap(&self) {
+        {
             let mut config = self.config.borrow_mut();
             config.minimap = !config.minimap;
-            config.minimap
-        };
-        settings::save(&self.config.borrow());
-        for tab in self.open_tabs() {
-            tab.set_minimap(on);
         }
+        self.config_changed();
     }
 
     /// Hand a URL to the desktop.
@@ -981,8 +1003,22 @@ impl App {
         }
     }
 
-    /// Put a config into effect: everything an edit in the preferences dialog, a Restore Defaults
-    /// or a re-read from disk can have changed.
+    /// Save the config this window has just changed and put it into effect in every open window.
+    /// The route for every surface that writes a preference outside the dialog — Toggle Minimap,
+    /// the Git pane's tree toggle, a drawing ring pick, a rebound chord, Leave Out of Search — so
+    /// none of them is left acting on its own window alone.
+    fn config_changed(&self) {
+        let config = self.config.borrow().clone();
+        settings::save(&config);
+        if let Some(shell) = self.shell.upgrade() {
+            shell.apply_config(&config);
+        }
+    }
+
+    /// Put a config into effect in this window: everything an edit in the preferences dialog, a
+    /// Restore Defaults, a re-read from disk or [`Self::config_changed`] can have changed.
+    /// Reached through [`Shell::apply_config`], which does this for every window and puts the
+    /// theme on screen first.
     fn apply_config(self: &Rc<Self>, config: &Config) {
         if let Some(vault) = self.vault() {
             // Both of these are a `hello` round trip on a remote vault, and this runs from the
@@ -996,9 +1032,6 @@ impl App {
                 vault.set_ghost(ghost);
             });
         }
-        // Switching to or away from Solarized does not change the system's dark state, so the
-        // notify handler that usually restyles never fires here.
-        theme::apply(config.theme);
         self.apply_accels();
         for tab in self.open_tabs() {
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
@@ -1007,25 +1040,30 @@ impl App {
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
-            tab.restyle();
         }
         for diff in self.diffs() {
             diff.set_font(config.editor_font.as_deref(), self.zoom.get());
-            diff.restyle();
         }
-        // A PDF is rendered in the theme's colours, so Solarized to Adwaita is a re-render even
-        // though the system's dark state, and with it the notify handler, never moved.
         for pdf in self.pdfs() {
-            pdf.restyle();
             pdf.set_drawing_config(config.drawing.clone());
-        }
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.restyle();
         }
         if let Some(git) = self.git.get() {
             git.set_tree(config.git_tree);
+            // Only once git has answered: the first answer reads the list itself, and a set
+            // written before it would drop what the last session left out until it lands.
+            if self.excluded.borrow().is_some() {
+                self.sync_excluded(git);
+            }
         }
-        self.restyle_terminals();
+        if let Some(tree) = self.tree.get() {
+            tree.set_show_hidden(config.show_hidden);
+        }
+        if let Some(action) = self.window.lookup_action("show-hidden-files") {
+            action.change_state(&config.show_hidden.to_variant());
+        }
+        // Switching to or away from Solarized does not change the system's dark state, so the
+        // notify handler that usually restyles never fires here.
+        self.restyle_all();
     }
 
     fn preferences(self: &Rc<Self>) {
@@ -1037,22 +1075,26 @@ impl App {
             Ok(fresh) => {
                 *self.config.borrow_mut() = fresh;
                 let config = self.config.borrow().clone();
-                self.apply_config(&config);
+                if let Some(shell) = self.shell.upgrade() {
+                    shell.apply_config(&config);
+                }
             }
             Err(e) if accent_core::config::config_path().exists() => {
                 tracing::warn!("re-reading the config: {e:#}")
             }
             Err(_) => {}
         }
+        // Every window, not just the one the dialog is over: the config is the process's.
+        let shell = self.shell.clone();
         settings::present(
             &self.window,
             self.config.clone(),
             self.vault().map(|v| v.root().to_path_buf()),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |config: &Config| app.apply_config(config)
-            ),
+            move |config: &Config| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.apply_config(config);
+                }
+            },
         );
     }
 

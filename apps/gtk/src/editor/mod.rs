@@ -339,8 +339,9 @@ pub fn open(
     // Outside the change bars, next to the text: a chevron is about the block it opens.
     let folds = crate::fold::Renderer::new();
     sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left).insert(&folds, 2);
-    // Whole-line cut and copy, whatever the tab holds: an editor where Ctrl+X on no selection
-    // does nothing is one that makes the user select the line first.
+    // Plain-text cut and copy, and whole-line with nothing selected, whatever the tab holds: an
+    // editor where Ctrl+X on no selection does nothing is one that makes the user select the line
+    // first.
     line_clipboard(&view);
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
@@ -572,6 +573,14 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_changed()
+    ));
+    // Copy and cut hand over plain text (`line_clipboard`), but the primary selection a middle
+    // click pastes is still GTK's rich copy, whose tags land after `changed` has re-tagged the
+    // text. Tagged again once the paste is in, so they do not stay on its last run.
+    buffer.connect_paste_done(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_, _| tab.analyse_text()
     ));
     buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]
