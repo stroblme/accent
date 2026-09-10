@@ -202,6 +202,22 @@ impl Panel {
         );
     }
 
+    /// Check out a remote-tracking branch as a local branch that tracks it, which is `git switch
+    /// --track`. git names the branch after the remote one and refuses where that name is taken.
+    pub(super) fn track(self: &Rc<Self>, remote: String) {
+        let asked = remote.clone();
+        self.command(
+            format!("check out {remote}"),
+            None,
+            Fail::Say,
+            move |vault, repo| {
+                vault
+                    .git_track(repo, &asked)
+                    .map(|()| format!("Switched to {}", local_name(&asked)))
+            },
+        );
+    }
+
     /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
     /// because the base a reader means is the state they are looking at.
     ///
@@ -286,11 +302,66 @@ impl Panel {
         );
     }
 
+    /// Pick one of the selected repository's other local branches and delete it: the palette's
+    /// Delete Branch…, which is how the keyboard reaches the popover's trash buttons. The pick
+    /// goes down the trash button's own path, asking again where git says the work is not merged.
+    pub fn delete_other_branch(self: &Rc<Self>) {
+        let others = self.other_branches();
+        if others.is_empty() {
+            return (self.hooks.toast)("There is no other branch to delete");
+        }
+        let labels: Vec<&str> = others.iter().map(String::as_str).collect();
+        let picker = gtk::DropDown::from_strings(&labels);
+        let form = dialogs::form();
+        form.append(&dialogs::labelled("Branch", &picker));
+        let dialog = dialogs::alert(
+            "Delete Branch",
+            "A branch whose commits are merged nowhere else asks again before it goes.",
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("delete", "Delete", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
+        );
+        dialog.set_extra_child(Some(&form));
+
+        let panel = self.clone();
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                if response != "delete" {
+                    return;
+                }
+                if let Some(branch) = others.get(picker.selected() as usize) {
+                    panel.delete_branch(branch.clone(), false);
+                }
+            },
+        );
+    }
+
+    /// The selected repository's local branches other than the one HEAD is on: what Merge
+    /// Branch… and Delete Branch… pick from.
+    fn other_branches(&self) -> Vec<String> {
+        let state = self.state.borrow();
+        let head = state
+            .statuses
+            .get(state.selected)
+            .and_then(|s| s.branch.head.as_ref());
+        state
+            .branches
+            .local
+            .iter()
+            .filter(|b| Some(*b) != head)
+            .cloned()
+            .collect()
+    }
+
     /// Pick one of the selected repository's other local branches and merge it into HEAD. The
     /// palette's Merge Branch… and the branch popover's both land here.
     pub fn merge_branch(self: &Rc<Self>) {
         self.branch_menu.popdown();
-        let (into, others) = {
+        let into = {
             let state = self.state.borrow();
             let Some(branch) = state.statuses.get(state.selected).map(|s| &s.branch) else {
                 return;
@@ -302,15 +373,9 @@ impl Panel {
             else {
                 return;
             };
-            let others: Vec<String> = state
-                .branches
-                .local
-                .iter()
-                .filter(|b| branch.head.as_ref() != Some(*b))
-                .cloned()
-                .collect();
-            (into, others)
+            into
         };
+        let others = self.other_branches();
         if others.is_empty() {
             return (self.hooks.toast)("There is no other branch to merge");
         }

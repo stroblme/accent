@@ -126,12 +126,22 @@ impl Panel {
         else {
             return;
         };
-        match section {
-            // A conflict is resolved in the file, not in a diff of two sides that both lost.
-            Section::Conflicts => (self.hooks.open)(key),
-            Section::Staged => self.compare(&entry.path, key, Sides::Staged),
-            Section::Changes => self.compare(&entry.path, key, Sides::Worktree),
+        match sides_for(*section, entry) {
+            Some(sides) => self.compare(&entry.path, key, sides),
+            None => (self.hooks.open)(key),
         }
+    }
+}
+
+/// What activating a changed file compares, or `None` for a conflict, which is resolved in the
+/// file rather than in a diff of two sides that both lost. A file deleted from the working tree
+/// has no tab to compare inside, so it gets one of its own: the index against nothing.
+fn sides_for(section: Section, entry: &Entry) -> Option<Sides> {
+    match section {
+        Section::Conflicts => None,
+        Section::Staged => Some(Sides::Staged),
+        Section::Changes if entry.y == 'D' => Some(Sides::Deleted),
+        Section::Changes => Some(Sides::Worktree),
     }
 }
 
@@ -704,6 +714,24 @@ mod tests {
             shape(&rows[1..]),
             [(0, "src/x.md".to_string()), (0, "a.md".to_string())]
         );
+    }
+
+    #[test]
+    fn a_file_deleted_from_the_working_tree_is_compared_against_nothing() {
+        let sides = |section, x, y| sides_for(section, &entry("f.md", x, y));
+        assert!(matches!(
+            sides(Section::Changes, '.', 'D'),
+            Some(Sides::Deleted)
+        ));
+        assert!(matches!(
+            sides(Section::Changes, '.', 'M'),
+            Some(Sides::Worktree)
+        ));
+        assert!(matches!(
+            sides(Section::Staged, 'D', '.'),
+            Some(Sides::Staged)
+        ));
+        assert!(sides(Section::Conflicts, 'U', 'U').is_none());
     }
 
     #[test]

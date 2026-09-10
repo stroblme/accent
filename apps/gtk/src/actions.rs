@@ -117,6 +117,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.git-sync", "Sync", &[]),
     ("win.git-merge", "Merge Branch…", &[]),
     ("win.git-merge-abort", "Abort Merge", &[]),
+    ("win.git-delete-branch", "Delete Branch…", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // Back and forward walk the active pane's history, over every kind of document. They take
     // the chords a browser uses for the same idea, and the mouse's side buttons with them.
@@ -382,6 +383,13 @@ impl App {
             "git-merge-abort" => {
                 if let Some(git) = self.git.get() {
                     git.abort_merge();
+                }
+            }
+            // On screen for the reason Merge Branch… gives: the branch list is the pane's.
+            "git-delete-branch" => {
+                self.show_pane("git");
+                if let Some(git) = self.git.get() {
+                    git.delete_other_branch();
                 }
             }
             "pane-outline" => self.show_pane("outline"),

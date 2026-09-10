@@ -216,6 +216,8 @@ fn bench_git(app: &Rc<App>) {
             "bench git_branch {}",
             git.branch_label(None).unwrap_or_default()
         );
+        let (local, remote) = git.branch_counts();
+        println!("bench git_branches local={local} remote={remote}");
         println!("bench git_not_pulled {}", git.not_pulled_rows());
         println!("bench git_sync {}", git.sync_hint().unwrap_or_default());
         let (live, tip) = git.commit_hint();

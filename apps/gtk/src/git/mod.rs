@@ -151,7 +151,7 @@ pub struct Panel {
     /// The names the popover is showing and which of them HEAD is on. A refresh that says the
     /// same thing leaves the rows alone: one fires on every save, and rebuilding them would take
     /// a row out from under the pointer already on it.
-    branch_shown: RefCell<(Vec<String>, Option<usize>)>,
+    branch_shown: RefCell<(git::Branches, Option<usize>)>,
     counts: gtk::Label,
     sync: gtk::Button,
     message: gtk::TextView,
@@ -229,8 +229,9 @@ impl Panel {
             .build();
 
         // The branch is a menu button rather than a chooser: its popover is a list of the local
-        // branches, each row switching to that branch and carrying a trash button, with Create
-        // Branch… underneath. A `GtkDropDown` can only ever pick one of the rows it already has.
+        // branches, each row switching to that branch and carrying a trash button, then the
+        // remote-only ones under a Remote heading, with Create Branch… underneath. A
+        // `GtkDropDown` can only ever pick one of the rows it already has.
         // Flat and `heading`, because it stands where the branch label stood and reads as the
         // branch first and as a control second; the label ellipsizes so that a long branch name
         // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
@@ -435,7 +436,7 @@ impl Panel {
             branch_label,
             branch_menu,
             branch_list,
-            branch_shown: RefCell::new((Vec::new(), None)),
+            branch_shown: RefCell::new((git::Branches::default(), None)),
             counts,
             sync,
             message,
@@ -709,8 +710,8 @@ impl Panel {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        let (names, at) = branch_model(head.map(|(name, _)| name), &branches.local);
-        self.set_branches(&names, at);
+        let (rows, at) = branch_model(head.map(|(name, _)| name), &branches);
+        self.set_branches(&rows, at);
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -789,20 +790,32 @@ impl Panel {
         }));
     }
 
-    /// Put the branch popover on `names`, `at` being the row HEAD is on.
-    fn set_branches(self: &Rc<Self>, names: &[String], at: Option<usize>) {
-        self.branch_label
-            .set_text(at.and_then(|i| names.get(i)).map_or("", String::as_str));
-        if *self.branch_shown.borrow() == (names.to_vec(), at) {
+    /// Put the branch popover on `rows` (see [`branch_model`]), `at` being the local row HEAD is
+    /// on.
+    fn set_branches(self: &Rc<Self>, rows: &git::Branches, at: Option<usize>) {
+        self.branch_label.set_text(
+            at.and_then(|i| rows.local.get(i))
+                .map_or("", String::as_str),
+        );
+        if *self.branch_shown.borrow() == (rows.clone(), at) {
             return;
         }
-        self.branch_shown.replace((names.to_vec(), at));
+        self.branch_shown.replace((rows.clone(), at));
         while let Some(row) = self.branch_list.first_child() {
             self.branch_list.remove(&row);
         }
-        for (i, name) in names.iter().enumerate() {
+        for (i, name) in rows.local.iter().enumerate() {
             let row = self.branch_row(name, Some(i) != at);
             self.branch_list.append(&row);
+        }
+        if rows.remote.is_empty() {
+            return;
+        }
+        self.branch_list.append(&remote_heading());
+        // No trash button here: deleting a remote branch is a push, and stays a terminal job.
+        for name in &rows.remote {
+            self.branch_list
+                .append(&self.pick_button(name, Panel::track));
         }
     }
 
@@ -810,18 +823,8 @@ impl Panel {
     /// it go — a trash button. The branch HEAD is on has none: git refuses to delete it, and a
     /// control that cannot work is dead chrome (DESIGN.md, Principle 1).
     fn branch_row(self: &Rc<Self>, name: &str, deletable: bool) -> gtk::Box {
-        let switch = gtk::Button::builder()
-            .child(&gtk::Label::builder().label(name).xalign(0.0).build())
-            .hexpand(true)
-            .build();
-        switch.add_css_class("flat");
-        let (weak, asked) = (Rc::downgrade(self), name.to_string());
-        switch.connect_clicked(move |_| {
-            if let Some(panel) = weak.upgrade() {
-                panel.branch_menu.popdown();
-                panel.checkout(asked.clone());
-            }
-        });
+        let switch = self.pick_button(name, Panel::checkout);
+        switch.set_hexpand(true);
 
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         row.append(&switch);
@@ -840,6 +843,22 @@ impl Panel {
             row.append(&trash);
         }
         row
+    }
+
+    /// A branch's name as a flat button that puts the popover away and hands the name to `pick`.
+    fn pick_button(self: &Rc<Self>, name: &str, pick: fn(&Rc<Panel>, String)) -> gtk::Button {
+        let button = gtk::Button::builder()
+            .child(&gtk::Label::builder().label(name).xalign(0.0).build())
+            .build();
+        button.add_css_class("flat");
+        let (weak, asked) = (Rc::downgrade(self), name.to_string());
+        button.connect_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.branch_menu.popdown();
+                pick(&panel, asked.clone());
+            }
+        });
+        button
     }
 
     fn message_text(&self) -> String {
@@ -944,6 +963,13 @@ impl Panel {
     /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
     pub fn sync_hint(&self) -> Option<String> {
         self.sync.tooltip_text().map(|t| t.to_string())
+    }
+
+    /// How many local and remote-tracking branches the last refresh listed. `ACCENT_BENCH_GIT`
+    /// and nothing else.
+    pub fn branch_counts(&self) -> (usize, usize) {
+        let branches = &self.state.borrow().branches;
+        (branches.local.len(), branches.remote.len())
     }
 
     /// Whether Commit can be pressed, and its tooltip. `ACCENT_BENCH_GIT` and nothing else.
@@ -1085,6 +1111,23 @@ fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
     factory
 }
 
+/// The heading over the branch popover's remote rows. A row that is not a branch, so nothing
+/// activates it and the keyboard passes it by.
+fn remote_heading() -> gtk::ListBoxRow {
+    let label = gtk::Label::builder()
+        .label("Remote")
+        .xalign(0.0)
+        .margin_top(6)
+        .build();
+    label.add_css_class("heading");
+    gtk::ListBoxRow::builder()
+        .child(&label)
+        .activatable(false)
+        .selectable(false)
+        .focusable(false)
+        .build()
+}
+
 fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name(icon)
@@ -1214,23 +1257,40 @@ fn vault_key(vault_root: &Path, repo: &Repo, repo_rel: &str) -> String {
     }
 }
 
-/// The branch chooser's rows and which of them HEAD is on: the local branches, led by whatever
-/// HEAD is on when that is not one of them — a detached HEAD, or a branch with no commit yet, so
-/// that the chooser always says where the repository actually is. `None` is a repository git told
-/// us nothing about, which shows an empty chooser as it used to show an empty label.
-fn branch_model(head: Option<String>, branches: &[String]) -> (Vec<String>, Option<usize>) {
+/// The branch chooser's rows and which of the local ones HEAD is on.
+///
+/// `local` is the local branches, led by whatever HEAD is on when that is not one of them — a
+/// detached HEAD, or a branch with no commit yet, so that the chooser always says where the
+/// repository actually is. `remote` is the remote-tracking branches no local branch shares a name
+/// with, which are the ones there is anything to check out: the others are a local row already.
+/// `None` is a repository git told us nothing about, which shows an empty chooser as it used to
+/// show an empty label.
+fn branch_model(head: Option<String>, branches: &git::Branches) -> (git::Branches, Option<usize>) {
     let Some(head) = head else {
-        return (Vec::new(), None);
+        return (git::Branches::default(), None);
     };
-    match branches.iter().position(|b| *b == head) {
-        Some(at) => (branches.to_vec(), Some(at)),
+    let remote = branches
+        .remote
+        .iter()
+        .filter(|r| !branches.local.iter().any(|b| b == local_name(r)))
+        .cloned()
+        .collect();
+    let (local, at) = match branches.local.iter().position(|b| *b == head) {
+        Some(at) => (branches.local.clone(), at),
         None => (
             std::iter::once(head)
-                .chain(branches.iter().cloned())
+                .chain(branches.local.iter().cloned())
                 .collect(),
-            Some(0),
+            0,
         ),
-    }
+    };
+    (git::Branches { local, remote }, Some(at))
+}
+
+/// The local branch a remote-tracking one checks out as: `origin/topic` is `topic`. Cut at the
+/// first slash, which is the remote's name wherever that name has no slash of its own.
+fn local_name(remote: &str) -> &str {
+    remote.split_once('/').map_or(remote, |(_, name)| name)
 }
 
 /// The branch name and its ahead/behind counts, the two labels of the branch row. `None` when git
@@ -1410,26 +1470,46 @@ mod tests {
         assert_eq!(branch_text(&Branch::default()), None, "nothing to say");
     }
 
+    fn listed(local: &[&str], remote: &[&str]) -> git::Branches {
+        git::Branches {
+            local: local.iter().map(|b| b.to_string()).collect(),
+            remote: remote.iter().map(|b| b.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn branch_model_always_shows_what_head_is_actually_on() {
-        let locals = ["main".to_string(), "side".to_string()];
+        let locals = listed(&["main", "side"], &[]);
         assert_eq!(
             branch_model(Some("side".into()), &locals),
-            (locals.to_vec(), Some(1))
+            (locals.clone(), Some(1))
         );
         assert_eq!(
             branch_model(Some("HEAD".into()), &locals),
-            (
-                ["HEAD", "main", "side"].map(str::to_string).to_vec(),
-                Some(0)
-            ),
+            (listed(&["HEAD", "main", "side"], &[]), Some(0)),
             "a detached HEAD leads the list it is not in"
         );
         assert_eq!(
-            branch_model(Some("main".into()), &[]),
-            (vec!["main".to_string()], Some(0)),
+            branch_model(Some("main".into()), &listed(&[], &[])),
+            (listed(&["main"], &[]), Some(0)),
             "a repository with no commits has a head and no branches"
         );
-        assert_eq!(branch_model(None, &locals), (Vec::new(), None));
+        assert_eq!(
+            branch_model(None, &locals),
+            (git::Branches::default(), None)
+        );
+    }
+
+    #[test]
+    fn branch_model_lists_a_remote_branch_only_where_no_local_one_has_its_name() {
+        let both = listed(
+            &["main", "side"],
+            &["origin/main", "origin/topic", "upstream/side"],
+        );
+        assert_eq!(
+            branch_model(Some("main".into()), &both),
+            (listed(&["main", "side"], &["origin/topic"]), Some(0)),
+            "after the local ones, and without the ones checked out already"
+        );
     }
 }
