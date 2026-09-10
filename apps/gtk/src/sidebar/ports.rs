@@ -7,7 +7,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 use gtk::pango;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,8 +21,8 @@ pub(super) const ICON: &str = "network-wired-symbolic";
 /// hold the window.
 #[allow(clippy::type_complexity)]
 pub struct Data {
-    /// Forward a remote port to a local one. Answers an error message when ssh refuses, which is
-    /// what the pane shows.
+    /// Start a forward, either way. Answers an error message when ssh refuses, which is what the
+    /// pane shows.
     pub add_forward: Arc<dyn Fn(Forward) -> Result<(), String> + Send + Sync>,
     /// Take a forward down. Nothing to answer: the row goes either way.
     pub remove_forward: Arc<dyn Fn(Forward) + Send + Sync>,
@@ -58,7 +58,7 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
         &status_page(
             ICON,
             "No Forwarded Ports",
-            "A forward makes a port on the remote machine reachable at the same address on this one.",
+            "A forward makes a port on one machine reachable on the other.",
         ),
         Some("empty"),
     );
@@ -107,6 +107,23 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
 
     let local = port_entry("Local");
     let remote = port_entry("Remote");
+    // The arrow between the boxes is the direction, and pressing it flips it: the two ports stay
+    // where they are, only which of them listens changes. Kept across Adds, so a run of forwards
+    // the same way round is set once.
+    let direction = Rc::new(Cell::new(Direction::ToRemote));
+    let flip = gtk::Button::builder().valign(gtk::Align::Center).build();
+    flip.add_css_class("flat");
+    show_direction(&flip, direction.get());
+    flip.connect_clicked({
+        let direction = direction.clone();
+        move |flip| {
+            direction.set(match direction.get() {
+                Direction::ToRemote => Direction::ToLocal,
+                Direction::ToLocal => Direction::ToRemote,
+            });
+            show_direction(flip, direction.get());
+        }
+    });
     let add = gtk::Button::builder()
         .label("Add")
         .halign(gtk::Align::End)
@@ -123,6 +140,7 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
             remote.clone(),
         );
         let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
+        let direction = direction.clone();
         move || {
             let Some((from, to)) = ports(&local.text(), &remote.text()) else {
                 return;
@@ -130,7 +148,7 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
             let f = Forward {
                 local: from,
                 remote: to,
-                direction: Direction::ToRemote,
+                direction: direction.get(),
             };
             let (forwards, list, banner) = (forwards.clone(), list.clone(), banner.clone());
             let (local, remote) = (local.clone(), remote.clone());
@@ -139,6 +157,13 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
             glib::spawn_future_local(async move {
                 let answered = gio::spawn_blocking(move || add(f)).await;
                 match answered {
+                    // ssh answers a forward it already has with OK and adds nothing, so a second
+                    // row would be stale the moment either was stopped. Asked when the answer
+                    // lands, which also catches an Add pressed twice before the first came back.
+                    Ok(Ok(())) if forwards.borrow().contains(&f) => {
+                        banner.set_title(&format!("{} is already forwarded", row_label(f)));
+                        banner.set_revealed(true);
+                    }
                     Ok(Ok(())) => {
                         banner.set_revealed(false);
                         forwards.borrow_mut().push(f);
@@ -175,11 +200,9 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
         move |_| submit()
     });
 
-    let arrow = gtk::Label::new(Some("→"));
-    arrow.add_css_class("dim-label");
     let entries = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     entries.append(&local);
-    entries.append(&arrow);
+    entries.append(&flip);
     entries.append(&remote);
 
     // The button on a line of its own, as the Search pane's replace row has it: the sidebar's
@@ -199,10 +222,48 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
     column.upcast()
 }
 
-/// One live forward: `local → remote`, and the button that takes it down.
+/// The arrow for a direction, pointing the way a connection travels: from the port that listens
+/// to the one it reaches. The local port is always the one on the left.
+fn arrow(direction: Direction) -> &'static str {
+    match direction {
+        Direction::ToRemote => "→",
+        Direction::ToLocal => "←",
+    }
+}
+
+/// Set the form's direction button to `direction`: its arrow, and the words for it.
+fn show_direction(flip: &gtk::Button, direction: Direction) {
+    flip.set_label(arrow(direction));
+    flip.set_tooltip_text(Some(match direction {
+        Direction::ToRemote => "A port on this machine reaches the remote one",
+        Direction::ToLocal => "A port on the remote machine reaches this one",
+    }));
+}
+
+/// A forward as its row reads it: `8080 → 80`, the local port first either way round.
+fn row_label(f: Forward) -> String {
+    format!("{} {} {}", f.local, arrow(f.direction), f.remote)
+}
+
+/// A forward in words, naming both ends: the tooltip on its row.
+fn describe(f: Forward) -> String {
+    match f.direction {
+        Direction::ToRemote => format!(
+            "Port {} on this machine reaches port {} on the remote one",
+            f.local, f.remote
+        ),
+        Direction::ToLocal => format!(
+            "Port {} on the remote machine reaches port {} on this one",
+            f.remote, f.local
+        ),
+    }
+}
+
+/// One live forward: its ports and direction, read-only, and the button that takes it down.
 fn forward_row(f: Forward, drop_forward: DropForward) -> gtk::ListBoxRow {
     let label = gtk::Label::builder()
-        .label(format!("{} → {}", f.local, f.remote))
+        .label(row_label(f))
+        .tooltip_text(describe(f))
         .xalign(0.0)
         .hexpand(true)
         .ellipsize(pango::EllipsizeMode::End)
@@ -254,6 +315,29 @@ fn port_entry(placeholder: &str) -> gtk::Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_row_keeps_the_local_port_left_and_names_the_listening_end_first() {
+        let out = Forward {
+            local: 8080,
+            remote: 80,
+            direction: Direction::ToRemote,
+        };
+        let back = Forward {
+            direction: Direction::ToLocal,
+            ..out
+        };
+        assert_eq!(row_label(out), "8080 → 80");
+        assert_eq!(row_label(back), "8080 ← 80");
+        assert_eq!(
+            describe(out),
+            "Port 8080 on this machine reaches port 80 on the remote one"
+        );
+        assert_eq!(
+            describe(back),
+            "Port 80 on the remote machine reaches port 8080 on this one"
+        );
+    }
 
     #[test]
     fn a_forward_needs_two_real_port_numbers() {
