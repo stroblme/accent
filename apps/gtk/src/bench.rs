@@ -49,7 +49,9 @@ use super::*;
 /// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
 /// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
 /// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
-/// `=focus:<rel>` gives it the keyboard instead.
+/// `=focus:<rel>` gives it the keyboard instead. On a remote vault they wait for the host to
+/// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
+/// way Ctrl+Q does.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -825,11 +827,18 @@ fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
 /// has no size to put a handle in until it is allocated, and a tab moved into a split takes the
 /// keyboard, and with it the active pane, from an idle.
 fn bench_layout(app: &Rc<App>, arg: &str) {
+    // A remote vault restores, and opens anything at all, once its host has answered.
+    if !app.restored.get() {
+        return bench_layout_waiting(app, arg);
+    }
     if arg == "1" {
-        let app = app.clone();
-        glib::timeout_add_local_once(Duration::from_millis(1000), move || {
-            bench_layout_print(&app);
-            bench_quit(&app);
+        let (app, landing) = (app.clone(), app.clone());
+        let landed = move || landing.awaiting.borrow().is_empty();
+        bench_layout_when(landed, move || {
+            glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+                bench_layout_print(&app);
+                bench_quit(&app);
+            });
         });
         return;
     }
@@ -840,8 +849,12 @@ fn bench_layout(app: &Rc<App>, arg: &str) {
     for rel in [a, b, c, d] {
         app.open_path(rel);
     }
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
     let (app, a, c, d) = (app.clone(), a.clone(), c.clone(), d.clone());
-    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+    bench_layout_when(landed, move || {
         let page = |rel: &str| app.doc_for(rel).map(|doc| doc.page().clone());
         let (Some(a), Some(c), Some(d)) = (page(&a), page(&c), page(&d)) else {
             return bench_quit(&app);
@@ -876,6 +889,55 @@ fn bench_layout(app: &Rc<App>, arg: &str) {
                 }
             });
         });
+    });
+}
+
+/// Run `then` once `ready` holds, looked at every 50 ms: on a remote vault a read is a round trip
+/// away, so the layout drill waits for what it needs rather than for a set time.
+fn bench_layout_when(ready: impl Fn() -> bool + 'static, then: impl FnOnce() + 'static) {
+    let mut then = Some(then);
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if !ready() {
+            return glib::ControlFlow::Continue;
+        }
+        if let Some(then) = then.take() {
+            then();
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// What a window that has not restored yet shows, printed each time it changes, until the restore
+/// runs and the drill goes on; `=quit` quits there instead.
+fn bench_layout_waiting(app: &Rc<App>, arg: &str) {
+    let (app, arg) = (app.clone(), arg.to_string());
+    let mut said = String::new();
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if app.restored.get() {
+            bench_layout(&app, &arg);
+            return glib::ControlFlow::Break;
+        }
+        let page = app
+            .content
+            .child_by_name("empty")
+            .and_downcast::<adw::StatusPage>();
+        let shows = format!(
+            "{} {:?} {:?}",
+            app.content.visible_child_name().unwrap_or_default(),
+            page.as_ref().map(|p| p.title()).unwrap_or_default(),
+            page.and_then(|p| p.description()).unwrap_or_default()
+        );
+        if shows != said {
+            println!("bench layout_waiting {shows}");
+            said = shows;
+        }
+        if arg == "quit"
+            && let Some(gtk_app) = app.window.application()
+        {
+            gtk_app.activate_action("quit", None);
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
     });
 }
 
