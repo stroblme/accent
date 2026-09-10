@@ -202,6 +202,22 @@ impl Panel {
         );
     }
 
+    /// Check out a remote-tracking branch as a local branch that tracks it, which is `git switch
+    /// --track`. git names the branch after the remote one and refuses where that name is taken.
+    pub(super) fn track(self: &Rc<Self>, remote: String) {
+        let asked = remote.clone();
+        self.command(
+            format!("check out {remote}"),
+            None,
+            Fail::Say,
+            move |vault, repo| {
+                vault
+                    .git_track(repo, &asked)
+                    .map(|()| format!("Switched to {}", local_name(&asked)))
+            },
+        );
+    }
+
     /// Branch from HEAD and switch to it in one step, which is `git switch -c`: no base picker,
     /// because the base a reader means is the state they are looking at.
     ///
