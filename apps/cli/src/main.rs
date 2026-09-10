@@ -107,7 +107,8 @@ enum Cmd {
     ///
     /// This is what runs on a remote host: the desktop uploads this binary, starts it over ssh,
     /// and drives the whole façade through the pipe. It answers until stdin closes, which is what
-    /// happens when the window goes away, so nothing is left behind on the host.
+    /// happens when the window goes away, or until a client that pinged has said nothing for 90 s,
+    /// which is what a dropped link looks like from here. Nothing is left behind on the host.
     Serve {
         /// Vault root directory.
         #[arg(long)]
@@ -229,13 +230,9 @@ fn main() -> Result<()> {
             println!("unresolved links {}", ix.unresolved_links()?.len());
         }
         Cmd::Serve { vault, db } => {
-            // Logging must not go anywhere near stdout: that is the protocol.
-            accent_api::rpc::serve(
-                &vault,
-                db.as_deref(),
-                std::io::stdin().lock(),
-                std::io::stdout(),
-            )?;
+            // Logging must not go anywhere near stdout: that is the protocol. Stdin unlocked,
+            // because the server reads it on a thread of its own.
+            accent_api::rpc::serve(&vault, db.as_deref(), std::io::stdin(), std::io::stdout())?;
         }
     }
     Ok(())

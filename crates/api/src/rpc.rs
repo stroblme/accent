@@ -9,11 +9,15 @@
 //! image is fetched over its own `cat`, because base64 through a JSON parser is neither fast nor
 //! debuggable. And every call has a deadline: a request whose answer never comes must fail the one
 //! caller waiting for it, not freeze the window.
+//!
+//! A link can also die without closing: the host never hears the TCP connection go, and `serve`
+//! would sit on a stdin that neither ends nor speaks. So the client pings every [`PING`], and a
+//! server that has been pinged once takes [`SILENCE`] without a word as the window gone.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +36,14 @@ use accent_core::fs::{Etag, SaveError};
 /// link a person would edit over, and short enough that a wedged server is a message rather than
 /// a hang.
 pub const DEADLINE: Duration = Duration::from_secs(10);
+
+/// How often the client says it is still there.
+pub const PING: Duration = Duration::from_secs(10);
+
+/// How long a pinged server waits without hearing anything before it stops. Nine missed pings:
+/// well past the 10–17 s a flaky VPN drops out for, and past ssh's own 15 s ServerAlive give-up,
+/// after which the window has let go of this server anyway.
+pub const SILENCE: Duration = Duration::from_secs(90);
 
 /// A save refused because the file changed under it. Its `data` is the current [`Etag`], so the
 /// client can rebuild [`SaveError::ChangedOnDisk`] and the UI can offer the same comparison it
@@ -165,28 +177,44 @@ pub struct Hello {
 
 /// The near end of a `serve`: writes requests, routes answers back to whoever is waiting.
 pub struct Client {
-    out: Mutex<Box<dyn Write + Send>>,
+    /// Shared with the heartbeat, which writes its pings through the same lock.
+    out: Arc<Mutex<Box<dyn Write + Send>>>,
     next_id: AtomicU64,
     pending: Waiting,
     dead: Arc<AtomicBool>,
-    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Set by [`close`](Self::close) before the pipe goes, so the reader can tell the end it was
+    /// asked for from a link that was lost.
+    closing: Arc<AtomicBool>,
+    /// Stops the heartbeat. The reader sends on it too: a server that is gone needs no pings.
+    stop: Sender<()>,
+    /// The reader and the heartbeat.
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl Client {
     /// Start routing. `events` receives the server's notifications; it is the same channel the
     /// local worker would have posted to, so nothing downstream can tell the two apart.
+    ///
+    /// `on_lost` runs once, on the reader thread, when the server's output ends without
+    /// [`close`](Self::close) having asked for it: the link dropped, or the server died. It must
+    /// not join this client, whose reader is the thread it runs on.
     pub fn new(
         out: Box<dyn Write + Send>,
         input: Box<dyn Read + Send>,
         events: Sender<Event>,
+        on_lost: Box<dyn FnOnce() + Send>,
     ) -> Client {
+        let out = Arc::new(Mutex::new(out));
         let pending: Waiting = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
+        let closing = Arc::new(AtomicBool::new(false));
+        let (stop, stopped) = channel();
 
         let reader = std::thread::Builder::new()
             .name("accent-rpc".to_string())
             .spawn({
                 let (pending, dead) = (pending.clone(), dead.clone());
+                let (closing, stop) = (closing.clone(), stop.clone());
                 move || {
                     for line in BufReader::new(input).lines() {
                         let Ok(line) = line else { break };
@@ -202,16 +230,39 @@ impl Client {
                     // their sender dropped, rather than each of them spending the full deadline.
                     dead.store(true, Ordering::SeqCst);
                     locked(&pending).clear();
+                    let _ = stop.send(());
+                    if !closing.load(Ordering::SeqCst) {
+                        on_lost();
+                    }
+                }
+            })
+            .ok();
+
+        // The first ping goes at once: a link that drops before the second must still leave a
+        // server that knows to stop.
+        let heartbeat = std::thread::Builder::new()
+            .name("accent-ping".to_string())
+            .spawn({
+                let out = out.clone();
+                move || {
+                    let ping = json!({"jsonrpc": "2.0", "method": "ping"});
+                    while emit(&out, &ping).is_ok() {
+                        if !matches!(stopped.recv_timeout(PING), Err(RecvTimeoutError::Timeout)) {
+                            break;
+                        }
+                    }
                 }
             })
             .ok();
 
         Client {
-            out: Mutex::new(out),
+            out,
             next_id: AtomicU64::new(1),
             pending,
             dead,
-            reader: Mutex::new(reader),
+            closing,
+            stop,
+            threads: Mutex::new(reader.into_iter().chain(heartbeat).collect()),
         }
     }
 
@@ -286,14 +337,16 @@ impl Client {
     /// Replacing the writer drops the pipe, and `serve` reads EOF on its stdin. Separate from
     /// [`join`](Self::join) because the caller owning the process in between has to be able to
     /// kill it: the reader thread ends when that process's output closes, and a wedged one would
-    /// never close it.
+    /// never close it. The end that follows is the one asked for, so `on_lost` stays quiet.
     pub fn close(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        let _ = self.stop.send(());
         *locked(&self.out) = Box::new(std::io::sink());
     }
 
-    /// Wait for the reader thread to notice the far end has closed.
+    /// Wait for the reader thread to notice the far end has closed, and for the heartbeat to stop.
     pub fn join(&self) {
-        if let Some(handle) = locked(&self.reader).take() {
+        for handle in std::mem::take(&mut *locked(&self.threads)) {
             let _ = handle.join();
         }
     }
@@ -302,6 +355,14 @@ impl Client {
     pub fn shutdown(&self) {
         self.close();
         self.join();
+    }
+}
+
+impl Drop for Client {
+    /// Let go of the pipe even when nobody closed it, as a connection whose `hello` failed does.
+    /// The heartbeat shares the writer, so dropping the client alone would leave it open.
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -362,7 +423,7 @@ fn route(msg: Value, pending: &Waiting, events: &Sender<Event>) {
 pub fn serve(
     root: &std::path::Path,
     db: Option<&std::path::Path>,
-    input: impl Read,
+    input: impl Read + Send + 'static,
     output: impl Write + Send + 'static,
 ) -> anyhow::Result<()> {
     let cfg = crate::VaultConfig::default();
@@ -370,7 +431,7 @@ pub fn serve(
         Some(db) => Local::open_at(root, db, cfg)?,
         None => Local::open(root, cfg)?,
     };
-    serve_local(vault, events, input, output);
+    serve_local(vault, events, input, output, SILENCE);
     Ok(())
 }
 
@@ -379,11 +440,15 @@ pub fn serve(
 /// Each request runs on a thread of its own: the vault is `Sync` and keeps a second SQLite reader
 /// for exactly this, so a whole-vault grep does not hold up the tree the user is clicking through.
 /// Every line is written whole under one lock, so two answers can never interleave.
+///
+/// Once the client has pinged, `silence` without a line from it ends the server too. Until then
+/// it waits for as long as it is left, so `serve` driven by hand still works.
 pub(crate) fn serve_local(
     vault: Local,
     events: Receiver<Event>,
-    input: impl Read,
+    input: impl Read + Send + 'static,
     output: impl Write + Send + 'static,
+    silence: Duration,
 ) {
     let vault = Arc::new(vault);
     let out: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(output)));
@@ -403,10 +468,38 @@ pub(crate) fn serve_local(
         })
         .ok();
 
+    // stdin on a thread of its own, so the loop below can notice it has gone quiet.
+    let (tx, lines) = channel();
+    let _ = std::thread::Builder::new()
+        .name("accent-stdin".to_string())
+        .spawn(move || {
+            for line in BufReader::new(input).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+
     let live: InFlight = Arc::new(Mutex::new(HashMap::new()));
     let mut workers = Vec::new();
-    for line in BufReader::new(input).lines() {
-        let Ok(line) = line else { break };
+    let mut pinged = false;
+    loop {
+        let line = match pinged {
+            true => lines.recv_timeout(silence),
+            false => lines.recv().map_err(RecvTimeoutError::from),
+        };
+        let line = match line {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                // The link died without closing. Nobody reads what the threads still have to
+                // write, so joining them could wait on a full pipe for good: the vault goes, and
+                // the process exits around the rest.
+                tracing::info!("nothing from the client in {silence:?}; stopping");
+                drop(vault);
+                return;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -430,6 +523,11 @@ pub(crate) fn serve_local(
             {
                 handle.abort();
             }
+            continue;
+        }
+        // Nothing to answer either: the client saying it is still there.
+        if method == "ping" {
+            pinged = true;
             continue;
         }
 
@@ -653,11 +751,16 @@ mod tests {
             let (server_in, client_out) = std::io::pipe().unwrap();
             let (client_in, server_out) = std::io::pipe().unwrap();
             let server = std::thread::spawn(move || {
-                serve_local(vault, vault_events, server_in, server_out);
+                serve_local(vault, vault_events, server_in, server_out, SILENCE);
             });
 
             let (events, event_rx) = channel();
-            let client = Client::new(Box::new(client_out), Box::new(client_in), events);
+            let client = Client::new(
+                Box::new(client_out),
+                Box::new(client_in),
+                events,
+                Box::new(|| {}),
+            );
             let hello: Hello = client
                 .call("hello", json!([VaultConfig::default()]))
                 .unwrap();
@@ -838,6 +941,75 @@ mod tests {
             "a dead client must fail immediately, not after {DEADLINE:?}"
         );
         assert!(e.message.contains("connect"), "{e}");
+    }
+
+    /// The reader is the first to know the link has gone, and says so once. An end the client
+    /// asked for is not a lost link, or every window close would read as one.
+    #[test]
+    fn a_lost_link_is_said_once_and_a_closed_one_not_at_all() {
+        let ends = |closed: bool| {
+            let (client_in, server_out) = std::io::pipe().unwrap();
+            let (_server_in, client_out) = std::io::pipe().unwrap();
+            let lost = Arc::new(AtomicU64::new(0));
+            let client = Client::new(
+                Box::new(client_out),
+                Box::new(client_in),
+                channel().0,
+                Box::new({
+                    let lost = lost.clone();
+                    move || {
+                        lost.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+            );
+            if closed {
+                client.close();
+            }
+            drop(server_out);
+            client.join();
+            lost.load(Ordering::SeqCst)
+        };
+        assert_eq!(ends(false), 1, "the server went away unasked");
+        assert_eq!(ends(true), 0, "the client closed it");
+    }
+
+    /// A link that dies without closing leaves the server a stdin that neither ends nor speaks.
+    /// Pinged once, the server takes the silence as the window gone; never pinged, as when it is
+    /// driven by hand, it waits for its stdin to close.
+    #[test]
+    fn a_pinged_server_stops_when_the_pings_do_and_an_unpinged_one_waits() {
+        let silence = Duration::from_millis(200);
+        let serve = || {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("vault");
+            std::fs::create_dir(&root).unwrap();
+            let db = dir.path().join("index.db");
+            let (vault, events) = Local::open_at(&root, &db, VaultConfig::default()).unwrap();
+            let (server_in, input) = std::io::pipe().unwrap();
+            let (output, server_out) = std::io::pipe().unwrap();
+            let server = std::thread::spawn(move || {
+                serve_local(vault, events, server_in, server_out, silence);
+            });
+            (server, input, (output, dir))
+        };
+        let (unpinged, quiet, _kept) = serve();
+        let (pinged, mut input, _also_kept) = serve();
+
+        writeln!(input, r#"{{"jsonrpc":"2.0","method":"ping"}}"#).unwrap();
+        let t = Instant::now();
+        while !pinged.is_finished() && t.elapsed() < silence + Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            pinged.is_finished(),
+            "still serving {:?} after the ping",
+            t.elapsed()
+        );
+
+        std::thread::sleep(3 * silence);
+        assert!(!unpinged.is_finished(), "nothing armed the silence");
+        drop(quiet);
+        unpinged.join().expect("stdin closing still ends it");
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.

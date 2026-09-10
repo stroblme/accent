@@ -4,7 +4,7 @@
 //!
 //! Opt-in, because it needs a host and a key: set `ACCENT_TEST_REMOTE` to an `ssh://` address
 //! whose path may be created and deleted. Without it the test says so and passes, so `make check`
-//! is unchanged for everyone else. The host needs `git` and `ss`, and [`HOST_PORT`] free.
+//! is unchanged for everyone else. The host needs `git`, `ss` and `pgrep`, and [`HOST_PORT`] free.
 //!
 //!     make server
 //!     ACCENT_TEST_REMOTE=ssh://myhost/tmp/accent-probe cargo test -p accent-cli --test remote
@@ -183,7 +183,8 @@ fn a_remote_vault_connects_indexes_and_answers() {
     remote.forward(back).unwrap();
     assert!(host_listens(&url, HOST_PORT), "the host does not listen");
 
-    // A dropped link: the master dies, and the server and the forward go with it.
+    // A dropped link: the master dies, and the server and the forward go with it. The window
+    // hears of it at once, without having to ask the host for anything first.
     let check = std::process::Command::new("ssh")
         .arg("-o")
         .arg(format!("ControlPath={}", remote.control_path().display()))
@@ -203,14 +204,22 @@ fn a_remote_vault_connects_indexes_and_answers() {
             .unwrap()
             .success()
     );
+    let t = Instant::now();
+    let why = loop {
+        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
+            Ok(Event::Disconnected(why)) => break why,
+            Ok(_) => {}
+            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
+        }
+    };
+    assert!(why.contains(&url.host), "{why}");
+    eprintln!("lost link said in {:?}: {why}", t.elapsed());
     assert!(
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the forward outlived its master"
     );
-    // The next call finds the link gone, as the window's would, and a reconnect makes a new
-    // master that has to carry the forward again by the time it says it is connected.
-    assert!(eventually(|| vault.list_dir("").is_err()));
-    wait_for(&events, |e| matches!(e, Event::Disconnected(_)));
+    // A reconnect makes a new master that has to carry the forward again by the time it says it
+    // is connected.
     let t = Instant::now();
     vault.reconnect();
     wait_for(&events, |e| matches!(e, Event::Connected));
@@ -226,6 +235,20 @@ fn a_remote_vault_connects_indexes_and_answers() {
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the cancel left it up"
     );
+
+    // Closing the vault takes the server and every forward it still has off the host. The master
+    // is left its ControlPersist minute on purpose, so it is not what is asserted on.
+    remote.forward(back).unwrap();
+    assert!(host_listens(&url, HOST_PORT), "the host does not listen");
+    assert!(host_serves(&url), "no server to see stop");
+    let t = Instant::now();
+    drop(vault);
+    let closed = t.elapsed();
+    assert!(
+        eventually(|| !host_serves(&url) && !host_listens(&url, HOST_PORT)),
+        "the close left the server or the forward behind"
+    );
+    eprintln!("closed in {closed:?}; host clear {:?} after", t.elapsed());
 }
 
 /// Run `script` on the host over a connection of its own, and answer with what it printed.
@@ -246,6 +269,15 @@ fn on_host(url: &Url, script: &str) -> String {
 
 fn host_listens(url: &Url, port: u16) -> bool {
     !on_host(url, &format!("ss -ltnH 'sport = :{port}'"))
+        .trim()
+        .is_empty()
+}
+
+/// Whether an `accent-cli serve` runs on the host for this vault. The bracket keeps the pattern
+/// from matching the shell that carries it.
+fn host_serves(url: &Url) -> bool {
+    let pattern = ssh::quote(&format!("[s]erve --vault {}", url.path.display()));
+    !on_host(url, &format!("pgrep -f {pattern} || true"))
         .trim()
         .is_empty()
 }
