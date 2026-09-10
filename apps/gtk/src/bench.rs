@@ -25,7 +25,8 @@ use super::*;
 /// PDF is wholly on screen whatever the scroll offset was.
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
-/// switch and the last tab's close leave behind.
+/// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
+/// eye first, and its title and indicator are printed either side of that.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
 /// held, and prints what the Ctrl+hover underline covers.
 ///
@@ -540,9 +541,18 @@ fn bench_tabs(app: &Rc<App>, rels: &str) {
         return bench_quit(app);
     };
     let (note, pdf) = (note.to_string(), pdf.to_string());
-    app.open_path(&note);
+    // Looked at rather than named, so the note arrives as a preview and says so on its tab.
+    app.open_preview(&note);
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(tab) = app.tab_for(&note) {
+            println!("bench tab_preview {}", bench_tab_line(&tab.page));
+            // A click on the eye: the one way to keep a preview that does not go through the app.
+            app.pane()
+                .tabs
+                .emit_by_name::<()>("indicator-activated", &[&tab.page]);
+            println!("bench tab_kept {}", bench_tab_line(&tab.page));
+        }
         let _ = WidgetExt::activate_action(&app.window, "win.find", None);
         println!("bench find_over_note {}", app.pane().find.is_open());
         app.open_terminal();
@@ -578,6 +588,19 @@ fn bench_tabs(app: &Rc<App>, rels: &str) {
             });
         });
     });
+}
+
+/// A tab as its bar draws it: the title, and what the indicator slot holds and says.
+fn bench_tab_line(page: &adw::TabPage) -> String {
+    let icon = page
+        .indicator_icon()
+        .and_then(|icon| IconExt::to_string(&icon));
+    format!(
+        "title={} indicator={} tip={:?}",
+        page.title(),
+        icon.as_deref().unwrap_or("none"),
+        page.indicator_tooltip()
+    )
 }
 
 /// What the Outline pane holds, by widget type — or by title where that is one of its status
