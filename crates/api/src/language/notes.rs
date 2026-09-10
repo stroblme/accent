@@ -37,7 +37,8 @@ pub(crate) enum Trigger {
     Wiki,
     /// `![[`: any file, an image or a PDF as readily as a note.
     Embed,
-    /// The `#` of a markdown link's destination, `[text](#`: a heading of this note.
+    /// The `#` of a markdown link's destination: a heading of this note after `[text](#`, of
+    /// the note the path names after `[text](Other.md#`. The start is the destination's.
     Anchor,
     /// The rest of a markdown link's destination, `[text](` or `![alt](`: a file's path.
     Path,
@@ -50,9 +51,8 @@ pub(crate) enum Trigger {
 /// of the note. `[[` is tried first, which is what makes the `#` of `[[Note#Heading]]` an anchor
 /// rather than a tag, and a link's destination next, which does the same for `[text](#Heading)`.
 ///
-/// `None` means there is nothing to complete: no trigger on the line, a link destination that
-/// anchors into another note, a `#` run that opens the line (an ATX heading marker), or a tag the
-/// caret has moved past.
+/// `None` means there is nothing to complete: no trigger on the line, a `#` run that opens the
+/// line (an ATX heading marker), or a tag the caret has moved past.
 pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     if let Some(start) = head.rfind("[[") {
         let prefix = &head[start + 2..];
@@ -67,13 +67,13 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     }
     if let Some(open) = head.rfind("](") {
         let dest = &head[open + 2..];
-        // A `#` in a destination is never a tag. One after a path is an anchor into another
-        // note, which is not offered.
+        // A `#` in a destination is never a tag but an anchor: into this note, or into the one
+        // the path before it names.
         if !dest.contains(|c: char| c == ')' || c.is_whitespace()) {
-            return match dest.strip_prefix('#') {
-                Some(prefix) => Some((Trigger::Anchor, open + 2, prefix)),
-                None => (!dest.contains('#')).then_some((Trigger::Path, open + 2, dest)),
-            };
+            return Some(match dest.split_once('#') {
+                Some((_, prefix)) => (Trigger::Anchor, open + 2, prefix),
+                None => (Trigger::Path, open + 2, dest),
+            });
         }
     }
     let start = head.rfind('#')?;
@@ -369,7 +369,21 @@ impl Notes {
                 })
             }
             Trigger::Anchor => {
-                let headings = markdown::analyze(&text).headings;
+                // The path before the `#` names a note from this one's folder, and no path names
+                // this note. A file that is not a note has no headings to offer.
+                let dest = head[start..].split_once('#').map_or("", |(dest, _)| dest);
+                let other = match dest {
+                    "" => None,
+                    _ => {
+                        let target =
+                            path::resolve(parent_dir(rel), &markdown::percent_decode(dest));
+                        match locked(&self.index).resolve_target(&target)? {
+                            Some(note) if note.ends_with(".md") => Some(self.text_of(&note)?),
+                            _ => return Ok(Completions::default()),
+                        }
+                    }
+                };
+                let headings = markdown::analyze(other.as_deref().unwrap_or(&text)).headings;
                 let slugs = markdown::slugs(headings.iter().map(|h| h.text.as_str()));
                 let items = headings
                     .iter()
@@ -379,10 +393,10 @@ impl Notes {
                         let anchor = format!("#{slug}");
                         Completion {
                             label: h.text.trim().to_string(),
-                            // What goes in is not what the row reads, so it is shown as well.
+                            // What goes in is not what the row reads, so its anchor is shown too.
                             detail: Some(anchor.clone()),
-                            filter: Some(anchor.clone()),
-                            insert: anchor,
+                            filter: Some(format!("{dest}{anchor}")),
+                            insert: format!("{dest}{anchor}"),
                             replace,
                             ..empty_item()
                         }
@@ -738,8 +752,8 @@ mod tests {
         assert_eq!(context("see [A](#Se"), Some((Trigger::Anchor, 8, "Se")));
         assert_eq!(
             context("[x](Other.md#se"),
-            None,
-            "an anchor into another note"
+            Some((Trigger::Anchor, 4, "se")),
+            "an anchor into another note starts with its path"
         );
         // A closed link leaves the rest of the line to decide.
         assert_eq!(context("[a](#x) #ta"), Some((Trigger::Tag, 8, "ta")));

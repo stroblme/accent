@@ -670,7 +670,7 @@ mod tests {
         let f = Fixture::open(VaultConfig::default());
         f.write("sub/n.md", "\n");
         f.write("Attachments/My Logo.png", "not really a png");
-        f.write("a/x.md", "\n");
+        f.write("a/x.md", "## My Part\n");
         f.write("b/c/x.md", "\n");
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
@@ -746,6 +746,22 @@ mod tests {
             let target = f.vault.definition("sub/n.md", at(1)).await.unwrap();
             assert_eq!(target.len(), 1);
             assert_eq!(target[0].path, "Attachments/My Logo.png");
+
+            // After a `#`, the headings of the note the path names, by their slugs.
+            f.vault
+                .change_document("sub/n.md", "[t](../a/x.md#)".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(14), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "My Part");
+            assert_eq!(items[0].insert, "../a/x.md#my-part");
+            assert_eq!(items[0].replace.start, at(4));
         });
     }
 
