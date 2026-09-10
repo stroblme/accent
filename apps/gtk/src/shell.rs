@@ -558,7 +558,7 @@ impl Shell {
             false => from.root().join(&key),
         };
         if let Some(tab) = doc.tab().filter(|tab| tab.modified.get())
-            && let Err(e) = from.write_tab(tab, tab.etag.get())
+            && let Err(e) = from.flush_tab(tab)
         {
             // Refused rather than dropped: a drag must never be the thing that loses an edit.
             return return_page(into, &from, page, &format!("Save failed: {e}"));

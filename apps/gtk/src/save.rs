@@ -18,6 +18,11 @@ impl App {
     /// answer to it. Ctrl+S raises the same dialog a refused write raises, so a reflex save is
     /// never silently dropped; an autosave says nothing beyond the banner already on screen.
     ///
+    /// The write runs on a worker and lands later ([`Self::land_save`]): every window shares the
+    /// one main thread, and on a remote vault a save is a round trip that held all of them, once
+    /// a second while anyone typed. One save per tab is on its way at a time; one asked for
+    /// meanwhile runs when it lands, gated on the etag it brought back.
+    ///
     /// The two paths a tab leaves by — a tab closing, a window closing — deliberately do *not*
     /// come through here. They write and then ask when the write is refused, because a buffer on
     /// its way out has nowhere else to be kept and refusing there would lose it outright.
@@ -34,17 +39,83 @@ impl App {
             }
             return;
         }
-        match self.write_tab(tab, tab.etag.get()) {
-            Ok(()) => {
+        if tab.flight.borrow().is_some() {
+            let asked = tab.save_again.get().unwrap_or(false);
+            tab.save_again.set(Some(asked || explicit));
+            return;
+        }
+        let (write, text, expected) = (self.writer(tab), tab.for_disk(), tab.etag.get());
+        let (tx, answer) = std::sync::mpsc::channel();
+        *tab.flight.borrow_mut() = Some(editor::Flight {
+            started: tab.edits.get(),
+            expected,
+            explicit,
+            answer,
+        });
+        // Started here and not inside the future below, which runs a turn of the loop later: a
+        // write that has to wait for this one may be asked for in this same turn, and would wait
+        // on a worker that had not begun. The answer goes through the channel; the worker's own
+        // end is only the news that it is there.
+        let worker = gio::spawn_blocking(move || tx.send(write(&text, expected)));
+        let (app, saved) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let _ = worker.await;
+            let (Some(app), Some(tab)) = (app.upgrade(), saved.upgrade()) else {
+                return;
+            };
+            // One asked for meanwhile, unless this one failed: that would meet the same refusal.
+            let again = tab.save_again.take();
+            match (app.land_save(&tab, true), again) {
+                (Some(true), Some(explicit)) if tab.modified.get() => app.save_tab(&tab, explicit),
+                (Some(true), Some(true)) => app.toast("Saved"),
+                _ => {}
+            }
+        });
+    }
+
+    /// Take in the save on its way for `tab`, waiting for its write if that has not finished:
+    /// `None` when there was none, else whether it did not fail. Whoever comes first applies it:
+    /// the save's own landing, or a write that has to go after it, which passes `report: false`
+    /// because it is about to meet whatever refused this one and will say so itself.
+    fn land_save(self: &Rc<Self>, tab: &Rc<Tab>, report: bool) -> Option<bool> {
+        let flight = tab.flight.take()?;
+        let written = flight
+            .answer
+            .recv()
+            .unwrap_or_else(|_| Err(std::io::Error::other("the save worker panicked").into()));
+        log_write(tab, flight.expected, &written);
+        let landed = editor::landing(
+            flight.started,
+            tab.edits.get(),
+            flight.expected,
+            tab.etag.get(),
+            written,
+        );
+        let landed_ok = !matches!(landed, editor::Landing::Failed(_));
+        match landed {
+            editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
+                self.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
                 self.sync_pdf_links_soon();
-                if explicit {
+                if report && flight.explicit {
                     self.toast("Saved");
                 }
             }
+            editor::Landing::Failed(e) if report => self.refused(tab, e, flight.explicit),
+            editor::Landing::Failed(_) | editor::Landing::Stale => {}
+        }
+        if tab.recheck.take() {
+            self.file_changed(tab);
+        }
+        Some(landed_ok)
+    }
+
+    /// A save that did not land, said the way its kind needs saying.
+    fn refused(self: &Rc<Self>, tab: &Rc<Tab>, e: SaveError, explicit: bool) {
+        match e {
             // The etag gate refused: the tab holds the question from now on, whatever asked. It
             // used to be recorded only for an autosave, so a Ctrl+S that was cancelled left a
             // blocked tab with no banner on it.
-            Err(SaveError::ChangedOnDisk { .. }) => {
+            SaveError::ChangedOnDisk { .. } => {
                 tab.disk_changed.set(true);
                 tab.show_alert(Alert::Compare);
                 if explicit {
@@ -56,13 +127,13 @@ impl App {
             // and it has the way back, so an autosave that cannot land every few seconds says
             // nothing further (DESIGN.md, States: a state that persists is a banner, and a toast
             // is a thing that happened and is over).
-            Err(SaveError::Offline) => {
+            SaveError::Offline => {
                 self.show_offline();
                 if explicit {
                     self.toast("Not connected, so nothing was saved");
                 }
             }
-            Err(e) => self.cannot("save", e),
+            e => self.cannot("save", e),
         }
     }
 
@@ -76,37 +147,82 @@ impl App {
         }
     }
 
-    /// Write the buffer and hand the error back instead of reporting it: a caller that is about
-    /// to make the buffer unreachable has to know whether the bytes landed.
-    pub fn write_tab(&self, tab: &Rc<Tab>, expected: Option<Etag>) -> Result<(), SaveError> {
-        // What the file should hold, not what the buffer holds: a code file loses its trailing
-        // whitespace here and a DOS file gets its CRLFs back.
-        let text = tab.for_disk();
-        // A loose tab is not in any vault, so it writes through core directly. Same atomic save,
-        // same etag gate; what it misses is the watcher being told the write was ours, which the
-        // tab's own file monitor makes harmless.
-        let written = match self.vault().filter(|_| !doc::is_loose_key(&tab.rel())) {
-            Some(vault) => vault.save(&tab.rel(), &text, expected),
-            None => accent_core::fs::write_note(&tab.path(), &text, expected),
-        };
-        match &written {
-            Ok(etag) => tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, ?etag, "wrote"),
-            Err(e) => {
-                tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, error = %e, "refused");
-            }
+    /// The write itself, as something a worker can run. What the file should hold, not what the
+    /// buffer holds, is the caller's: a code file loses its trailing whitespace and a DOS file
+    /// gets its CRLFs back in [`Tab::for_disk`].
+    ///
+    /// A loose tab is not in any vault, so it writes through core directly. Same atomic save,
+    /// same etag gate; what it misses is the watcher being told the write was ours, which the
+    /// tab's own file monitor makes harmless.
+    fn writer(
+        &self,
+        tab: &Tab,
+    ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
+        let vault = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned();
+        let (rel, path) = (tab.rel(), tab.path());
+        move |text, expected| match vault {
+            Some(vault) => vault.save(&rel, text, expected),
+            None => accent_core::fs::write_note(&path, text, expected),
         }
-        let etag = written?;
-        tab.mark_clean(etag);
-        tab.clear_disk_alert();
-        // The tab is clean again, so the bar's dot goes with the one on the tab title.
-        self.sync_status();
+    }
+
+    /// What follows a write that landed: the etag it left, and — when the buffer is still what
+    /// was written — the tab clean again.
+    fn wrote(&self, tab: &Rc<Tab>, etag: Etag, clean: bool) {
+        if clean {
+            tab.mark_clean(etag);
+            tab.clear_disk_alert();
+            // The tab is clean again, so the bar's dot goes with the one on the tab title.
+            self.sync_status();
+        } else {
+            tab.etag.set(Some(etag));
+        }
         lang::saved(tab);
         // Our own writes go through the vault, which tells the watcher they were ours, so no
         // event comes back to say the working tree moved. The pane is told here instead.
         if let Some(git) = self.git.get() {
             git.schedule_refresh(git::Depth::Status);
         }
+    }
+
+    /// Write the buffer before returning, and hand the error back instead of reporting it: a
+    /// caller that is about to make the buffer unreachable has to know whether the bytes landed.
+    /// A save still on its way lands first, so the two never race for the file.
+    pub fn write_tab(
+        self: &Rc<Self>,
+        tab: &Rc<Tab>,
+        expected: Option<Etag>,
+    ) -> Result<(), SaveError> {
+        self.land_save(tab, false);
+        let written = self.writer(tab)(&tab.for_disk(), expected);
+        log_write(tab, expected, &written);
+        self.wrote(tab, written?, true);
         Ok(())
+    }
+
+    /// [`save_tab`](Self::save_tab) written before it returns, for a buffer whose file is about
+    /// to move: an autosave in every other respect.
+    pub fn save_tab_now(self: &Rc<Self>, tab: &Rc<Tab>) {
+        if !editor::may_save(tab.modified.get(), tab.disk_changed.get()) {
+            return;
+        }
+        if let Err(e) = self.flush_tab(tab) {
+            self.refused(tab, e, false);
+        }
+    }
+
+    /// [`write_tab`](Self::write_tab) gated on the tab's own etag, as it stands once any save on
+    /// its way has landed; a buffer that landing left clean has nothing more to write. For the
+    /// paths a buffer leaves by, and for a file about to move with its buffer dirty.
+    pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), SaveError> {
+        self.land_save(tab, false);
+        if !tab.modified.get() {
+            return Ok(());
+        }
+        self.write_tab(tab, tab.etag.get())
     }
 
     /// A watcher says the file under a tab moved.
@@ -154,6 +270,12 @@ impl App {
 
     /// What [`file_changed`](Self::file_changed) does once the stat is in.
     fn compare_disk(self: &Rc<Self>, tab: &Rc<Tab>, looked: std::io::Result<Option<Etag>>) {
+        // A save still on its way has not put its etag in the tab yet, so our own write would
+        // read as someone else's. Looked at again once it has landed.
+        if tab.flight.borrow().is_some() {
+            tab.recheck.set(true);
+            return;
+        }
         let disk = match looked {
             Ok(disk) => disk,
             Err(e) => {
@@ -512,5 +634,15 @@ impl App {
             fileops::trash(ops, conflict);
         }
         self.sync_conflict_banner(original, Some(conflict));
+    }
+}
+
+/// One write's outcome, on the `SAVES` target the save path has always logged to.
+fn log_write(tab: &Tab, expected: Option<Etag>, written: &Result<Etag, SaveError>) {
+    match written {
+        Ok(etag) => tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, ?etag, "wrote"),
+        Err(e) => {
+            tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, error = %e, "refused");
+        }
     }
 }

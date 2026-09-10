@@ -11,7 +11,7 @@
 
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret};
 use accent_api::{Diagnostic, Fold};
-use accent_core::fs::{self, Etag};
+use accent_core::fs::{self, Etag, SaveError};
 use accent_core::markdown::Link;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -72,6 +72,52 @@ type Hook = RefCell<Option<Rc<dyn Fn(&Rc<Tab>)>>>;
 /// being attempted at all once the tab already knows the answer.
 pub fn may_save(modified: bool, disk_changed: bool) -> bool {
     !(modified && disk_changed)
+}
+
+/// A save on its way to the file, as its tab keeps it: what the write was started against, and
+/// the channel its answer arrives on. There is at most one per tab.
+pub struct Flight {
+    /// [`Tab::edits`] when the text was taken.
+    pub started: u64,
+    /// The etag the write was gated on.
+    pub expected: Option<Etag>,
+    /// A Ctrl+S, which says "Saved" when it lands.
+    pub explicit: bool,
+    pub answer: std::sync::mpsc::Receiver<Result<Etag, SaveError>>,
+}
+
+/// What a save that has just landed means for its tab.
+#[derive(Debug)]
+pub enum Landing {
+    /// The buffer is still what was written: clean, at the new etag.
+    Clean(Etag),
+    /// The file holds what was written, but the buffer has been typed into since: still dirty,
+    /// and the next save is gated on the new etag.
+    Behind(Etag),
+    /// A reload put other text and its own etag in the tab meanwhile, so the answer describes a
+    /// buffer that is gone and changes nothing.
+    Stale,
+    /// Refused or failed, for a buffer that still holds its edits.
+    Failed(SaveError),
+}
+
+/// Decide a [`Landing`] from the tab as the save found it (`started`, `expected`) and as it is
+/// now (`edits`, `holding`).
+pub fn landing(
+    started: u64,
+    edits: u64,
+    expected: Option<Etag>,
+    holding: Option<Etag>,
+    written: Result<Etag, SaveError>,
+) -> Landing {
+    if holding != expected {
+        return Landing::Stale;
+    }
+    match written {
+        Ok(etag) if started == edits => Landing::Clean(etag),
+        Ok(etag) => Landing::Behind(etag),
+        Err(e) => Landing::Failed(e),
+    }
 }
 
 /// What kind of text a tab holds.
@@ -161,6 +207,17 @@ pub struct Tab {
     /// Someone else changed the file under a dirty tab. Autosave stops until the user has
     /// answered the banner, so a conflict is never resolved behind their back.
     pub disk_changed: Cell<bool>,
+    /// Counts every change to the buffer, typed or loaded, so a save that lands can tell whether
+    /// the buffer is still the text it wrote.
+    pub edits: Cell<u64>,
+    /// The save on its way, if one is.
+    pub flight: RefCell<Option<Flight>>,
+    /// A save asked for while one was on its way, run when that lands; `Some(true)` if any of the
+    /// asks was a Ctrl+S.
+    pub save_again: Cell<Option<bool>>,
+    /// The watcher spoke while a save was on its way, so its stat is taken again once the save
+    /// has landed and the tab holds the etag it wrote.
+    pub recheck: Cell<bool>,
     /// Every question standing about this file. The banner shows one of them ([`banner_alert`]);
     /// the rest wait rather than being overwritten.
     alerts: RefCell<Vec<Alert>>,
@@ -469,6 +526,10 @@ pub fn open(
         etag: Cell::new(Some(text.etag)),
         modified: Cell::new(false),
         disk_changed: Cell::new(false),
+        edits: Cell::new(0),
+        flight: RefCell::new(None),
+        save_again: Cell::new(None),
+        recheck: Cell::new(false),
         alerts: RefCell::new(Vec::new()),
         context,
         occurrence_tag,
@@ -801,6 +862,7 @@ impl Tab {
     /// reload left the server, the symbols, the folds and the diagnostics describing the text the
     /// file used to hold until the next keystroke.
     pub fn set_text(self: &Rc<Self>, text: &str) {
+        self.edits.set(self.edits.get() + 1);
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
@@ -1190,6 +1252,7 @@ impl Tab {
         if self.loading.get() {
             return;
         }
+        self.edits.set(self.edits.get() + 1);
         if !self.modified.replace(true) {
             self.page.set_title(&self.tab_title());
         }
@@ -1377,5 +1440,34 @@ mod tests {
             "a clean buffer has nothing to lose, which is how a deleted note is written back"
         );
         assert!(may_save(false, false));
+    }
+
+    /// A background save lands on a tab that may have moved on. Getting this wrong either marks
+    /// unsaved typing clean, which loses it at the next close, or trusts an etag the tab no
+    /// longer holds.
+    #[test]
+    fn a_landed_save_cleans_only_the_buffer_it_wrote() {
+        let etag = |n| Etag {
+            mtime_ns: n,
+            size: 1,
+            ino: 1,
+        };
+        let (was, wrote) = (Some(etag(1)), etag(2));
+        assert!(
+            matches!(landing(5, 5, was, was, Ok(wrote)), Landing::Clean(e) if e == wrote),
+            "nothing typed since: clean at the new etag"
+        );
+        assert!(
+            matches!(landing(5, 7, was, was, Ok(wrote)), Landing::Behind(e) if e == wrote),
+            "typed into since: still dirty, gated on the new etag"
+        );
+        assert!(
+            matches!(landing(5, 5, was, Some(etag(3)), Ok(wrote)), Landing::Stale),
+            "a reload put its own etag in meanwhile: the answer is about a buffer that is gone"
+        );
+        assert!(matches!(
+            landing(5, 7, was, was, Err(SaveError::Offline)),
+            Landing::Failed(SaveError::Offline)
+        ));
     }
 }

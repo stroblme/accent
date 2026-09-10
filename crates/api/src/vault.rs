@@ -29,10 +29,11 @@ use crate::{
 /// That is the whole point of the split — the UI was written against a local vault and did not
 /// have to learn anything to work on a remote one.
 ///
-/// Reads and writes are synchronous here, as they always were. A remote call is a round trip, so
-/// the desktop runs the ones that paint a list or open a document on a worker thread; the ones
-/// that follow a click and write a file stay where they are, because a save that takes a
-/// millisecond longer is not something anyone can feel.
+/// Reads and writes are synchronous here, as they always were. A remote call is a round trip, and
+/// every window of the desktop app shares one main thread, so it makes them on worker threads,
+/// autosave included: a round trip once a second while someone typed held every window. What
+/// stays where it is called is a write the click that asked for it has to see land before it is
+/// done — a new note, or a tab closing with its buffer dirty.
 pub struct Vault {
     pub(crate) backend: Backend,
     /// What this vault is called in the config, the recents and the session file: the root for a

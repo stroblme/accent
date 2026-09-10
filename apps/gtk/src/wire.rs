@@ -63,7 +63,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .find(|t| &t.page == page)
                 .filter(|t| t.modified.get());
             if let Some(tab) = dirty
-                && let Err(e) = app.write_tab(&tab, tab.etag.get())
+                && let Err(e) = app.flush_tab(&tab)
             {
                 let (tabs, page) = (tabs.clone(), page.clone());
                 app.ask_unsaved(&tab, &e, move |app, close| {
@@ -416,7 +416,7 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         glib::Propagation::Proceed,
         move |_| {
             for tab in app.open_tabs().iter().filter(|t| t.modified.get()) {
-                let Err(e) = app.write_tab(tab, tab.etag.get()) else {
+                let Err(e) = app.flush_tab(tab) else {
                     continue;
                 };
                 app.ask_unsaved(tab, &e, |app, close| {
