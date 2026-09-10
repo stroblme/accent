@@ -682,6 +682,7 @@ fn retired_daily_keys(app: &Rc<App>) {
 /// outlive nothing, and a strong capture here would keep a closed window's vault open.
 fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let toast = Rc::downgrade(app);
+    let transferring = Rc::downgrade(app);
     let open = Rc::downgrade(app);
     let flush = Rc::downgrade(app);
     let reload = Rc::downgrade(app);
@@ -694,6 +695,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         toast: Box::new(move |message| {
             if let Some(app) = toast.upgrade() {
                 app.toast(message);
+            }
+        }),
+        transferring: Box::new(move |what, running| {
+            if let Some(app) = transferring.upgrade() {
+                app.statusbar.set_transfer(what, running);
             }
         }),
         open: Box::new(move |rel, stops| {
