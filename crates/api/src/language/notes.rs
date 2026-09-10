@@ -110,6 +110,18 @@ fn target_of(rel: &str, link: &markdown::Link) -> String {
     }
 }
 
+/// What a hint asks the index about a link in `rel`, or `None` when it is not the index's to
+/// judge: a URL, a pure `#anchor`, and a markdown link that points out of the vault — absolute,
+/// or climbing past the root — which [`path::resolve`] would otherwise fold back into it.
+fn checked_target(rel: &str, link: &markdown::Link) -> Option<String> {
+    let judged = match link.kind {
+        LinkKind::Wiki | LinkKind::Embed => true,
+        LinkKind::Markdown => path::stays_inside(parent_dir(rel), &link.target),
+        LinkKind::External => false,
+    };
+    (judged && !link.target.is_empty()).then(|| target_of(rel, link))
+}
+
 /// The two ways a `[[…]]` link names `rel`: by its bare name — a note's stem, any other file's
 /// whole name — and by its path, which drops a note's extension too.
 pub(crate) fn link_names(rel: &str) -> (String, String) {
@@ -269,26 +281,25 @@ impl Notes {
 
     /// Say what is wrong with the note as it now stands. An empty list is what clears the last one.
     fn publish(&self, rel: &str, text: &str) {
-        let items = or_empty("diagnose", self.diagnose(text));
+        let items = or_empty("diagnose", self.diagnose(rel, text));
         let _ = self.events.send(Event::Diagnostics {
             rel: rel.to_string(),
             items,
         });
     }
 
-    /// One hint per wikilink the index cannot resolve. `Markdown` links are left alone: they are
-    /// relative to the note, and link resolution does no path arithmetic.
-    fn diagnose(&self, text: &str) -> Result<Vec<Diagnostic>> {
+    /// One hint per link in `rel` the index cannot resolve: a wikilink by its name, a markdown
+    /// link by the vault path it names from the note's folder. Anchors are not checked.
+    fn diagnose(&self, rel: &str, text: &str) -> Result<Vec<Diagnostic>> {
         let a = markdown::analyze(text);
-        let links: Vec<&markdown::Link> = a
+        let (links, targets): (Vec<&markdown::Link>, Vec<String>) = a
             .links
             .iter()
-            .filter(|l| matches!(l.kind, LinkKind::Wiki | LinkKind::Embed) && !l.target.is_empty())
-            .collect();
+            .filter_map(|l| Some((l, checked_target(rel, l)?)))
+            .unzip();
         if links.is_empty() {
             return Ok(Vec::new());
         }
-        let targets: Vec<String> = links.iter().map(|l| l.target.clone()).collect();
         let resolved = locked(&self.index).resolve_targets(&targets)?;
         Ok(links
             .iter()
@@ -781,6 +792,21 @@ mod tests {
             link_names("Attachments/logo.png"),
             ("logo.png".to_string(), "Attachments/logo.png".to_string())
         );
+    }
+
+    #[test]
+    fn a_hint_checks_wikilinks_by_name_and_markdown_links_by_vault_path() {
+        let text = "[[Beta]] [b](../Beta%20Two.md#x) [u](https://e.com) [m](mailto:a@b.c) \
+                    [h](#x) [[#h]] [o](../../x.md) [r](/x.md)";
+        let checked: Vec<Option<String>> = markdown::analyze(text)
+            .links
+            .iter()
+            .map(|l| checked_target("sub/a.md", l))
+            .collect();
+        let want = [Some("Beta"), Some("Beta Two.md")];
+        assert_eq!(checked[..2], want.map(|t| t.map(String::from)));
+        // URLs, pure anchors and paths that leave the vault are not the index's to judge.
+        assert!(checked[2..].iter().all(Option::is_none), "{checked:?}");
     }
 
     #[test]
