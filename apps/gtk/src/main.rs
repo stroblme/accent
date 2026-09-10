@@ -206,6 +206,8 @@ struct App {
     awaiting: RefCell<HashMap<String, Waiting>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
+    /// The session restore while its tabs are still landing: see [`App::reader_in`].
+    restore: RefCell<std::rc::Weak<session::Restore>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     /// Files / Search / Tags / References over the vault tree.
@@ -786,7 +788,7 @@ impl App {
         let page = term.page.clone();
         let view = term.view.clone();
         self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.select_new_page(&page);
+        self.select_new_page(&page, Opened::Kept);
         // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
         // unable to hear a keystroke, which is a terminal you have to click before you can type
         // in. From an idle, because the page has only just been selected and the widget it holds

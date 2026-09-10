@@ -103,6 +103,11 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     app.mark_page(left);
                 }
                 pane.touch(&page);
+                // A page with no document yet is still being opened, and was selected by being
+                // the first one added; any other is a tab someone picked.
+                if app.doc_for_page(&page).is_some() {
+                    app.reader_in(&pane);
+                }
             }
             // This pane's bar, whether or not this pane has the keyboard: a tab dragged out of a
             // background pane must not leave that pane's bar holding a tab it no longer has.
@@ -194,6 +199,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         #[weak]
         pane,
         move |_| {
+            app.reader_in(&pane);
             if app.set_active_pane(&pane) {
                 app.sync_active();
             }

@@ -47,7 +47,9 @@ use super::*;
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
 /// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
-/// its tabs have landed, and quits without writing one.
+/// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
+/// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
+/// `=focus:<rel>` gives it the keyboard instead.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -87,6 +89,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !hidden
     {
         return;
+    }
+    // Not after the first frame: a restore has landed every tab by then.
+    if let Some(arg) = layout.as_deref().filter(|arg| arg.contains(':')) {
+        return bench_layout_pick(app, arg);
     }
     let app = app.clone();
     // After the first frame, so widget realisation is not counted in the numbers.
@@ -870,6 +876,65 @@ fn bench_layout(app: &Rc<App>, arg: &str) {
                 }
             });
         });
+    });
+}
+
+/// See `ACCENT_BENCH_LAYOUT` above. However fast the reads are, the pick comes between two tabs
+/// landing: the restore's work waiting on each tab is wrapped before any lands, and the first
+/// landing after which `<rel>` is in its pane — behind another tab to be picked, in front to be
+/// given the keyboard — with a tab still to come does it.
+fn bench_layout_pick(app: &Rc<App>, arg: &str) {
+    let Some((how, rel)) = arg.split_once(':') else {
+        return bench_quit(app);
+    };
+    let (app, how, rel) = (app.clone(), Rc::<str>::from(how), Rc::<str>::from(rel));
+    let done = Rc::new(Cell::new(false));
+    let mut hooked = false;
+    // From before the restore, every millisecond: the first tick after it runs ahead of the reads.
+    glib::timeout_add_local(Duration::from_millis(1), move || {
+        if !hooked && app.restored.get() {
+            hooked = true;
+            let keys: Vec<String> = app.awaiting.borrow().keys().cloned().collect();
+            for key in keys {
+                let Some(restore) = app.awaiting.borrow_mut().remove(&key) else {
+                    continue;
+                };
+                let (how, rel, done) = (how.clone(), rel.clone(), done.clone());
+                let pick: Waiting = Box::new(move |app, tab| {
+                    restore(app, tab);
+                    let landing = app.awaiting.borrow().len();
+                    let Some(tab) = app.tab_for(&rel).filter(|_| !done.get() && landing > 0) else {
+                        return;
+                    };
+                    let Some(pane) = app.pane_of(&tab.page) else {
+                        return;
+                    };
+                    let front = pane.tabs.selected_page().as_ref() == Some(&tab.page);
+                    match (&*how, front) {
+                        ("focus", true) => {
+                            tab.view.grab_focus();
+                        }
+                        ("pick", false) => pane.tabs.set_selected_page(&tab.page),
+                        _ => return,
+                    }
+                    done.set(true);
+                    println!("bench layout_{how} {rel} with {landing} still landing");
+                });
+                app.awaiting.borrow_mut().insert(key, pick);
+            }
+        }
+        if !app.restored.get() || !app.awaiting.borrow().is_empty() {
+            return glib::ControlFlow::Continue;
+        }
+        if !done.get() {
+            println!("bench layout_{how} {rel} missed");
+        }
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            bench_layout_print(&app);
+            bench_quit(&app);
+        });
+        glib::ControlFlow::Break
     });
 }
 

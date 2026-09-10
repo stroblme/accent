@@ -404,31 +404,36 @@ impl App {
         if let Some(root) = self.content.child_by_name("tabs") {
             hold_ratios(&root, splits);
         }
-        let placed = Rc::new(placed);
-        let active = Rc::new(active);
-        for key in placed.iter().flat_map(|p| &p.tabs) {
+        let restore = Rc::new(Restore {
+            placed,
+            active,
+            taken: RefCell::default(),
+            selecting: Cell::new(false),
+        });
+        // Weak: the work waiting on each tab holds it, so it goes once the last one has settled.
+        *self.restore.borrow_mut() = Rc::downgrade(&restore);
+        for key in restore.placed.iter().flat_map(|p| &p.tabs) {
             // Opened while a remote vault was still connecting, and left where it is.
             if self.doc_for(key).is_some() {
                 continue;
             }
             let asked = Asked {
                 app: Rc::downgrade(self),
-                placed: placed.clone(),
-                active: active.clone(),
+                restore: restore.clone(),
                 landed: Cell::new(false),
             };
-            // At once rather than from `Asked`'s idle, so a landing tab is never painted in front
-            // of its pane's own.
-            self.with_tab(key, Opened::Kept, move |app, _| {
+            // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
+            // it is put back.
+            self.with_tab(key, Opened::Restored, move |app, _| {
                 asked.landed.set(true);
-                app.put_back(&asked.placed, asked.active.as_deref())
+                app.put_back(&asked.restore)
             });
         }
         // What is still on its way keeps its place; the rest has landed, or failed to open.
         self.placing
             .borrow_mut()
             .retain(|key, _| self.awaiting.borrow().contains_key(key));
-        self.put_back(&placed, active.as_deref());
+        self.put_back(&restore);
     }
 
     /// Split `pane` the way `layout` is split, and note which pane each tab belongs in. The pane
@@ -480,10 +485,16 @@ impl App {
     /// on its way has lost every note it held since, and closes, the other side of its split
     /// taking the room.
     ///
+    /// A pane the reader has picked a tab in or moved the keyboard to since is theirs: its tabs
+    /// still go into bar order, but what it shows is left alone, and notes go on opening where the
+    /// reader last went rather than beside the active tab.
+    ///
     /// Run once every open has been asked for, and again as each one settles (see [`Asked`]): a
-    /// landing tab is selected in its pane as it arrives, and a failed one may have emptied one.
-    fn put_back(self: &Rc<Self>, placed: &[Placed], active: Option<&str>) {
-        for leaf in placed {
+    /// pane's own tab may just have landed, and a failed one may have emptied its pane.
+    fn put_back(self: &Rc<Self>, restore: &Restore) {
+        // What it selects is not the reader's doing: see `reader_in`.
+        restore.selecting.set(true);
+        for leaf in &restore.placed {
             let Some(pane) = leaf.pane.upgrade() else {
                 continue;
             };
@@ -497,7 +508,9 @@ impl App {
             for (at, page) in (0..).zip(&pages) {
                 pane.tabs.reorder_page(page, at);
             }
-            if let Some(doc) = leaf.selected.as_deref().and_then(|key| self.doc_for(key))
+            let taken = restore.taken.borrow().iter().any(|p| p.ptr_eq(&leaf.pane));
+            if !taken
+                && let Some(doc) = leaf.selected.as_deref().and_then(|key| self.doc_for(key))
                 && pane.has(doc.page())
             {
                 pane.tabs.set_selected_page(doc.page());
@@ -510,7 +523,42 @@ impl App {
                 self.close_pane(&pane);
             }
         }
-        self.select_doc(active);
+        // The reader stays where they last went, and until they go anywhere notes open beside the
+        // active tab. Either way the active pane is set again: a tab landing in an empty pane is
+        // selected by being added, which makes that pane the active one.
+        let reader = restore.taken.borrow().last().cloned();
+        match reader {
+            None => self.select_doc(restore.active.as_deref()),
+            Some(pane) => {
+                // Unless it has closed since, which left notes going to whichever pane was first.
+                let open = pane
+                    .upgrade()
+                    .filter(|pane| self.panes.borrow().iter().any(|p| Rc::ptr_eq(p, pane)));
+                if let Some(pane) = open
+                    && self.set_active_pane(&pane)
+                {
+                    self.sync_active();
+                }
+            }
+        }
+        restore.selecting.set(false);
+    }
+
+    /// The reader picked a tab in `pane`, or moved the keyboard to it. While a restore is landing
+    /// that makes the pane theirs, which [`App::put_back`] leaves alone; its own selections fire
+    /// the same notify, and are told apart by being made while it has `selecting` set.
+    pub(crate) fn reader_in(&self, pane: &Rc<Pane>) {
+        let Some(restore) = self.restore.borrow().upgrade() else {
+            return;
+        };
+        if restore.selecting.get() {
+            return;
+        }
+        let pane = Rc::downgrade(pane);
+        let mut taken = restore.taken.borrow_mut();
+        // Last is where the reader is now.
+        taken.retain(|p| !p.ptr_eq(&pane));
+        taken.push(pane);
     }
 
     /// Bring the tab holding `key` to the front, if there is one, and make its pane the one notes
@@ -537,16 +585,24 @@ struct Placed {
     selected: Option<String>,
 }
 
+/// A restore whose tabs are still landing: see [`App::put_back`].
+pub struct Restore {
+    placed: Vec<Placed>,
+    active: Option<String>,
+    /// The panes the reader has picked a tab in or moved the keyboard to since, the latest last.
+    taken: RefCell<Vec<std::rc::Weak<Pane>>>,
+    /// Set while `put_back` selects, so the notify that fires is not taken for the reader's.
+    selecting: Cell<bool>,
+}
+
 /// One tab a restore asked for, held by the work waiting on it in `awaiting`. A tab that fails to
 /// open drops that work without running it, and says nothing else, so the drop is when the panes
 /// are looked at again. From an idle: the drop happens inside a borrow of `awaiting`, which
 /// `put_back` reads.
 struct Asked {
     app: std::rc::Weak<App>,
-    placed: Rc<Vec<Placed>>,
-    active: Rc<Option<String>>,
-    /// The tab landed and the work ran, putting the panes back itself. A second pass from the
-    /// idle would take the front from a note opened since — the one on the command line.
+    restore: Rc<Restore>,
+    /// The tab landed and the work ran, putting the panes back itself: the drop has nothing to do.
     landed: Cell<bool>,
 }
 
@@ -555,10 +611,10 @@ impl Drop for Asked {
         if self.landed.get() {
             return;
         }
-        let (app, placed, active) = (self.app.clone(), self.placed.clone(), self.active.clone());
+        let (app, restore) = (self.app.clone(), self.restore.clone());
         glib::idle_add_local_once(move || {
             if let Some(app) = app.upgrade() {
-                app.put_back(&placed, active.as_deref());
+                app.put_back(&restore);
             }
         });
     }
