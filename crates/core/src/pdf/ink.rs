@@ -49,6 +49,20 @@ pub struct Drawn {
     pub(super) style: InkStyle,
 }
 
+impl Drawn {
+    /// The same stroke along another path, drawn straight from point to point: a piece of it.
+    pub(super) fn along(&self, points: &[(f32, f32)]) -> Drawn {
+        let segs = points.iter().enumerate().map(|(i, &p)| match i {
+            0 => Seg::Move(p),
+            _ => Seg::Line(p),
+        });
+        Drawn {
+            segs: segs.collect(),
+            style: self.style,
+        }
+    }
+}
+
 /// Drop points closer than `min` to the last one kept.
 ///
 /// A pointer reports on every motion event, so a slow stroke arrives as a cloud of near-identical
@@ -151,11 +165,21 @@ pub(super) fn points_of(segs: &[Seg]) -> impl Iterator<Item = (f32, f32)> + '_ {
     })
 }
 
-/// The path as one polyline for [`hit`]: a curve is sampled at three points before its end, and
-/// a close goes back to where the sub-path began.
+/// How far a flattened curve strays from the curve, at most, in page points: half a pixel at the
+/// viewer's largest zoom, so a stroke redrawn straight between its flattened points — which is
+/// what a cut leaves of it — lies on the one it came from.
+const FLAT: f32 = 0.05;
+
+/// The shortest piece a cut keeps, in page points. Anything shorter would draw as a dot of the
+/// stroke's width under its round cap: a crumb nobody meant to leave.
+const CRUMB: f32 = 1.0;
+
+/// The path as one polyline for [`hit`] and [`cut`]: a curve is walked in as many straight steps
+/// as keep it within [`FLAT`] of itself, and a close goes back to where the sub-path began.
 ///
 // ponytail: one polyline, so a second sub-path is joined to the first by a segment nobody drew.
-// Our paths have one sub-path; another editor's multi-stroke `/Ink` gains a false edge.
+// Our paths have one sub-path; another editor's multi-stroke `/Ink` gains a false edge, and is
+// not cut (see `InkShape::cuttable`).
 pub(super) fn flatten(segs: &[Seg]) -> Vec<(f32, f32)> {
     let mut out = Vec::new();
     let mut start = None;
@@ -172,7 +196,14 @@ pub(super) fn flatten(segs: &[Seg]) -> Vec<(f32, f32)> {
                 out.push(p);
             }
             Seg::Bezier(c1, c2, end) => {
-                out.extend([0.25, 0.5, 0.75].map(|t| cubic(last, c1, c2, end, t)));
+                // Wang's bound: a cubic whose control points bend by at most `bend` stays within
+                // FLAT of the chords of `n` equal steps once n² ≥ 3·bend / (4·FLAT).
+                let bend = |a: (f32, f32), b: (f32, f32), c: (f32, f32)| {
+                    (a.0 - 2.0 * b.0 + c.0).hypot(a.1 - 2.0 * b.1 + c.1)
+                };
+                let most = bend(last, c1, c2).max(bend(c1, c2, end));
+                let n = ((0.75 * most / FLAT).sqrt().ceil() as usize).max(1);
+                out.extend((1..n).map(|i| cubic(last, c1, c2, end, i as f32 / n as f32)));
                 last = end;
                 out.push(end);
             }
@@ -250,4 +281,112 @@ fn to_segment(p: (f32, f32), (a, b): Segment) -> f32 {
         false => 0.0,
     };
     (p.0 - (a.0 + t * dx)).hypot(p.1 - (a.1 + t * dy))
+}
+
+/// What is left of the polyline through `points` once the pointer, moved in a straight line from
+/// `from` to `to`, has taken everything within `reach` of its path: the runs outside that reach,
+/// in order and without the crumbs. `None` when the path came nowhere near, which leaves the
+/// stroke alone; nothing at all when it took the lot.
+pub fn cut(
+    points: &[(f32, f32)],
+    from: (f32, f32),
+    to: (f32, f32),
+    reach: f32,
+) -> Option<Vec<Vec<(f32, f32)>>> {
+    let path = (from, to);
+    // A dot is taken whole or not at all.
+    if let [only] = points {
+        return (to_segment(*only, path) <= reach).then(Vec::new);
+    }
+    let mut runs = Vec::new();
+    let mut run: Vec<(f32, f32)> = Vec::new();
+    let mut touched = false;
+    for w in points.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let Some((enter, leave)) = within((a, b), path, reach) else {
+            if run.is_empty() {
+                run.push(a);
+            }
+            run.push(b);
+            continue;
+        };
+        touched = true;
+        if enter > 0.0 {
+            if run.is_empty() {
+                run.push(a);
+            }
+            run.push(lerp(a, b, enter));
+        }
+        runs.push(std::mem::take(&mut run));
+        if leave < 1.0 {
+            run = vec![lerp(a, b, leave), b];
+        }
+    }
+    if !touched {
+        return None;
+    }
+    runs.push(run);
+    // A closed path cut once is one piece, not two that meet where it began.
+    let closed = points.len() > 2 && points.first() == points.last();
+    let ends = |run: &Vec<(f32, f32)>| (run.first().copied(), run.last().copied());
+    if closed
+        && runs.len() > 1
+        && ends(&runs[0]).0 == points.first().copied()
+        && runs.last().and_then(|r| ends(r).1) == points.last().copied()
+    {
+        let first = runs.remove(0);
+        if let Some(last) = runs.last_mut() {
+            last.extend(first.into_iter().skip(1));
+        }
+    }
+    runs.retain(|run| length(run) >= CRUMB);
+    Some(runs)
+}
+
+/// Which part of the segment `a`–`b` lies within `reach` of `path`, as the span of it from `a`
+/// (0) to `b` (1), or nothing. The distance to a segment is convex along another, so that part
+/// is one span: its nearest point is found by narrowing thirds, and each end by halving.
+fn within((a, b): Segment, path: Segment, reach: f32) -> Option<(f32, f32)> {
+    let d = |t: f32| to_segment(lerp(a, b, t), path);
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..40 {
+        let (l, h) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        match d(l) < d(h) {
+            true => hi = h,
+            false => lo = l,
+        }
+    }
+    let nearest = (lo + hi) / 2.0;
+    if d(nearest) > reach {
+        return None;
+    }
+    // From the nearest point out towards `end`, the last place still within reach.
+    let edge = |end: f32| {
+        if d(end) <= reach {
+            return end;
+        }
+        let (mut inside, mut outside) = (nearest, end);
+        for _ in 0..24 {
+            let mid = (inside + outside) / 2.0;
+            match d(mid) <= reach {
+                true => inside = mid,
+                false => outside = mid,
+            }
+        }
+        inside
+    };
+    Some((edge(0.0), edge(1.0)))
+}
+
+/// The point `t` of the way from `a` to `b`.
+fn lerp(a: (f32, f32), b: (f32, f32), t: f32) -> (f32, f32) {
+    (a.0 + t * (b.0 - a.0), a.1 + t * (b.1 - a.1))
+}
+
+/// How long the polyline through `points` is.
+fn length(points: &[(f32, f32)]) -> f32 {
+    points
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum()
 }

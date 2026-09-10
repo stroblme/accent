@@ -19,7 +19,7 @@ use super::geometry::{
     Anchor, Layout, PT_TO_PX, PdfZoom, Span, anchor_at, clamp_scale, fit_scale, layout, offset_of,
     page_at, resume_at, stepped,
 };
-use super::protocol::{Highlights, NamedInk, Reply};
+use super::protocol::{Highlights, NamedInk, Pass, Reply, fresh_id};
 use super::tools::{
     ADJUST_RADIUS, HANDLE, Handle, Mode, Selected, Stroke, drag_matrix, handle_at, mapped,
     shape_of, snap,
@@ -401,9 +401,9 @@ impl PdfView {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a page, the id of a stroke on it the eraser passed over, and whether the same
-    /// drag took one before it.
-    pub fn connect_erase(&self, f: impl Fn(usize, u32, bool) + 'static) {
+    /// Called with a page, the id of a stroke on it the eraser passed over, what a partial eraser
+    /// left of it, and whether the same drag took one before it.
+    pub fn connect_erase(&self, f: impl Fn(usize, u32, Option<Pass>, bool) + 'static) {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
@@ -412,9 +412,15 @@ impl PdfView {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
     }
 
-    /// What one page holds for the eraser and the Adjust tool. A selection on that page follows
-    /// its stroke by id to wherever a move put it, or goes if the stroke did.
-    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>) {
+    /// What one page holds for the eraser and the Adjust tool, read once the render thread had
+    /// answered `erases` of this view's erases. A list read before the last of them landed is of
+    /// the page before it — the view's own, taken out of and cut as it went, is truer — so it is
+    /// let go; the erase itself sends one back. A selection on that page follows its stroke by id
+    /// to wherever a move put it, or goes if the stroke did.
+    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, erases: u64) {
+        if erases < self.imp().erases.get() {
+            return;
+        }
         {
             let mut adjust = self.imp().adjust.borrow_mut();
             if let Some(a) = adjust.as_ref()
@@ -521,7 +527,8 @@ impl PdfView {
         self.queue_draw();
     }
 
-    /// Tell the tab which strokes the eraser passed over since it was last reported.
+    /// Tell the tab which strokes the eraser passed over since it was last reported, and what a
+    /// partial eraser leaves of each.
     fn erase_at(&self, x: f64, y: f64) {
         let Some((page, _)) = self.nearest_page_point(x, y) else {
             return;
@@ -533,26 +540,57 @@ impl PdfView {
             Some((was, from)) if was == page => from,
             _ => at,
         };
-        let radius = self.imp().style.borrow().eraser_radius;
+        let (radius, partial) = {
+            let style = self.imp().style.borrow();
+            (style.eraser_radius, style.eraser_partial)
+        };
         // Hit-tested here, against the strokes the tab keeps for this page, rather than on the
         // render thread: that read and flattened every annotation on the page under the pdfium
         // lock, once per pointer event of the drag. Taken out of the list at once, so a drag
-        // that passes over one again does not ask for it twice.
+        // that passes over one again does not ask for it twice; what a partial eraser leaves goes
+        // in at once, named here, so the next report can cut it again before the thread answers.
         let mut taken = Vec::new();
         if let Some(list) = self.imp().inks.borrow_mut().get_mut(&page) {
-            list.retain(|(id, ink)| {
+            for (id, ink) in std::mem::take(list) {
                 // To the stroke's edge rather than its middle: a highlighter is 14 pt across.
                 let reach = radius + ink.style.width / 2.0;
-                let hit = accent_core::pdf::swept(&ink.points, from, at, reach);
-                if hit {
-                    taken.push(*id);
+                if !accent_core::pdf::swept(&ink.points, from, at, reach) {
+                    list.push((id, ink));
+                    continue;
                 }
-                !hit
-            });
+                if !partial {
+                    taken.push((id, None));
+                    continue;
+                }
+                // Another editor's stroke that a cut would redraw wrongly is left alone.
+                let runs = ink
+                    .cuttable
+                    .then(|| accent_core::pdf::cut(&ink.points, from, at, reach));
+                let Some(Some(runs)) = runs else {
+                    list.push((id, ink));
+                    continue;
+                };
+                let mut pieces = Vec::with_capacity(runs.len());
+                for points in runs {
+                    let name = fresh_id();
+                    pieces.push(name);
+                    list.push((name, piece_of(&ink, points)));
+                }
+                taken.push((
+                    id,
+                    Some(Pass {
+                        from,
+                        to: at,
+                        radius,
+                        pieces,
+                    }),
+                ));
+            }
         }
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
-            for id in taken {
-                f(page, id, self.imp().erased.replace(true));
+            for (id, pass) in taken {
+                self.imp().erases.set(self.imp().erases.get() + 1);
+                f(page, id, pass, self.imp().erased.replace(true));
             }
         }
     }
@@ -838,6 +876,27 @@ fn configure(adjustment: Option<gtk::Adjustment>, upper: f64, page: f64) {
     adjustment.configure(value, 0.0, upper.max(page), page * 0.1, page * 0.9, page);
 }
 
+/// A piece a partial eraser leaves of `ink`: its style along `points`, as the render thread will
+/// draw it. The place in `/Annots` is the parent's and means nothing here; ids name strokes now.
+fn piece_of(
+    ink: &accent_core::pdf::InkShape,
+    points: Vec<(f32, f32)>,
+) -> accent_core::pdf::InkShape {
+    let bounds = points
+        .iter()
+        .map(|&p| accent_core::pdf::Rect::from_corners(p, p))
+        .reduce(accent_core::pdf::Rect::union)
+        .unwrap_or(ink.bounds)
+        .grow(ink.style.width / 2.0 + 1.0);
+    accent_core::pdf::InkShape {
+        index: ink.index,
+        points,
+        bounds,
+        style: ink.style,
+        cuttable: true,
+    }
+}
+
 /// Whether the event in hand is a stylus's, its tip or its eraser. A pen is known by its tool: on
 /// Wayland a tablet's events arrive on a logical device whose source is a mouse, and only the tool
 /// says otherwise. X11 without libwacom has no tool, and there the device's source is what says
@@ -892,9 +951,9 @@ mod imp {
     type OnSelect = Box<dyn Fn(&super::PdfView, super::Span)>;
     type Lowres = Box<dyn Fn(u32)>;
     type Stroke = Box<dyn Fn(usize, Vec<(f32, f32)>)>;
-    /// A page and the id of a stroke on it the eraser passed over, and whether the same drag took
-    /// one before it.
-    type At = Box<dyn Fn(usize, u32, bool)>;
+    /// A page and the id of a stroke on it the eraser passed over, what a partial eraser left of
+    /// it, and whether the same drag took one before it.
+    type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
     type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
 
     #[derive(glib::Properties)]
@@ -955,6 +1014,9 @@ mod imp {
         /// Whether the drag under way has taken a stroke yet: every later one is part of the
         /// same step for Undo.
         pub erased: Cell<bool>,
+        /// How many erases this view has sent, which a list of a page has to have seen to be
+        /// current. See [`super::PdfView::set_inks`].
+        pub erases: Cell<u64>,
         /// Whether the pointer is the stylus's dot rather than the arrow a tool otherwise shows.
         pub dot: Cell<bool>,
         pub current_mark: Cell<Option<(usize, usize)>>,
@@ -1014,6 +1076,7 @@ mod imp {
                 adjust: RefCell::new(None),
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
+                erases: Cell::new(0),
                 dot: Cell::new(false),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),

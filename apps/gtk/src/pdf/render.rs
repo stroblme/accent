@@ -13,7 +13,7 @@ use accent_core::pdf::{self, PdfDoc};
 use anyhow::{Result, anyhow};
 use gtk::glib;
 
-use super::protocol::{NamedInk, Request};
+use super::protocol::{NamedInk, Request, fresh_id};
 use super::{Highlights, LOWRES_W, PdfView, Reply, TILE, TileKey, Want};
 
 /// Open `path` on a thread of its own and answer for it until the sender is dropped.
@@ -94,7 +94,6 @@ struct Ink {
     ids: HashMap<usize, Vec<Option<u32>>>,
     done: Vec<Vec<Step>>,
     undone: Vec<Vec<Step>>,
-    next: u32,
     dirty: bool,
 }
 
@@ -109,17 +108,12 @@ impl Ink {
         }
     }
 
-    fn fresh(&mut self) -> u32 {
-        self.next += 1;
-        self.next
-    }
-
     /// The id of the annotation at `index` of a noted page, giving it one if it has none yet.
     fn id_at(&mut self, page: usize, index: usize) -> Option<u32> {
         if let Some(id) = *self.ids.get(&page)?.get(index)? {
             return Some(id);
         }
-        let id = self.fresh();
+        let id = fresh_id();
         self.ids.get_mut(&page)?[index] = Some(id);
         Some(id)
     }
@@ -137,7 +131,7 @@ impl Ink {
     fn removed(&mut self, page: usize, index: usize) -> u32 {
         let slots = self.ids.get_mut(&page).filter(|s| index < s.len());
         let had = slots.and_then(|s| s.remove(index));
-        had.unwrap_or_else(|| self.fresh())
+        had.unwrap_or_else(fresh_id)
     }
 
     /// The annotation named `id` went onto the end of `page`'s `/Annots`.
@@ -166,7 +160,7 @@ impl Ink {
     /// A stroke of ours went onto the end of `page`, which carried `before` annotations.
     fn drew(&mut self, page: usize, before: usize) {
         self.note(page, before);
-        let id = self.fresh();
+        let id = fresh_id();
         self.appended(page, id);
         self.record(
             Step::Drawn {
@@ -178,11 +172,25 @@ impl Ink {
         );
     }
 
-    /// The stroke at `index` was erased, and `kept` is what it drew.
-    fn erased(&mut self, page: usize, index: usize, kept: pdf::Drawn, joined: bool) {
+    /// The stroke at `index` was erased — `was` being what it drew — and `left` drawn in its
+    /// place under the names given: what a partial eraser leaves of it, nothing for a whole one.
+    /// Undo takes the pieces off and puts the stroke back as one step.
+    fn erased(
+        &mut self,
+        page: usize,
+        index: usize,
+        was: pdf::Drawn,
+        left: Vec<(u32, pdf::Drawn)>,
+        joined: bool,
+    ) {
         let id = self.removed(page, index);
-        let kept = Some(kept);
+        let kept = Some(was);
         self.record(Step::Erased { page, id, kept }, joined);
+        for (id, piece) in left {
+            self.appended(page, id);
+            let kept = Some(piece);
+            self.record(Step::Drawn { page, id, kept }, true);
+        }
     }
 
     /// The stroke at `index` was moved by `matrix`, which drew it again at the end of `page`.
@@ -379,6 +387,9 @@ fn render_loop(
     let mut ink = Ink::default();
     // What the tab was last told Undo and Redo have to walk, so it hears again only on a change.
     let mut told = (false, false);
+    // How many erases this thread has answered, taken or refused — what a list of a page is
+    // stamped with, so the widget can tell one read before its latest erase landed.
+    let mut erases: u64 = 0;
     // The pages whose text has already been read, for the highlights, the selections and the
     // exports that all want the same glyphs.
     let mut glyphs = Glyphs::new();
@@ -507,7 +518,7 @@ fn render_loop(
                 }
                 Request::Inks(page) => {
                     let inks = ink.named(&doc, page);
-                    send(&view, Reply::Inks { page, inks });
+                    send(&view, Reply::Inks { page, inks, erases });
                 }
                 Request::Transform { page, id, matrix } => {
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
@@ -525,29 +536,63 @@ fn render_loop(
                         Err(e) => {
                             tracing::debug!("moving a stroke on page {page}: {e:#}");
                             let inks = ink.named(&doc, page);
-                            send(&view, Reply::Inks { page, inks });
+                            send(&view, Reply::Inks { page, inks, erases });
                         }
                     }
                 }
-                Request::Erase { page, id, joined } => {
+                Request::Erase {
+                    page,
+                    id,
+                    joined,
+                    partial,
+                } => {
+                    erases += 1;
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
-                    let taken = ink
+                    let erased = ink
                         .index_of(page, id)
                         .ok_or_else(|| anyhow!("stroke {id} is gone"))
-                        .and_then(|index| Ok((index, doc.take_ink(page, index)?)));
-                    match taken {
-                        Ok((index, (kept, area))) => {
-                            ink.erased(page, index, kept, joined);
+                        .and_then(|index| {
+                            let cut = match &partial {
+                                None => {
+                                    let (was, area) = doc.take_ink(page, index)?;
+                                    let left = Vec::new();
+                                    Some(pdf::Cut { was, left, area })
+                                }
+                                Some(pass) => {
+                                    doc.cut_ink(page, index, pass.from, pass.to, pass.radius)?
+                                }
+                            };
+                            let missed = || anyhow!("the pass missed stroke {id}");
+                            cut.map(|cut| (index, cut)).ok_or_else(missed)
+                        });
+                    match erased {
+                        Ok((index, cut)) => {
+                            // The pieces keep the names the widget gave them when it cut the
+                            // stroke the same way. When it did not, its list was behind the page,
+                            // and it hears the page again.
+                            let given = partial.map(|pass| pass.pieces).unwrap_or_default();
+                            let behind = given.len() != cut.left.len();
+                            let names: Vec<u32> = match behind {
+                                false => given,
+                                true => cut.left.iter().map(|_| fresh_id()).collect(),
+                            };
+                            let left = names.into_iter().zip(cut.left).collect();
+                            ink.erased(page, index, cut.was, left, joined);
                             ink.dirty = true;
-                            send(&view, Reply::PageChanged(page, area));
+                            send(&view, Reply::PageChanged(page, cut.area));
+                            if behind {
+                                let inks = ink.named(&doc, page);
+                                send(&view, Reply::Inks { page, inks, erases });
+                            }
                         }
                         // Gone already — the list the eraser aimed at had not caught up with an
-                        // erase before this one — or refused. Either way the page's list goes
-                        // back at once, so the two agree again rather than at the next change.
+                        // erase before this one — or refused, or a pass that by the page itself
+                        // missed. Either way the page's list goes back at once, so the two agree
+                        // again rather than at the next change.
                         Err(e) => {
                             tracing::debug!("erasing on page {page}: {e:#}");
                             let inks = ink.named(&doc, page);
-                            send(&view, Reply::Inks { page, inks });
+                            send(&view, Reply::Inks { page, inks, erases });
                         }
                     }
                 }
@@ -650,12 +695,9 @@ fn render_loop(
                             // `/Annots` array this one need not share, so a later Ctrl+Z would
                             // resolve one to an index and delete whatever now sits there. It
                             // also carries `dirty`, which the fresh document is not. The ids
-                            // keep counting, so a request still naming a stroke of the old
-                            // document cannot land on one of the new.
-                            ink = Ink {
-                                next: ink.next,
-                                ..Ink::default()
-                            };
+                            // come from a counter that never goes back, so a request still naming
+                            // a stroke of the old document cannot land on one of the new.
+                            ink = Ink::default();
                             // The text moved with the document, so what was read of it goes.
                             glyphs.clear();
                             send(&view, Reply::Reloaded(page_sizes(&doc)));
@@ -775,7 +817,8 @@ mod tests {
 
         // An export's highlight joins the end unseen, and the next stroke counts it.
         ink.drew(0, 3);
-        assert_eq!(ink.index_of(0, ink.next), Some(3), "{:?}", ink.ids);
+        let drawn = newest(&ink, 0);
+        assert_eq!(ink.index_of(0, drawn), Some(3), "{:?}", ink.ids);
         // A page nobody touched names nothing, whatever it carries.
         assert_eq!(ink.index_of(9, a), None);
     }
@@ -816,8 +859,7 @@ mod tests {
         doc.add_shape(0, line(20.0), style).unwrap();
         doc.add_shape(0, line(40.0), style).unwrap();
         ink.drew(0, 1);
-        let ours = ink.next;
-        let at = ink.index_of(0, ours).unwrap();
+        let at = ink.index_of(0, newest(&ink, 0)).unwrap();
         let down = [1.0, 0.0, 0.0, 1.0, 0.0, 10.0];
         doc.transform_ink(0, at, down).unwrap();
         ink.moved(0, at, down);
@@ -827,7 +869,7 @@ mod tests {
         for (n, id) in named.into_iter().enumerate() {
             let at = ink.index_of(0, id).unwrap();
             let (kept, _) = doc.take_ink(0, at).unwrap();
-            ink.erased(0, at, kept, n > 0);
+            ink.erased(0, at, kept, Vec::new(), n > 0);
         }
         assert!(lines(&doc).is_empty());
         assert_eq!(ink.history(), (true, false));
@@ -856,6 +898,67 @@ mod tests {
         ink.drew(0, before);
         assert_eq!(lines(&doc), [20, 50, 60]);
         assert_eq!(ink.history(), (true, false));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The name of the annotation last put on the end of `page`.
+    fn newest(ink: &Ink, page: usize) -> u32 {
+        ink.ids[&page].last().copied().flatten().unwrap()
+    }
+
+    /// A cut is one step: Undo takes the pieces off and puts the stroke back whole, and Redo cuts
+    /// it again, the pieces under the names the widget gave them.
+    #[test]
+    fn undo_puts_a_cut_stroke_back_whole() {
+        if !pdf::available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let path = std::env::temp_dir().join(format!("accent-cut-{}.pdf", std::process::id()));
+        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        let mut doc = PdfDoc::open(&path).unwrap();
+        let style = pdf::InkStyle {
+            width: 2.0,
+            rgba: [0, 0, 0, 255],
+            multiply: false,
+        };
+        let line = pdf::Shape::Line {
+            a: (20.0, 50.0),
+            b: (180.0, 50.0),
+        };
+        // Where each stroke on the page begins and ends, left to right.
+        let spans = |doc: &PdfDoc| {
+            let ends = |i: &pdf::InkShape| (i.points[0].0, i.points[i.points.len() - 1].0);
+            let mut spans: Vec<(i32, i32)> = doc
+                .inks(0)
+                .unwrap()
+                .iter()
+                .map(|i| (ends(i).0.round() as i32, ends(i).1.round() as i32))
+                .collect();
+            spans.sort();
+            spans
+        };
+        let mut ink = Ink::default();
+        doc.add_shape(0, line, style).unwrap();
+        ink.drew(0, 0);
+        let at = ink.index_of(0, newest(&ink, 0)).unwrap();
+        // A 4 pt eraser straight down across the middle takes 5 pt either side of it.
+        let cut = doc.cut_ink(0, at, (100.0, 20.0), (100.0, 80.0), 4.0);
+        let cut = cut.unwrap().expect("the pass crossed the line");
+        let names: Vec<u32> = cut.left.iter().map(|_| fresh_id()).collect();
+        let left = names.iter().copied().zip(cut.left).collect();
+        ink.erased(0, at, cut.was, left, false);
+        assert_eq!(spans(&doc), [(20, 95), (105, 180)]);
+
+        ink.walk(&mut doc, false);
+        assert_eq!(spans(&doc), [(20, 180)]);
+        ink.walk(&mut doc, true);
+        assert_eq!(spans(&doc), [(20, 95), (105, 180)]);
+        assert!(names.iter().all(|id| ink.index_of(0, *id).is_some()));
+        // Back past the cut and the stroke it was made in.
+        ink.walk(&mut doc, false);
+        ink.walk(&mut doc, false);
+        assert!(spans(&doc).is_empty());
         let _ = std::fs::remove_file(&path);
     }
 

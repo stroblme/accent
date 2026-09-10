@@ -16,7 +16,7 @@ mod tests;
 mod text;
 
 pub use doc::{PdfDoc, blank_pdf};
-pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, hit, invert, swept, thin};
+pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
 pub use text::{line_top, same_quads, selection_link, selection_quads};
 
 use std::path::{Path, PathBuf};
@@ -227,6 +227,20 @@ pub struct InkShape {
     pub points: Vec<(f32, f32)>,
     pub bounds: Rect,
     pub style: InkStyle,
+    /// Whether what was read is all it draws, where it draws it: one path of one stroke, inside
+    /// its `/Rect`. Ours always is. Another editor's may hold several paths, or draw in a space of
+    /// its own that its appearance stream maps onto the page — and a cut redraws what was read,
+    /// so it would lose the rest or put the pieces somewhere else. Only these are cut.
+    pub cuttable: bool,
+}
+
+/// What a cut did to one stroke: what it drew, the pieces drawn in its place, and how much of the
+/// page that changed.
+#[derive(Debug, Clone)]
+pub struct Cut {
+    pub was: Drawn,
+    pub left: Vec<Drawn>,
+    pub area: Rect,
 }
 
 /// A rendered page. `data` is tightly packed RGBA8, `width * height * 4` bytes.

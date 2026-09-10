@@ -1,6 +1,7 @@
 //! What crosses the channel between the tab and the thread that renders its document.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
 use accent_api::PdfLink;
@@ -12,9 +13,25 @@ use super::cache::{TileKey, Want};
 /// index of the link each came from.
 pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 
-/// One ink stroke as the tools address it: the id the render thread gave it, which unlike its
-/// place in `/Annots` survives every erase and move made before it lands, and its shape.
+/// One ink stroke as the tools address it: the id it was given, which unlike its place in
+/// `/Annots` survives every erase and move made before it lands, and its shape.
 pub type NamedInk = (u32, accent_core::pdf::InkShape);
+
+/// A name no stroke in the process has had. One counter for every thread, so the widget can name
+/// the pieces its eraser cuts before the render thread has seen them.
+pub fn fresh_id() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// One report of a partial eraser across a stroke: the line it moved along, its radius, and the
+/// names the widget gave the pieces it worked out would be left, in order.
+pub struct Pass {
+    pub from: (f32, f32),
+    pub to: (f32, f32),
+    pub radius: f32,
+    pub pieces: Vec<u32>,
+}
 
 /// What the render thread sends back. Every variant is `Send`, because each one travels to the
 /// main loop inside its own idle callback.
@@ -44,10 +61,12 @@ pub enum Reply {
     /// An export finished: how many annotations it wrote, or why it could not.
     Exported(Result<usize, String>),
     /// Every ink stroke of one page with its box and style, for the eraser to find and the
-    /// Adjust tool to take hold of.
+    /// Adjust tool to take hold of, and how many erases the thread had answered when it read
+    /// them: a list read before an erase still on its way is of the page before it.
     Inks {
         page: usize,
         inks: Vec<NamedInk>,
+        erases: u64,
     },
     /// Whether there is anything for Undo to take back and for Redo to put back.
     History {
@@ -110,13 +129,15 @@ pub enum Request {
         shape: pdf::Shape,
         style: pdf::InkStyle,
     },
-    /// Take one stroke off a page, named by its id. Which stroke the eraser passed over is
-    /// decided on the main thread, against the list the tab already holds; `joined` is that the
-    /// same drag took one already, which makes the two one step for Undo.
+    /// Take one stroke off a page, named by its id — whole, or with `partial` only what that pass
+    /// of the eraser covered, the rest kept as pieces of their own. Which stroke the eraser passed
+    /// over is decided on the main thread, against the list the tab already holds; `joined` is
+    /// that the same drag took one already, which makes the two one step for Undo.
     Erase {
         page: usize,
         id: u32,
         joined: bool,
+        partial: Option<Pass>,
     },
     /// Every ink stroke of a page with its box and style, for the eraser and the Adjust tool.
     Inks(usize),

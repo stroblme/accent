@@ -6,9 +6,11 @@ use std::collections::hash_map::Entry;
 use anyhow::{Context, Result, anyhow};
 use pdfium_render::prelude::*;
 
-use super::ink::{Drawn, Seg, catmull_rom, flatten, points_of, segments_of, thin, transformed};
+use super::ink::{
+    Drawn, Seg, catmull_rom, cut, flatten, points_of, segments_of, thin, transformed,
+};
 use super::text::same_quads;
-use super::{Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock};
+use super::{Cut, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock};
 
 impl PdfDoc {
     /// Existing `/Highlight` annotations on one page.
@@ -281,14 +283,68 @@ impl PdfDoc {
             .filter_map(|(index, a)| {
                 let (segs, style) = read_ink(&a, height)?;
                 let bounds = Rect::from_pdf(a.bounds().ok()?, height);
+                let points = flatten(&segs);
                 Some(InkShape {
                     index,
-                    points: flatten(&segs),
+                    cuttable: cuttable(&a, &segs, &points, bounds),
+                    points,
                     bounds,
                     style,
                 })
             })
             .collect())
+    }
+
+    /// Cut one `/Ink` annotation by the pointer's path from `from` to `to`: take away whatever of
+    /// it lies within `radius` of that path — measured to the stroke's painted edge, so nothing of
+    /// it is left under the eraser — and write each run that is left as an `/Ink` of its own at
+    /// the end of `/Annots`, in the same colour, width and opacity, straight between the
+    /// stroke's flattened points. The original goes.
+    ///
+    /// `None`, and nothing touched, when the path came nowhere near it or it is not
+    /// [`InkShape::cuttable`].
+    ///
+    // ponytail: the pieces are straight polylines at the flattening tolerance rather than curves
+    // fitted again through `catmull_rom`, which is a spline *through* its points: fitted through
+    // a rectangle's corners it bows each edge outwards by a few points, where straight lines
+    // drawn from a curve flattened to `FLAT` stay on it. The cost is a longer path per piece.
+    pub fn cut_ink(
+        &mut self,
+        page: usize,
+        index: usize,
+        from: (f32, f32),
+        to: (f32, f32),
+        radius: f32,
+    ) -> Result<Option<Cut>> {
+        let _guard = lock();
+        let mut p = self.page(page)?;
+        p.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        let height = p.height().value;
+        let runs = {
+            let a = p
+                .annotations()
+                .get(index as PdfPageAnnotationIndex)
+                .map_err(|e| anyhow!("annotation {index} of page {page}: {e:?}"))?;
+            let (segs, style) = read_ink(&a, height)
+                .ok_or_else(|| anyhow!("annotation {index} of page {page} is not a drawn path"))?;
+            let bounds = Rect::from_pdf(a.bounds().context("ink bounds")?, height);
+            let points = flatten(&segs);
+            if !cuttable(&a, &segs, &points, bounds) {
+                return Ok(None);
+            }
+            match cut(&points, from, to, radius + style.width / 2.0) {
+                Some(runs) => runs,
+                None => return Ok(None),
+            }
+        };
+        let (was, mut area) = take(&mut p, page, index)?;
+        let mut left = Vec::with_capacity(runs.len());
+        for run in runs {
+            let piece = was.along(&run);
+            area = area.union(self.put_ink(&mut p, &piece.segs, piece.style)?);
+            left.push(piece);
+        }
+        Ok(Some(Cut { was, left, area }))
     }
 
     /// Move or resize one `/Ink` annotation by an affine map over its page. The annotation is
@@ -306,6 +362,16 @@ impl PdfDoc {
         let now = self.put_ink(&mut p, &transformed(&drawn.segs, m), drawn.style)?;
         Ok(was.union(now))
     }
+}
+
+/// Whether what `read_ink` made of an annotation is all it draws, where it draws it — see
+/// [`InkShape::cuttable`]. The path lying inside `/Rect` is what says its space is the page's:
+/// an appearance stream fitted onto the page from a box of its own reads back in that box.
+fn cuttable(a: &PdfPageAnnotation<'_>, segs: &[Seg], points: &[(f32, f32)], bounds: Rect) -> bool {
+    let one_path = a.objects().len() == 1;
+    let one_stroke = segs.iter().skip(1).all(|s| !matches!(s, Seg::Move(_)));
+    let inside = bounds.grow(1.0);
+    one_path && one_stroke && points.iter().all(|&p| inside.contains(p))
 }
 
 /// Take the `/Ink` annotation at `index` off a loaded page: what it drew, and the box it left.
