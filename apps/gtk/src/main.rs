@@ -141,6 +141,7 @@ fn main() -> glib::ExitCode {
     let shell = Rc::new(Shell {
         applied: RefCell::new(config.clone()),
         config: Rc::new(RefCell::new(config)),
+        config_write: RefCell::new(None),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
@@ -163,6 +164,12 @@ fn main() -> glib::ExitCode {
     app.connect_command_line({
         let shell = shell.clone();
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
+    });
+    // The last window has gone, so a preference changed in the second before it would otherwise
+    // die with the timer that was to write it.
+    app.connect_shutdown({
+        let shell = shell.clone();
+        move |_| shell.flush_config()
     });
     app.run()
 }
@@ -1009,15 +1016,16 @@ impl App {
         }
     }
 
-    /// Save the config this window has just changed and put it into effect in every open window.
-    /// The route for every surface that writes a preference outside the dialog — Toggle Minimap,
-    /// the Git pane's tree toggle, a drawing ring pick, a rebound chord, Leave Out of Search — so
-    /// none of them is left acting on its own window alone.
+    /// Put the config this window has just changed into effect in every open window, and write it
+    /// a second later, so a run of ring picks is one write. The route for every surface that
+    /// writes a preference outside the dialog — Toggle Minimap, the Git pane's tree toggle, a
+    /// drawing ring pick, a rebound chord, Leave Out of Search — so none of them is left acting on
+    /// its own window alone.
     fn config_changed(&self) {
         let config = self.config.borrow().clone();
-        settings::save(&config);
         if let Some(shell) = self.shell.upgrade() {
             shell.apply_config(&config);
+            shell.save_config_soon();
         }
     }
 
@@ -1084,7 +1092,11 @@ impl App {
         // The config is read once at startup and every row here writes the whole struct back, so
         // an edit made in the file while accent runs would be undone by the next switch touched.
         // Re-reading as the dialog opens keeps the file the source of truth; a file that no
-        // longer parses is left alone, exactly as at startup.
+        // longer parses is left alone, exactly as at startup. A ring pick still waiting to be
+        // written goes first, or the read would take it back.
+        if let Some(shell) = self.shell.upgrade() {
+            shell.flush_config();
+        }
         match Config::read(&accent_core::config::config_path()) {
             Ok(fresh) => {
                 *self.config.borrow_mut() = fresh;

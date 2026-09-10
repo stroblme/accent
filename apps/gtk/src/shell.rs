@@ -9,6 +9,8 @@ pub struct Shell {
     /// The config as it was last put into effect, so the next one can tell what moved
     /// ([`Changed`]). `config` itself is edited in place before it is applied.
     pub applied: RefCell<Config>,
+    /// The write [`Shell::save_config_soon`] has scheduled and not yet done.
+    pub config_write: RefCell<Option<glib::SourceId>>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
     /// `None` for the one window opened on files rather than on a folder.
@@ -27,6 +29,10 @@ pub struct Shell {
 
 /// What an `app.` action does, given the shell and the application it was fired at.
 type AppAction = fn(&Rc<Shell>, &adw::Application);
+
+/// How long a preference changed outside the dialog waits to be written, so a run of ring picks is
+/// one write. The session's beat.
+const CONFIG_WRITE: Duration = Duration::from_secs(1);
 
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
 ///
@@ -148,6 +154,32 @@ impl Shell {
             .collect();
         for app in apps {
             app.apply_config(config, &changed);
+        }
+    }
+
+    /// Write the config a moment from now, once for every change made before then, the way a
+    /// window's session is written. The config is the process's, so the timer is too: a window
+    /// that closes meanwhile takes nothing with it.
+    pub fn save_config_soon(self: &Rc<Self>) {
+        if self.config_write.borrow().is_some() {
+            return;
+        }
+        let shell = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(CONFIG_WRITE, move || {
+            if let Some(shell) = shell.upgrade() {
+                shell.config_write.take();
+                settings::save(&shell.config.borrow());
+            }
+        });
+        self.config_write.replace(Some(id));
+    }
+
+    /// Do a write [`Self::save_config_soon`] still has waiting, now: the process is ending, or
+    /// the file is about to be read back.
+    pub fn flush_config(&self) {
+        if let Some(id) = self.config_write.take() {
+            id.remove();
+            settings::save(&self.config.borrow());
         }
     }
 

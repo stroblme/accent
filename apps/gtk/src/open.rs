@@ -432,8 +432,8 @@ impl App {
         self.sync_status();
     }
 
-    /// A width or a colour picked on the ring: into the config, onto disk, and to every open PDF
-    /// in every window.
+    /// A width or a colour picked on the ring: into the config, to every open PDF in every window,
+    /// and onto disk a second later (`App::config_changed`).
     fn pdf_choice(&self, tool: pdfview::Mode, choice: ring::Choice) {
         choice.apply(tool, &mut self.config.borrow_mut().drawing);
         self.config_changed();
