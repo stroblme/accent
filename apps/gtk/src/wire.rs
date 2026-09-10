@@ -449,6 +449,23 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
         }
     ));
     app.window.add_controller(motion);
+    // A wheel or touchpad scroll is the reader looking around the document rather than writing
+    // in it, so the chrome comes back — a touchpad scroll need not move the pointer at all.
+    // Capture phase, so a scroller that takes the event on its way down cannot hide it; the
+    // event goes on to it untouched. The keyboard's scroll chords are actions and stay typing.
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    scroll.connect_scroll(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, _, _| {
+            app.show_chrome();
+            glib::Propagation::Proceed
+        }
+    ));
+    app.window.add_controller(scroll);
 
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
