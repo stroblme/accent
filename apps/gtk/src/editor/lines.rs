@@ -15,12 +15,14 @@ fn leading_indent(line: &str) -> &str {
     &line[..end]
 }
 
-/// The text a duplicated line is inserted as. A line that already ends in a newline can be
-/// repeated as it stands; the last line of a file has none, so the copy brings its own.
-fn duplicated(line: &str) -> String {
-    match line.ends_with('\n') {
-        true => line.to_string(),
-        false => format!("\n{line}"),
+/// The last line Duplicate Line copies, from the lines the selection starts and ends on and the
+/// column it ends in. Every line it touches, except that a selection ending at the very start of a
+/// line leaves that line out: VS Code's rule, so lines selected whole with Shift+Down are copied
+/// without the one below them.
+fn last_copied(first: i32, last: i32, end_column: i32) -> i32 {
+    match last > first && end_column == 0 {
+        true => last - 1,
+        false => last,
     }
 }
 
@@ -205,12 +207,26 @@ impl Tab {
         self.view.scroll_mark_onscreen(&self.buffer.get_insert());
     }
 
+    /// VS Code's Copy Line Down: the lines the selection touches ([`last_copied`]) are repeated
+    /// below themselves, and the caret and the selection move down onto the copy, in the same
+    /// columns.
+    ///
+    /// The copy is inserted *above* the lines, at the start of the first one, and that is what
+    /// moves them: the buffer's insert and selection-bound marks have right gravity, so text put
+    /// in front of them carries them along onto the lower of the two blocks. It also means a last
+    /// line with no newline of its own needs no special case.
     pub fn duplicate_line(&self) {
-        let (start, mut end) = self.line_bounds();
-        let line = self.buffer.text(&start, &end, true);
+        let (mut from, end) = self.buffer.selection_bounds().unwrap_or_else(|| {
+            let at = caret(&self.buffer);
+            (at, at)
+        });
+        let last = last_copied(from.line(), end.line(), end.line_offset());
+        from.set_line_offset(0);
+        let lines = self.buffer.text(&from, &line_end(&self.buffer, last), true);
         self.buffer.begin_user_action();
-        self.buffer.insert(&mut end, &duplicated(&line));
+        self.buffer.insert(&mut from, &format!("{lines}\n"));
         self.buffer.end_user_action();
+        self.view.scroll_mark_onscreen(&self.buffer.get_insert());
     }
 
     pub fn delete_line(&self) {
@@ -304,9 +320,14 @@ mod tests {
     }
 
     #[test]
-    fn a_duplicated_line_brings_its_own_newline_only_when_it_has_none() {
-        assert_eq!(duplicated("note\n"), "note\n");
-        assert_eq!(duplicated("last line"), "\nlast line");
-        assert_eq!(duplicated(""), "\n");
+    fn duplicate_copies_every_line_the_selection_touches() {
+        assert_eq!(last_copied(2, 2, 5), 2, "the caret's line");
+        assert_eq!(last_copied(2, 2, 0), 2, "even at its start");
+        assert_eq!(last_copied(0, 1, 2), 1);
+        assert_eq!(
+            last_copied(0, 2, 0),
+            1,
+            "a selection ending at a line's start leaves that line out"
+        );
     }
 }
