@@ -18,6 +18,7 @@ mod diff;
 mod doc;
 mod editor;
 mod events;
+mod fade;
 mod fileops;
 mod find;
 mod fold;
@@ -56,7 +57,7 @@ mod wire;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
-use accent_core::config::PdfZoom;
+use accent_core::config::{FocusMode, PdfZoom};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{

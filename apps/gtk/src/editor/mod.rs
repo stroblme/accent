@@ -408,6 +408,8 @@ pub fn open(
     map.set_view(&view);
     map.set_vexpand(true);
     map.set_visible(false);
+    // It goes with the chrome while the user types (`App::hide_chrome`).
+    map.add_css_class("chrome-fade");
     let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     document.append(&overlay);
     document.append(&map);
@@ -1062,6 +1064,18 @@ impl Tab {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
             view.add_caret(below);
         }
+    }
+
+    /// Focus mode's line fade, which the view subclass paints (`fade.rs`).
+    pub fn set_fade(&self, on: bool) {
+        if let Some(view) = self.view.downcast_ref::<multicaret::View>() {
+            view.set_fade(on);
+        }
+    }
+
+    /// The minimap, which fades with the chrome.
+    pub fn minimap(&self) -> &gtk::Widget {
+        self.map.upcast_ref()
     }
 
     /// Park `snippet` in the view at `at` and remember it, so a Tab pressed while its stops are

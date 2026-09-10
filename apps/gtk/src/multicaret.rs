@@ -24,7 +24,8 @@
 //! * the completion popup can open at several carets at once, since it follows the primary.
 //!
 //! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
-//! nothing to give it a text tag, and this widget is already the one drawing over the text.
+//! nothing to give it a text tag, and this widget is already the one drawing over the text. Focus
+//! mode's line fade (`fade.rs`) is drawn here for the same reason.
 //!
 //! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, the arrow, Home
 //! and End motions, and the four wordwise chords `Ctrl+Left`, `Ctrl+Right`, `Ctrl+Delete` and
@@ -264,6 +265,12 @@ mod imp {
         /// screen. What a column of carets asks for in code; in wrapped prose one Down would be
         /// a whole paragraph, which can be several screens.
         pub logical_lines: Cell<bool>,
+        /// Focus mode's line fade (`fade.rs`): whether it is wanted, how far in it is from 0 to
+        /// 1, the frame time and strength its ramp started from, and the tick running the ramp.
+        pub fade_on: Cell<bool>,
+        pub fade: Cell<f32>,
+        pub fade_from: Cell<(i64, f32)>,
+        pub fade_tick: RefCell<Option<gtk::TickCallbackId>>,
     }
 
     #[glib::object_subclass]
@@ -288,9 +295,14 @@ mod imp {
                     move |_, _, mark| {
                         let moved = mark.name();
                         let moved = moved.as_deref();
-                        if !obj.imp().busy.get()
-                            && (moved == Some("insert") || moved == Some("selection_bound"))
-                        {
+                        if moved != Some("insert") && moved != Some("selection_bound") {
+                            return;
+                        }
+                        // The fade is measured from the caret, so it follows it.
+                        if obj.imp().fade.get() > 0.0 {
+                            obj.queue_draw();
+                        }
+                        if !obj.imp().busy.get() {
                             obj.imp().goal.set(None);
                             obj.clear_carets();
                         }
@@ -316,6 +328,12 @@ mod imp {
                 return;
             }
             let obj = self.obj();
+            // Focus mode's veil first, so nothing drawn after it — the carets, the suggestion —
+            // is ever veiled.
+            let fade = self.fade.get();
+            if fade > 0.0 {
+                crate::fade::paint(&obj, &snapshot, fade);
+            }
             let buffer = obj.buffer();
             let colour = obj.color();
             // Every caret on one phase, the primary one included: GTK's is transparent while the
@@ -439,6 +457,49 @@ impl View {
     /// What is painted after the caret, if anything.
     pub fn ghost(&self) -> Option<String> {
         self.imp().ghost.borrow().clone()
+    }
+
+    /// Bring focus mode's line fade in or take it away, over the chrome's own transition. It
+    /// jumps where animations are off, as the chrome does, and where the view is not realised
+    /// and has no frame clock to ramp on.
+    pub fn set_fade(&self, on: bool) {
+        let imp = self.imp();
+        if imp.fade_on.replace(on) == on {
+            return;
+        }
+        let clock = self
+            .frame_clock()
+            .filter(|_| self.settings().is_gtk_enable_animations());
+        let Some(clock) = clock else {
+            imp.fade.set(if on { 1.0 } else { 0.0 });
+            self.queue_draw();
+            return;
+        };
+        // From wherever a ramp still running has got to, so a quick toggle turns it round.
+        imp.fade_from.set((clock.frame_time(), imp.fade.get()));
+        if imp.fade_tick.borrow().is_some() {
+            return;
+        }
+        let id = self.add_tick_callback(|obj, clock| {
+            let imp = obj.imp();
+            let (start, from) = imp.fade_from.get();
+            let to = if imp.fade_on.get() { 1.0 } else { 0.0 };
+            let t = ((clock.frame_time() - start) as f32 / (crate::fade::RAMP_MS * 1000) as f32)
+                .min(1.0);
+            imp.fade.set(from + (to - from) * t);
+            obj.queue_draw();
+            if t < 1.0 {
+                return glib::ControlFlow::Continue;
+            }
+            imp.fade_tick.take();
+            glib::ControlFlow::Break
+        });
+        *imp.fade_tick.borrow_mut() = Some(id);
+    }
+
+    /// Whether the line fade is on, for the headless check that cannot see it.
+    pub(crate) fn fading(&self) -> bool {
+        self.imp().fade_on.get()
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating

@@ -24,6 +24,7 @@ line_numbers = false
 git_tree = true
 column_width = 50
 theme = "solarized"
+focus_mode = "high"
 
 [shortcuts]
 "win.find-next" = ["F3"]
@@ -62,6 +63,19 @@ pub enum Theme {
     Solarized,
 }
 
+/// How much of the window recedes while the user types (DESIGN.md, Chrome auto-hide).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusMode {
+    /// Nothing fades.
+    None,
+    /// The bars, the sidebar and the minimap fade away.
+    #[default]
+    Medium,
+    /// As Medium, and the other panes and the text away from the caret fade too.
+    High,
+}
+
 /// The global config file.
 #[doc = concat!("\n```toml\n", example!(), "```")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +104,7 @@ pub struct Config {
     /// window keeps a readable line.
     pub column_width: u32,
     pub theme: Theme,
+    pub focus_mode: FocusMode,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
     /// is stored, so the built-in table stays the source of truth for everything else; an empty
     /// list means the action is deliberately unbound.
@@ -171,6 +186,7 @@ impl Default for Config {
             git_tree: true,
             column_width: 50,
             theme: Theme::System,
+            focus_mode: FocusMode::default(),
             shortcuts: BTreeMap::new(),
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
@@ -581,6 +597,7 @@ daily_template = "DailyNote.md"
         assert!(c.git_tree);
         assert_eq!(c.column_width, 50);
         assert_eq!(c.theme, Theme::Solarized);
+        assert_eq!(c.focus_mode, FocusMode::High);
         assert_eq!(c.editor_font, None);
         let v = &c.vaults["/home/me/Notes"];
         assert_eq!(v.templates_dir, "Templates");
@@ -602,6 +619,7 @@ daily_template = "DailyNote.md"
         let again = Config::read(&back).unwrap();
         assert_eq!(again.recent_vaults, c.recent_vaults);
         assert_eq!(again.theme, Theme::Solarized);
+        assert_eq!(again.focus_mode, FocusMode::High);
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
@@ -646,6 +664,7 @@ daily_template = "DailyNote.md"
         let tmp = tempfile::tempdir().unwrap();
         let c = with_xdg(tmp.path(), Config::load);
         assert!(c.spellcheck);
+        assert_eq!(c.focus_mode, FocusMode::Medium);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));
     }

@@ -359,39 +359,62 @@ impl App {
         gtk::prelude::GtkWindowExt::focus(&self.window)
     }
 
+    /// Fade what the focus mode preference says to: nothing at None; the chrome at Medium; and at
+    /// High the chrome, every pane but the one being written in, and the text away from the caret
+    /// (DESIGN.md, Chrome auto-hide).
     pub fn hide_chrome(&self) {
-        if self.chrome_hidden.get() || self.chrome_busy() {
+        let level = self.config.borrow().focus_mode;
+        if level == FocusMode::None || self.chrome_hidden.get() || self.chrome_busy() {
             return;
         }
         self.chrome_hidden.set(true);
-        self.sidebar_header.add_css_class("chrome-hidden");
-        self.header.add_css_class("chrome-hidden");
-        self.statusbar.widget().add_css_class("chrome-hidden");
-        for pane in self.panes.borrow().iter() {
-            pane.bar.add_css_class("chrome-hidden");
+        for widget in self.chrome() {
+            widget.add_css_class("chrome-hidden");
         }
-        // The sidebar's panes dim instead of hiding: the tree is context, and losing it while
-        // typing would be losing the place in the vault (DESIGN.md, Chrome auto-hide).
-        if let Some(sidebar) = self.sidebar.get() {
-            sidebar.widget().add_css_class("chrome-dimmed");
+        if level != FocusMode::High {
+            return;
+        }
+        let active = self.pane();
+        for pane in self.panes.borrow().iter() {
+            if !Rc::ptr_eq(pane, &active) {
+                pane.widget().add_css_class("chrome-away");
+            }
+        }
+        if let Some(tab) = self.active() {
+            tab.set_fade(true);
         }
     }
 
+    /// Put back everything [`App::hide_chrome`] can have faded, at whatever level it was faded.
     pub fn show_chrome(&self) {
         // Presentation owns the chrome while it lasts: a pointer that crosses the window must not
         // undo it, or the mode is useless.
         if self.presenting.get().is_some() || !self.chrome_hidden.replace(false) {
             return;
         }
-        self.sidebar_header.remove_css_class("chrome-hidden");
-        self.header.remove_css_class("chrome-hidden");
-        self.statusbar.widget().remove_css_class("chrome-hidden");
+        for widget in self.chrome() {
+            widget.remove_css_class("chrome-hidden");
+        }
         for pane in self.panes.borrow().iter() {
-            pane.bar.remove_css_class("chrome-hidden");
+            pane.widget().remove_css_class("chrome-away");
         }
-        if let Some(sidebar) = self.sidebar.get() {
-            sidebar.widget().remove_css_class("chrome-dimmed");
+        for tab in self.open_tabs() {
+            tab.set_fade(false);
         }
+    }
+
+    /// What fades at Medium: both header bars, the status bar, every pane's tab bar, the
+    /// sidebar's panes and the minimaps.
+    fn chrome(&self) -> Vec<gtk::Widget> {
+        let mut chrome: Vec<gtk::Widget> = vec![
+            self.sidebar_header.clone().upcast(),
+            self.header.clone().upcast(),
+            self.statusbar.widget().clone(),
+        ];
+        chrome.extend(self.panes.borrow().iter().map(|p| p.bar.clone().upcast()));
+        chrome.extend(self.sidebar.get().map(|s| s.widget().clone()));
+        chrome.extend(self.open_tabs().iter().map(|t| t.minimap().clone()));
+        chrome
     }
 
     /// Never fade over something that is waiting for an answer: a dialog, a banner, an open
