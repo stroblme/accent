@@ -287,6 +287,7 @@ impl Bar {
     }
 
     /// Reveal the bar in `mode`, prefilled from the selection when there is one worth searching.
+    /// Replace over such a selection starts in the replacement box, the query being given already.
     pub fn open(self: &Rc<Self>, mode: Mode) {
         self.marked.set(false);
         match mode {
@@ -308,18 +309,23 @@ impl Bar {
                 self.line.select_region(0, -1);
             }
             _ => {
-                if let Some(selected) = self.tab().and_then(|tab| tab.selected_query()) {
-                    self.query.set_text(&selected);
+                let selected = self.tab().and_then(|tab| tab.selected_query());
+                if let Some(selected) = &selected {
+                    self.query.set_text(selected);
                 }
                 // Nothing behind a presented preview or PDF can be rewritten, so the row is
                 // not offered there: it used to appear and quietly do nothing.
-                self.replace_row
-                    .set_visible(mode == Mode::Replace && !self.presenting());
+                let replacing = mode == Mode::Replace && !self.presenting();
+                self.replace_row.set_visible(replacing);
                 self.rows.set_visible_child_name("find");
                 self.bar.set_search_mode(true);
                 self.search(&self.query.text());
-                self.query.grab_focus();
-                self.query.select_region(0, -1);
+                let entry: &gtk::Editable = match replacing && selected.is_some() {
+                    true => self.replace.upcast_ref(),
+                    false => self.query.upcast_ref(),
+                };
+                entry.grab_focus();
+                entry.select_region(0, -1);
             }
         }
     }
