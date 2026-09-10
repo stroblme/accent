@@ -759,26 +759,39 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         total: Cell::new(0),
     });
 
+    // Every handler below holds `search` weakly. Each is connected to a widget `Search` holds, so
+    // a strong one is a cycle that outlives the window, and the vault behind `data` with it. The
+    // pane's `restart` is the one strong handle, and the sidebar keeps it.
+    //
     // A toggle is a click rather than a burst, so only what is typed is debounced.
     let debounce = Rc::new(Debounce::new(DEBOUNCE));
     let debounced: Rc<dyn Fn()> = Rc::new({
-        let (search, debounce) = (search.clone(), debounce.clone());
-        move || {
-            let search = search.clone();
-            debounce.call(move || search.start());
-        }
+        let debounce = debounce.clone();
+        glib::clone!(
+            #[weak]
+            search,
+            move || debounce.call(glib::clone!(
+                #[weak]
+                search,
+                move || search.start()
+            ))
+        )
     });
 
     entry.connect_search_changed({
-        let (search, debounced, debounce) = (search.clone(), debounced.clone(), debounce.clone());
-        move |entry| {
-            // Clearing the entry is free, so it cancels the pending query and repaints at once.
-            if entry.text().trim().is_empty() {
-                debounce.cancel();
-                return search.start();
+        let (debounced, debounce) = (debounced.clone(), debounce.clone());
+        glib::clone!(
+            #[weak]
+            search,
+            move |entry| {
+                // Clearing the entry is free, so it cancels the pending query and repaints at once.
+                if entry.text().trim().is_empty() {
+                    debounce.cancel();
+                    return search.start();
+                }
+                debounced();
             }
-            debounced();
-        }
+        )
     });
     // ponytail: a changed replacement re-runs the whole query, because the rows carry finished
     // markup rather than the matches they were built from. Off the main thread it costs nothing
@@ -788,22 +801,28 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         move |_| debounced()
     });
     for button in &toggles {
-        button.connect_toggled({
-            let search = search.clone();
+        button.connect_toggled(glib::clone!(
+            #[weak]
+            search,
             move |_| search.start()
-        });
+        ));
     }
     replace_toggle.connect_toggled({
-        let (search, replace_row) = (search.clone(), replace_row.clone());
-        move |toggle| {
-            replace_row.set_reveal_child(toggle.is_active());
-            search.start();
-        }
+        let replace_row = replace_row.clone();
+        glib::clone!(
+            #[weak]
+            search,
+            move |toggle| {
+                replace_row.set_reveal_child(toggle.is_active());
+                search.start();
+            }
+        )
     });
-    apply.connect_clicked({
-        let search = search.clone();
+    apply.connect_clicked(glib::clone!(
+        #[weak]
+        search,
         move |_| search.replace_all()
-    });
+    ));
 
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 6);
     controls.set_margin_top(6);

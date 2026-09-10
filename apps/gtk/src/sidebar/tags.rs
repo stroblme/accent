@@ -121,14 +121,17 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // The default position is set the first time there is anything below the divider, when the
     // pane already knows how tall it is. Afterwards the position is the user's.
     let placed = Cell::new(false);
-    files_box.connect_map({
-        let paned = paned.clone();
+    // Weak: the paned holds the box this is connected to, and a strong handle would be a cycle
+    // keeping the pane, and the vault behind `data`, alive after the window has closed.
+    files_box.connect_map(glib::clone!(
+        #[weak]
+        paned,
         move |_| {
             if !placed.replace(true) {
                 paned.set_position(paned.height() * SHARE.0 / SHARE.1);
             }
         }
-    });
+    ));
 
     // Which tag the file list is answering for. The listing lands from a worker thread, so an
     // answer for a tag the user has already clicked past is dropped rather than painted.
@@ -186,17 +189,21 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // The whole list is kept, so filtering is a splice rather than a query: the tags come from one
     // GROUP BY over the index and re-running it per keystroke would buy nothing.
     let all: Rc<RefCell<Vec<(String, i64)>>> = Rc::new(RefCell::new(Vec::new()));
+    // The filter weakly, because its own handler runs this: a strong one is a cycle.
     let apply: Rc<dyn Fn()> = Rc::new({
-        let (tags, selection, all, filter) =
-            (tags.clone(), selection.clone(), all.clone(), filter.clone());
-        move || {
-            let rows: Vec<glib::BoxedAnyObject> = filtered(&all.borrow(), &filter.text())
-                .into_iter()
-                .map(glib::BoxedAnyObject::new)
-                .collect();
-            tags.splice(0, tags.n_items(), &rows);
-            selection.set_selected(gtk::INVALID_LIST_POSITION);
-        }
+        let (tags, selection, all) = (tags.clone(), selection.clone(), all.clone());
+        glib::clone!(
+            #[weak]
+            filter,
+            move || {
+                let rows: Vec<glib::BoxedAnyObject> = filtered(&all.borrow(), &filter.text())
+                    .into_iter()
+                    .map(glib::BoxedAnyObject::new)
+                    .collect();
+                tags.splice(0, tags.n_items(), &rows);
+                selection.set_selected(gtk::INVALID_LIST_POSITION);
+            }
+        )
     });
     filter.connect_search_changed({
         let apply = apply.clone();
