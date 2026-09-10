@@ -10,7 +10,8 @@ use super::*;
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
-/// Stage clicks.
+/// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// an XTEST press held while the repository changes.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
@@ -57,7 +58,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
-    let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
+    let git = std::env::var("ACCENT_BENCH_GIT").ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
@@ -82,7 +83,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && occur.is_none()
         && follow.is_none()
         && layout.is_none()
-        && !git
+        && git.is_none()
         && !keys
         && chrome.is_none()
         && !templates
@@ -142,8 +143,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if keys {
             return bench_keys(&app);
         }
-        if git {
-            return bench_git(&app);
+        if let Some(arg) = git {
+            return match arg.strip_prefix("press:") {
+                Some(path) => bench_git_press(&app, path),
+                None => bench_git(&app),
+            };
         }
         if let Some(rel) = style {
             return bench_style(&app, &rel);
@@ -430,25 +434,9 @@ fn bench_git_stage(app: &Rc<App>) {
                 println!("bench git_splice at={at} removed={removed} added={added}");
             });
         }
-        let row = |path: &str| {
-            list.as_ref().and_then(|list| {
-                // A header row keeps whatever tooltip its widget last had, so the layout is asked.
-                find_widget(list, &|w| {
-                    w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
-                        matches!(s.visible_child_name().as_deref(), Some("entry" | "folder"))
-                            && s.tooltip_text().as_deref() == Some(path)
-                    })
-                })
-            })
-        };
+        let row = |path: &str| list.as_ref().and_then(|list| change_row(list, path));
         let click = |path: &str, tooltip: &str| {
-            let button = row(path)
-                .and_then(|r| {
-                    find_widget(&r, &|w| {
-                        w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
-                    })
-                })
-                .and_downcast::<gtk::Button>();
+            let button = row(path).and_then(|r| row_button(&r, tooltip));
             println!("bench git_click {path} {tooltip} {}", button.is_some());
             if let Some(button) = button {
                 button.emit_clicked();
@@ -472,6 +460,59 @@ fn bench_git_stage(app: &Rc<App>) {
         println!("bench git_changes_rows {}", git.changes_rows());
         bench_quit(&app);
     });
+}
+
+/// Hold a real press on the Stage button of `path`'s row while the list changes under it. Prints
+/// where the button is on screen (`bench git_press x y`, window coordinates) and stays up for ten
+/// seconds, so that a script can press there through XTEST, change the repository and release; the
+/// repository's `git status` afterwards says whether the click landed. `emit_clicked` cannot show
+/// this, having no press and no release to take apart.
+fn bench_git_press(app: &Rc<App>, path: &str) {
+    app.show_pane("git");
+    let (app, path) = (app.clone(), path.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        git.set_tree(true);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let list = git.divider().start_child();
+        let button = list
+            .as_ref()
+            .and_then(|list| change_row(list, &path))
+            .and_then(|row| row_button(&row, "Stage"));
+        let at = button.and_then(|b| {
+            let middle = graphene::Point::new(b.width() as f32 / 2.0, b.height() as f32 / 2.0);
+            b.compute_point(&app.window, &middle)
+        });
+        match at {
+            Some(at) => println!("bench git_press {} {}", at.x() as i32, at.y() as i32),
+            None => println!("bench git_press none"),
+        }
+        glib::timeout_future(Duration::from_secs(10)).await;
+        bench_quit(&app);
+    });
+}
+
+/// The changes list's row for `path`, a file or a folder. A header row keeps whatever tooltip its
+/// widget last had, so the layout it shows is asked as well.
+fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
+    find_widget(list, &|w| {
+        w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
+            matches!(s.visible_child_name().as_deref(), Some("entry" | "folder"))
+                && s.tooltip_text().as_deref() == Some(path)
+        })
+    })
+}
+
+/// The button of `row` that `tooltip` names, where the row shows it.
+fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
+    find_widget(row, &|w| {
+        w.is::<gtk::Button>() && w.is_visible() && w.tooltip_text().as_deref() == Some(tooltip)
+    })
+    .and_downcast::<gtk::Button>()
 }
 
 /// The first widget in `root`'s subtree, `root` included, that `found` accepts.

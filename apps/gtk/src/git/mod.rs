@@ -225,6 +225,9 @@ pub struct Panel {
     /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
     /// schedules one and folding a folder must survive it.
     collapsed: RefCell<HashSet<String>>,
+    /// A press is down over the changes list, so its rows are held where they are until the
+    /// release (see [`Panel::rebuild_changes`]).
+    pressed: Cell<bool>,
 }
 
 impl Panel {
@@ -439,6 +442,7 @@ impl Panel {
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
+            pressed: Cell::new(false),
             hooks,
             root: root.upcast(),
             stack,

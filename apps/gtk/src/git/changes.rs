@@ -73,6 +73,37 @@ impl Panel {
         });
         view.set_factory(Some(&factory));
 
+        // A press over the list holds its rows still until the release, which is then answered
+        // with the redraw that was held off. Comparing first keeps the rows a refresh does not
+        // touch, but a Stage elsewhere still replaces the rows between the two sections it moves
+        // a file across, and a press on one of those lost its click (XTEST, 2026-09-10). Capture
+        // phase, so the release is seen on its way to the button, and the redraw waits an idle
+        // so that the button has had it first.
+        let held = gtk::EventControllerLegacy::new();
+        held.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        held.connect_event(move |_, event| {
+            use gdk::EventType as E;
+            let Some(panel) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            match event.event_type() {
+                E::ButtonPress | E::TouchBegin => panel.pressed.set(true),
+                E::ButtonRelease | E::TouchEnd | E::TouchCancel | E::GrabBroken => {
+                    panel.pressed.set(false);
+                    let weak = Rc::downgrade(&panel);
+                    glib::idle_add_local_once(move || {
+                        if let Some(panel) = weak.upgrade() {
+                            panel.rebuild_changes();
+                        }
+                    });
+                }
+                _ => {}
+            }
+            glib::Propagation::Proceed
+        });
+        view.add_controller(held);
+
         let weak = Rc::downgrade(self);
         view.connect_activate(move |view, position| {
             let Some(panel) = weak.upgrade() else {
@@ -92,7 +123,11 @@ impl Panel {
     /// what is on screen already, and a row spliced out from under a press loses its release —
     /// which is how Stage clicks went missing. So a row has to carry everything its binding
     /// draws; the one thing it does not, the view, empties the list in [`Panel::set_tree`].
+    /// Nothing moves while a press is down over the list: its release redraws.
     pub(super) fn rebuild_changes(&self) {
+        if self.pressed.get() {
+            return;
+        }
         let rows = {
             let state = self.state.borrow();
             match (
