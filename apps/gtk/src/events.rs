@@ -183,7 +183,7 @@ impl App {
             Event::Connected => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
-                self.hide_connection_banner();
+                self.connection_up();
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
@@ -201,7 +201,7 @@ impl App {
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
-                self.show_connection_banner(&why);
+                self.connection_down(&why);
             }
             Event::Error(message) => self.toast(&message),
             Event::Diagnostics { rel, items } => {

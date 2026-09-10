@@ -263,6 +263,7 @@ pub fn build_window(
         title,
         toasts,
         connection,
+        retry: Default::default(),
         connect,
         corpus: RefCell::new(Corpus::default()),
         statusbar,
@@ -330,19 +331,14 @@ pub fn build_window(
         }
     }
 
-    // The banner's one button, which until now was a label with nothing behind it. `reconnect`
-    // returns before the connection exists and reports itself through the events, so the banner
-    // is what says it is working — and stops taking presses — until `Event::Connected` takes it
-    // down or `Event::Disconnected` puts a fresh reason on it.
+    // The banner's one button. `reconnect` returns before the connection exists and reports
+    // itself through the events, so the banner is what says it is working — and stops taking
+    // presses — until `Event::Connected` takes it down or `Event::Disconnected` puts a fresh
+    // reason, or the next automatic attempt's countdown, on it.
     app.connection.connect_button_clicked(glib::clone!(
         #[weak(rename_to = app)]
         app,
-        move |banner| {
-            let Some(vault) = app.vault() else { return };
-            banner.set_title("Reconnecting…");
-            banner.set_sensitive(false);
-            vault.reconnect();
-        }
+        move |_| app.reconnect_now()
     ));
 
     wire_pane(&app, &first);
