@@ -12,9 +12,11 @@ use super::*;
 /// pulled yet.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
-/// chrome stayed away. `ACCENT_BENCH_PATHS=1` does the same for a path entry's completion, and
-/// prints widths and the text its keys apply. `ACCENT_BENCH_STYLE=<rel_path>` types a heading into
-/// a note at two sizes and prints whether it was styled on the keystroke or on the debounce.
+/// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
+/// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
+/// drives a path entry's completion, and prints widths and the text its keys apply.
+/// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
+/// was styled on the keystroke or on the debounce.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up.
@@ -39,7 +41,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").is_ok();
     let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
-    let chrome = std::env::var("ACCENT_BENCH_CHROME").is_ok();
+    let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
@@ -60,7 +62,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && follow.is_none()
         && !git
         && !keys
-        && !chrome
+        && chrome.is_none()
         && !templates
         && !paths
         && !shell_keys
@@ -97,8 +99,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if templates {
             return bench_templates(&app);
         }
-        if chrome {
-            return bench_chrome(&app);
+        if let Some(notes) = chrome {
+            return bench_chrome(&app, &notes);
         }
         if keys {
             return bench_keys(&app);
@@ -431,16 +433,130 @@ fn selected_offer(field: &gtk::Widget) -> Option<String> {
         .map(|label| label.label().into())
 }
 
+/// Focus mode, headless: [`bench_chrome_actions`] first, then — when `notes` is `<relA>,<relB>` —
+/// both notes open, one of them split off to the right so the left pane is the one being written
+/// in and the right one has something to recede, and [`bench_chrome_levels`] and
+/// [`bench_chrome_veil`] run over them. `1` stops after the actions.
+///
+/// The actions go first because one of them is `win.save`, and an explicit save writes whatever
+/// the active tab holds, clean or not: run over the notes it would write them back into the vault.
+fn bench_chrome(app: &Rc<App>, notes: &str) {
+    bench_chrome_actions(app);
+    let Some((a, b)) = notes.split_once(',') else {
+        return bench_quit(app);
+    };
+    // The actions end on a find, whose open bar would suspend the fade.
+    app.pane().find.close();
+    app.open_path(a);
+    app.open_path(b);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let left = app.pane();
+        let _ = WidgetExt::activate_action(&app.window, "win.split-right", None);
+        // The split hands the keyboard to the note it moved, from an idle; this takes it back
+        // once that has run, since nothing headless can click into the left note.
+        glib::timeout_future(Duration::from_millis(200)).await;
+        app.set_active_pane(&left);
+        bench_chrome_levels(&app);
+        bench_chrome_veil(&app).await;
+        bench_quit(&app);
+    });
+}
+
+/// Show and then hide the chrome at each focus level, printing what that faded. The level is set
+/// in memory only; nothing is saved.
+fn bench_chrome_levels(app: &Rc<App>) {
+    let was = app.config.borrow().focus_mode;
+    for level in [FocusMode::None, FocusMode::Medium, FocusMode::High] {
+        app.config.borrow_mut().focus_mode = level;
+        app.show_chrome();
+        app.hide_chrome();
+        println!("bench chrome_level {level:?} {}", chrome_state(app));
+    }
+    app.show_chrome();
+    println!("bench chrome_level shown {}", chrome_state(app));
+    app.config.borrow_mut().focus_mode = was;
+}
+
+/// What the chrome and the panes carry: the header's and the sidebar's fade, the active note's
+/// minimap, how many panes recede, and whether the active note's line fade is on.
+fn chrome_state(app: &Rc<App>) -> String {
+    let hidden = |w: &gtk::Widget| w.has_css_class("chrome-hidden");
+    let tab = app.active();
+    let away = app
+        .panes
+        .borrow()
+        .iter()
+        .filter(|pane| pane.widget().has_css_class("chrome-away"))
+        .count();
+    format!(
+        "hidden={} sidebar={} map={} away={away} fade={}",
+        hidden(app.header.upcast_ref()),
+        app.sidebar.get().is_some_and(|s| hidden(s.widget())),
+        tab.as_ref().is_some_and(|t| hidden(t.minimap())),
+        tab.as_ref()
+            .and_then(|t| t.ghost_view())
+            .is_some_and(|view| view.fading()),
+    )
+}
+
+/// The line fade on the active note at High: held for a second and a half with the caret on line
+/// 8 and the line numbers on, which is long enough for `import -window root` to see the veil and
+/// the gutter it leaves alone, then [`fade::paint`] timed over a 2 KB and a 64 KB note. The veil is
+/// a rectangle per line on screen, so the two should cost the same.
+///
+/// `Tab::set_text` leaves the tab clean and the note's own text goes back at the end, so the
+/// tab closes as it opened and nothing asks to write it.
+async fn bench_chrome_veil(app: &Rc<App>) {
+    let Some(tab) = app.active() else {
+        return;
+    };
+    let was = app.config.borrow().focus_mode;
+    app.config.borrow_mut().focus_mode = FocusMode::High;
+    tab.set_line_numbers(true);
+    if let Some(iter) = tab.buffer.iter_at_line(8) {
+        tab.buffer.place_cursor(&iter);
+    }
+    app.hide_chrome();
+    println!("bench chrome_veil {} caret_line=8", tab.rel());
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    let own = tab.text();
+    for chars in [2 * 1024, 64 * 1024] {
+        // Exactly 32 bytes, so the body is exactly the size the numbers are labelled with.
+        let body = "filler text for a long-ish note\n";
+        tab.set_text(&body.repeat(chars / body.len()));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        // A frame to lay the new text out, which is what the veil measures its lines against.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(view) = tab.ghost_view() else {
+            break;
+        };
+        const PAINTS: u32 = 200;
+        let snapshot = gtk::Snapshot::new();
+        let t0 = Instant::now();
+        for _ in 0..PAINTS {
+            fade::paint(view, &snapshot, 1.0);
+        }
+        let us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(PAINTS);
+        drop(snapshot.to_node());
+        println!("bench fade_paint_us chars={chars} {us:.1}");
+    }
+    tab.set_text(&own);
+    app.show_chrome();
+    app.config.borrow_mut().focus_mode = was;
+}
+
 /// Fire the actions the chords go through at a faded window, and print whether the chrome came
-/// back. An action on its own must not bring it back: focus mode ends on pointer motion, Escape,
-/// a focus change or a view-mode change, and an action is none of those (DESIGN.md, Chrome
-/// auto-hide). Find is the counter-example that proves the rule — its bar takes the keyboard, so
-/// the chrome returns through `focus-widget` rather than through the activation.
+/// back. An action on its own must not bring it back: focus mode ends on pointer motion, a scroll,
+/// Escape, a focus change or a view-mode change, and an action is none of those (DESIGN.md,
+/// Chrome auto-hide). Find is the counter-example that proves the rule — its bar takes the
+/// keyboard, so the chrome returns through `focus-widget` rather than through the activation.
 ///
 /// `Ctrl+Left` and `Ctrl+Right` are printed alongside as the accelerators they are not: nothing in
 /// [`ACTIONS`] claims either chord, so they activate nothing and reach no `show_chrome` at all. If
 /// focus mode still drops on them, the cause is elsewhere.
-fn bench_chrome(app: &Rc<App>) {
+fn bench_chrome_actions(app: &Rc<App>) {
     // Find last: it leaves its bar open, and an open find bar suspends the fade entirely.
     for action in ["win.save", "win.scroll-down", "win.zoom-in", "win.find"] {
         app.hide_chrome();
@@ -455,7 +571,6 @@ fn bench_chrome(app: &Rc<App>) {
             );
         }
     }
-    bench_quit(app);
 }
 
 /// Open the two notes `rels` names in one pane, then split the second one off to the right, move

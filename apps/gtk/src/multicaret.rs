@@ -497,6 +497,11 @@ impl View {
         *imp.fade_tick.borrow_mut() = Some(id);
     }
 
+    /// Whether the line fade is on, for the headless check that cannot see it.
+    pub(crate) fn fading(&self) -> bool {
+        self.imp().fade_on.get()
+    }
+
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating
     /// the action grows the column away from the primary caret.
     pub fn add_caret(&self, below: bool) {
