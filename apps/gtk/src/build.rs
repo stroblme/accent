@@ -387,6 +387,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let tree = tree::build(
         vault.clone(),
         rows,
+        app.config.borrow().show_hidden,
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
         // one click is looking, not keeping.

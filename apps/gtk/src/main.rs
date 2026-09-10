@@ -1055,6 +1055,12 @@ impl App {
                 self.sync_excluded(git);
             }
         }
+        if let Some(tree) = self.tree.get() {
+            tree.set_show_hidden(config.show_hidden);
+        }
+        if let Some(action) = self.window.lookup_action("show-hidden-files") {
+            action.change_state(&config.show_hidden.to_variant());
+        }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
         self.restyle_all();

@@ -314,6 +314,22 @@ mod tests {
         );
     }
 
+    /// What the file tree's Show Hidden Files has to choose from: every dotfile, and never `.git`.
+    #[test]
+    fn list_dir_holds_the_dotfiles_and_never_git() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write(".gitignore", "target/\n");
+        f.write(".obsidian/app.json", "{}");
+        f.write(".git/config", "c");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        assert_eq!(
+            names(&f.vault.list_dir("").unwrap()),
+            [".obsidian", ".gitignore"]
+        );
+    }
+
     /// The other half of All: a tree the index never walked is greped from disk, and a file the
     /// index does hold is not greped twice.
     #[test]
