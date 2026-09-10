@@ -591,13 +591,11 @@ pub fn parse_refs(decorations: &str) -> Vec<Ref> {
                 (RefKind::LocalBranch, name)
             } else if let Some(name) = full.strip_prefix("tag: refs/tags/") {
                 (RefKind::Tag, name)
-            } else if let Some(name) = full
-                .strip_prefix("refs/remotes/")
-                .filter(|name| !name.ends_with("/HEAD"))
-            {
-                (RefKind::RemoteBranch, name)
             } else {
-                return None;
+                let name = full
+                    .strip_prefix("refs/remotes/")
+                    .filter(|name| !name.ends_with("/HEAD"))?;
+                (RefKind::RemoteBranch, name)
             };
             Some(Ref {
                 name: name.to_string(),
