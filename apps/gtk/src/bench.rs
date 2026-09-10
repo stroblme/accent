@@ -37,8 +37,9 @@ use super::*;
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
 ///
-/// `ACCENT_BENCH_CLOSE=1` opens a note, quits, and prints how many references to the vault the
-/// closed window left behind; it exits 1 unless that is 0.
+/// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
+/// and prints how many references to the vault the closed window left behind and whether either
+/// dialog outlived it; it exits 1 unless nothing did.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -191,10 +192,11 @@ fn bench_templates(app: &Rc<App>) {
     bench_quit(app);
 }
 
-/// Quit with a note open, the way Ctrl+Q does, and count the vault's references once the window
-/// is gone. The application is held so the process outlives its last window, and the main loop
-/// gets up to three seconds to let go of whatever was still in flight. Every reference left is a
-/// closed window keeping its vault open — on a remote one, its `serve` session and its forwards.
+/// Cancel two dialogs and say whether either outlived its close, then quit with a note open, the
+/// way Ctrl+Q does, and count the vault's references once the window is gone. The application is
+/// held so the process outlives its last window, and the main loop gets up to three seconds to let
+/// go of whatever was still in flight. Every reference left is a closed window keeping its vault
+/// open — on a remote one, its `serve` session and its forwards.
 fn bench_close(app: &Rc<App>) {
     let (Some(vault), Some(gtk_app)) = (app.vault(), app.window.application()) else {
         return bench_quit(app);
@@ -209,9 +211,23 @@ fn bench_close(app: &Rc<App>) {
         app.open_path(&note.rel_path);
     }
     // Nothing below holds the `App`: the close has to be what lets it go.
-    let vault = Arc::downgrade(vault);
+    let (app, vault) = (Rc::downgrade(app), Arc::downgrade(vault));
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
+        let dialogs = app
+            .upgrade()
+            .map_or_else(Vec::new, |app| bench_dialogs(&app));
+        // Past the close animation, so a dialog still alive is one its close did not let go of.
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let mut kept = 0;
+        for (heading, dialog) in dialogs {
+            let alive = dialog.upgrade().is_some();
+            println!(
+                "bench dialog_kept_after_cancel {heading:?} {}",
+                u8::from(alive)
+            );
+            kept += usize::from(alive);
+        }
         println!("bench vault_refs_open {}", vault.strong_count());
         let _hold = gtk_app.hold();
         gtk_app.activate_action("quit", None);
@@ -223,8 +239,38 @@ fn bench_close(app: &Rc<App>) {
         }
         let held = vault.strong_count();
         println!("bench vault_refs_after_close {held}");
-        std::process::exit(i32::from(held > 0));
+        std::process::exit(i32::from(held > 0 || kept > 0));
     });
+}
+
+/// Cancel a New File dialog and, over the open note, an Unsaved Changes one: a dialog that
+/// outlives its close keeps whatever its handlers hold, and New File's path field completes from
+/// the vault.
+fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+    let _ = WidgetExt::activate_action(&app.window, "win.new-file", None);
+    let mut dialogs = vec![bench_cancel(app)];
+    if let Some(tab) = app.open_tabs().into_iter().next() {
+        app.ask_unsaved(&tab, &SaveError::Offline, |_, _| {});
+        dialogs.push(bench_cancel(app));
+    }
+    dialogs.into_iter().flatten().collect()
+}
+
+/// Close the window's topmost dialog the way Escape does, printing the response that answers,
+/// and keep its heading and a weak reference to it.
+fn bench_cancel(app: &App) -> Option<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+    let dialog = app
+        .window
+        .visible_dialog()?
+        .downcast::<adw::AlertDialog>()
+        .ok()?;
+    let heading = dialog.heading()?;
+    dialog.connect_response(None, {
+        let heading = heading.clone();
+        move |_, response| println!("bench dialog_response {heading:?} {response}")
+    });
+    dialog.close();
+    Some((heading, dialog.downgrade()))
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the
