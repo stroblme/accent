@@ -644,7 +644,7 @@ fn adopt_sidebar(
     // is built rather than discovered later, so unlike the Git pane this needs no refresh to say.
     pane.set_ports_visible(app.vault().is_some_and(|v| v.is_remote()));
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
-    // The panes dim rather than hide while the user types, on the same transition as the bars.
+    // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
@@ -869,13 +869,16 @@ fn install_chrome_css() {
             return;
         };
         let fade = match gtk::Settings::for_display(&display).is_gtk_enable_animations() {
-            true => ".chrome-fade { transition: opacity 250ms ease; } ",
-            false => "",
+            true => format!(
+                ".chrome-fade {{ transition: opacity {}ms ease; }} ",
+                fade::RAMP_MS
+            ),
+            false => String::new(),
         };
         let provider = gtk::CssProvider::new();
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
-             .chrome-dimmed {{ opacity: 0.5; }} \
+             .chrome-away {{ opacity: {away}; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
@@ -908,7 +911,8 @@ fn install_chrome_css() {
              GtkSourceAssistant.completion list row cell.icon {{ opacity: 0.7; }} \
              GtkSourceAssistant.completion list row cell.after {{ opacity: 0.6; \
                margin-left: 12px; }} \
-             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}"
+             textview.GtkSourceMap {{ font-size: 2.5pt; line-height: 6px; }}",
+            away = fade::FLOOR,
         ));
         gtk::style_context_add_provider_for_display(
             &display,

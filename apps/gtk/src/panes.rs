@@ -464,6 +464,8 @@ impl Pane {
         column.append(&bar);
         column.append(find.widget());
         column.append(&overlay);
+        // A pane that is not being written in recedes at High (`App::hide_chrome`).
+        column.add_css_class("chrome-fade");
 
         let pane = Rc::new(Pane {
             column,
