@@ -129,12 +129,16 @@ impl Shell {
     /// Let go of a window's [`App`] once the close is certain. This is the only strong reference
     /// to it, so the vault, its worker thread and its WebKit process all go with it.
     ///
-    /// ponytail: the `App` goes here, the vault a moment later — the tree and the sidebar hold
-    /// their own `Rc<Vault>` inside widgets, so the last one drops when GTK destroys the window,
-    /// and `Vault`'s `Drop` joins the worker there. Closing a second into `testvault`'s 2.7 s cold
-    /// reconcile blocked the main loop for 2.3 s, with the window already off screen. `Vault::drop`
-    /// names the fix (a cancellation flag on `reconcile`); until a vault is opened and closed often
-    /// enough for that pause to be felt, one stalled close is cheaper than the flag.
+    /// ponytail: the `App` goes here, the vault a moment later — the tree's model and the sidebar's
+    /// panes hold their own `Arc<Vault>` inside widgets, so the last one drops when GTK destroys
+    /// the window, or when a query still on a worker thread returns, and `Vault`'s `Drop` joins the
+    /// worker there. That holds only while no handler keeps its own widget alive: one strong
+    /// capture of the widget it is connected to, or of one around it, keeps a closed window's
+    /// vault open until the process exits, which `ACCENT_BENCH_CLOSE=1` checks for. Closing a
+    /// second into `testvault`'s 2.7 s cold reconcile blocked the main loop for 2.3 s, with the
+    /// window already off screen. `Vault::drop` names the fix (a cancellation flag on
+    /// `reconcile`); until a vault is opened and closed often enough for that pause to be felt,
+    /// one stalled close is cheaper than the flag.
     fn forget(&self, window: &adw::ApplicationWindow) {
         let mut windows = self.windows.borrow_mut();
         let Some(i) = windows.iter().position(|(_, app)| &app.window == window) else {

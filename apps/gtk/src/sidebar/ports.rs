@@ -71,39 +71,47 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
     // is to choose another port — a decision made in the row right below the message.
     let banner = adw::Banner::new("");
 
+    // The widgets are held weakly by every closure here: each closure ends up in a handler on a
+    // widget inside the ones it names — a row's close button, the entries, Add — and a strong
+    // handle would be a cycle keeping the pane, and the vault behind `data`, alive after the
+    // window has closed.
     let switch_body: Rc<dyn Fn()> = Rc::new({
-        let (body, forwards) = (body.clone(), forwards.clone());
-        move || {
-            body.set_visible_child_name(match forwards.borrow().is_empty() {
-                true => "empty",
-                false => "list",
-            });
-        }
+        let forwards = forwards.clone();
+        glib::clone!(
+            #[weak]
+            body,
+            move || {
+                body.set_visible_child_name(match forwards.borrow().is_empty() {
+                    true => "empty",
+                    false => "list",
+                });
+            }
+        )
     });
 
     let drop_forward: DropForward = Rc::new({
-        let (data, forwards, list, switch_body) = (
-            data.clone(),
-            forwards.clone(),
-            list.clone(),
-            switch_body.clone(),
-        );
-        move |f, row: &gtk::ListBoxRow| {
-            // Greyed out while ssh answers, so the button cannot ask a second time.
-            row.set_sensitive(false);
-            let remove = data.remove_forward.clone();
-            let (forwards, list, switch_body) =
-                (forwards.clone(), list.clone(), switch_body.clone());
-            let row = row.clone();
-            glib::spawn_future_local(async move {
-                // The row goes whatever ssh answers: a forward it would not cancel is one nothing
-                // here could cancel either, and a master that died took its forwards with it.
-                let _ = gio::spawn_blocking(move || remove(f)).await;
-                forwards.borrow_mut().retain(|kept| *kept != f);
-                list.remove(&row);
-                switch_body();
-            });
-        }
+        let (data, forwards, switch_body) = (data.clone(), forwards.clone(), switch_body.clone());
+        glib::clone!(
+            #[weak]
+            list,
+            move |f, row: &gtk::ListBoxRow| {
+                // Greyed out while ssh answers, so the button cannot ask a second time.
+                row.set_sensitive(false);
+                let remove = data.remove_forward.clone();
+                let (forwards, list, switch_body) =
+                    (forwards.clone(), list.clone(), switch_body.clone());
+                let row = row.clone();
+                glib::spawn_future_local(async move {
+                    // The row goes whatever ssh answers: a forward it would not cancel is one
+                    // nothing here could cancel either, and a master that died took its forwards
+                    // with it.
+                    let _ = gio::spawn_blocking(move || remove(f)).await;
+                    forwards.borrow_mut().retain(|kept| *kept != f);
+                    list.remove(&row);
+                    switch_body();
+                });
+            }
+        )
     });
 
     let local = port_entry("Local");
@@ -132,65 +140,74 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
         .build();
 
     let submit: Rc<dyn Fn()> = Rc::new({
-        let (data, forwards, list, banner, local, remote) = (
-            data.clone(),
-            forwards.clone(),
-            list.clone(),
-            banner.clone(),
-            local.clone(),
-            remote.clone(),
-        );
+        let (data, forwards) = (data.clone(), forwards.clone());
         let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
         let direction = direction.clone();
-        move || {
-            let Some((from, to)) = ports(&local.text(), &remote.text()) else {
-                return;
-            };
-            let f = Forward {
-                local: from,
-                remote: to,
-                direction: direction.get(),
-            };
-            let (forwards, list, banner) = (forwards.clone(), list.clone(), banner.clone());
-            let (local, remote) = (local.clone(), remote.clone());
-            let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
-            let add = data.add_forward.clone();
-            glib::spawn_future_local(async move {
-                let answered = gio::spawn_blocking(move || add(f)).await;
-                match answered {
-                    // ssh answers a forward it already has with OK and adds nothing, so a second
-                    // row would be stale the moment either was stopped. Asked when the answer
-                    // lands, which also catches an Add pressed twice before the first came back.
-                    Ok(Ok(())) if forwards.borrow().contains(&f) => {
-                        banner.set_title(&format!("{} is already forwarded", row_label(f)));
-                        banner.set_revealed(true);
+        glib::clone!(
+            #[weak]
+            list,
+            #[weak]
+            banner,
+            #[weak]
+            local,
+            #[weak]
+            remote,
+            move || {
+                let Some((from, to)) = ports(&local.text(), &remote.text()) else {
+                    return;
+                };
+                let f = Forward {
+                    local: from,
+                    remote: to,
+                    direction: direction.get(),
+                };
+                let (forwards, list, banner) = (forwards.clone(), list.clone(), banner.clone());
+                let (local, remote) = (local.clone(), remote.clone());
+                let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
+                let add = data.add_forward.clone();
+                glib::spawn_future_local(async move {
+                    let answered = gio::spawn_blocking(move || add(f)).await;
+                    match answered {
+                        // ssh answers a forward it already has with OK and adds nothing, so a
+                        // second row would be stale the moment either was stopped. Asked when the
+                        // answer lands, which also catches an Add pressed twice before the first
+                        // came back.
+                        Ok(Ok(())) if forwards.borrow().contains(&f) => {
+                            banner.set_title(&format!("{} is already forwarded", row_label(f)));
+                            banner.set_revealed(true);
+                        }
+                        Ok(Ok(())) => {
+                            banner.set_revealed(false);
+                            forwards.borrow_mut().push(f);
+                            list.append(&forward_row(f, drop_forward));
+                            local.set_text("");
+                            remote.set_text("");
+                            switch_body();
+                        }
+                        Ok(Err(message)) => {
+                            banner.set_title(&message);
+                            banner.set_revealed(true);
+                        }
+                        Err(_) => {
+                            banner.set_title("Cannot forward this port");
+                            banner.set_revealed(true);
+                        }
                     }
-                    Ok(Ok(())) => {
-                        banner.set_revealed(false);
-                        forwards.borrow_mut().push(f);
-                        list.append(&forward_row(f, drop_forward));
-                        local.set_text("");
-                        remote.set_text("");
-                        switch_body();
-                    }
-                    Ok(Err(message)) => {
-                        banner.set_title(&message);
-                        banner.set_revealed(true);
-                    }
-                    Err(_) => {
-                        banner.set_title("Cannot forward this port");
-                        banner.set_revealed(true);
-                    }
-                }
-            });
-        }
+                });
+            }
+        )
     });
 
     for entry in [&local, &remote] {
-        entry.connect_changed({
-            let (add, local, remote) = (add.clone(), local.clone(), remote.clone());
+        entry.connect_changed(glib::clone!(
+            #[weak]
+            add,
+            #[weak]
+            local,
+            #[weak]
+            remote,
             move |_| add.set_sensitive(ports(&local.text(), &remote.text()).is_some())
-        });
+        ));
         entry.connect_activate({
             let submit = submit.clone();
             move |_| submit()

@@ -35,6 +35,9 @@ use super::*;
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
+///
+/// `ACCENT_BENCH_CLOSE=1` opens a note, quits, and prints how many references to the vault the
+/// closed window left behind; it exits 1 unless that is 0.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -51,6 +54,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
+    let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -66,6 +70,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !templates
         && !paths
         && !shell_keys
+        && !close
     {
         return;
     }
@@ -92,6 +97,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if shell_keys {
             return bench_shell_keys(&app);
+        }
+        if close {
+            return bench_close(&app);
         }
         if paths {
             return bench_paths(&app);
@@ -180,6 +188,42 @@ fn bench_templates(app: &Rc<App>) {
         }
     }
     bench_quit(app);
+}
+
+/// Quit with a note open, the way Ctrl+Q does, and count the vault's references once the window
+/// is gone. The application is held so the process outlives its last window, and the main loop
+/// gets up to three seconds to let go of whatever was still in flight. Every reference left is a
+/// closed window keeping its vault open — on a remote one, its `serve` session and its forwards.
+fn bench_close(app: &Rc<App>) {
+    let (Some(vault), Some(gtk_app)) = (app.vault(), app.window.application()) else {
+        return bench_quit(app);
+    };
+    // A tab open, so that a tab holding the window's state is caught as well as the sidebar.
+    let note = vault
+        .list_dir("")
+        .unwrap_or_default()
+        .into_iter()
+        .find(|row| row.kind == accent_core::walk::FileKind::Markdown);
+    if let Some(note) = note {
+        app.open_path(&note.rel_path);
+    }
+    // Nothing below holds the `App`: the close has to be what lets it go.
+    let vault = Arc::downgrade(vault);
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        println!("bench vault_refs_open {}", vault.strong_count());
+        let _hold = gtk_app.hold();
+        gtk_app.activate_action("quit", None);
+        for _ in 0..30 {
+            if vault.strong_count() == 0 {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let held = vault.strong_count();
+        println!("bench vault_refs_after_close {held}");
+        std::process::exit(i32::from(held > 0));
+    });
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the

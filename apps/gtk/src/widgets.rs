@@ -113,9 +113,9 @@ impl Pulse {
         let (bar, slot) = (self.bar.clone(), self.id.clone());
         let mut steps = 0;
         self.id.set(Some(glib::timeout_add_local(every, move || {
-            // The owner is kept alive by the handlers it connected to its own widgets, so `Drop`
-            // is not guaranteed to run. An unrooted bar means the window closed under the work;
-            // that is the timer's cue to stop on its own.
+            // The owner can outlive its window — a query still on a worker thread holds the search
+            // pane's — so `Drop` may come late. An unrooted bar means the window closed under the
+            // work; that is the timer's cue to stop on its own.
             if bar.root().is_none() {
                 slot.set(None);
                 return glib::ControlFlow::Break;
