@@ -610,6 +610,20 @@ mod tests {
         assert_eq!(items[0].message, "No note named Nope");
         assert_eq!(items[0].range.start.character, 17);
 
+        // A markdown link is judged by the path it names from the note's own folder.
+        rt.block_on(f.vault.change_document(
+            "a.md",
+            "[b](sub/Beta.md) [n](sub/Gone%20Away.md)".to_string(),
+        ))
+        .unwrap();
+        let Some(Event::Diagnostics { items, .. }) =
+            f.wait(|e| matches!(e, Event::Diagnostics { .. }))
+        else {
+            panic!("a change has to say what is wrong with the note");
+        };
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].message, "No note named sub/Gone Away.md");
+
         rt.block_on(async {
             // The provider answers about the text the editor has, not about the file on disk.
             f.vault
