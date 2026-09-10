@@ -185,35 +185,10 @@ fn a_remote_vault_connects_indexes_and_answers() {
 
     // A dropped link: the master dies, and the server and the forward go with it. The window
     // hears of it at once, without having to ask the host for anything first.
-    let check = std::process::Command::new("ssh")
-        .arg("-o")
-        .arg(format!("ControlPath={}", remote.control_path().display()))
-        .args(["-O", "check", &url.destination()])
-        .output()
-        .unwrap();
-    let said = String::from_utf8_lossy(&check.stderr);
-    let pid = said
-        .split("pid=")
-        .nth(1)
-        .and_then(|rest| rest.split(')').next())
-        .unwrap_or_else(|| panic!("ssh -O check said {said:?}"));
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-9", pid])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let t = Instant::now();
-    let why = loop {
-        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
-            Ok(Event::Disconnected(why)) => break why,
-            Ok(_) => {}
-            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
-        }
-    };
+    kill_master(&url, remote.control_path());
+    let (why, took) = wait_lost(&events);
     assert!(why.contains(&url.host), "{why}");
-    eprintln!("lost link said in {:?}: {why}", t.elapsed());
+    eprintln!("lost link said in {took:?}: {why}");
     assert!(
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the forward outlived its master"
@@ -235,6 +210,51 @@ fn a_remote_vault_connects_indexes_and_answers() {
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the cancel left it up"
     );
+
+    // Documents open when the link drops are open again on the new server, with the text they
+    // were sent, by the time it says it is connected. The attempt is a quiet one, as the window's
+    // own retries are, so nothing on the way may prompt.
+    let docs = ["One", "Two", "Three"];
+    for name in docs {
+        remote
+            .call::<serde_json::Value>(
+                "open_document",
+                serde_json::json!([format!("{name}.md"), "markdown", format!("# {name}\n")]),
+            )
+            .unwrap();
+    }
+    kill_master(&url, remote.control_path());
+    wait_lost(&events);
+    let t = Instant::now();
+    remote.reconnect_quietly();
+    let mut reopening = None;
+    let reopened = loop {
+        match events.recv_timeout(BUDGET.saturating_sub(t.elapsed())) {
+            Ok(Event::Connected) => break reopening.map(|at: Instant| at.elapsed()),
+            Ok(Event::Connecting { what, .. }) => {
+                eprintln!("  {what}");
+                if what == "Reopening the documents" {
+                    reopening = Some(Instant::now());
+                }
+            }
+            Ok(Event::Disconnected(why)) => panic!("disconnected: {why}"),
+            Ok(_) => {}
+            Err(_) => panic!("no quiet reconnect in {BUDGET:?}"),
+        }
+    };
+    let reopened = reopened.expect("the documents were never reopened");
+    eprintln!(
+        "quiet reconnect with {} documents in {:?}, reopening them {reopened:?} of it",
+        docs.len(),
+        t.elapsed()
+    );
+    for name in docs {
+        let symbols: Vec<accent_api::Symbol> = remote
+            .call("symbols", serde_json::json!([format!("{name}.md")]))
+            .unwrap_or_else(|e| panic!("{name}.md after the reconnect: {e}"));
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, [name]);
+    }
 
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
@@ -280,6 +300,41 @@ fn host_serves(url: &Url) -> bool {
     !on_host(url, &format!("pgrep -f {pattern} || true"))
         .trim()
         .is_empty()
+}
+
+/// `kill -9` the master behind `ctl`, which is a link dropped without a word to either end.
+fn kill_master(url: &Url, ctl: &std::path::Path) {
+    let check = std::process::Command::new("ssh")
+        .arg("-o")
+        .arg(format!("ControlPath={}", ctl.display()))
+        .args(["-O", "check", &url.destination()])
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&check.stderr);
+    let pid = said
+        .split("pid=")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap_or_else(|| panic!("ssh -O check said {said:?}"));
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// The lost link as the window hears it, with no call made: within three seconds of the kill.
+fn wait_lost(events: &Receiver<Event>) -> (String, Duration) {
+    let t = Instant::now();
+    loop {
+        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
+            Ok(Event::Disconnected(why)) => return (why, t.elapsed()),
+            Ok(_) => {}
+            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
+        }
+    }
 }
 
 /// Whether `probe` comes true within ten seconds.

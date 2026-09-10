@@ -92,7 +92,7 @@ impl Remote {
             child: Mutex::new(None),
             events,
         });
-        remote.clone().start();
+        remote.clone().start(false);
         remote
     }
 
@@ -133,11 +133,24 @@ impl Remote {
     /// Try again after a failure. The master usually survives whatever killed the server, so the
     /// second attempt is normally the fast one.
     pub fn reconnect(self: &Arc<Self>) {
-        if matches!(self.state(), State::Connecting) {
+        self.retry(false);
+    }
+
+    /// The same, for an attempt nobody asked for: the window's own retries after a dropped link.
+    /// It never prompts, so a key that wants a passphrase fails it instead of raising a dialog;
+    /// the attempt that may ask is [`reconnect`](Self::reconnect).
+    pub fn reconnect_quietly(self: &Arc<Self>) {
+        self.retry(true);
+    }
+
+    fn retry(self: &Arc<Self>, quiet: bool) {
+        let mut state = self.locked(&self.state);
+        if *state == State::Connecting {
             return;
         }
-        *self.locked(&self.state) = State::Connecting;
-        self.clone().start();
+        *state = State::Connecting;
+        drop(state);
+        self.clone().start(quiet);
     }
 
     // ------------------------------------------------------------- calling
@@ -425,10 +438,10 @@ impl Remote {
 
     // ----------------------------------------------------------- connect
 
-    fn start(self: Arc<Self>) {
+    fn start(self: Arc<Self>, quiet: bool) {
         let _ = std::thread::Builder::new()
             .name("accent-connect".to_string())
-            .spawn(move || match self.connect() {
+            .spawn(move || match self.connect(quiet) {
                 Ok(()) => {
                     // Said under the lock, so a loss the reader reports at once lands after it.
                     let mut state = self.locked(&self.state);
@@ -484,7 +497,7 @@ impl Remote {
         })
     }
 
-    fn connect(&self) -> Result<(), String> {
+    fn connect(&self, quiet: bool) -> Result<(), String> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
         self.teardown();
@@ -493,7 +506,7 @@ impl Remote {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
         let out = self
-            .ssh(&ssh::master(&self.url, &self.ctl))
+            .ssh(&ssh::master(&self.url, &self.ctl, quiet))
             // The master must not read our stdin, and its own prompts go through SSH_ASKPASS.
             .stdin(Stdio::null())
             .output()

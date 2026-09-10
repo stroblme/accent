@@ -213,14 +213,26 @@ fn base(url: &Url, ctl: &Path) -> Vec<String> {
 /// timer only counts idle time, and `serve` holds a session for as long as the vault is open, so a
 /// working remote never reaches it. Closing the vault leaves the master that minute on purpose, so
 /// a reopen within it is quick.
-pub fn master(url: &Url, ctl: &Path) -> Vec<String> {
+///
+/// `quiet` is for an attempt nobody asked for, the window's own reconnect after a dropped link:
+/// `BatchMode=yes` makes a key that wants a passphrase fail that attempt rather than raise a
+/// dialog over whatever the reader is doing. An attempt someone asked for may prompt.
+pub fn master(url: &Url, ctl: &Path, quiet: bool) -> Vec<String> {
     let mut argv = base(url, ctl);
+    if quiet {
+        argv.extend(["-o", "BatchMode=yes"].map(String::from));
+    }
     argv.extend(
         [
             "-o",
             "ControlMaster=auto",
             "-o",
             "ControlPersist=60",
+            // A host that does not answer fails the attempt in ten seconds, rather than after
+            // the kernel's own connect timeout of a minute or two. It covers the handshake too,
+            // but not a prompt, which waits for the person answering it.
+            "-o",
+            "ConnectTimeout=10",
             // A dropped link must surface as an error in 15 seconds rather than a hung read.
             "-o",
             "ServerAliveInterval=5",
@@ -636,7 +648,7 @@ mod tests {
     #[test]
     fn the_master_command_reuses_a_socket_and_notices_a_dead_link() {
         assert_eq!(
-            master(&plain(), ctl()),
+            master(&plain(), ctl(), false),
             words(&[
                 "ssh",
                 "-o",
@@ -645,6 +657,8 @@ mod tests {
                 "ControlMaster=auto",
                 "-o",
                 "ControlPersist=60",
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=5",
                 "-o",
@@ -653,8 +667,9 @@ mod tests {
                 "true",
             ])
         );
+        // An attempt nobody asked for never prompts.
         assert_eq!(
-            master(&ported(), ctl()),
+            master(&ported(), ctl(), true),
             words(&[
                 "ssh",
                 "-o",
@@ -662,9 +677,13 @@ mod tests {
                 "-p",
                 "2222",
                 "-o",
+                "BatchMode=yes",
+                "-o",
                 "ControlMaster=auto",
                 "-o",
                 "ControlPersist=60",
+                "-o",
+                "ConnectTimeout=10",
                 "-o",
                 "ServerAliveInterval=5",
                 "-o",
