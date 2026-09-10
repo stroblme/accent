@@ -12,8 +12,8 @@ mod spans;
 
 pub use html::to_html;
 pub use links::{
-    heading_for, is_image, link_key, path_keys, pdf_anchor, percent_decode, rewrite_links,
-    rewrite_targets, slugs, strip_ext,
+    heading_for, is_image, link_key, path_keys, pdf_anchor, percent_decode, percent_encode,
+    rewrite_links, rewrite_targets, slugs, strip_ext,
 };
 
 use frontmatter::{frontmatter, scan_tags};

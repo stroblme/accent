@@ -574,7 +574,7 @@ mod tests {
             "markdown",
             "see [[Beta]] and [[Nope]] #rust\n".to_string(),
         ));
-        assert_eq!(support.unwrap().completion_triggers, ['[', '#']);
+        assert_eq!(support.unwrap().completion_triggers, ['[', '#', '(']);
 
         let Some(Event::Diagnostics { rel, items }) =
             f.wait(|e| matches!(e, Event::Diagnostics { .. }))
@@ -660,6 +660,83 @@ mod tests {
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].insert, "#rust");
             assert_eq!(items[0].kind, Kind::Tag);
+        });
+    }
+
+    /// `![[` offers every file, and a markdown link's destination offers paths from the note's
+    /// own folder; each writes what the index resolves back to the file its row named.
+    #[test]
+    fn notes_provider_completes_embeds_and_link_paths() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("sub/n.md", "\n");
+        f.write("Attachments/My Logo.png", "not really a png");
+        f.write("a/x.md", "\n");
+        f.write("b/c/x.md", "\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        accent_lsp::runtime().block_on(async {
+            let at = |character| Pos { line: 0, character };
+            f.vault
+                .open_document("sub/n.md", "markdown", "![[]]".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(3), None)
+                .await
+                .unwrap()
+                .items;
+            let mut inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
+            inserts.sort();
+            assert_eq!(
+                inserts,
+                ["[[My Logo.png]]", "[[b/c/x]]", "[[n]]", "[[x]]"],
+                "`x` reaches a/x.md, the shorter path, so b/c/x.md is written out"
+            );
+            assert_eq!(
+                items[0].replace,
+                Range {
+                    start: at(1),
+                    end: at(5)
+                },
+                "the `!` stays, the `]]` the auto-pair left goes"
+            );
+
+            f.vault
+                .change_document("sub/n.md", "[t]()".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(4), None)
+                .await
+                .unwrap()
+                .items;
+            let logo = items.iter().find(|i| i.label == "My Logo.png").unwrap();
+            assert_eq!(logo.insert, "../Attachments/My%20Logo.png");
+            assert_eq!(
+                logo.replace,
+                Range {
+                    start: at(4),
+                    end: at(4)
+                },
+                "the `)` the auto-pair left stays"
+            );
+
+            // What was typed is a relative, encoded path; the files it names are found anywhere.
+            f.vault
+                .change_document("sub/n.md", "[t](../My%20L)".to_string())
+                .await
+                .unwrap();
+            let items = f
+                .vault
+                .completion("sub/n.md", at(13), None)
+                .await
+                .unwrap()
+                .items;
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].label, "My Logo.png");
         });
     }
 

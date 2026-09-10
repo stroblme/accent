@@ -100,10 +100,10 @@ impl Index {
 
     /// Every openable file's rel_path, notes first and then the rest by path.
     ///
-    /// The switcher opens more than markdown now, so it needs this rather than
-    /// [`note_paths`](Self::note_paths), which stays markdown-only because wikilink completion may
-    /// only ever offer notes. Directories are not files to open and conflict copies are reached
-    /// through the resolve UI, so neither is listed.
+    /// The switcher opens more than markdown, and an `![[embed]]` or a markdown link's destination
+    /// can name any file, so they need this rather than [`note_paths`](Self::note_paths), which
+    /// stays markdown-only because `[[` completion offers notes alone. Directories are not files
+    /// to open and conflict copies are reached through the resolve UI, so neither is listed.
     ///
     /// Git-ignored files are left out unless `include_ignored`, but **a note is never left out**:
     /// a vault that gitignores its own markdown is the ordinary case, not the exception. The file
