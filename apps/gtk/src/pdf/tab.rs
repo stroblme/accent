@@ -786,6 +786,16 @@ impl PdfTab {
             self,
             move |_, reply| tab.on_reply(reply)
         ));
+        // A page's stand-in landed. It is all the strip paints of a page, and the strip hears of
+        // it only here: what it asks for is answered to the reading view, which repaints itself.
+        view.connect_lowres(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page| {
+                tab.thumbs.queue_draw();
+                tab.band_landed(page);
+            }
+        ));
         view.connect_page(glib::clone!(
             #[weak(rename_to = tab)]
             self,

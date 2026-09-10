@@ -53,22 +53,18 @@ impl PdfTab {
             self,
             move |_| tab.hide_preview()
         ));
-        // The band arrives after the popover does, for any page nobody has read yet.
-        self.view.connect_lowres(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |ready| {
-                let waiting = match tab.preview.borrow().as_ref().map(|p| p.target.clone()) {
-                    Some(LinkTarget::Page { page, top }) if page as u32 == ready => {
-                        Some((page, top))
-                    }
-                    _ => None,
-                };
-                if let Some((page, top)) = waiting {
-                    tab.fill_band(page, top);
-                }
-            }
-        ));
+    }
+
+    /// A page's stand-in landed. The band arrives after the popover does, for any page nobody has
+    /// read yet, so a preview up for that page fills in now.
+    pub(super) fn band_landed(self: &Rc<Self>, ready: u32) {
+        let waiting = match self.preview.borrow().as_ref().map(|p| p.target.clone()) {
+            Some(LinkTarget::Page { page, top }) if page as u32 == ready => Some((page, top)),
+            _ => None,
+        };
+        if let Some((page, top)) = waiting {
+            self.fill_band(page, top);
+        }
     }
 
     /// Ctrl over a link: show where it leads. Anything else takes the preview away.
