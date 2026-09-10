@@ -19,7 +19,7 @@ pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
 use adw::prelude::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 use widgets::path_list;
@@ -62,6 +62,9 @@ pub struct Sidebar {
     /// belongs in it depends entirely on the open tab: a note's headings, a PDF's bookmarks and
     /// thumbnails, or a sentence saying why there is nothing.
     outline_bin: adw::Bin,
+    /// The list in `outline_bin` while it holds a text document's outline, kept to be refilled
+    /// rather than rebuilt while that document is edited.
+    outline_list: RefCell<Option<outline::List>>,
 }
 
 /// The panes that read the vault's index.
@@ -211,6 +214,7 @@ impl Sidebar {
                 },
             ),
             outline_bin,
+            outline_list: RefCell::new(None),
         }
     }
 
@@ -292,9 +296,30 @@ impl Sidebar {
 
     /// Replace what the Outline pane shows; `None` puts the empty state back.
     pub fn set_outline(&self, content: Option<&gtk::Widget>) {
+        self.outline_list.take();
         match content {
             Some(widget) => self.outline_bin.set_child(Some(widget)),
             None => self.outline_bin.set_child(Some(&outline::empty())),
+        }
+    }
+
+    /// Show the outline of the text document `key` as rows that jump. The list on screen is
+    /// refilled when it is already that document's, so an edit, a save or a language server's
+    /// answer leaves it scrolled where it was; another document gets a new list, from the top.
+    pub fn set_outline_rows<T: Copy + 'static>(
+        &self,
+        key: &str,
+        rows: &[(u8, String, T)],
+        on_jump: impl Fn(T) + 'static,
+    ) {
+        let mut kept = self.outline_list.borrow_mut();
+        if kept.as_ref().is_none_or(|list| list.key != key) {
+            let list = outline::List::new(key);
+            self.outline_bin.set_child(Some(&list.scroller));
+            *kept = Some(list);
+        }
+        if let Some(list) = kept.as_ref() {
+            list.fill(rows, on_jump);
         }
     }
 

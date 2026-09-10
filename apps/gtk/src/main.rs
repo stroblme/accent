@@ -640,14 +640,15 @@ impl App {
             };
             return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
-        sidebar.set_outline(Some(&sidebar::outline_list(
+        sidebar.set_outline_rows(
+            &doc.key(),
             &rows,
             glib::clone!(
                 #[weak]
                 tab,
                 move |at| tab.goto_pos(at)
             ),
-        )));
+        );
     }
 
     /// The file's own facts in the status bar: what it is, whether it is saved, and its one
