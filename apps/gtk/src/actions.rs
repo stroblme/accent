@@ -115,6 +115,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pane-tags", "Tags Pane", &["<Control><Shift>t"]),
     ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
+    ("win.git-merge", "Merge Branch…", &[]),
+    ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
     // Back and forward walk the active pane's history, over every kind of document. They take
     // the chords a browser uses for the same idea, and the mouse's side buttons with them.
@@ -362,6 +364,19 @@ impl App {
                         .filter(|d| !d.is_transient())
                         .map(|d| d.key());
                     git.sync(key.as_deref());
+                }
+            }
+            // The pane's selected repository, like the branch popover's own button: the pane is
+            // put on screen so the conflicts a merge may leave are in view.
+            "git-merge" => {
+                self.show_pane("git");
+                if let Some(git) = self.git.get() {
+                    git.merge_branch();
+                }
+            }
+            "git-merge-abort" => {
+                if let Some(git) = self.git.get() {
+                    git.abort_merge();
                 }
             }
             "pane-outline" => self.show_pane("outline"),
