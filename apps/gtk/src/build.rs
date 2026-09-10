@@ -270,6 +270,7 @@ pub fn build_window(
         statusbar,
         docs: RefCell::new(Vec::new()),
         awaiting: RefCell::new(HashMap::new()),
+        placing: RefCell::new(HashMap::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
         git: OnceCell::new(),

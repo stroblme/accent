@@ -43,6 +43,11 @@ use super::*;
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
+///
+/// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
+/// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
+/// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
+/// its tabs have landed, and quits without writing one.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -61,6 +66,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
+    let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -70,6 +76,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && follow.is_none()
+        && layout.is_none()
         && !git
         && !keys
         && chrome.is_none()
@@ -86,6 +93,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
         if let Some(rels) = panes {
             return bench_panes(&app, &rels);
+        }
+        if let Some(arg) = layout {
+            return bench_layout(&app, &arg);
         }
         if let Some(rel) = compare {
             return bench_compare(&app, &rel);
@@ -803,6 +813,102 @@ fn bench_pane_at(app: &Rc<App>, page: &adw::TabPage) {
             .cloned()
     });
     at("focus_at", focused.as_ref());
+}
+
+/// See `ACCENT_BENCH_LAYOUT` above. Each step waits for the one before it to be laid out: a split
+/// has no size to put a handle in until it is allocated, and a tab moved into a split takes the
+/// keyboard, and with it the active pane, from an idle.
+fn bench_layout(app: &Rc<App>, arg: &str) {
+    if arg == "1" {
+        let app = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+            bench_layout_print(&app);
+            bench_quit(&app);
+        });
+        return;
+    }
+    let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    let [a, b, c, d] = &rels[..] else {
+        return bench_quit(app);
+    };
+    for rel in [a, b, c, d] {
+        app.open_path(rel);
+    }
+    let (app, a, c, d) = (app.clone(), a.clone(), c.clone(), d.clone());
+    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+        let page = |rel: &str| app.doc_for(rel).map(|doc| doc.page().clone());
+        let (Some(a), Some(c), Some(d)) = (page(&a), page(&c), page(&d)) else {
+            return bench_quit(&app);
+        };
+        app.split_page(&app.pane(), Side::Right, &c);
+        let Some(right) = app.pane_of(&c) else {
+            return bench_quit(&app);
+        };
+        app.split_page(&right, Side::Down, &d);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            app.reveal_page(&a);
+            app.reveal_page(&c);
+            let outer = app
+                .content
+                .child_by_name("tabs")
+                .and_downcast::<adw::Bin>()
+                .and_then(|bin| bin.child())
+                .and_downcast::<gtk::Paned>();
+            let inner = outer
+                .as_ref()
+                .and_then(|paned| paned.end_child())
+                .and_downcast::<gtk::Paned>();
+            let (Some(outer), Some(inner)) = (outer, inner) else {
+                return bench_quit(&app);
+            };
+            outer.set_position(outer.width() * 3 / 10);
+            inner.set_position(inner.height() * 6 / 10);
+            glib::timeout_add_local_once(Duration::from_millis(300), move || {
+                bench_layout_print(&app);
+                if let Some(gtk_app) = app.window.application() {
+                    gtk_app.activate_action("quit", None);
+                }
+            });
+        });
+    });
+}
+
+/// The tree the session would write, the tab notes open next to, and how many panes there are.
+fn bench_layout_print(app: &Rc<App>) {
+    let tree = app
+        .layout()
+        .map_or_else(|| "none".to_string(), |layout| bench_layout_line(&layout));
+    println!("bench layout {tree}");
+    println!(
+        "bench layout_active {}",
+        app.active_key().unwrap_or_default()
+    );
+    println!("bench layout_panes {}", app.panes.borrow().len());
+}
+
+/// `(h 0.300 [a.md b.md *a.md] (v 0.600 [c.md *c.md] [d.md *d.md]))`: each split's axis and
+/// share, and each pane's tabs with the one in front.
+fn bench_layout_line(layout: &Layout) -> String {
+    match layout {
+        Layout::Pane { tabs, selected } => {
+            format!(
+                "[{} *{}]",
+                tabs.join(" "),
+                selected.as_deref().unwrap_or("-")
+            )
+        }
+        Layout::Split {
+            vertical,
+            ratio,
+            start,
+            end,
+        } => format!(
+            "({} {ratio:.3} {} {})",
+            if *vertical { "v" } else { "h" },
+            bench_layout_line(start),
+            bench_layout_line(end)
+        ),
+    }
 }
 
 /// The find bar and the Outline pane across a tab switch and a close: a note with the bar open, a

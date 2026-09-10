@@ -58,7 +58,7 @@ mod wire;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
-use accent_core::config::{FocusMode, PdfZoom};
+use accent_core::config::{FocusMode, Layout, PdfZoom};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
@@ -204,6 +204,8 @@ struct App {
     docs: RefCell<Vec<Doc>>,
     /// Work waiting for a tab that is still being opened, by key: see [`App::with_tab`].
     awaiting: RefCell<HashMap<String, Waiting>>,
+    /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
+    placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
     /// Set once, after `App` exists, by the sidebar the tree lives in.
     tree: OnceCell<tree::Tree>,
     /// Files / Search / Tags / References over the vault tree.
