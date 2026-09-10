@@ -334,6 +334,8 @@ methods! {
     git git_checkout_commit = checkout_commit(repo: ref Repo, oid: ref str) -> ();
     git git_create_branch = create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> ();
     git git_delete_branch = delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();
+    git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge;
+    git git_merge_abort = merge_abort(repo: ref Repo) -> ();
     git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String;
     git git_sync = sync(repo: ref Repo) -> String;
     /// Bring the remote-tracking refs up to date. Bounded by [`git::FETCH_TIMEOUT`], which is

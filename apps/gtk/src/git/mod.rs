@@ -136,6 +136,8 @@ pub struct Panel {
     root: gtk::Widget,
     /// "empty" (no repository) or "repo".
     stack: gtk::Stack,
+    /// Over the pane while the selected repository is part way through a merge.
+    banner: adw::Banner,
     /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
     /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
     /// (`fileops::context_menu` documents the symptom).
@@ -247,6 +249,8 @@ impl Panel {
         branch_list.add_css_class("navigation-sidebar");
         let create = gtk::Button::builder().label("Create Branch…").build();
         create.add_css_class("flat");
+        let merge = gtk::Button::builder().label("Merge Branch…").build();
+        merge.add_css_class("flat");
         let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // A repository with fifty branches is a list that scrolls, not a popover taller than the
         // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
@@ -260,6 +264,7 @@ impl Panel {
         );
         branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         branch_box.append(&create);
+        branch_box.append(&merge);
         let branch_menu = gtk::Popover::builder().child(&branch_box).build();
         let branch = gtk::MenuButton::builder()
             .hexpand(true)
@@ -404,12 +409,23 @@ impl Panel {
         stack.add_named(&column, Some("repo"));
         stack.set_visible_child_name("empty");
 
+        // A banner and not a toast (DESIGN.md, States): a merge that stopped is a state that
+        // lasts until it is committed or aborted, and Abort is the one decision it can offer.
+        let banner = adw::Banner::builder()
+            .title("A merge is in progress")
+            .button_label("Abort")
+            .build();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&banner);
+        root.append(&stack);
+
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
             hooks,
-            root: stack.clone().upcast(),
+            root: root.upcast(),
             stack,
+            banner,
             column,
             names,
             chooser,
@@ -445,7 +461,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check, &create);
+        panel.wire_header(&check, &create, &merge);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -517,10 +533,22 @@ impl Panel {
         self.pending.replace(Some(id));
     }
 
-    fn wire_header(self: &Rc<Self>, check: &gtk::Button, create: &gtk::Button) {
+    fn wire_header(
+        self: &Rc<Self>,
+        check: &gtk::Button,
+        create: &gtk::Button,
+        merge: &gtk::Button,
+    ) {
         on_click(self, &self.sync, |panel| panel.sync(None));
         on_click(self, check, |panel| panel.refresh(Depth::Discover));
         on_click(self, create, |panel| panel.create_branch());
+        on_click(self, merge, |panel| panel.merge_branch());
+        let weak = Rc::downgrade(self);
+        self.banner.connect_button_clicked(move |_| {
+            if let Some(panel) = weak.upgrade() {
+                panel.abort_merge();
+            }
+        });
 
         let weak = Rc::downgrade(self);
         self.chooser.connect_selected_notify(move |chooser| {
@@ -721,6 +749,7 @@ impl Panel {
             state.selected = selected;
         }
         self.sync_state();
+        self.banner.set_revealed(self.merging());
         // git has answered for the first time since the window opened this vault, so there is a
         // repository to fetch at last. Everything after this is the timer's.
         if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
@@ -827,13 +856,30 @@ impl Panel {
         (staged, staged || status.changes().next().is_some())
     }
 
+    /// Whether the selected repository is part way through a merge.
+    fn merging(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| s.merging)
+    }
+
     /// The placeholder, the Commit button and whether the box is there at all.
+    ///
+    /// A merge under way always has its commit to make — resolved to "ours", it may stage nothing
+    /// at all — and a message of its own already, so neither an index nor a message is needed.
     fn sync_commit(&self) {
         let message = self.message_text();
+        let merging = self.merging();
         self.placeholder.set_visible(message.is_empty());
-        let anything = self.to_commit().1;
+        self.placeholder.set_label(match merging {
+            true => "Merge message (optional)",
+            false => "Commit message",
+        });
+        let anything = merging || self.to_commit().1;
         self.commit
-            .set_sensitive(anything && !message.trim().is_empty());
+            .set_sensitive(anything && (merging || !message.trim().is_empty()));
         // A clean tree has nothing to say, so the box goes — but never out from under a message
         // being written: a refresh fires on every save, and one of those would take it away
         // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
@@ -1260,6 +1306,7 @@ mod tests {
             branch: on_main(Some("origin/main"), 1, 2),
             entries: Vec::new(),
             ignored: vec!["build/".to_string()],
+            merging: false,
         };
         assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
 

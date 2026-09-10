@@ -821,6 +821,102 @@ fn commit_all_takes_tracked_changes_and_leaves_untracked_files_alone() {
     );
 }
 
+/// `base` on `main`, then `side` and `main` each writing their own `f.md`. The merge settings are
+/// local, so a developer's own `merge.ff` or `merge.autoStash` cannot decide what these tests see.
+fn diverged(dir: &Path) {
+    init(dir);
+    ok(dir, &["config", "merge.ff", "true"]);
+    ok(dir, &["config", "merge.autoStash", "false"]);
+    write_file(dir, "f.md", "base\n");
+    commit_all(dir, "base");
+    ok(dir, &["checkout", "-q", "-b", "side"]);
+    write_file(dir, "f.md", "side\n");
+    commit_all(dir, "side");
+    ok(dir, &["checkout", "-q", "main"]);
+    write_file(dir, "f.md", "main\n");
+    commit_all(dir, "main");
+}
+
+#[test]
+fn merge_fast_forwards_commits_and_says_when_there_is_nothing_to_merge() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    ok(dir, &["config", "merge.ff", "true"]);
+    write_file(dir, "f.md", "base\n");
+    commit_all(dir, "base");
+    ok(dir, &["checkout", "-q", "-b", "side"]);
+    write_file(dir, "s.md", "s\n");
+    commit_all(dir, "side");
+    let side = head(dir);
+    ok(dir, &["checkout", "-q", "main"]);
+    let repo = open(dir);
+
+    assert_eq!(merge(&repo, "side").unwrap(), Merge::FastForward);
+    assert_eq!(head(dir), side);
+    assert_eq!(merge(&repo, "side").unwrap(), Merge::UpToDate);
+
+    write_file(dir, "m.md", "m\n");
+    commit_all(dir, "main moves on");
+    ok(dir, &["checkout", "-q", "side"]);
+    write_file(dir, "t.md", "t\n");
+    commit_all(dir, "side moves on");
+    ok(dir, &["checkout", "-q", "main"]);
+    assert_eq!(merge(&repo, "side").unwrap(), Merge::Commit);
+    let top = &log(&repo, 0, 1).unwrap()[0];
+    assert_eq!(top.parents.len(), 2);
+    assert_eq!(top.summary, "Merge branch 'side'");
+    assert!(!status(&repo).unwrap().merging);
+}
+
+#[test]
+fn a_conflicting_merge_waits_for_a_commit_or_an_abort() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged(dir);
+    let repo = open(dir);
+
+    // Uncommitted work the merge would overwrite is git's refusal, and nothing is left under way.
+    write_file(dir, "f.md", "uncommitted\n");
+    let refused = merge(&repo, "side").unwrap_err().to_string();
+    assert!(refused.contains("would be overwritten"), "{refused}");
+    assert!(!status(&repo).unwrap().merging);
+    ok(dir, &["checkout", "--", "f.md"]);
+
+    // git says CONFLICT on stdout, so this is read off the repository and not off its words.
+    assert_eq!(
+        merge(&repo, "side").unwrap(),
+        Merge::Conflicts(vec!["f.md".to_string()])
+    );
+    assert!(status(&repo).unwrap().merging);
+    assert!(merge(&repo, "side").is_err(), "one merge at a time");
+
+    merge_abort(&repo).unwrap();
+    assert!(!status(&repo).unwrap().merging);
+    assert_eq!(std::fs::read_to_string(dir.join("f.md")).unwrap(), "main\n");
+
+    // Resolved, staged and committed with no message: the merge's own, without its conflict list.
+    assert!(matches!(merge(&repo, "side"), Ok(Merge::Conflicts(_))));
+    write_file(dir, "f.md", "both\n");
+    stage(&repo, &["f.md"]).unwrap();
+    commit(&repo, "", false).unwrap();
+    let top = &log(&repo, 0, 1).unwrap()[0];
+    assert_eq!(top.parents.len(), 2);
+    assert_eq!(top.summary, "Merge branch 'side'");
+    assert!(!top.body.contains("Conflicts"), "{:?}", top.body);
+    assert!(!status(&repo).unwrap().merging);
+
+    // Outside a merge there is no message to fall back on, and git still refuses an empty one.
+    write_file(dir, "f.md", "after\n");
+    assert!(commit(&repo, "", true).is_err());
+}
+
 #[test]
 fn sync_moves_a_commit_each_way_through_the_bare_origin() {
     if !have_git() {

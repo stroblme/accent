@@ -6,6 +6,7 @@
 
 use super::changes::Section;
 use super::*;
+use crate::dialogs;
 
 /// What a refusal does with git's own words, beyond saying them.
 pub(super) enum Fail {
@@ -105,12 +106,15 @@ impl Panel {
 
     pub(super) fn do_commit(self: &Rc<Self>) {
         let message = self.message_text();
-        if message.trim().is_empty() {
+        // A merge under way commits with git's own message where the box is empty.
+        let merging = self.merging();
+        if message.trim().is_empty() && !merging {
             return;
         }
         // Nothing staged means "commit what changed", which is `git commit -a`: every tracked
-        // file goes in and an untracked one stays untracked, as VS Code's smart commit does.
-        let all = !self.to_commit().0;
+        // file goes in and an untracked one stays untracked, as VS Code's smart commit does. Never
+        // during a merge, where it would stage the unresolved files with their markers in them.
+        let all = !merging && !self.to_commit().0;
         // The box is cleared once the commit is in, not before it runs: a commit git refuses — an
         // unset identity, a hook that said no, nothing staged after all — must leave the message
         // where it was written rather than make the user type it again.
@@ -277,6 +281,113 @@ impl Panel {
                 if response == "delete" {
                     panel.delete_branch(name, true);
                 }
+            },
+        );
+    }
+
+    /// Pick one of the selected repository's other local branches and merge it into HEAD. The
+    /// palette's Merge Branch… and the branch popover's both land here.
+    pub fn merge_branch(self: &Rc<Self>) {
+        self.branch_menu.popdown();
+        let (into, others) = {
+            let state = self.state.borrow();
+            let Some(branch) = state.statuses.get(state.selected).map(|s| &s.branch) else {
+                return;
+            };
+            let Some(into) = branch
+                .head
+                .clone()
+                .or_else(|| branch.oid.as_deref().map(short))
+            else {
+                return;
+            };
+            let others: Vec<String> = state
+                .branches
+                .iter()
+                .filter(|b| branch.head.as_ref() != Some(*b))
+                .cloned()
+                .collect();
+            (into, others)
+        };
+        if others.is_empty() {
+            return (self.hooks.toast)("There is no other branch to merge");
+        }
+        let labels: Vec<&str> = others.iter().map(String::as_str).collect();
+        let picker = gtk::DropDown::from_strings(&labels);
+        let form = dialogs::form();
+        form.append(&dialogs::labelled("Branch", &picker));
+        let dialog = dialogs::name_dialog(&format!("Merge into {into}"), "Merge", &form);
+
+        let panel = self.clone();
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                if response != dialogs::CONFIRM {
+                    return;
+                }
+                if let Some(branch) = others.get(picker.selected() as usize) {
+                    panel.merge(branch.clone());
+                }
+            },
+        );
+    }
+
+    /// Merge `branch` into HEAD. What git made of it is the toast; conflicts land in the Merge
+    /// Conflicts section and the banner, with the refresh [`Panel::command`] brings.
+    fn merge(self: &Rc<Self>, branch: String) {
+        let asked = branch.clone();
+        self.command(
+            format!("merge {branch}"),
+            None,
+            Fail::Say,
+            move |vault, repo| {
+                vault.git_merge(repo, &asked).map(|merged| match merged {
+                    git::Merge::UpToDate => format!("Already up to date with {asked}"),
+                    git::Merge::FastForward => format!("Fast-forwarded to {asked}"),
+                    git::Merge::Commit => format!("Merged {asked}"),
+                    git::Merge::Conflicts(paths) => {
+                        format!("Merging {asked}: conflicts in {}", files(paths.len()))
+                    }
+                })
+            },
+        );
+    }
+
+    /// Give up the merge under way. It throws away every resolution made so far, so it asks
+    /// first (DESIGN.md, States).
+    pub fn abort_merge(self: &Rc<Self>) {
+        if !self.merging() {
+            return (self.hooks.toast)("No merge in progress");
+        }
+        let dialog = dialogs::alert(
+            "Abort Merge?",
+            "The files go back to how they were before the merge, and the conflicts resolved so \
+             far are lost.",
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("abort", "Abort", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
+        );
+        let panel = self.clone();
+        dialog.choose(
+            Some(&self.hooks.window),
+            gio::Cancellable::NONE,
+            move |response| {
+                if response != "abort" {
+                    return;
+                }
+                panel.command(
+                    "abort the merge".to_string(),
+                    None,
+                    Fail::Say,
+                    |vault, repo| {
+                        vault
+                            .git_merge_abort(repo)
+                            .map(|()| "Merge aborted".to_string())
+                    },
+                );
             },
         );
     }
