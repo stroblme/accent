@@ -15,14 +15,16 @@ use std::sync::Arc;
 /// shield — none of them a port.
 pub(super) const ICON: &str = "network-wired-symbolic";
 
-/// What the Ports pane asks of the ssh connection behind the vault.
+/// What the Ports pane asks of the ssh connection behind the vault. Both are called on a worker
+/// thread: ssh has to answer before either returns, and a host that is slow to would otherwise
+/// hold the window.
 #[allow(clippy::type_complexity)]
 pub struct Data {
     /// Forward a remote port to a local one. Answers an error message when ssh refuses, which is
-    /// what the pane shows. Called on a worker thread: ssh has to answer before this returns, and
-    /// a host that is slow to would otherwise hold the window.
+    /// what the pane shows.
     pub add_forward: Arc<dyn Fn(u16, u16) -> Result<(), String> + Send + Sync>,
-    pub remove_forward: Box<dyn Fn(u16, u16)>,
+    /// Take a forward down. Nothing to answer: the row goes either way.
+    pub remove_forward: Arc<dyn Fn(u16, u16) + Send + Sync>,
 }
 
 /// What the two port boxes say, as a forward, or `None` while they are not one yet. `u16` does the
@@ -85,10 +87,20 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
             switch_body.clone(),
         );
         move |local, remote, row: &gtk::ListBoxRow| {
-            (data.remove_forward)(local, remote);
-            forwards.borrow_mut().retain(|f| *f != (local, remote));
-            list.remove(row);
-            switch_body();
+            // Greyed out while ssh answers, so the button cannot ask a second time.
+            row.set_sensitive(false);
+            let remove = data.remove_forward.clone();
+            let (forwards, list, switch_body) =
+                (forwards.clone(), list.clone(), switch_body.clone());
+            let row = row.clone();
+            glib::spawn_future_local(async move {
+                // The row goes whatever ssh answers: a forward it would not cancel is one nothing
+                // here could cancel either, and a master that died took its forwards with it.
+                let _ = gio::spawn_blocking(move || remove(local, remote)).await;
+                forwards.borrow_mut().retain(|f| *f != (local, remote));
+                list.remove(&row);
+                switch_body();
+            });
         }
     });
 
