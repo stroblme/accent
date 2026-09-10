@@ -904,11 +904,12 @@ mod imp {
         pub current_mark: Cell<Option<(usize, usize)>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
         pub asked: RefCell<Vec<Want>>,
-        /// The scale and colour scheme [`Self::asked`] was for. Every event that makes the tiles
-        /// on screen the wrong ones without changing *which* tiles are wanted goes through here
-        /// — a zoom step, a fit mode, a resize, a theme change, entering presentation mode — and
-        /// without it the page keeps painting its blurry stand-in and never asks again.
-        pub asked_for: Cell<(u32, bool)>,
+        /// The scale, colour scheme and cache generation [`Self::asked`] was for. Every event that
+        /// makes the tiles on screen the wrong ones without changing *which* tiles are wanted
+        /// goes through here — a zoom step, a fit mode, a resize, a theme change, entering
+        /// presentation mode, a stroke or an erase on a part of the page the last change also
+        /// touched — and without it the page keeps painting its old render and never asks again.
+        pub asked_for: Cell<(u32, bool, u64)>,
         pub page: Cell<usize>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
         /// the same for every page of every frame until the theme changes.
@@ -958,7 +959,7 @@ mod imp {
                 reselect: Cell::new(false),
                 current_mark: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
-                asked_for: Cell::new((0, false)),
+                asked_for: Cell::new((0, false, 0)),
                 page: Cell::new(0),
                 paper: Cell::new(None),
                 on_wants: RefCell::new(None),
@@ -1493,9 +1494,10 @@ mod imp {
             snapshot.restore();
 
             // Asked for once per change, not once per frame: a scroll that reveals nothing new
-            // must not re-send the same list. The scale and the scheme are part of "the same",
-            // because the same tiles at another one are a different render.
-            let stamp = (scale_milli, dark);
+            // must not re-send the same list. The scale, the scheme and the cache's generation
+            // are part of "the same", because the same tiles at another scale, or after the page
+            // changed, are a different render.
+            let stamp = (scale_milli, dark, cache.borrow().generation());
             if !wanted.is_empty()
                 && (self.asked_for.get() != stamp || *self.asked.borrow() != wanted)
             {

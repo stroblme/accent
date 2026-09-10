@@ -24,6 +24,7 @@ use std::time::Duration;
 
 mod banner;
 mod compare;
+mod follow;
 mod keys;
 mod lines;
 mod page;
@@ -33,6 +34,7 @@ mod text;
 pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, restyle_companion, style_companion};
+use follow::Follow;
 use lines::line_clipboard;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
@@ -180,6 +182,10 @@ pub struct Tab {
     /// while Ctrl is held, and translating a byte offset there meant copying the text up to the
     /// pointer each time.
     links: RefCell<Vec<(Range<i32>, Link)>>,
+    /// The underline under what a Ctrl+click would follow, and what it is showing. See
+    /// [`follow`].
+    follow_tag: gtk::TextTag,
+    follow: RefCell<Follow>,
     /// What the language server last said about this file, and the provider that shows the loud
     /// half of it at the ends of the lines. Kept because the gutter tooltip and the status bar
     /// both read it back after the paint.
@@ -413,6 +419,11 @@ pub fn open(
     let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
     buffer.tag_table().add(&occurrence_tag);
     mute(&buffer, &occurrence_tag);
+    // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
+    // underline that says a Ctrl+click would land somewhere.
+    let follow_tag = gtk::TextTag::new(Some("follow"));
+    follow_tag.set_underline(pango::Underline::Single);
+    buffer.tag_table().add(&follow_tag);
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
@@ -461,6 +472,8 @@ pub fn open(
         occurrence_query: RefCell::new(None),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
+        follow_tag,
+        follow: RefCell::new(Follow::default()),
         diagnostics: RefCell::new(Vec::new()),
         annotations,
         folds: RefCell::new(Vec::new()),
@@ -616,30 +629,30 @@ pub fn open(
                 tab.buffer.place_cursor(&iter);
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            tab.clear_follow();
             tab.emit(&tab.on_follow);
         }
     ));
     view.add_controller(click);
 
-    // The pointer only changes when the answer changes: setting a cursor on every motion event
-    // would be a GDK call per pixel of travel.
-    let hot = Rc::new(Cell::new(false));
+    // The pointer and the underline only change when the answer does: `follow_hint` compares
+    // what it is about to show with what is already showing, so an ordinary drag across the view
+    // costs a lookup in the link table and nothing else.
     let motion = gtk::EventControllerMotion::new();
     motion.connect_motion(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        #[strong]
-        hot,
         move |controller, x, y| {
-            let over = controller
+            let ctrl = controller
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK)
-                && tab.link_at(x, y).is_some();
-            if hot.replace(over) != over {
-                tab.view
-                    .set_cursor_from_name(Some(if over { "pointer" } else { "text" }));
-            }
+                .contains(gdk::ModifierType::CONTROL_MASK);
+            tab.follow_hint(x, y, ctrl);
         }
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak(rename_to = tab)]
+        tab,
+        move |_| tab.clear_follow()
     ));
     view.add_controller(motion);
 
