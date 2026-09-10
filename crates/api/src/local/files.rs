@@ -365,6 +365,15 @@ impl Local {
             .map(|f| f.rel_path)
             .collect())
     }
+
+    /// The templates whose `accent-target:` says where their notes go.
+    pub fn template_targets(&self) -> Result<Vec<String>> {
+        Ok(self
+            .templates()?
+            .into_iter()
+            .filter(|t| matches!(self.template_target(t), Ok(Some(_))))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +563,21 @@ mod tests {
 
         assert_eq!(f.vault.template_target("Meeting.md").unwrap(), None);
         assert_eq!(f.vault.note_from_template("Meeting.md").unwrap(), None);
+    }
+
+    /// What New from Template lists: only the templates that say where their notes go.
+    #[test]
+    fn template_targets_are_the_templates_that_name_one() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Templates/Meeting.md", "# {{title}}\n");
+        f.write(
+            "Templates/Weekly.md",
+            "---\naccent-target: Logs/{{title}}\n---\n\nx\n",
+        );
+        assert!(poll_until(
+            || f.vault.template_targets().unwrap() == ["Templates/Weekly.md"],
+            BUDGET
+        ));
     }
 
     #[test]

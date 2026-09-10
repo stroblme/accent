@@ -300,6 +300,9 @@ methods! {
     any note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
     any render_template(template: ref str, title: ref str) -> (String, Vec<usize>);
     any templates() -> Vec<String>;
+    /// The templates that name a target: one question for New from Template rather than one
+    /// [`template_target`](Vault::template_target) per template, a round trip each when remote.
+    any template_targets() -> Vec<String>;
 
     // ------------------------------------------------------------ index reads
     any list_dir(rel: ref str) -> Vec<FileRow>;
