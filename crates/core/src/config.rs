@@ -202,7 +202,7 @@ impl Default for Config {
 }
 
 /// Per-vault preferences. All paths are vault-relative.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VaultConfig {
     pub templates_dir: String,

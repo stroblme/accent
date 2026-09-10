@@ -137,8 +137,11 @@ fn main() -> glib::ExitCode {
         // The vault comes from argv, which GApplication would otherwise try to parse itself.
         .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
         .build();
+    let config = Config::load();
     let shell = Rc::new(Shell {
-        config: Rc::new(RefCell::new(Config::load())),
+        applied: RefCell::new(config.clone()),
+        config: Rc::new(RefCell::new(config)),
+        config_write: RefCell::new(None),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
@@ -161,6 +164,12 @@ fn main() -> glib::ExitCode {
     app.connect_command_line({
         let shell = shell.clone();
         move |gtk_app, command_line| shell.command_line(gtk_app, command_line)
+    });
+    // The last window has gone, so a preference changed in the second before it would otherwise
+    // die with the timer that was to write it.
+    app.connect_shutdown({
+        let shell = shell.clone();
+        move |_| shell.flush_config()
     });
     app.run()
 }
@@ -1007,24 +1016,25 @@ impl App {
         }
     }
 
-    /// Save the config this window has just changed and put it into effect in every open window.
-    /// The route for every surface that writes a preference outside the dialog — Toggle Minimap,
-    /// the Git pane's tree toggle, a drawing ring pick, a rebound chord, Leave Out of Search — so
-    /// none of them is left acting on its own window alone.
+    /// Put the config this window has just changed into effect in every open window, and write it
+    /// a second later, so a run of ring picks is one write. The route for every surface that
+    /// writes a preference outside the dialog — Toggle Minimap, the Git pane's tree toggle, a
+    /// drawing ring pick, a rebound chord, Leave Out of Search — so none of them is left acting on
+    /// its own window alone.
     fn config_changed(&self) {
         let config = self.config.borrow().clone();
-        settings::save(&config);
         if let Some(shell) = self.shell.upgrade() {
             shell.apply_config(&config);
+            shell.save_config_soon();
         }
     }
 
     /// Put a config into effect in this window: everything an edit in the preferences dialog, a
     /// Restore Defaults, a re-read from disk or [`Self::config_changed`] can have changed.
     /// Reached through [`Shell::apply_config`], which does this for every window and puts the
-    /// theme on screen first.
-    fn apply_config(self: &Rc<Self>, config: &Config) {
-        if let Some(vault) = self.vault() {
+    /// theme on screen first. The costly parts run only where `changed` says their inputs moved.
+    fn apply_config(self: &Rc<Self>, config: &Config, changed: &shell::Changed) {
+        if let Some(vault) = self.vault().filter(|_| changed.vault) {
             // Both of these are a `hello` round trip on a remote vault, and this runs from the
             // preferences dialog, on the main loop. Sent from a worker and not waited for: the
             // server takes the config on `hello` too, so one that does not land is corrected by
@@ -1036,17 +1046,23 @@ impl App {
                 vault.set_ghost(ghost);
             });
         }
-        self.apply_accels();
+        if changed.shortcuts {
+            self.apply_accels();
+        }
         for tab in self.open_tabs() {
-            tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            if changed.font {
+                tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            }
             tab.set_spellcheck(config.spellcheck);
             lang::set_ghost(&tab, config.ghost_text);
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
         }
-        for diff in self.diffs() {
-            diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+        if changed.font {
+            for diff in self.diffs() {
+                diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+            }
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());
@@ -1067,14 +1083,20 @@ impl App {
         }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
-        self.restyle_all();
+        if changed.theme {
+            self.restyle_all();
+        }
     }
 
     fn preferences(self: &Rc<Self>) {
         // The config is read once at startup and every row here writes the whole struct back, so
         // an edit made in the file while accent runs would be undone by the next switch touched.
         // Re-reading as the dialog opens keeps the file the source of truth; a file that no
-        // longer parses is left alone, exactly as at startup.
+        // longer parses is left alone, exactly as at startup. A ring pick still waiting to be
+        // written goes first, or the read would take it back.
+        if let Some(shell) = self.shell.upgrade() {
+            shell.flush_config();
+        }
         match Config::read(&accent_core::config::config_path()) {
             Ok(fresh) => {
                 *self.config.borrow_mut() = fresh;

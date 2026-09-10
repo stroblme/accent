@@ -6,6 +6,11 @@ use super::*;
 /// One process, one config, one window per vault.
 pub struct Shell {
     pub config: Rc<RefCell<Config>>,
+    /// The config as it was last put into effect, so the next one can tell what moved
+    /// ([`Changed`]). `config` itself is edited in place before it is applied.
+    pub applied: RefCell<Config>,
+    /// The write [`Shell::save_config_soon`] has scheduled and not yet done.
+    pub config_write: RefCell<Option<glib::SourceId>>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
     /// `None` for the one window opened on files rather than on a folder.
@@ -25,6 +30,10 @@ pub struct Shell {
 /// What an `app.` action does, given the shell and the application it was fired at.
 type AppAction = fn(&Rc<Shell>, &adw::Application);
 
+/// How long a preference changed outside the dialog waits to be written, so a run of ring picks is
+/// one write. The session's beat.
+const CONFIG_WRITE: Duration = Duration::from_secs(1);
+
 /// A tab let go over a pane, waiting for `AdwTabView::create-window` to spend it.
 ///
 /// libadwaita detaches a dragged page from its view for the length of the drag, and neither
@@ -36,6 +45,30 @@ pub struct Landing {
     app: Rc<App>,
     pane: Rc<Pane>,
     zone: Zone,
+}
+
+/// The costly parts of putting a config into effect, each true only where its inputs moved. The
+/// theme swaps the display's style provider and restyles every widget, a font re-measures every
+/// tab, the vault settings are a `hello` to each remote host, and the shortcuts are the whole
+/// accelerator table; everything else is a cheap switch that is simply set again.
+#[derive(Debug, Default, PartialEq)]
+pub struct Changed {
+    pub theme: bool,
+    pub font: bool,
+    pub vault: bool,
+    pub shortcuts: bool,
+}
+
+impl Changed {
+    pub fn between(old: &Config, new: &Config) -> Changed {
+        Changed {
+            theme: old.theme != new.theme,
+            font: old.editor_font != new.editor_font,
+            // Every vault's entries, not this window's: a `hello` too many is harmless.
+            vault: old.vaults != new.vaults || old.ghost_text != new.ghost_text,
+            shortcuts: old.shortcuts != new.shortcuts,
+        }
+    }
 }
 
 impl Shell {
@@ -104,10 +137,14 @@ impl Shell {
 
     /// Put a config into effect in every window. There is one config per process, so a preference
     /// changed in one window — in its dialog or anywhere else (`App::config_changed`) — is the
-    /// same preference in all of them.
+    /// same preference in all of them. Measured against the last one applied, so a switch does
+    /// not restyle every widget the way a theme change has to.
     pub fn apply_config(&self, config: &Config) {
+        let changed = Changed::between(&self.applied.replace(config.clone()), config);
         // The theme is the display's rather than a window's, so it goes on once.
-        theme::apply(config.theme);
+        if changed.theme {
+            theme::apply(config.theme);
+        }
         // Cloned out of the borrow: applying a config reaches a long way into each window.
         let apps: Vec<Rc<App>> = self
             .windows
@@ -116,7 +153,33 @@ impl Shell {
             .map(|(_, app)| app.clone())
             .collect();
         for app in apps {
-            app.apply_config(config);
+            app.apply_config(config, &changed);
+        }
+    }
+
+    /// Write the config a moment from now, once for every change made before then, the way a
+    /// window's session is written. The config is the process's, so the timer is too: a window
+    /// that closes meanwhile takes nothing with it.
+    pub fn save_config_soon(self: &Rc<Self>) {
+        if self.config_write.borrow().is_some() {
+            return;
+        }
+        let shell = Rc::downgrade(self);
+        let id = glib::timeout_add_local_once(CONFIG_WRITE, move || {
+            if let Some(shell) = shell.upgrade() {
+                shell.config_write.take();
+                settings::save(&shell.config.borrow());
+            }
+        });
+        self.config_write.replace(Some(id));
+    }
+
+    /// Do a write [`Self::save_config_soon`] still has waiting, now: the process is ending, or
+    /// the file is about to be read back.
+    pub fn flush_config(&self) {
+        if let Some(id) = self.config_write.take() {
+            id.remove();
+            settings::save(&self.config.borrow());
         }
     }
 
@@ -495,7 +558,7 @@ impl Shell {
             false => from.root().join(&key),
         };
         if let Some(tab) = doc.tab().filter(|tab| tab.modified.get())
-            && let Err(e) = from.write_tab(tab, tab.etag.get())
+            && let Err(e) = from.flush_tab(tab)
         {
             // Refused rather than dropped: a drag must never be the thing that loses an edit.
             return return_page(into, &from, page, &format!("Save failed: {e}"));
@@ -599,5 +662,40 @@ mod tests {
         assert_eq!(cwd(&["accent"]), None);
         // The other flag a command line can carry is not a path either.
         assert_eq!(cwd(&["accent", "--new-window", "--terminal"]), None);
+    }
+
+    #[test]
+    fn a_config_change_redoes_only_what_it_moved() {
+        use accent_core::config::Theme;
+        let old = Config::default();
+        // A switch or a ring pick is none of the expensive parts.
+        let minimap = Config {
+            minimap: true,
+            ..Config::default()
+        };
+        assert_eq!(Changed::between(&old, &minimap), Changed::default());
+        let theme = Config {
+            theme: Theme::Solarized,
+            ..Config::default()
+        };
+        assert_eq!(
+            Changed::between(&old, &theme),
+            Changed {
+                theme: true,
+                ..Changed::default()
+            }
+        );
+        // Ghost text is carried to the vault alongside its settings.
+        let ghost = Config {
+            ghost_text: false,
+            ..Config::default()
+        };
+        assert_eq!(
+            Changed::between(&old, &ghost),
+            Changed {
+                vault: true,
+                ..Changed::default()
+            }
+        );
     }
 }

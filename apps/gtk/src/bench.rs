@@ -245,9 +245,10 @@ fn bench_close(app: &Rc<App>) {
     let (app, vault) = (Rc::downgrade(app), Arc::downgrade(vault));
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        let dialogs = app
-            .upgrade()
-            .map_or_else(Vec::new, |app| bench_dialogs(&app));
+        let dialogs = match app.upgrade() {
+            Some(app) => bench_dialogs(&app).await,
+            None => Vec::new(),
+        };
         // Past the close animation, so a dialog still alive is one its close did not let go of.
         glib::timeout_future(Duration::from_millis(600)).await;
         let mut kept = 0;
@@ -277,8 +278,15 @@ fn bench_close(app: &Rc<App>) {
 /// Cancel a New File dialog and, over the open note, an Unsaved Changes one: a dialog that
 /// outlives its close keeps whatever its handlers hold, and New File's path field completes from
 /// the vault.
-fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
+async fn bench_dialogs(app: &Rc<App>) -> Vec<(glib::GString, glib::WeakRef<adw::AlertDialog>)> {
     let _ = WidgetExt::activate_action(&app.window, "win.new-file", None);
+    // The dialog is built once a worker has the templates.
+    for _ in 0..40 {
+        if app.window.visible_dialog().is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
     let mut dialogs = vec![bench_cancel(app)];
     if let Some(tab) = app.open_tabs().into_iter().next() {
         app.ask_unsaved(&tab, &SaveError::Offline, |_, _| {});

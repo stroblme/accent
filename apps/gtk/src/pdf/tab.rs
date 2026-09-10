@@ -116,8 +116,8 @@ pub struct PdfTab {
     pub(super) on_choice: ChoiceHook,
 }
 
-/// Open `path` in a new tab of `tabs`. Never fails: a document that will not open is a tab
-/// holding the reason.
+/// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
+/// handed the bytes. Never fails: a document that will not open is a tab holding the reason.
 pub fn open(
     path: &Path,
     key: &str,
@@ -232,13 +232,10 @@ pub fn open(
     tab.wire_menu();
 
     // Nothing about the document is known yet, and deliberately so: opening it and measuring its
-    // pages is pdfium work, which for a thousand-page file is most of a second. The tab goes up
-    // empty and fills in when the render thread reports back, so the window is on screen in the
-    // time it takes to build a widget.
+    // pages is pdfium work, which for a thousand-page file is most of a second, and on a remote
+    // vault the bytes are still to be fetched. The tab goes up empty and fills in when the render
+    // thread reports back, so the window is on screen in the time it takes to build a widget.
     tab.stack.set_visible_child_name("view");
-    if let Err(message) = tab.start() {
-        tab.show_status(&message);
-    }
     tab
 }
 
@@ -249,6 +246,15 @@ impl PdfTab {
 
     pub fn path(&self) -> PathBuf {
         self.path.borrow().clone()
+    }
+
+    /// Read the document from `path`, a file on this machine: the vault's own, or a remote
+    /// vault's copy once the fetch has landed.
+    pub fn load(self: &Rc<Self>, path: &Path) {
+        *self.path.borrow_mut() = path.to_path_buf();
+        if let Err(message) = self.start() {
+            self.show_status(&message);
+        }
     }
 
     pub fn page_count(&self) -> usize {

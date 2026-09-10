@@ -716,7 +716,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                     .iter()
                     .any(|rel| fileops::trashed_with(rel, &tab.rel()));
                 if under && tab.modified.get() {
-                    app.save_tab(&tab, false);
+                    app.save_tab_now(&tab);
                 }
             }
         }),

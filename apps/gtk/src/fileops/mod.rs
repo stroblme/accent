@@ -103,6 +103,14 @@ pub struct Ops {
 /// A name carrying `/` is a path relative to `dir`, exactly as it is in Rename, and the folders it
 /// names are created with it. The line under the entry says where the file will really land.
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
+    let dir = dir.to_string();
+    with_templates(ops, false, move |ops, templates| {
+        new_file_with(ops, &dir, templates)
+    });
+}
+
+/// [`new_file`] once the templates are in.
+fn new_file_with(ops: &Rc<Ops>, dir: &str, templates: Vec<String>) {
     let entry = name_entry("File name", "");
     let form = form();
     form.append(&vault_path_field(&entry, &ops.vault, dir));
@@ -112,7 +120,6 @@ pub fn new_file(ops: &Rc<Ops>, dir: &str) {
         move |typed| typed_path(&dir, typed)
     }));
 
-    let templates = ops.vault.templates().unwrap_or_default();
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
         let row = labelled("Template", picker);
@@ -212,13 +219,11 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
 /// naming a note that already exists opens it untouched, which is what makes a dated one a daily
 /// note.
 pub fn new_from_template(ops: &Rc<Ops>) {
-    let templates: Vec<String> = ops
-        .vault
-        .templates()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|t| matches!(ops.vault.template_target(t), Ok(Some(_))))
-        .collect();
+    with_templates(ops, true, new_from_template_with);
+}
+
+/// [`new_from_template`] once the templates that name a target are in.
+fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
         return (ops.toast)(&format!(
@@ -258,7 +263,33 @@ type Insert = Box<dyn Fn(&str, &[usize])>;
 /// stops. Every template is offered, target or not; a Meeting is something typed into the day's
 /// note, not a note of its own.
 pub fn insert_template(ops: &Rc<Ops>, title: &str, insert: Insert) {
-    let templates = ops.vault.templates().unwrap_or_default();
+    let title = title.to_string();
+    with_templates(ops, false, move |ops, templates| {
+        insert_template_with(ops, &title, insert, templates)
+    });
+}
+
+/// Carry on with the vault's templates once a worker has them, all of them or only the ones that
+/// name a target: on a remote vault the asking is a round trip, and the dialog waits for it
+/// rather than the window.
+fn with_templates(
+    ops: &Rc<Ops>,
+    targets_only: bool,
+    then: impl FnOnce(&Rc<Ops>, Vec<String>) + 'static,
+) {
+    let (vault, ops) = (ops.vault.clone(), ops.clone());
+    glib::spawn_future_local(async move {
+        let listed = gio::spawn_blocking(move || match targets_only {
+            true => vault.template_targets(),
+            false => vault.templates(),
+        })
+        .await;
+        then(&ops, listed.ok().and_then(Result::ok).unwrap_or_default());
+    });
+}
+
+/// [`insert_template`] once the templates are in.
+fn insert_template_with(ops: &Rc<Ops>, title: &str, insert: Insert, templates: Vec<String>) {
     if templates.is_empty() {
         let dir = ops.vault.config().templates_dir;
         return (ops.toast)(&format!("No templates in {dir}"));

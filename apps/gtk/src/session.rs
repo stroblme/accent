@@ -18,6 +18,9 @@ const SESSION: Duration = Duration::from_secs(1);
 pub struct Corpus {
     files: Rc<Vec<String>>,
     tags: Rc<Vec<String>>,
+    /// The index's recently changed notes, up to [`RECENT_NOTES`]: one refresh behind at worst,
+    /// which a list of what changed lately can afford.
+    recent: Rc<Vec<String>>,
 }
 
 impl App {
@@ -40,13 +43,15 @@ impl App {
                         .into_iter()
                         .map(|(name, _)| name)
                         .collect::<Vec<_>>(),
+                    vault.recent_notes(RECENT_NOTES).unwrap_or_default(),
                 )
             })
             .await;
-            if let (Some(app), Ok((files, tags))) = (weak.upgrade(), loaded) {
+            if let (Some(app), Ok((files, tags, recent))) = (weak.upgrade(), loaded) {
                 *app.corpus.borrow_mut() = Corpus {
                     files: Rc::new(files),
                     tags: Rc::new(tags),
+                    recent: Rc::new(recent),
                 };
             }
         });
@@ -59,13 +64,9 @@ impl App {
         // is what the user means, so it leads and the index's mtime list fills the page below it.
         let mru = self.recent_notes.borrow().clone();
         let mut recent = mru.clone();
-        for rel in self
-            .vault()
-            .and_then(|v| v.recent_notes(RECENT_NOTES).ok())
-            .unwrap_or_default()
-        {
-            if !recent.contains(&rel) {
-                recent.push(rel);
+        for rel in self.corpus.borrow().recent.iter() {
+            if !recent.contains(rel) {
+                recent.push(rel.clone());
             }
         }
         // Pruned before the config is borrowed for the rest: dropping a gone folder writes it.
