@@ -24,6 +24,12 @@ const ZONE: &str = "accent-drop-zone";
 /// without swallowing the middle, which is the far commoner drop.
 const EDGE: f64 = 0.25;
 
+/// What a preview tab carries in its indicator slot: an eye, since the tab is only being looked
+/// at, and clicking it keeps the tab. A file from outside the vault has the slot already
+/// (`App::mark_loose`), and that says more, so it keeps it.
+const PREVIEW_ICON: &str = "view-reveal-symbolic";
+const PREVIEW_TIP: &str = "Preview — Click to Keep";
+
 /// What `AdwTabView` keeps of its own chords. Six are taken away: `Ctrl+Tab` and
 /// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
 /// they were last used rather than along the bar, and both Home / End pairs go back to
@@ -459,7 +465,7 @@ impl Pane {
         column.append(find.widget());
         column.append(&overlay);
 
-        Rc::new(Pane {
+        let pane = Rc::new(Pane {
             column,
             bar,
             find,
@@ -472,7 +478,9 @@ impl Pane {
             cycling: Cell::new(None),
             nav: RefCell::new(Nav::default()),
             preview: RefCell::new(None),
-        })
+        });
+        pane.wire_preview();
+        pane
     }
 
     pub fn widget(&self) -> &gtk::Widget {
@@ -574,9 +582,9 @@ impl Pane {
 
     // --- preview tabs ----------------------------------------------------------------------
 
-    /// The tab that is only being looked at, if this pane still holds it. A tab dragged into
-    /// another pane leaves the slot naming a page that is no longer here, and that is the whole
-    /// of "moving a tab makes it a real one".
+    /// The tab that is only being looked at, if this pane still holds it. A tab that leaves the
+    /// pane is kept on its way out (`Pane::wire_preview`), and that is the whole of "moving a
+    /// tab makes it a real one".
     pub fn preview(&self) -> Option<adw::TabPage> {
         let page = self.preview.borrow().clone()?;
         self.has(&page).then_some(page)
@@ -586,15 +594,44 @@ impl Pane {
     pub fn set_preview(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
         let old = self.preview();
         *self.preview.borrow_mut() = Some(page.clone());
+        if page.indicator_icon().is_none() {
+            page.set_indicator_icon(Some(&gio::ThemedIcon::new(PREVIEW_ICON)));
+            page.set_indicator_tooltip(PREVIEW_TIP);
+            page.set_indicator_activatable(true);
+        }
         old.filter(|old| old != page)
     }
 
-    /// `page` is a real tab now: it was edited, or its own tab was double-clicked.
+    /// `page` is a real tab now: it was edited, its own tab was double-clicked, its eye was
+    /// clicked, or it left the pane.
     pub fn keep(&self, page: &adw::TabPage) {
         let mut slot = self.preview.borrow_mut();
         if slot.as_ref() == Some(page) {
             *slot = None;
+            // The eye and nothing else: an outside-the-vault mark stays where it is.
+            if page.indicator_tooltip() == PREVIEW_TIP {
+                page.set_indicator_icon(None::<&gio::Icon>);
+                page.set_indicator_tooltip("");
+                page.set_indicator_activatable(false);
+            }
         }
+    }
+
+    /// The two ways out of being a preview that the tab view reports itself: a click on the eye,
+    /// and the page leaving this pane, whether into another pane, another window or a drag.
+    fn wire_preview(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.tabs.connect_indicator_activated(move |_, page| {
+            if let Some(pane) = weak.upgrade() {
+                pane.keep(page);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        self.tabs.connect_page_detached(move |_, page, _| {
+            if let Some(pane) = weak.upgrade() {
+                pane.keep(page);
+            }
+        });
     }
 
     /// Call `f` when one of this pane's tabs is double-clicked, with the page that was clicked.

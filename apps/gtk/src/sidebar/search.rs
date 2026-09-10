@@ -558,6 +558,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             .build();
         dir.add_css_class("dim-label");
         let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        head.append(&gtk::Image::new());
         head.append(&name);
         head.append(&dir);
         let snippet = gtk::Label::builder()
@@ -591,8 +592,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         ) else {
             return;
         };
+        let Some(icon) = head.first_child().and_downcast::<gtk::Image>() else {
+            return;
+        };
         let (Some(name), Some(dir)) = (
-            head.first_child().and_downcast::<gtk::Label>(),
+            icon.next_sibling().and_downcast::<gtk::Label>(),
             head.last_child().and_downcast::<gtk::Label>(),
         ) else {
             return;
@@ -601,6 +605,9 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             return;
         };
         let hit: Ref<Row> = boxed.borrow();
+        // A tail row has no name, and no icon either: it continues the file above it.
+        icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
+        icon.set_visible(!hit.name.is_empty());
         name.set_text(&hit.name);
         dir.set_text(&hit.dir);
         // A tail row is the dim line alone, so the empty second line is taken away rather than

@@ -394,7 +394,8 @@ fn references_body(
         "Open a note to see what links to it.",
     );
     stack.add_named(&empty, Some("empty"));
-    stack.add_named(&scroller(&path_list(model, on_reference)), Some("list"));
+    let list = path_list(model, crate::references::reference_icon, on_reference);
+    stack.add_named(&scroller(&list), Some("list"));
     stack.set_visible_child_name("empty");
     (stack, empty)
 }

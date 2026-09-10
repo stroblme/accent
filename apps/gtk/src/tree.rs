@@ -1,10 +1,10 @@
 //! Lazy vault file tree: `gtk::ListView` over a `gtk::TreeListModel` whose children come from
 //! `Vault::list_dir(prefix)`, one directory level per expansion.
 
+use crate::doc::{FOLDER_ICON, icon_for};
 use crate::widgets::{scroller, set_class, status_page};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
-use accent_core::markdown::is_image;
 use accent_core::path::basename;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
@@ -18,7 +18,7 @@ use std::time::Instant;
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// `d`, `m`, `p`, `i` or `o` — see [`encode`].
+    /// `d` for a directory, `f` for a file — see [`encode`].
     pub kind: char,
     /// Vault-relative path.
     pub rel: String,
@@ -46,14 +46,11 @@ impl Row {
 /// The kind letter is upper case for a row the index does not hold, which is the one extra bit
 /// [`Row::indexed`] needs and costs no extra byte.
 fn encode(kind: FileKind, rel: &str, indexed: bool) -> String {
+    // What a file is — its icon, what it opens as — is read off its name, so a directory is the
+    // one thing the row has to carry.
     let c = match kind {
         FileKind::Dir => 'd',
-        FileKind::Markdown => 'm',
-        FileKind::Pdf => 'p',
-        // The walk has no image kind, but the tree needs one: an image gets its own icon and
-        // opens in a picture tab rather than being turned away as an unknown file.
-        _ if is_image(rel) => 'i',
-        _ => 'o',
+        _ => 'f',
     };
     let c = match indexed {
         true => c,
@@ -155,16 +152,6 @@ fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)>
     match (old.len() - head - tail, new.len() - head - tail) {
         (0, 0) => None,
         (removed, added) => Some((head, removed, added)),
-    }
-}
-
-fn icon_name(kind: char) -> &'static str {
-    match kind {
-        'd' => "folder-symbolic",
-        'm' => "text-x-generic-symbolic",
-        'p' => "x-office-document-symbolic",
-        'i' => "image-x-generic-symbolic",
-        _ => "application-x-addon-symbolic",
     }
 }
 
@@ -532,7 +519,7 @@ fn root_row(label: &str) -> gtk::Box {
         .build();
     row.append(
         &gtk::Image::builder()
-            .icon_name(icon_name('d'))
+            .icon_name(FOLDER_ICON)
             .valign(gtk::Align::Center)
             .build(),
     );
@@ -676,7 +663,10 @@ pub fn build(
             .first_child()
             .and_downcast::<gtk::Image>()
             .expect("icon");
-        icon.set_icon_name(Some(icon_name(item.kind)));
+        icon.set_icon_name(Some(match item.is_dir() {
+            true => FOLDER_ICON,
+            false => icon_for(&item.rel),
+        }));
         let label = icon
             .next_sibling()
             .and_downcast::<gtk::Label>()
@@ -827,7 +817,7 @@ mod tests {
     fn a_row_carries_whether_the_index_holds_it() {
         let row = |kind, rel, indexed| decode_str(&encode(kind, rel, indexed)).unwrap();
         let note = row(FileKind::Markdown, "Notes/A.md", true);
-        assert_eq!(note.kind, 'm');
+        assert_eq!(note.kind, 'f');
         assert_eq!(note.rel, "Notes/A.md");
         assert!(note.indexed);
         // A row read off the disk keeps its kind — the icon and the expander must not change —

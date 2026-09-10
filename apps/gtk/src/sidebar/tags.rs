@@ -100,7 +100,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     files_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     files_box.append(&heading);
-    files_box.append(&scroller(&path_list(&files, {
+    files_box.append(&scroller(&path_list(&files, crate::doc::icon_for, {
         let on_open = on_open.clone();
         move |rel: &str| on_open(rel, None)
     })));

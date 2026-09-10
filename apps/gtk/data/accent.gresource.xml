@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  The completion-kind icons. Adwaita has no glyph for a function or an enum member, so these
-  are shipped with the binary rather than looked up in the theme; the prefix is what
-  `IconTheme::add_resource_path` is pointed at, so GTK finds them by name like any other icon.
+  The icons Adwaita has no glyph for: the completion kinds, the drawing tools and the file types
+  every file list leads its rows with. They are shipped with the binary rather than looked up in
+  the theme; the prefix is what `IconTheme::add_resource_path` is pointed at, so GTK finds them
+  by name like any other icon. `filetype-*` rather than `file-*`, which themes already use.
 -->
 <gresources>
   <gresource prefix="/io/github/stroblme/Accent">
@@ -31,5 +32,15 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-rect-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-circle-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-adjust-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-markdown-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-pdf-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-table-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-image-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-code-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-config-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-text-symbolic.svg</file>
+    <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
+    <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
+    <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
   </gresource>
 </gresources>

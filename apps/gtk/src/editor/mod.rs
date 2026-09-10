@@ -434,7 +434,7 @@ pub fn open(
     column.append(&banner);
     column.append(&document);
     let page = tabs.append(&column);
-    page.set_title(tab_name(key, flavour));
+    page.set_title(crate::doc::file_name(key));
     // The title is only the file name, so where the note really lives is a hover away.
     page.set_tooltip(&crate::fileops::display_path(root, key));
 
@@ -669,14 +669,6 @@ fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
     sourceview5::LanguageManager::default().guess_language(Some(path), Some(&content_type))
 }
 
-/// A tab's label: the file name, with `.md` dropped for a note because every note has it.
-fn tab_name(key: &str, flavour: Flavour) -> &str {
-    match flavour {
-        Flavour::Note => title_of(key),
-        _ => crate::doc::file_name(key),
-    }
-}
-
 // ------------------------------------------------------------------------------------- helpers
 
 /// GtkSourceView paints its background from its own style scheme, so unlike every other widget in
@@ -685,11 +677,6 @@ pub fn sync_scheme(buffer: &sourceview5::Buffer) {
     let id = crate::theme::scheme_id(adw::StyleManager::default().is_dark());
     let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
     buffer.set_style_scheme(scheme.as_ref());
-}
-
-fn title_of(rel: &str) -> &str {
-    let name = accent_core::path::basename(rel);
-    name.strip_suffix(".md").unwrap_or(name)
 }
 
 /// The language a file called `key` holding `text` is coloured as.
@@ -1031,7 +1018,7 @@ impl Tab {
 
     fn tab_title(&self) -> String {
         let rel = self.rel();
-        let name = tab_name(&rel, self.flavour);
+        let name = crate::doc::file_name(&rel);
         let name = match self.comparing.borrow().as_ref() {
             Some(comparing) => format!("{name} ({})", comparing.label),
             None => name.to_string(),

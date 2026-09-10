@@ -977,10 +977,13 @@ fn short(oid: &str) -> String {
     oid.chars().take(7).collect()
 }
 
-/// The line one changed file is shown on — status letter, name, directory — in the changes list
-/// and under an expanded history row alike. Whatever comes after the directory, the changes list's
-/// action buttons, is appended by the caller, and the binders find all four by sibling order.
+/// The line one changed file is shown on — icon, status letter, name, directory — in the changes
+/// list and under an expanded history row alike. Whatever comes after the directory, the changes
+/// list's action buttons, is appended by the caller, and the binders find all five by sibling
+/// order. The icon leads so that under a folder row it lands in the column a sibling folder
+/// draws its own icon in (`changes::FILE_INSET`).
 fn file_line() -> gtk::Box {
+    let icon = gtk::Image::new();
     let letter = gtk::Label::builder().width_chars(1).build();
     for class in ["dim-label", "numeric", "monospace"] {
         letter.add_css_class(class);
@@ -999,7 +1002,8 @@ fn file_line() -> gtk::Box {
 
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     for child in [
-        letter.upcast_ref::<gtk::Widget>(),
+        icon.upcast_ref::<gtk::Widget>(),
+        letter.upcast_ref(),
         name.upcast_ref(),
         dir.upcast_ref(),
     ] {
@@ -1008,16 +1012,20 @@ fn file_line() -> gtk::Box {
     row
 }
 
-/// Put one changed file on a [`file_line`]: its status letter, its name, and the directory it
-/// sits in. Both lists that show a file — the changes list and an expanded commit — bind their
-/// row through here, so the two read the same way.
+/// Put one changed file on a [`file_line`]: its icon, its status letter, its name, and the
+/// directory it sits in. Both lists that show a file — the changes list and an expanded commit —
+/// bind their row through here, so the two read the same way.
 ///
 /// `dir` is what the directory label shows rather than where the file is: a row under a folder
 /// leaves it empty, the path being on screen above it already.
-fn bind_file_line(row: &gtk::Box, letter: char, path: &str, dir: &str) {
-    let Some(mark) = row.first_child().and_downcast::<gtk::Label>() else {
+fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &str) {
+    let Some(image) = row.first_child().and_downcast::<gtk::Image>() else {
         return;
     };
+    let Some(mark) = image.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    image.set_icon_name(Some(icon));
     let (Some(name), Some(directory)) = (
         mark.next_sibling().and_downcast::<gtk::Label>(),
         mark.next_sibling()
