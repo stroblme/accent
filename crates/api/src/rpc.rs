@@ -169,24 +169,33 @@ pub struct Client {
     next_id: AtomicU64,
     pending: Waiting,
     dead: Arc<AtomicBool>,
+    /// Set by [`close`](Self::close) before the pipe goes, so the reader can tell the end it was
+    /// asked for from a link that was lost.
+    closing: Arc<AtomicBool>,
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl Client {
     /// Start routing. `events` receives the server's notifications; it is the same channel the
     /// local worker would have posted to, so nothing downstream can tell the two apart.
+    ///
+    /// `on_lost` runs once, on the reader thread, when the server's output ends without
+    /// [`close`](Self::close) having asked for it: the link dropped, or the server died. It must
+    /// not join this client, whose reader is the thread it runs on.
     pub fn new(
         out: Box<dyn Write + Send>,
         input: Box<dyn Read + Send>,
         events: Sender<Event>,
+        on_lost: Box<dyn FnOnce() + Send>,
     ) -> Client {
         let pending: Waiting = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
+        let closing = Arc::new(AtomicBool::new(false));
 
         let reader = std::thread::Builder::new()
             .name("accent-rpc".to_string())
             .spawn({
-                let (pending, dead) = (pending.clone(), dead.clone());
+                let (pending, dead, closing) = (pending.clone(), dead.clone(), closing.clone());
                 move || {
                     for line in BufReader::new(input).lines() {
                         let Ok(line) = line else { break };
@@ -202,6 +211,9 @@ impl Client {
                     // their sender dropped, rather than each of them spending the full deadline.
                     dead.store(true, Ordering::SeqCst);
                     locked(&pending).clear();
+                    if !closing.load(Ordering::SeqCst) {
+                        on_lost();
+                    }
                 }
             })
             .ok();
@@ -211,6 +223,7 @@ impl Client {
             next_id: AtomicU64::new(1),
             pending,
             dead,
+            closing,
             reader: Mutex::new(reader),
         }
     }
@@ -286,8 +299,9 @@ impl Client {
     /// Replacing the writer drops the pipe, and `serve` reads EOF on its stdin. Separate from
     /// [`join`](Self::join) because the caller owning the process in between has to be able to
     /// kill it: the reader thread ends when that process's output closes, and a wedged one would
-    /// never close it.
+    /// never close it. The end that follows is the one asked for, so `on_lost` stays quiet.
     pub fn close(&self) {
+        self.closing.store(true, Ordering::SeqCst);
         *locked(&self.out) = Box::new(std::io::sink());
     }
 
@@ -657,7 +671,12 @@ mod tests {
             });
 
             let (events, event_rx) = channel();
-            let client = Client::new(Box::new(client_out), Box::new(client_in), events);
+            let client = Client::new(
+                Box::new(client_out),
+                Box::new(client_in),
+                events,
+                Box::new(|| {}),
+            );
             let hello: Hello = client
                 .call("hello", json!([VaultConfig::default()]))
                 .unwrap();
@@ -838,6 +857,36 @@ mod tests {
             "a dead client must fail immediately, not after {DEADLINE:?}"
         );
         assert!(e.message.contains("connect"), "{e}");
+    }
+
+    /// The reader is the first to know the link has gone, and says so once. An end the client
+    /// asked for is not a lost link, or every window close would read as one.
+    #[test]
+    fn a_lost_link_is_said_once_and_a_closed_one_not_at_all() {
+        let ends = |closed: bool| {
+            let (client_in, server_out) = std::io::pipe().unwrap();
+            let (_server_in, client_out) = std::io::pipe().unwrap();
+            let lost = Arc::new(AtomicU64::new(0));
+            let client = Client::new(
+                Box::new(client_out),
+                Box::new(client_in),
+                channel().0,
+                Box::new({
+                    let lost = lost.clone();
+                    move || {
+                        lost.fetch_add(1, Ordering::SeqCst);
+                    }
+                }),
+            );
+            if closed {
+                client.close();
+            }
+            drop(server_out);
+            client.join();
+            lost.load(Ordering::SeqCst)
+        };
+        assert_eq!(ends(false), 1, "the server went away unasked");
+        assert_eq!(ends(true), 0, "the client closed it");
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.

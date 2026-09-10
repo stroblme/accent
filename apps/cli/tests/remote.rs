@@ -183,7 +183,8 @@ fn a_remote_vault_connects_indexes_and_answers() {
     remote.forward(back).unwrap();
     assert!(host_listens(&url, HOST_PORT), "the host does not listen");
 
-    // A dropped link: the master dies, and the server and the forward go with it.
+    // A dropped link: the master dies, and the server and the forward go with it. The window
+    // hears of it at once, without having to ask the host for anything first.
     let check = std::process::Command::new("ssh")
         .arg("-o")
         .arg(format!("ControlPath={}", remote.control_path().display()))
@@ -203,14 +204,22 @@ fn a_remote_vault_connects_indexes_and_answers() {
             .unwrap()
             .success()
     );
+    let t = Instant::now();
+    let why = loop {
+        match events.recv_timeout(Duration::from_secs(3).saturating_sub(t.elapsed())) {
+            Ok(Event::Disconnected(why)) => break why,
+            Ok(_) => {}
+            Err(_) => panic!("nothing said of the lost link {:?} after it", t.elapsed()),
+        }
+    };
+    assert!(why.contains(&url.host), "{why}");
+    eprintln!("lost link said in {:?}: {why}", t.elapsed());
     assert!(
         eventually(|| !host_listens(&url, HOST_PORT)),
         "the forward outlived its master"
     );
-    // The next call finds the link gone, as the window's would, and a reconnect makes a new
-    // master that has to carry the forward again by the time it says it is connected.
-    assert!(eventually(|| vault.list_dir("").is_err()));
-    wait_for(&events, |e| matches!(e, Event::Disconnected(_)));
+    // A reconnect makes a new master that has to carry the forward again by the time it says it
+    // is connected.
     let t = Instant::now();
     vault.reconnect();
     wait_for(&events, |e| matches!(e, Event::Connected));

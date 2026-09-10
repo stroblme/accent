@@ -69,7 +69,8 @@ pub struct Remote {
     /// [`connect`](Self::connect) puts them back. Nothing outlives the vault: closing it ends the
     /// master and this list together.
     forwards: Mutex<Vec<Forward>>,
-    state: Mutex<State>,
+    /// Shared with the rpc reader thread, which is the first to know the link has gone.
+    state: Arc<Mutex<State>>,
     child: Mutex<Option<Child>>,
     events: Sender<Event>,
 }
@@ -87,7 +88,7 @@ impl Remote {
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
             forwards: Mutex::new(Vec::new()),
-            state: Mutex::new(State::Connecting),
+            state: Arc::new(Mutex::new(State::Connecting)),
             child: Mutex::new(None),
             events,
         });
@@ -161,10 +162,8 @@ impl Remote {
         self.remember(method, &params);
         let client = self.wait_for_client()?;
         let answer = client.call_tracked(method, params, asked);
-        if let Err(e) = &answer
-            && client.is_dead()
-        {
-            self.disconnect(&e.message);
+        if answer.is_err() && client.is_dead() {
+            self.disconnect(&self.lost());
         }
         answer
     }
@@ -431,7 +430,9 @@ impl Remote {
             .name("accent-connect".to_string())
             .spawn(move || match self.connect() {
                 Ok(()) => {
-                    *self.locked(&self.state) = State::Connected;
+                    // Said under the lock, so a loss the reader reports at once lands after it.
+                    let mut state = self.locked(&self.state);
+                    *state = State::Connected;
                     let _ = self.events.send(Event::Connected);
                 }
                 Err(e) => self.disconnect(&e),
@@ -459,6 +460,28 @@ impl Remote {
         *state = State::Disconnected(why.to_string());
         drop(state);
         let _ = self.events.send(Event::Disconnected(why.to_string()));
+    }
+
+    /// What a dropped link is called, whichever side notices it first.
+    fn lost(&self) -> String {
+        format!("Lost the connection to {}", self.url.host)
+    }
+
+    /// What the rpc reader runs when the server's output ends unasked.
+    ///
+    /// It holds the state and the channel rather than the `Remote`: were it the last holder,
+    /// dropping it there would run [`teardown`](Self::teardown), which joins the very thread it is
+    /// on. Only a connection that was up can be lost: one still being made fails its own `hello`
+    /// and says why, or is found dead by the first call after [`Event::Connected`].
+    fn on_lost(&self) -> Box<dyn FnOnce() + Send> {
+        let (state, events, why) = (self.state.clone(), self.events.clone(), self.lost());
+        Box::new(move || {
+            let mut state = crate::locked(&state);
+            if *state == State::Connected {
+                *state = State::Disconnected(why.clone());
+                let _ = events.send(Event::Disconnected(why));
+            }
+        })
     }
 
     fn connect(&self) -> Result<(), String> {
@@ -566,6 +589,7 @@ impl Remote {
             Box::new(stdin),
             Box::new(stdout),
             self.events.clone(),
+            self.on_lost(),
         ));
         let hello: Hello = client
             .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
