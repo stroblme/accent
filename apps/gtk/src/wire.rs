@@ -129,7 +129,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
     // A tab let go outside every tab bar. libadwaita reads that as "detach into a window of its
     // own" and this is the only public way to give a dragged page a view again, so a drop on one
-    // of our pane zones — which `dropped` declines for exactly this reason — arrives here too.
+    // of our pane zones — outside every tab bar as far as libadwaita knows — arrives here too.
     pane.tabs.connect_create_window(glib::clone!(
         #[weak]
         app,

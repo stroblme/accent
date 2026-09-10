@@ -29,9 +29,9 @@ type AppAction = fn(&Rc<Shell>, &adw::Application);
 ///
 /// libadwaita detaches a dragged page from its view for the length of the drag, and neither
 /// `attach_page` nor the page's own view is public, so nothing can give a page a view back except
-/// the `create-window` handler, which libadwaita calls on the source view the moment a drop is
-/// declined. Our drop zones therefore record where the drop landed and decline it; the handler
-/// hands back the tab view named here and libadwaita does the attaching.
+/// the `create-window` handler, which libadwaita calls on the source view when a drop outside its
+/// own tab bars has finished. Our drop zones therefore take the drop and record where it landed;
+/// the handler hands back the tab view named here and libadwaita does the attaching.
 pub struct Landing {
     app: Rc<App>,
     pane: Rc<Pane>,
@@ -392,19 +392,15 @@ impl Shell {
     }
 
     /// A dragged tab was let go over `pane`. Recorded rather than moved: see [`Landing`].
-    pub fn aim(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
+    ///
+    /// Spent by `landed`, at whichever attach ends the drag. That is a round trip away, through
+    /// the X server or the compositor, so nothing here times it out; `App::set_drop_active`
+    /// drops one left over when the next drag begins.
+    pub fn aim(&self, app: &Rc<App>, pane: &Rc<Pane>, zone: Zone) {
         *self.landing.borrow_mut() = Some(Landing {
             app: app.clone(),
             pane: pane.clone(),
             zone,
-        });
-        // Spent by `create-window` in the same turn of the main loop; this is only so a drop that
-        // never reaches one cannot misdirect the next drag.
-        let shell = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            if let Some(shell) = shell.upgrade() {
-                *shell.landing.borrow_mut() = None;
-            }
         });
     }
 
@@ -427,24 +423,25 @@ impl Shell {
     }
 
     /// A page has been attached to `pane`, which is where a drag ends. Two things may be owed:
-    /// the split the drop asked for, and — for a page out of another window — the move into this
-    /// window's bookkeeping.
+    /// what the drop asked for — a split at an edge, the end of the bar in the middle — and, for
+    /// a page out of another window, the move into this window's bookkeeping.
     ///
-    /// The split waits for an idle because this runs inside libadwaita's drag handling, and
-    /// re-parenting the pane it is emitting from fails GTK's own assertion.
+    /// Either waits for an idle, because this runs inside libadwaita's drag handling: re-parenting
+    /// the pane it is emitting from fails GTK's own assertion, and the attach has not selected
+    /// the page yet.
     pub fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
-        let side = self
+        let zone = self
             .landing
             .borrow_mut()
             .take()
             .filter(|l| Rc::ptr_eq(&l.pane, pane))
-            .and_then(|l| match l.zone {
-                Zone::Split(side) => Some(side),
-                Zone::Here => None,
-            });
-        if let Some(side) = side {
+            .map(|l| l.zone);
+        if let Some(zone) = zone {
             let (app, pane, page) = (app.clone(), pane.clone(), page.clone());
-            glib::idle_add_local_once(move || app.split_page(&pane, side, &page));
+            glib::idle_add_local_once(move || match zone {
+                Zone::Split(side) => app.split_page(&pane, side, &page),
+                Zone::Here => app.move_in(&pane, &page),
+            });
         }
         // Before the adoption, which is queued behind it: the note is reopened in whichever pane
         // the window is working in, and a split has just made that the new one.
