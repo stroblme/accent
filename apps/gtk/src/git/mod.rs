@@ -118,8 +118,8 @@ struct State {
     statuses: Vec<Status>,
     /// The selected repository's history, as far as it has been paged in.
     commits: Vec<Commit>,
-    /// The selected repository's local branches, which is what the branch chooser lists.
-    branches: Vec<String>,
+    /// The selected repository's branches, which is what the branch chooser lists.
+    branches: git::Branches,
     /// The oids the selected repository's upstream has and HEAD does not: the rows the history
     /// draws as not pulled yet. Empty unless a fetch has found something.
     incoming: HashSet<String>,
@@ -709,7 +709,7 @@ impl Panel {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        let (names, at) = branch_model(head.map(|(name, _)| name), &branches);
+        let (names, at) = branch_model(head.map(|(name, _)| name), &branches.local);
         self.set_branches(&names, at);
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
