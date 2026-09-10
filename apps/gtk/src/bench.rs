@@ -40,6 +40,9 @@ use super::*;
 /// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
 /// and prints how many references to the vault the closed window left behind and whether either
 /// dialog outlived it; it exits 1 unless nothing did.
+///
+/// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
+/// Show Hidden Files off and on again, printing them after each.
 pub fn install_bench_hooks(app: &Rc<App>) {
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
@@ -57,6 +60,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
+    let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     if expand.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -73,6 +77,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !paths
         && !shell_keys
         && !close
+        && !hidden
     {
         return;
     }
@@ -102,6 +107,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if close {
             return bench_close(&app);
+        }
+        if hidden {
+            return bench_hidden(&app);
         }
         if paths {
             return bench_paths(&app);
@@ -271,6 +279,61 @@ fn bench_cancel(app: &App) -> Option<(glib::GString, glib::WeakRef<adw::AlertDia
     });
     dialog.close();
     Some((heading, dialog.downgrade()))
+}
+
+/// Print the tree's rows as drawn, then fire Show Hidden Files twice, the way its menu item and
+/// the palette do, and print them after each. The headless image has no pointer, so this is how
+/// "dot-named rows are dimmed, `.git` is never there, and the toggle takes them away and brings
+/// them back" is seen rather than claimed.
+fn bench_hidden(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for step in 0..3 {
+            if step > 0 {
+                let _ = WidgetExt::activate_action(&app.window, "win.show-hidden-files", None);
+                // The listing is asked for again and lands from a worker thread.
+                glib::timeout_future(Duration::from_millis(500)).await;
+            }
+            let state = app
+                .window
+                .lookup_action("show-hidden-files")
+                .and_then(|a| a.state())
+                .and_then(|s| s.get::<bool>());
+            println!("bench show_hidden {state:?}");
+            if let Some(tree) = app.tree.get() {
+                for (rel, dim) in drawn_rows(tree.view()) {
+                    println!("bench tree_row {rel} dim={}", u8::from(dim));
+                }
+            }
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Every row the list has a widget bound to, as its path and whether its label is dimmed.
+fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
+    let mut rows = Vec::new();
+    let mut todo = vec![view.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if let Some(expander) = widget.downcast_ref::<gtk::TreeExpander>() {
+            let row = expander.list_row().and_then(|row| row.item());
+            let dim = expander
+                .child()
+                .and_then(|row| row.last_child())
+                .is_some_and(|label| label.has_css_class("dim-label"));
+            if let Some(row) = row.as_ref().and_then(tree::decode) {
+                rows.push((row.rel, dim));
+            }
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    rows.sort();
+    rows
 }
 
 /// Show the Git pane, print how many rows its two lists hold, flip the changes list between the
