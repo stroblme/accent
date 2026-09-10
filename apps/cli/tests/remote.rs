@@ -340,6 +340,28 @@ fn a_remote_vault_connects_indexes_and_answers() {
         "the close left the server or the forward behind"
     );
     eprintln!("closed in {closed:?}; host clear {:?} after", t.elapsed());
+
+    // A mistyped path is refused rather than served as an empty vault, and the reason is what
+    // the window's banner says.
+    let missing = format!("{}-nonesuch", address.trim_end_matches('/'));
+    let (vault, events) = Vault::open_remote(&missing, VaultConfig::default()).unwrap();
+    let why = loop {
+        match events.recv_timeout(BUDGET) {
+            Ok(Event::Disconnected(why)) => break why,
+            Ok(Event::Connected) => panic!("connected to {missing}"),
+            Ok(_) => {}
+            Err(_) => panic!("{missing} neither failed nor connected in {BUDGET:?}"),
+        }
+    };
+    let path = format!("{}-nonesuch", url.path.display());
+    assert_eq!(
+        why,
+        format!(
+            "cannot open the vault on {}: {path} is not a folder",
+            url.host
+        )
+    );
+    drop(vault);
 }
 
 /// Run `script` on the host over a connection of its own, and answer with what it printed.

@@ -630,7 +630,8 @@ impl Remote {
         ));
         let hello: Hello = client
             .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
-            .map_err(|e| format!("the server did not answer: {e}"))?;
+            // The server's own refusal ("/srv/x is not a folder") or the link's failure.
+            .map_err(|e| format!("cannot open the vault on {}: {e}", self.url.host))?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
         self.reopen(&client);
         *self.locked(&self.client) = Some(client);

@@ -427,12 +427,37 @@ pub fn serve(
     output: impl Write + Send + 'static,
 ) -> anyhow::Result<()> {
     let cfg = crate::VaultConfig::default();
-    let (vault, events) = match db {
-        Some(db) => Local::open_at(root, db, cfg)?,
-        None => Local::open(root, cfg)?,
+    let opened = match db {
+        Some(db) => Local::open_at(root, db, cfg),
+        None => Local::open(root, cfg),
+    };
+    let (vault, events) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            refuse(&e, input, output);
+            return Err(e);
+        }
     };
     serve_local(vault, events, input, output, SILENCE);
     Ok(())
+}
+
+/// Answer the first request — the client's `hello` — with why there is no vault to serve.
+/// Exiting alone would only close the pipe, and the window would say the link closed.
+fn refuse(e: &anyhow::Error, input: impl Read, mut output: impl Write) {
+    for line in BufReader::new(input).lines().map_while(Result::ok) {
+        // The client's pings come without an id, and one may arrive before the `hello`.
+        let id = serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|msg| msg.get("id").cloned());
+        if let Some(id) = id {
+            let answer = json!({"jsonrpc": "2.0", "id": id, "error": {
+                "code": FAILED, "message": format!("{e:#}"),
+            }});
+            let _ = writeln!(output, "{answer}").and_then(|()| output.flush());
+            return;
+        }
+    }
 }
 
 /// Answer requests on `input` until it ends, forwarding `events` as notifications.
@@ -1010,6 +1035,33 @@ mod tests {
         assert!(!unpinged.is_finished(), "nothing armed the silence");
         drop(quiet);
         unpinged.join().expect("stdin closing still ends it");
+    }
+
+    /// A mistyped root is refused rather than served as an empty vault, and the refusal is the
+    /// answer to the `hello` the window opens with, so the window's banner can say why.
+    #[test]
+    fn serve_refuses_a_root_that_is_not_a_folder_and_says_so_to_hello() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, db) = (dir.path().join("nonesuch"), dir.path().join("index.db"));
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn({
+            let (root, db) = (root.clone(), db.clone());
+            move || serve(&root, Some(&db), server_in, server_out)
+        });
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        );
+
+        let e = client
+            .call::<Hello>("hello", json!([VaultConfig::default()]))
+            .unwrap_err();
+        assert_eq!(e.message, format!("{} is not a folder", root.display()));
+        assert!(server.join().unwrap().is_err(), "serve must exit failing");
+        assert!(!db.exists(), "no index for a vault that is not there");
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.
