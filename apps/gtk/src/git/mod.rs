@@ -116,6 +116,9 @@ struct State {
     selected: usize,
     /// One per repository, index-aligned with `repos`.
     statuses: Vec<Status>,
+    /// Git did not answer the last refresh's status of the selected repository, so what the pane
+    /// shows for it is the status before (see [`merge_statuses`]). The Sync tooltip says so.
+    status_kept: bool,
     /// The selected repository's history, as far as it has been paged in.
     commits: Vec<Commit>,
     /// The selected repository's branches, which is what the branch chooser lists.
@@ -685,14 +688,19 @@ impl Panel {
         });
 
         let selected = clamp(self.state.borrow().selected, repos.len());
+        let status_kept = fetched.statuses.get(selected).is_some_and(Option::is_none);
+        let statuses = {
+            let state = self.state.borrow();
+            merge_statuses(&repos, fetched.statuses, &state.repos, &state.statuses)
+        };
         let heads: HashMap<PathBuf, String> = repos
             .iter()
-            .zip(&fetched.statuses)
+            .zip(&statuses)
             .filter_map(|(repo, status)| Some((repo.git_dir.clone(), status.branch.oid.clone()?)))
             .collect();
         let ignored = repos
             .iter()
-            .zip(&fetched.statuses)
+            .zip(&statuses)
             .flat_map(|(repo, status)| {
                 status
                     .ignored
@@ -701,18 +709,25 @@ impl Panel {
             })
             .collect();
 
-        let head = fetched
-            .statuses
-            .get(selected)
-            .and_then(|s| branch_parts(&s.branch));
+        let head = statuses.get(selected).and_then(|s| branch_parts(&s.branch));
         self.counts
             .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
         let branches = match fetched.branches {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        let (rows, at) = branch_model(head.map(|(name, _)| name), &branches);
+        // A repository whose status never came back still has its branches listed, and the list
+        // marks the one HEAD is on. A detached HEAD is on none, so that case stays empty until a
+        // status says where it is.
+        let name = head.map(|(name, _)| name).or_else(|| branches.head.clone());
+        let (rows, at) = branch_model(name, &branches);
         self.set_branches(&rows, at);
+        tracing::debug!(
+            repos = repos.len(),
+            status_kept,
+            branch = %self.branch_label.text(),
+            "git refresh landed"
+        );
         // Most refreshes read back the history that is already on screen — a save, a watcher
         // event and a `.git` write each schedule one — and splicing then costs an expanded commit
         // its file list and flashes every row, so only a real difference is drawn. A page that
@@ -740,7 +755,8 @@ impl Panel {
             state.heads = heads;
             state.ignored = ignored;
             state.repos = repos;
-            state.statuses = fetched.statuses;
+            state.statuses = statuses;
+            state.status_kept = status_kept;
             if let (true, Some(commits)) = (moved, fetched.commits) {
                 state.commits = commits;
             }
@@ -781,14 +797,23 @@ impl Panel {
         let state = self.state.borrow();
         let branch = state.statuses.get(state.selected).map(|s| &s.branch);
         self.sync.set_sensitive(branch.is_some());
-        let hint = branch.map(sync_hint).unwrap_or_else(|| "Sync".to_string());
+        // A branch git has said nothing about has no upstream anyone knows of, so it is not
+        // "Publish" either.
+        let mut tip = branch
+            .filter(|b| branch_parts(b).is_some())
+            .map(sync_hint)
+            .unwrap_or_else(|| "Sync".to_string());
         // Quiet, and only here: the button still works and a sync is still what it does. What a
-        // failed background fetch costs is the counts beside it, and this is the one surface that
+        // failed background fetch costs is the counts beside it, and what a status that did not
+        // come back costs is everything the pane shows beside it; this is the one surface that
         // can say so without interrupting anyone.
-        self.sync.set_tooltip_text(Some(&match self.fetch_failed.get() {
-            true => format!("{hint}\n\nThe last background fetch did not go through, so the counts may be out of date."),
-            false => hint,
-        }));
+        if state.status_kept {
+            tip.push_str("\n\nThe status could not be refreshed, so the branch and the changes shown may be out of date.");
+        }
+        if self.fetch_failed.get() {
+            tip.push_str("\n\nThe last background fetch did not go through, so the counts may be out of date.");
+        }
+        self.sync.set_tooltip_text(Some(&tip));
     }
 
     /// Put the branch popover on `rows` (see [`branch_model`]), `at` being the local row HEAD is
@@ -1290,7 +1315,39 @@ fn branch_model(head: Option<String>, branches: &git::Branches) -> (git::Branche
             0,
         ),
     };
-    (git::Branches { local, remote }, Some(at))
+    let rows = git::Branches {
+        local,
+        remote,
+        ..git::Branches::default()
+    };
+    (rows, Some(at))
+}
+
+/// Each repository's status, index-aligned with `repos`: this refresh's answer, or where git gave
+/// none, the one the pane already had for that repository. A status that failed — a host too busy
+/// with its first index to answer in time, say — would otherwise take the branch, its counts and
+/// the changes off the pane. Matched by git dir rather than position, because a rediscovery can
+/// find a repository the last refresh did not; one seen for the first time has nothing to keep.
+fn merge_statuses(
+    repos: &[Repo],
+    fetched: Vec<Option<Status>>,
+    known: &[Repo],
+    kept: &[Status],
+) -> Vec<Status> {
+    repos
+        .iter()
+        .zip(fetched)
+        .map(|(repo, status)| {
+            status.unwrap_or_else(|| {
+                known
+                    .iter()
+                    .zip(kept)
+                    .find(|(known, _)| known.git_dir == repo.git_dir)
+                    .map(|(_, status)| status.clone())
+                    .unwrap_or_default()
+            })
+        })
+        .collect()
 }
 
 /// The local branch a remote-tracking one checks out as: `origin/topic` is `topic`. Cut at the
@@ -1480,7 +1537,32 @@ mod tests {
         git::Branches {
             local: local.iter().map(|b| b.to_string()).collect(),
             remote: remote.iter().map(|b| b.to_string()).collect(),
+            head: None,
         }
+    }
+
+    #[test]
+    fn a_status_git_did_not_give_keeps_the_last_one_for_that_repository() {
+        let on = |name: &str| Status {
+            branch: Branch {
+                head: Some(name.to_string()),
+                ..Branch::default()
+            },
+            ..Status::default()
+        };
+        let (a, b, c) = (repo("/v"), repo("/v/b"), repo("/v/c"));
+        // The rediscovery found `c`, which moved `b` along: matched by git dir, not position.
+        let merged = merge_statuses(
+            &[a.clone(), c, b.clone()],
+            vec![None, None, Some(on("fresh"))],
+            &[a, b],
+            &[on("kept"), on("old")],
+        );
+        assert_eq!(
+            merged,
+            [on("kept"), Status::default(), on("fresh")],
+            "kept, nothing to keep for a new one, and an answer beats what was kept"
+        );
     }
 
     #[test]
