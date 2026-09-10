@@ -31,6 +31,9 @@ use crate::{Event, VaultConfig};
 /// moves while it is uploading.
 const CHUNK: usize = 256 * 1024;
 
+/// A call on the main thread that takes longer than this has cost the windows a frame.
+const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Where a call in flight leaves its request id, so a caller that gives up on the answer can
 /// cancel it at the server.
 pub type Asked = Mutex<Option<u64>>;
@@ -174,7 +177,14 @@ impl Remote {
     ) -> Result<T, RpcError> {
         self.remember(method, &params);
         let client = self.wait_for_client()?;
+        let asked_at = std::time::Instant::now();
         let answer = client.call_tracked(method, params, asked);
+        // Every window shares the one GTK main thread, so a round trip made there stalls them
+        // all. `RUST_LOG=accent_api::remote=debug` names each one that cost a frame.
+        let took = asked_at.elapsed();
+        if took > FRAME && std::thread::current().name() == Some("main") {
+            tracing::debug!(method, ms = took.as_millis() as u64, "held the main thread");
+        }
         if answer.is_err() && client.is_dead() {
             self.disconnect(&self.lost());
         }

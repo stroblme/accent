@@ -199,8 +199,9 @@ impl Local {
     ///
     /// It still returns only once the write has landed — the worker answers on `reply` — because
     /// the caller re-runs the query on screen the moment it does. What the caller now waits for is
-    /// the worker reaching this message, which during a reconcile is the reconcile: a wait, but
-    /// never one a reader is behind, and one that ends in the write actually happening.
+    /// the worker reaching this message, which during a reconcile is the end of the batch in
+    /// progress rather than of the walk: the worker writes the set for the rows already there and
+    /// again once the walk is over (`Worker::reconcile`).
     pub fn set_excluded(&self, entries: &[String]) -> Result<()> {
         let (reply, answer) = channel();
         self.tx
