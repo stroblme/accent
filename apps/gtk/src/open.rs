@@ -8,14 +8,17 @@ use super::*;
 /// A tab opened by browsing — a click in the sidebar tree, a search hit, a Git row, a wikilink
 /// followed — is a `Preview`: the next such open closes it and takes its place, so clicking down
 /// a list of notes to see what is in them leaves one tab rather than twenty. Anything the reader
-/// named is `Kept`: the palette, Open File…, a drop, a rename, the command line and the session,
-/// where the file was asked for by name and the tab is meant to stay. A preview tab becomes a
-/// kept one the moment it is edited, its own tab is double-clicked, or it is moved to another
-/// pane, all three being the reader saying they want to keep it.
+/// named is `Kept`: the palette, Open File…, a drop, a rename and the command line, where the
+/// file was asked for by name and the tab is meant to stay. A preview tab becomes a kept one the
+/// moment it is edited, its own tab is double-clicked, or it is moved to another pane, all three
+/// being the reader saying they want to keep it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Opened {
     Kept,
     Preview,
+    /// Kept, and put back by the session restore, which says itself which tab each pane shows
+    /// (see [`App::put_back`]): so it lands behind whatever its pane is showing.
+    Restored,
 }
 
 impl App {
@@ -294,7 +297,7 @@ impl App {
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         self.docs.borrow_mut().push(Doc::Pdf(pdf));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
     }
@@ -693,7 +696,7 @@ impl App {
             self.zoom.get(),
         );
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        self.select_new_page(&tab.page);
+        self.select_new_page(&tab.page, Opened::Preview);
         self.mark_opened(&tab.page, Opened::Preview);
         tab
     }
@@ -715,7 +718,7 @@ impl App {
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
         self.docs.borrow_mut().push(wrap(viewer.clone()));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
         viewer
@@ -1003,7 +1006,7 @@ impl App {
         let page = tab.page.clone();
         self.fetch_head(&tab);
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
-        self.select_new_page(&page);
+        self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
         // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the
@@ -1029,17 +1032,19 @@ impl App {
         }
     }
 
-    /// Put a page that has just been added to a pane in front of it.
+    /// Put a page that has just been added to a pane in front of it, unless the session restore
+    /// opened it: which tab is in front of a restored pane is [`App::put_back`]'s to say.
     ///
     /// Selecting it fires `selected-page`, whose handler runs `sync_active`. The first page in a
     /// pane is selected as it is added, before its document is in `docs`, so that one gets no
     /// notify from here and is synced by hand instead.
-    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage) {
+    pub fn select_new_page(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
         let Some(pane) = self.pane_of(page) else {
             return;
         };
         match pane.tabs.selected_page().as_ref() == Some(page) {
             true => self.sync_active(),
+            false if how == Opened::Restored => {}
             false => pane.tabs.set_selected_page(page),
         }
     }
