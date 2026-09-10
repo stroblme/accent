@@ -159,18 +159,24 @@ pub fn build_window(
         .visible(false)
         .build();
     drawing.add_css_class("flat");
-    // Undo and Redo for the drawing, beside the toggle that puts the tools out and shown only
-    // while one is in hand with something to walk (`App::sync_history`). A click leaves the
-    // keyboard on the page, where `Ctrl+Z` is.
+    // Undo and Redo for the drawing, beside the toggle that puts the tools out and shown as a
+    // pair while one is in hand with something to walk (`App::sync_history`). A click fires the
+    // action rather than the button being one of its actionables, which would tie the button's
+    // sensitivity to the action — and the actions stay enabled, so a key pressed while the
+    // render thread is busy still queues its step. A click leaves the keyboard on the page,
+    // where `Ctrl+Z` is.
     let history = |icon: &str, action: &'static str| {
-        gtk::Button::builder()
+        let button = gtk::Button::builder()
             .icon_name(icon)
             .tooltip_text(label_of(action))
-            .action_name(action)
             .valign(gtk::Align::Center)
             .focus_on_click(false)
             .visible(false)
-            .build()
+            .build();
+        button.connect_clicked(move |button| {
+            let _ = button.activate_action(action, None);
+        });
+        button
     };
     let (undo, redo) = (
         history("edit-undo-symbolic", "win.pdf-undo"),
