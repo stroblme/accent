@@ -63,6 +63,12 @@ const PAGE: usize = 200;
 /// watcher events is one query, short enough that a save shows up while the hand is still there.
 const DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// How often the vault is searched for repositories again while it is being indexed. Discovery
+/// goes by the indexed directories, so a nested repository shows up this long after the walk has
+/// reached it rather than when the walk ends. Not every progress tick: each look is a whole
+/// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
+const REDISCOVER: Duration = Duration::from_secs(3);
+
 /// Arrows going out and coming back, which is what a sync is. The same name the sidebar gives the
 /// pane's own tab, and for the same reason: `network-transmit-receive-symbolic` is a pair of
 /// arrows in Adwaita but a network device in WhiteSur, so a Sync button drew as a port.
@@ -93,9 +99,9 @@ pub struct Hooks {
     /// side's title and text, and what to call once the comparison exists so a refresh can reach
     /// it.
     pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
-    /// Move a vault file to the trash. Vault keys only, which is what leaves an untracked file
-    /// outside the vault without a Discard button.
-    pub trash: Box<dyn Fn(&str)>,
+    /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
+    /// leaves an untracked file outside the vault without a Discard button.
+    pub trash: Box<dyn Fn(&[String])>,
     /// A refresh landed and the pane's answers changed.
     pub changed: Box<dyn Fn()>,
     /// A sync started (`true`) or ended (`false`). Separate from `changed`, which is a refresh
@@ -179,6 +185,10 @@ pub struct Panel {
     again: Cell<Option<Depth>>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_depth: Cell<Option<Depth>>,
+    /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
+    /// starts at the pane's creation, which the window follows with a discovery of its own, so a
+    /// walk that is over within [`REDISCOVER`] asks for nothing more.
+    discovered: Cell<i64>,
     /// The comparisons open right now, re-read whenever a refresh lands: a diff tab is not a
     /// snapshot. Weak, so a closed one falls out on the next pass.
     watches: RefCell<Vec<Watch>>,
@@ -215,6 +225,9 @@ pub struct Panel {
     /// The [`folder_key`]s whose contents are folded away. Kept across a refresh, because a save
     /// schedules one and folding a folder must survive it.
     collapsed: RefCell<HashSet<String>>,
+    /// A press is down over the changes list, so its rows are held where they are until the
+    /// release (see [`Panel::rebuild_changes`]).
+    pressed: Cell<bool>,
 }
 
 impl Panel {
@@ -429,6 +442,7 @@ impl Panel {
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
+            pressed: Cell::new(false),
             hooks,
             root: root.upcast(),
             stack,
@@ -456,6 +470,7 @@ impl Panel {
             busy: Cell::new(false),
             again: Cell::new(None),
             pending_depth: Cell::new(None),
+            discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
@@ -518,8 +533,12 @@ impl Panel {
         self.tree.get()
     }
 
+    /// A move redraws every row: the view is the one thing a row's binding reads that the row
+    /// does not carry — a file at the root is the same row either way, indented only in the tree
+    /// — so [`Panel::rebuild_changes`] would keep it as it was.
     pub fn set_tree(&self, on: bool) {
         if self.tree.replace(on) != on {
+            self.changes.remove_all();
             self.rebuild_changes();
         }
     }
@@ -539,6 +558,18 @@ impl Panel {
             panel.refresh(depth);
         });
         self.pending.replace(Some(id));
+    }
+
+    /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
+    /// which arrives many times a second: [`Panel::schedule_refresh`] restarts its timer on every
+    /// call, so passing each tick on would put the refresh off until the walk was over.
+    pub fn rediscover(self: &Rc<Self>) {
+        let now = glib::monotonic_time();
+        if now - self.discovered.get() < REDISCOVER.as_micros() as i64 {
+            return;
+        }
+        self.discovered.set(now);
+        self.schedule_refresh(Depth::Discover);
     }
 
     fn wire_header(
@@ -716,10 +747,9 @@ impl Panel {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),
         };
-        // A repository whose status never came back still has its branches listed, and the list
-        // marks the one HEAD is on. A detached HEAD is on none, so that case stays empty until a
-        // status says where it is.
-        let name = head.map(|(name, _)| name).or_else(|| branches.head.clone());
+        let name = statuses
+            .get(selected)
+            .and_then(|s| head_name(s, Some(&branches)));
         let (rows, at) = branch_model(name, &branches);
         self.set_branches(&rows, at);
         tracing::debug!(
@@ -976,13 +1006,16 @@ impl Panel {
     }
 
     /// The branch line for the repository `key` lives in, or for the selected one when `key` is
-    /// `None`. What the status bar shows.
+    /// `None`. What the status bar shows: while git has given the repository no status, the bare
+    /// name the chooser falls back on too ([`head_name`]).
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
             .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
             .unwrap_or(state.selected);
-        branch_line(state.statuses.get(index)?)
+        let status = state.statuses.get(index)?;
+        let listed = (index == state.selected).then_some(&state.branches);
+        branch_line(status).or_else(|| head_name(status, listed))
     }
 
     /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
@@ -1377,6 +1410,16 @@ fn branch_parts(b: &Branch) -> Option<(String, String)> {
     Some((name, counts))
 }
 
+/// The branch HEAD is on, as the chooser and the status bar both name it: what the status says,
+/// or while git has given the repository no status, the branch its branch list marks. Only the
+/// selected repository's branches are read, so `listed` is `None` for any other; a detached HEAD
+/// marks none, and stays unnamed until a status says where it is.
+fn head_name(status: &Status, listed: Option<&git::Branches>) -> Option<String> {
+    branch_parts(&status.branch)
+        .map(|(name, _)| name)
+        .or_else(|| listed?.head.clone())
+}
+
 /// The branch row on one line, for anywhere with room for one string.
 fn branch_text(b: &Branch) -> Option<String> {
     branch_parts(b).map(|(name, counts)| match counts.is_empty() {
@@ -1562,6 +1605,28 @@ mod tests {
             merged,
             [on("kept"), Status::default(), on("fresh")],
             "kept, nothing to keep for a new one, and an answer beats what was kept"
+        );
+    }
+
+    #[test]
+    fn head_name_falls_back_on_the_branch_list_only_while_there_is_no_status() {
+        let branches = git::Branches {
+            head: Some("side".to_string()),
+            ..listed(&["main", "side"], &[])
+        };
+        let status = Status {
+            branch: on_main(None, 0, 0),
+            ..Status::default()
+        };
+        assert_eq!(head_name(&status, Some(&branches)).as_deref(), Some("main"));
+        assert_eq!(
+            head_name(&Status::default(), Some(&branches)).as_deref(),
+            Some("side")
+        );
+        assert_eq!(
+            head_name(&Status::default(), None),
+            None,
+            "another repository's branches are not read"
         );
     }
 

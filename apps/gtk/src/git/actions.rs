@@ -491,8 +491,9 @@ impl Panel {
         });
     }
 
-    /// The paths of one whole section, for its header's bulk button.
-    pub(super) fn section_paths(&self, section: Section) -> Vec<String> {
+    /// The entries of one section under `under`: a folder's path with its slash, or `""` for the
+    /// whole section, which is what its header's bulk button takes.
+    pub(super) fn section_entries(&self, section: Section, under: &str) -> Vec<Entry> {
         let state = self.state.borrow();
         let Some(status) = state.statuses.get(state.selected) else {
             return Vec::new();
@@ -502,43 +503,99 @@ impl Panel {
             Section::Staged => Box::new(status.staged()),
             Section::Changes => Box::new(status.changes()),
         };
-        entries.map(|e| e.path.clone()).collect()
+        entries
+            .filter(|e| e.path.starts_with(under))
+            .cloned()
+            .collect()
+    }
+
+    /// [`Panel::section_entries`]' paths, for Stage and Unstage.
+    pub(super) fn section_paths(&self, section: Section, under: &str) -> Vec<String> {
+        self.section_entries(section, under)
+            .into_iter()
+            .map(|e| e.path)
+            .collect()
     }
 
     /// Discarding is the one thing here that loses work, so it asks first (DESIGN.md, States).
-    pub(super) fn discard(self: &Rc<Self>, entry: &Entry, key: &str) {
-        let name = split_name(&entry.path).1.to_string();
-        // An untracked file has nothing in the index to go back to, so what "discard" means for
-        // it is that the file itself goes — to the trash, which is at least recoverable.
-        let untracked = entry.x == '?';
-        let body = match untracked {
-            true => format!("{name} is not tracked, so it moves to the trash."),
-            false => format!("{name} goes back to what the index holds. This cannot be undone."),
+    ///
+    /// `folder` is the folder row it was asked from, whose `entries` are every one under it; a
+    /// file's own row passes `None` and itself. An untracked file has nothing in the index to go
+    /// back to, so what "discard" means for it is that the file itself goes — to the trash, which
+    /// is at least recoverable, and all of a folder's in one go.
+    pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
+        let Some(repo) = ({
+            let state = self.state.borrow();
+            state.repos.get(state.selected).cloned()
+        }) else {
+            return;
         };
+        let (untracked, tracked): (Vec<Entry>, Vec<Entry>) =
+            entries.into_iter().partition(|e| e.x == '?');
+        let what = match (folder, tracked.first().or(untracked.first())) {
+            (Some(folder), _) => folder.to_string(),
+            (None, Some(entry)) => split_name(&entry.path).1.to_string(),
+            (None, None) => return,
+        };
+        let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
         let dialog = adw::AlertDialog::new(Some("Discard Changes?"), Some(&body));
         dialog.add_responses(&[("cancel", "Cancel"), ("discard", "Discard")]);
         dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
 
-        let (panel, path, key) = (self.clone(), entry.path.clone(), key.to_string());
+        let root = self.hooks.vault.root();
+        let keys: Vec<String> = untracked
+            .iter()
+            .map(|e| vault_key(&root, &repo, &e.path))
+            .collect();
+        let paths: Vec<String> = tracked.into_iter().map(|e| e.path).collect();
+        let done = match folder {
+            Some(_) => format!("Discarded {}", files(paths.len())),
+            None => format!("Discarded {what}"),
+        };
+        let panel = self.clone();
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
             if response != "discard" {
                 return;
             }
-            match untracked {
-                true => {
-                    (panel.hooks.trash)(&key);
-                    panel.schedule_refresh(Depth::Status);
-                }
-                false => panel.write("discard", vec![path], move |vault, repo, paths| {
-                    vault
-                        .git_discard(repo, paths)
-                        .map(|()| format!("Discarded {name}"))
-                }),
+            if !keys.is_empty() {
+                (panel.hooks.trash)(&keys);
+                panel.schedule_refresh(Depth::Status);
             }
+            panel.write("discard", paths, move |vault, repo, paths| {
+                vault.git_discard(repo, paths).map(|()| done)
+            });
         });
     }
+}
+
+/// What the Discard confirmation says will happen. A file's own row names the file; a folder's
+/// names the folder and how many files of each kind it takes, the ones that go back to the index
+/// and the untracked ones that go to the trash.
+fn discard_body(what: &str, folder: bool, tracked: usize, untracked: usize) -> String {
+    let undone = match tracked {
+        0 => "",
+        _ => " This cannot be undone.",
+    };
+    if !folder {
+        return match untracked {
+            0 => format!("{what} goes back to what the index holds.{undone}"),
+            _ => format!("{what} is not tracked, so it moves to the trash."),
+        };
+    }
+    let back = match tracked {
+        0 => None,
+        1 => Some("1 file goes back to what the index holds".to_string()),
+        n => Some(format!("{n} files go back to what the index holds")),
+    };
+    let trashed = match untracked {
+        0 => None,
+        1 => Some("1 untracked file moves to the trash".to_string()),
+        n => Some(format!("{n} untracked files move to the trash")),
+    };
+    let parts: Vec<String> = back.into_iter().chain(trashed).collect();
+    format!("In {what}, {}.{undone}", parts.join(" and "))
 }
 
 /// The one line of a git refusal that fits in a toast: git's own first line, without the prefix
@@ -562,6 +619,27 @@ fn files(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_discard_says_how_many_files_go_where() {
+        assert_eq!(
+            discard_body("a.md", false, 1, 0),
+            "a.md goes back to what the index holds. This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("new.md", false, 0, 1),
+            "new.md is not tracked, so it moves to the trash."
+        );
+        assert_eq!(
+            discard_body("src", true, 3, 1),
+            "In src, 3 files go back to what the index holds and 1 untracked file moves to the \
+             trash. This cannot be undone."
+        );
+        assert_eq!(
+            discard_body("src", true, 0, 2),
+            "In src, 2 untracked files move to the trash."
+        );
+    }
 
     #[test]
     fn reason_is_gits_own_first_line() {
