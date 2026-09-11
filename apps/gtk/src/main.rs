@@ -747,8 +747,8 @@ impl App {
         // Only a text tab has a buffer that can be ahead of the disk; the dot is the tab's own,
         // so one symbol means "unsaved" in both places.
         self.statusbar.set_unsaved(match &doc {
-            Some(Doc::Text(t)) => t.modified.get(),
-            Some(Doc::Diagram(d)) => d.modified.get(),
+            Some(Doc::Text(t)) => t.save.modified.get(),
+            Some(Doc::Diagram(d)) => d.save.modified.get(),
             _ => false,
         });
         self.sync_branch();

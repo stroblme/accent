@@ -27,11 +27,11 @@ pub struct LabelEditor {
     original: String,
 }
 
-/// The zoom that makes the note font, `doc_pt` points, show a label's `font_px` page pixels at
-/// `scale` on screen. Kept to a range a label can still be read and typed in at.
-pub fn label_zoom(font_px: f64, scale: f64, doc_pt: f64) -> f64 {
+/// The zoom that makes the note font, `doc_pt` points, show a label at `px` pixels on screen.
+/// Kept to a range a label can still be read and typed in at.
+pub fn label_zoom(px: f64, doc_pt: f64) -> f64 {
     let doc_px = doc_pt * 96.0 / 72.0;
-    (font_px * scale / doc_px.max(1.0)).clamp(0.6, 3.0)
+    (px / doc_px.max(1.0)).clamp(0.6, 3.0)
 }
 
 impl LabelEditor {
@@ -79,20 +79,15 @@ impl LabelEditor {
         });
         editor.set_font(font, px);
         if spellcheck {
-            let adapter = libspelling::TextBufferAdapter::new(
-                &editor.buffer,
-                &libspelling::Checker::default(),
-            );
-            editor.view.insert_action_group("spelling", Some(&adapter));
-            editor.view.set_extra_menu(Some(&adapter.menu_model()));
-            adapter.set_enabled(true);
+            editor::spell_adapter(&editor.buffer, &editor.view).set_enabled(true);
         }
-        editor.buffer.connect_changed(|buffer| {
-            crate::highlight::apply(buffer);
-        });
+        // Styled as the note editor's companions are, on each change and in the theme's colours.
+        editor
+            .buffer
+            .connect_changed(|buffer| editor::style_companion(Flavour::Note, buffer));
         let (view, buffer) = (editor.view.clone(), editor.buffer.clone());
         editor.view.connect_realize(move |_| {
-            crate::highlight::restyle(&buffer, &view);
+            editor::restyle_companion(Flavour::Note, &buffer, &view);
         });
         editor
             .buffer
@@ -110,7 +105,7 @@ impl LabelEditor {
                 .unwrap_or_else(editor::default_font),
         );
         let doc_pt = f64::from(desc.size()) / f64::from(pango::SCALE);
-        let zoom = label_zoom(px, 1.0, doc_pt);
+        let zoom = label_zoom(px, doc_pt);
         editor::install_font(
             &self.font,
             Flavour::Note,
@@ -170,10 +165,10 @@ pub fn wire_keys(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
 mod tests {
     #[test]
     fn the_editor_shows_a_label_at_its_size_on_screen() {
-        // 12 px at 2× is 24 px on screen; an 11 pt note font is 14.67 px.
-        let zoom = super::label_zoom(12.0, 2.0, 11.0);
+        // A label 24 px on screen, over an 11 pt note font of 14.67 px.
+        let zoom = super::label_zoom(24.0, 11.0);
         assert!((zoom - 24.0 / (11.0 * 96.0 / 72.0)).abs() < 1e-9);
-        assert_eq!(super::label_zoom(1.0, 0.1, 11.0), 0.6);
-        assert_eq!(super::label_zoom(100.0, 8.0, 11.0), 3.0);
+        assert_eq!(super::label_zoom(0.1, 11.0), 0.6);
+        assert_eq!(super::label_zoom(800.0, 11.0), 3.0);
     }
 }

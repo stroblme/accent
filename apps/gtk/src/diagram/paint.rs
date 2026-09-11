@@ -108,8 +108,7 @@ impl Cache {
 }
 
 pub fn rgba(c: Color) -> gdk::RGBA {
-    let channel = |v: u8| f32::from(v) / 255.0;
-    gdk::RGBA::new(channel(c.r), channel(c.g), channel(c.b), channel(c.a))
+    theme::rgba([c.r, c.g, c.b], f32::from(c.a) / 255.0)
 }
 
 fn gpoint(p: Point) -> graphene::Point {

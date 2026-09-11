@@ -145,7 +145,7 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     println!(
         "bench diagram nudge frame={:?} modified={}",
         bounds(tab),
-        tab.modified.get()
+        tab.save.modified.get()
     );
     tab.edit(|e, page| e.set_label_markdown(page, "a", "**bold** A"));
     println!("bench diagram label markdown={:?}", tab.label_markdown("a"));
@@ -158,13 +158,13 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
         tab.history()
     );
     tab.redo();
-    let etag = tab.etag.get();
+    let etag = tab.save.etag.get();
     let flushed = app.flush_diagram(tab);
     println!(
         "bench diagram flush {:?} modified={} etag_moved={}",
         flushed.map_err(|e| e.to_string()),
-        tab.modified.get(),
-        tab.etag.get() != etag
+        tab.save.modified.get(),
+        tab.save.etag.get() != etag
     );
     let disk = std::fs::read(tab.path()).expect("the file");
     let back = accent_drawio::File::from_bytes(&disk).expect("it reads back");

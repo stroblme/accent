@@ -148,9 +148,9 @@ impl App {
                     }
                     // Only a buffer holds work the file no longer does; everything else has
                     // nothing left to show, so its tab goes with the file.
-                    match doc.tab().filter(|tab| tab.modified.get()) {
+                    match doc.tab().filter(|tab| tab.save.modified.get()) {
                         Some(tab) => {
-                            tab.disk_changed.set(true);
+                            tab.save.disk_changed.set(true);
                             tab.show_alert(Alert::Restore);
                         }
                         None => self.close_page(doc.page()),

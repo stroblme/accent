@@ -65,7 +65,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .open_tabs()
                 .into_iter()
                 .find(|t| &t.page == page)
-                .filter(|t| t.modified.get());
+                .filter(|t| t.save.modified.get());
             if let Some(tab) = dirty
                 && let Err(e) = app.flush_tab(&tab)
             {
@@ -81,12 +81,13 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 });
                 return glib::Propagation::Stop;
             }
-            // A diagram is the same, through its own save.
-            let dirty = app
-                .diagrams()
-                .into_iter()
-                .find(|d| &d.page == page)
-                .filter(|d| d.modified.get());
+            // A diagram is the same, through its own save; a label still being typed is part of
+            // what it holds, so it goes into the cell first.
+            let closing = app.diagrams().into_iter().find(|d| &d.page == page);
+            if let Some(diagram) = &closing {
+                diagram.finish_label();
+            }
+            let dirty = closing.filter(|d| d.save.modified.get());
             if let Some(diagram) = dirty
                 && let Err(e) = app.flush_diagram(&diagram)
             {
@@ -438,7 +439,7 @@ pub fn wire_window(app: &Rc<App>) {
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |_| {
-            for tab in app.open_tabs().iter().filter(|t| t.modified.get()) {
+            for tab in app.open_tabs().iter().filter(|t| t.save.modified.get()) {
                 let Err(e) = app.flush_tab(tab) else {
                     continue;
                 };
@@ -449,7 +450,11 @@ pub fn wire_window(app: &Rc<App>) {
                 });
                 return glib::Propagation::Stop;
             }
-            for diagram in app.diagrams().iter().filter(|d| d.modified.get()) {
+            let diagrams = app.diagrams();
+            for diagram in &diagrams {
+                diagram.finish_label();
+            }
+            for diagram in diagrams.iter().filter(|d| d.save.modified.get()) {
                 let Err(e) = app.flush_diagram(diagram) else {
                     continue;
                 };

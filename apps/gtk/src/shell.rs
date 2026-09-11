@@ -626,7 +626,7 @@ impl Shell {
             true => PathBuf::from(&key),
             false => from.root().join(&key),
         };
-        if let Some(tab) = doc.tab().filter(|tab| tab.modified.get())
+        if let Some(tab) = doc.tab().filter(|tab| tab.save.modified.get())
             && let Err(e) = from.flush_tab(tab)
         {
             // Refused rather than dropped: a drag must never be the thing that loses an edit.
