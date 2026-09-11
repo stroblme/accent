@@ -376,7 +376,7 @@ fn font_size(value: &str) -> Option<f64> {
     let value = value.trim();
     let n: i32 = value.parse().ok()?;
     let step = if value.starts_with(['+', '-']) {
-        3 + n
+        n.saturating_add(3)
     } else {
         n
     };
@@ -762,6 +762,10 @@ mod tests {
             (
                 "<font color='#009682' size=5>a</font>",
                 vec![sized("a", "", 24.0, teal)],
+            ),
+            (
+                "<font size='+2147483647'>a</font>",
+                vec![sized("a", "", 48.0, None)],
             ),
             (
                 "<span style='font-size: 28px; color: #009682'>a</span>",

@@ -213,10 +213,7 @@ impl Resolved {
 
     /// A number, or `default` when the key is missing or not a number.
     pub fn num(&self, key: &str, default: f64) -> f64 {
-        self.get(key)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|n| n.is_finite())
-            .unwrap_or(default)
+        self.get(key).and_then(parse_num).unwrap_or(default)
     }
 
     /// A switch: any number but 0 is on, and so is `true`.
@@ -247,6 +244,12 @@ impl Resolved {
     pub fn shape(&self) -> &str {
         self.get("shape").unwrap_or("label")
     }
+}
+
+/// A number as a file writes it, spaces around it allowed. `None` for anything else, infinities
+/// and NaN included, which would otherwise carry into every coordinate worked out from them.
+pub(crate) fn parse_num(v: &str) -> Option<f64> {
+    v.trim().parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 /// An sRGB colour with straight alpha.

@@ -10,7 +10,7 @@
 
 use crate::geom::{self, Point, Rect};
 use crate::perimeter;
-use crate::style::Resolved;
+use crate::style::{Resolved, parse_num};
 
 /// Which outline an end attaches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,7 +108,7 @@ fn connection_constraint(style: &Resolved, source: bool) -> Option<Constraint> {
     } else {
         ["entryX", "entryY", "entryDx", "entryDy", "entryPerimeter"]
     };
-    let num = |key| style.get(key).and_then(|v| v.trim().parse::<f64>().ok());
+    let num = |key| style.get(key).and_then(parse_num);
     Some(Constraint {
         point: Point::new(num(x)?, num(y)?),
         dx: style.num(dx, 0.0),
@@ -1359,5 +1359,28 @@ mod tests {
         };
         let pts = route(&input(&style, source, rect(200.0, 0.0)));
         assert_points(&pts, &[(60.0, 20.0), (200.0, 20.0)]);
+    }
+
+    #[test]
+    fn a_constraint_that_is_not_a_finite_number_leaves_the_end_floating() {
+        let style = Style::parse("exitX=1e999;exitY=0.5;exitPerimeter=0;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 0.0)));
+        assert_points(&pts, &[(80.0, 20.0), (200.0, 20.0)]);
+    }
+
+    #[test]
+    fn a_flat_ellipse_is_met_at_its_centre() {
+        let style = Style::parse("").resolve(true);
+        let flat = Terminal {
+            bounds: Rect::new(0.0, 20.0, 80.0, 0.0),
+            perimeter: PerimeterKind::Ellipse,
+            ..Terminal::default()
+        };
+        let bend = [Point::new(140.0, 20.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &bend,
+            ..input(&style, flat, rect(200.0, 0.0))
+        });
+        assert_points(&pts, &[(40.0, 20.0), (140.0, 20.0), (200.0, 20.0)]);
     }
 }

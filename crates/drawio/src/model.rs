@@ -4,7 +4,7 @@
 
 use crate::Error;
 use crate::geom::{Point, Rect};
-use crate::style::{Color, Style};
+use crate::style::{Color, Style, parse_num};
 
 pub type CellId = String;
 
@@ -148,10 +148,7 @@ impl Page {
     }
 
     fn model_num(&self, name: &str) -> Option<f64> {
-        self.model_attr(name)?
-            .parse()
-            .ok()
-            .filter(|n: &f64| n.is_finite())
+        self.model_attr(name).and_then(parse_num)
     }
 
     /// The page's size in page units.
