@@ -103,7 +103,8 @@ mod provider_imp {
     use sourceview5::prelude::*;
     use sourceview5::subclass::prelude::*;
     use sourceview5::{
-        CompletionCell, CompletionColumn, CompletionContext, CompletionProposal, CompletionProvider,
+        CompletionActivation, CompletionCell, CompletionColumn, CompletionContext,
+        CompletionProposal, CompletionProvider,
     };
 
     use super::{Proposal, ordered};
@@ -245,6 +246,16 @@ mod provider_imp {
             &self,
             context: &CompletionContext,
         ) -> Pin<Box<dyn Future<Output = Result<gio::ListModel, glib::Error>>>> {
+            // Nothing unasked while a column of carets is up, as there is no ghost text then
+            // (`ghost::request`): what the popup applies goes to the primary caret alone, which
+            // ends the column. `Ctrl+Space` still asks. Not `block_interactive`, which blocks
+            // `Ctrl+Space` as well.
+            let column = self
+                .tab()
+                .is_some_and(|tab| tab.ghost_view().is_some_and(|view| view.has_carets()));
+            if column && context.activation() == CompletionActivation::Interactive {
+                return Box::pin(async { Ok(gio::ListStore::new::<Proposal>().upcast()) });
+            }
             let fetch = self.fetch(context.clone());
             Box::pin(async move { Ok(fetch.await.upcast()) })
         }

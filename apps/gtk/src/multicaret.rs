@@ -21,8 +21,9 @@
 //! * while a column of carets exists this widget paints every caret, the primary one included,
 //!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
 //!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
-//! * the completion popup can open at several carets at once, since it follows the primary, and
-//!   what is typed or accepted while it is up goes to the primary alone, which ends the column.
+//! * no completion popup unasked while a column is up, as no ghost text (`completion.rs`):
+//!   `Ctrl+Space` still opens one at the primary, and what is typed or accepted while it is up
+//!   goes to the primary alone, which ends the column.
 //!
 //! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
 //! nothing to give it a text tag, and this widget is already the one drawing over the text. Focus
@@ -611,10 +612,12 @@ impl View {
         if self.caret_offsets().contains(&target.offset()) {
             return;
         }
-        // A new column: the steps an earlier one recorded are not its to put back.
+        // A new column: the steps an earlier one recorded are not its to put back, and a popup
+        // still up at the primary caret would take the keys meant for all of them.
         if !self.has_carets() {
             self.imp().undo.take();
             self.imp().redo.take();
+            self.completion().hide();
         }
         let mark = buffer.create_mark(None, &target, false);
         self.imp().carets.borrow_mut().push(imp::Caret {
