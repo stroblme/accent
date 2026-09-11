@@ -1,17 +1,14 @@
 //! The drawing tools, as a ring that floats over the page.
 //!
 //! Round buttons orbiting a hub, dragged around the pane by that hub, with the tool in hand's
-//! widths and colours on a second orbit outside them. It is an overlay child of the PDF tab
-//! rather than a bar in the chrome, because the reader puts it wherever the part of the page they
-//! are working on is not.
+//! options on a second orbit outside them. The ring knows its tools only through [`Tool`]; what
+//! the options are and do is the owning tab's (`pdf/ring.rs` for a PDF's widths and colours). It
+//! is an overlay child of that tab rather than a bar in the chrome, because the reader puts it
+//! wherever the part of the page they are working on is not.
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::cell::{Cell, RefCell};
-
-use accent_core::config::DrawingConfig;
-
-use crate::pdfview::Mode;
+use std::cell::Cell;
 
 /// The distance from the hub to a tool button, in pixels.
 const ORBIT: f64 = 60.0;
@@ -22,73 +19,22 @@ const SIZE: i32 = 220;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 
-/// Three widths per tool, in page points — fine, the default, bold — and the eraser's reach.
-const WIDTHS: [(Mode, [f32; 3]); 3] = [
-    (Mode::Pen, [1.0, 2.0, 4.0]),
-    (Mode::Highlighter, [8.0, 14.0, 24.0]),
-    (Mode::Eraser, [4.0, 8.0, 16.0]),
-];
-
-/// Told which tool was in hand and what was picked for it.
-type OnChoice = Box<dyn Fn(Mode, Choice)>;
-
-/// The eraser's two ways, on the first two of the slots the other tools give their colours to:
-/// whole strokes, or only what it passes over.
-const ERASERS: [(bool, &str, &str); 2] = [
-    (false, "edit-delete-symbolic", "Erase Whole Strokes"),
-    (true, "edit-cut-symbolic", "Erase Only What It Passes Over"),
-];
-
-/// What an option button picks for the tool in hand.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Choice {
-    Width(f32),
-    /// `None` is the accent.
-    Colour(Option<[u8; 3]>),
-    /// The eraser's: partial, or whole strokes.
-    Partial(bool),
+/// A tool the ring can hold. Its label comes from `ACTIONS` through the action, so a button,
+/// the status bar and the palette say the same word.
+pub trait Tool: Copy + PartialEq + 'static {
+    /// Top first, then clockwise: the tool and its icon name.
+    const TOOLS: &'static [(Self, &'static str)];
+    /// The window action that puts it in hand; `None` for the state that is no tool (no button).
+    fn action(self) -> Option<&'static str>;
+    /// The state that is no tool in hand, which the ring starts in.
+    fn none() -> Self;
 }
-
-impl Choice {
-    /// Write the choice for `tool` into the config. The shapes share the pen's style, and the
-    /// eraser's width is its reach.
-    pub fn apply(self, tool: Mode, config: &mut DrawingConfig) {
-        match (tool.style_owner(), self) {
-            (Mode::Eraser, Choice::Width(w)) => config.eraser_radius = w,
-            (Mode::Eraser, Choice::Partial(p)) => config.eraser_partial = p,
-            (Mode::Eraser, Choice::Colour(_)) | (_, Choice::Partial(_)) => {}
-            (Mode::Highlighter, Choice::Width(w)) => config.highlighter_width = w,
-            (Mode::Highlighter, Choice::Colour(c)) => config.highlighter_color = c,
-            (_, Choice::Width(w)) => config.pen_width = w,
-            (_, Choice::Colour(c)) => config.pen_color = c,
-        }
-    }
-}
-
-/// The tools, in the order they sit on the ring: pen at the top, then clockwise. Each one's
-/// action and label are [`Mode::action`]'s, so a button says what the palette says.
-const TOOLS: [(Mode, &str); 7] = [
-    (Mode::Pen, "tool-pen-symbolic"),
-    (Mode::Highlighter, "tool-highlighter-symbolic"),
-    (Mode::Eraser, "tool-eraser-symbolic"),
-    (Mode::Line, "tool-line-symbolic"),
-    (Mode::Rect, "tool-rect-symbolic"),
-    (Mode::Circle, "tool-circle-symbolic"),
-    (Mode::Adjust, "tool-adjust-symbolic"),
-];
 
 /// A ring of tool buttons, and the hub that moves it.
-pub struct Ring {
+pub struct Ring<T: Tool> {
     root: RingBox,
-    buttons: Vec<(Mode, gtk::ToggleButton)>,
-    /// The outer orbit: three widths, then six colours, shown for the tool in hand — or for the
-    /// eraser, its two ways where the colours would be.
-    widths: Vec<gtk::ToggleButton>,
-    swatches: Vec<gtk::ToggleButton>,
-    erasers: Vec<gtk::ToggleButton>,
-    tool: Cell<Mode>,
-    config: RefCell<DrawingConfig>,
-    on_choice: RefCell<Option<OnChoice>>,
+    buttons: Vec<(T, gtk::ToggleButton)>,
+    tool: Cell<T>,
     /// Where the ring's top-left corner sits in the pane, which is what the overlay's margins are
     /// set from.
     at: std::cell::Cell<(f64, f64)>,
@@ -98,9 +44,9 @@ pub struct Ring {
     moved: std::cell::Cell<bool>,
 }
 
-impl Ring {
+impl<T: Tool> Ring<T> {
     /// Build the ring. It is hidden until the window says otherwise.
-    pub fn new() -> std::rc::Rc<Ring> {
+    pub fn new() -> std::rc::Rc<Ring<T>> {
         let root: RingBox = glib::Object::builder()
             .property("width-request", SIZE)
             .property("height-request", SIZE)
@@ -121,11 +67,11 @@ impl Ring {
         place(&root, &hub, centre, centre, BUTTON);
 
         let mut buttons = Vec::new();
-        for (i, (mode, icon)) in TOOLS.iter().enumerate() {
-            let Some(action) = mode.action() else {
+        for (i, (tool, icon)) in T::TOOLS.iter().enumerate() {
+            let Some(action) = tool.action() else {
                 continue;
             };
-            let (dx, dy) = orbit(i, TOOLS.len(), ORBIT);
+            let (dx, dy) = orbit(i, T::TOOLS.len(), ORBIT);
             let button = gtk::ToggleButton::builder()
                 .icon_name(*icon)
                 .tooltip_text(crate::actions::label_of(action))
@@ -135,158 +81,32 @@ impl Ring {
             button.add_css_class("osd");
             button.add_css_class("accent-ring-tool");
             place(&root, &button, centre + dx, centre + dy, BUTTON);
-            buttons.push((*mode, button));
+            buttons.push((*tool, button));
         }
-
-        // Nine slots outside the tools: the widths at the top, the colours after them.
-        let slots = 3 + crate::theme::swatches().len();
-        let option = |i: usize, child: &gtk::Widget| {
-            let button = gtk::ToggleButton::new();
-            button.set_child(Some(child));
-            button.add_css_class("circular");
-            button.add_css_class("osd");
-            button.add_css_class("accent-ring-tool");
-            let (dx, dy) = orbit(i, slots, OPTIONS);
-            place(&root, &button, centre + dx, centre + dy, OPTION);
-            button
-        };
-        let widths: Vec<_> = [5.0, 8.0, 12.0]
-            .into_iter()
-            .enumerate()
-            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
-            .collect();
-        let swatches: Vec<_> = (0..crate::theme::swatches().len())
-            .map(|i| {
-                let colour = move |_: &gtk::DrawingArea| match crate::theme::swatches()[i] {
-                    Some(rgb) => crate::theme::rgba(rgb, 1.0),
-                    None => crate::theme::accent(),
-                };
-                option(3 + i, dot(14.0, colour).upcast_ref())
-            })
-            .collect();
-        let erasers: Vec<_> = ERASERS
-            .iter()
-            .enumerate()
-            .map(|(i, (_, icon, label))| {
-                let button = option(3 + i, gtk::Image::from_icon_name(icon).upcast_ref());
-                button.set_tooltip_text(Some(label));
-                button
-            })
-            .collect();
 
         let ring = std::rc::Rc::new(Ring {
             root,
             buttons,
-            widths,
-            swatches,
-            erasers,
-            tool: Cell::new(Mode::Select),
-            config: RefCell::new(DrawingConfig::default()),
-            on_choice: RefCell::new(None),
+            tool: Cell::new(T::none()),
             at: std::cell::Cell::new((INSET, INSET)),
             moved: std::cell::Cell::new(false),
         });
         ring.wire_drag(&hub);
-        ring.wire_options();
         ring
     }
 
-    /// An option button picks for whichever tool is in hand when it is pressed. The buttons are
-    /// toggles only to wear the checked look; which one is checked is the config's say, through
-    /// [`Ring::set_config`], not the click's.
-    fn wire_options(self: &std::rc::Rc<Self>) {
-        for (i, button) in self.widths.iter().enumerate() {
-            button.connect_clicked(glib::clone!(
-                #[weak(rename_to = ring)]
-                self,
-                move |_| {
-                    let tool = ring.tool.get();
-                    let owner = tool.style_owner();
-                    if let Some((_, widths)) = WIDTHS.iter().find(|(m, _)| *m == owner) {
-                        ring.choose(tool, Choice::Width(widths[i]));
-                    }
-                }
-            ));
-        }
-        for (i, button) in self.swatches.iter().enumerate() {
-            button.connect_clicked(glib::clone!(
-                #[weak(rename_to = ring)]
-                self,
-                move |_| {
-                    let tool = ring.tool.get();
-                    ring.choose(tool, Choice::Colour(crate::theme::swatches()[i]));
-                }
-            ));
-        }
-        for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
-            button.connect_clicked(glib::clone!(
-                #[weak(rename_to = ring)]
-                self,
-                move |_| ring.choose(ring.tool.get(), Choice::Partial(partial))
-            ));
-        }
-    }
-
-    fn choose(&self, tool: Mode, choice: Choice) {
-        if let Some(f) = self.on_choice.borrow().as_ref() {
-            f(tool, choice);
-        }
-        // Whatever the config comes back as, the button the hand is on stops looking toggled
-        // by the click alone.
-        self.sync_options();
-    }
-
-    /// Called with the tool in hand and what was picked for it.
-    pub fn connect_choice(&self, f: impl Fn(Mode, Choice) + 'static) {
-        *self.on_choice.borrow_mut() = Some(Box::new(f));
-    }
-
-    /// What the preferences say about the tools, which is what the options show as checked.
-    pub fn set_config(&self, config: &DrawingConfig) {
-        *self.config.borrow_mut() = config.clone();
-        self.sync_options();
-    }
-
-    /// Show the tool in hand's options, checked as the config has them, and nothing for a tool
-    /// with none.
-    fn sync_options(&self) {
-        let tool = self.tool.get().style_owner();
-        let config = self.config.borrow();
-        let widths = match self.tool.get() {
-            Mode::Select | Mode::Adjust => None,
-            _ => WIDTHS.iter().find(|(m, _)| *m == tool).map(|(_, w)| *w),
-        };
-        let (width, colour) = match tool {
-            Mode::Eraser => (config.eraser_radius, None),
-            Mode::Highlighter => (config.highlighter_width, Some(config.highlighter_color)),
-            _ => (config.pen_width, Some(config.pen_color)),
-        };
-        let check = |button: &gtk::ToggleButton, shown: bool, wanted: bool| {
-            button.set_visible(shown);
-            if button.is_active() != wanted {
-                button.set_active(wanted);
-            }
-        };
-        // The nearest of the three rather than an exact match: a hand-edited config, or one
-        // written before these three widths were, would otherwise show no width selected at all.
-        let nearest = widths.map(|w| {
-            let distance = |i: &usize| (w[*i] - width).abs();
-            (0..w.len())
-                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
-                .unwrap_or(0)
-        });
-        for (i, button) in self.widths.iter().enumerate() {
-            check(button, widths.is_some(), nearest == Some(i));
-        }
-        let swatches = crate::theme::swatches();
-        let shown = widths.is_some() && colour.is_some();
-        for (i, button) in self.swatches.iter().enumerate() {
-            check(button, shown, shown && colour == Some(swatches[i]));
-        }
-        let erasing = self.tool.get() == Mode::Eraser;
-        for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
-            check(button, erasing, erasing && config.eraser_partial == partial);
-        }
+    /// A button on the outer orbit, slot `i` of `n`, holding `child`. Hidden until shown.
+    pub fn add_option(&self, i: usize, n: usize, child: &gtk::Widget) -> gtk::ToggleButton {
+        let button = gtk::ToggleButton::new();
+        button.set_child(Some(child));
+        button.set_visible(false);
+        button.add_css_class("circular");
+        button.add_css_class("osd");
+        button.add_css_class("accent-ring-tool");
+        let centre = f64::from(SIZE) / 2.0;
+        let (dx, dy) = orbit(i, n, OPTIONS);
+        place(&self.root, &button, centre + dx, centre + dy, OPTION);
+        button
     }
 
     /// Dragging the hub moves the whole ring, which is an overlay child positioned by its margins.
@@ -364,20 +184,24 @@ impl Ring {
 
     /// Show which tool is in hand. The buttons fire actions, so this only reflects the state; it
     /// must not toggle them back or pressing one would fight its own handler.
-    pub fn set_tool(&self, mode: Mode) {
-        for (tool, button) in &self.buttons {
-            let wanted = *tool == mode;
+    pub fn set_tool(&self, tool: T) {
+        for (held, button) in &self.buttons {
+            let wanted = *held == tool;
             if button.is_active() != wanted {
                 button.set_active(wanted);
             }
         }
-        self.tool.set(mode);
-        self.sync_options();
+        self.tool.set(tool);
+    }
+
+    /// The tool in hand.
+    pub fn tool(&self) -> T {
+        self.tool.get()
     }
 }
 
 /// A filled circle of `diameter` pixels in whatever colour `colour` says when it is drawn.
-fn dot(
+pub(crate) fn dot(
     diameter: f64,
     colour: impl Fn(&gtk::DrawingArea) -> gdk::RGBA + 'static,
 ) -> gtk::DrawingArea {
@@ -462,16 +286,18 @@ const OPTION: i32 = 24;
 
 #[cfg(test)]
 mod tests {
-    use super::{BUTTON, Choice, OPTION, OPTIONS, ORBIT, TOOLS, orbit};
-    use crate::pdfview::Mode;
+    use super::{BUTTON, OPTION, OPTIONS, ORBIT, orbit};
+
+    /// The most tools the inner orbit holds a button apart; the PDF has seven.
+    const TOOLS: usize = 9;
 
     #[test]
     fn tools_start_at_the_top_and_sit_a_button_apart() {
-        let (dx, dy) = orbit(0, TOOLS.len(), ORBIT);
+        let (dx, dy) = orbit(0, TOOLS, ORBIT);
         assert!(dx.abs() < 1e-9 && (dy + ORBIT).abs() < 1e-9);
-        for i in 0..TOOLS.len() {
-            let a = orbit(i, TOOLS.len(), ORBIT);
-            let b = orbit((i + 1) % TOOLS.len(), TOOLS.len(), ORBIT);
+        for i in 0..TOOLS {
+            let a = orbit(i, TOOLS, ORBIT);
+            let b = orbit((i + 1) % TOOLS, TOOLS, ORBIT);
             let gap = (a.0 - b.0).hypot(a.1 - b.1);
             assert!(
                 gap >= f64::from(BUTTON),
@@ -487,23 +313,5 @@ mod tests {
                 "options {i} and next are {gap} px apart"
             );
         }
-    }
-
-    #[test]
-    fn a_choice_lands_in_the_right_tool() {
-        let mut config = accent_core::config::DrawingConfig::default();
-        Choice::Width(4.0).apply(Mode::Line, &mut config);
-        assert_eq!(config.pen_width, 4.0, "a shape draws in the pen's width");
-        Choice::Width(8.0).apply(Mode::Eraser, &mut config);
-        assert_eq!(config.eraser_radius, 8.0);
-        Choice::Colour(Some([0, 0, 0])).apply(Mode::Highlighter, &mut config);
-        assert_eq!(config.highlighter_color, Some([0, 0, 0]));
-        assert_eq!(config.pen_color, None);
-        Choice::Colour(Some([1, 2, 3])).apply(Mode::Eraser, &mut config);
-        assert_eq!(config.pen_color, None, "the eraser has no colour");
-        Choice::Partial(true).apply(Mode::Pen, &mut config);
-        assert!(!config.eraser_partial, "only the eraser has two ways");
-        Choice::Partial(true).apply(Mode::Eraser, &mut config);
-        assert!(config.eraser_partial);
     }
 }
