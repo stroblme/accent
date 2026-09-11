@@ -422,9 +422,7 @@ fn entry(line: &str, fields: usize) -> Option<Entry> {
 /// Fetching is the one call here that talks to a network, and `GIT_TERMINAL_PROMPT=0` only stops
 /// it hanging on a *prompt*: a host that accepts the connection and then says nothing holds the
 /// thread it runs on for as long as ssh's own timeout, which is minutes. A background fetch is a
-/// convenience, so it is bounded and its answer is allowed to be "not this time". Kept under the
-/// ten seconds `accent-api`'s RPC layer waits for an answer, so a fetch on a remote vault still
-/// comes back while its caller is listening.
+/// convenience, so it is bounded and its answer is allowed to be "not this time".
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// How long a transfer the user asked for may run before it is killed.

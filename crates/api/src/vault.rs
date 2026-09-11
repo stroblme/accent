@@ -205,6 +205,10 @@ pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
 /// An argument marked `ref` is taken by reference and travels as the owned form of its type
 /// (`str` as a `String`); one marked `val` travels as itself.
 ///
+/// A method the host runs under a timeout of its own ends with `bounded by` that timeout, and a
+/// remote caller waits for it plus [`rpc::DEADLINE`] rather than the deadline alone. Without it a
+/// merge whose hooks ran past ten seconds timed out here while the host carried on and landed it.
+///
 /// What is *not* here is anything whose two sides differ: a save, which has an error of its own;
 /// the searches, which compile their pattern where the files are; the transfers, which carry
 /// bytes outside the protocol; and `repos`, which posts to the vault's own worker.
@@ -237,9 +241,14 @@ macro_rules! methods {
         rpc::git_result(git::$core($($a)*))
     };
 
+    // How long a remote caller waits: the host's own bound, if it has one, and a round trip.
+    (@deadline) => { rpc::DEADLINE };
+    (@deadline $bound:expr) => { $bound + rpc::DEADLINE };
+
     ($(
         $(#[$doc:meta])*
-        $group:ident $name:ident $(= $core:ident)? ($($arg:ident : $kind:tt $t:ty),* $(,)?) -> $ret:ty;
+        $group:ident $name:ident $(= $core:ident)? ($($arg:ident : $kind:tt $t:ty),* $(,)?) -> $ret:ty
+            $(, bounded by $bound:expr)?;
     )*) => {
         impl Vault {
             $(
@@ -250,7 +259,11 @@ macro_rules! methods {
                     match &self.backend {
                         Backend::Local(_v) => methods!(@here _v $group $name $($core)? ($($arg),*)),
                         Backend::Remote(r) => r
-                            .call(stringify!($name), json!([$($arg),*]))
+                            .call_within(
+                                stringify!($name),
+                                json!([$($arg),*]),
+                                methods!(@deadline $($bound)?),
+                            )
                             .map_err(methods!(@err $group)),
                     }
                 }
@@ -339,13 +352,15 @@ methods! {
     git git_checkout_commit = checkout_commit(repo: ref Repo, oid: ref str) -> ();
     git git_create_branch = create_branch(repo: ref Repo, name: ref str, checkout: val bool) -> ();
     git git_delete_branch = delete_branch(repo: ref Repo, name: ref str, force: val bool) -> ();
-    git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge;
+    git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge,
+        bounded by git::TRANSFER_TIMEOUT;
     git git_merge_abort = merge_abort(repo: ref Repo) -> ();
-    git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String;
-    git git_sync = sync(repo: ref Repo) -> String;
-    /// Bring the remote-tracking refs up to date. Bounded by [`git::FETCH_TIMEOUT`], which is
-    /// under [`rpc::DEADLINE`] so that a fetch on a remote vault answers rather than times out.
-    git git_fetch = fetch(repo: ref Repo) -> String;
+    git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String,
+        bounded by git::TRANSFER_TIMEOUT;
+    /// A pull and then a push, each under its own bound.
+    git git_sync = sync(repo: ref Repo) -> String, bounded by git::TRANSFER_TIMEOUT * 2;
+    /// Bring the remote-tracking refs up to date.
+    git git_fetch = fetch(repo: ref Repo) -> String, bounded by git::FETCH_TIMEOUT;
     /// The oids a pull would bring in. Asked only where [`git::Status`] says there are any.
     git git_incoming = incoming(repo: ref Repo) -> Vec<String>;
 }
