@@ -253,7 +253,7 @@ impl PdfTab {
     pub fn load(self: &Rc<Self>, path: &Path) {
         *self.path.borrow_mut() = path.to_path_buf();
         if let Err(message) = self.start() {
-            self.show_status(&message);
+            self.fail(&message);
         }
     }
 
@@ -762,6 +762,15 @@ impl PdfTab {
         self.stack.set_visible_child_name("status");
     }
 
+    /// The document will not open, whether the render thread could not start or could not read
+    /// it: say why in place of the pages, and tell the window, which is still showing it as
+    /// opening.
+    fn fail(self: &Rc<Self>, message: &str) {
+        self.failed.set(true);
+        self.show_status(message);
+        self.emit(&self.on_open);
+    }
+
     pub(super) fn ask(&self, request: Request) {
         let tx = self.tx.borrow();
         if let Some(tx) = tx.as_ref() {
@@ -1178,11 +1187,7 @@ impl PdfTab {
                 }
                 self.emit(&self.on_open);
             }
-            Reply::Failed(message) => {
-                self.failed.set(true);
-                self.show_status(&message);
-                self.emit(&self.on_open);
-            }
+            Reply::Failed(message) => self.fail(&message),
             // Textures never reach here; `PdfView::deliver` keeps those.
             Reply::Tile(..) | Reply::Lowres { .. } => {}
         }

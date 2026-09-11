@@ -77,10 +77,7 @@ impl App {
             recent,
             mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
-            load_files: Box::new({
-                let corpus = self.corpus.borrow().files.clone();
-                move || corpus.as_ref().clone()
-            }),
+            files: self.corpus.borrow().files.clone(),
             commands: ACTIONS
                 .iter()
                 .map(|(action, label, _)| palette::Item::Command {
@@ -90,10 +87,7 @@ impl App {
                     recent: used.iter().position(|a| a == action),
                 })
                 .collect(),
-            load_tags: Box::new({
-                let corpus = self.corpus.borrow().tags.clone();
-                move || corpus.as_ref().clone()
-            }),
+            tags: self.corpus.borrow().tags.clone(),
             // Filtered here rather than in the dialog: the window is the only thing that knows
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.

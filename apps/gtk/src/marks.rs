@@ -4,8 +4,9 @@
 //! has no room to be subtle. A modified line is the accent instead: it is neither an addition nor
 //! a removal, and the accent is the colour this app already means "something here" with.
 //!
-//! The marks come from the same `accent_core::diff::lines` the comparison tabs are built from, so
-//! a line the diff paints green is a line the gutter marks green.
+//! The marks come from the same line diff the comparison tabs are built from, less its word-level
+//! pass (`accent_core::diff::line_ops`), so a line the diff paints green is a line the gutter marks
+//! green.
 
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;

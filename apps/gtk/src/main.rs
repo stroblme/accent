@@ -610,12 +610,13 @@ impl App {
         // A PDF's outline is its bookmarks, with the page thumbnails under them.
         if let Some(pdf) = doc.pdf() {
             // Still being opened on the render thread, so there is nothing to say yet and
-            // "No Bookmarks" would be a guess.
+            // "No Bookmarks" would be a guess; or it never opened, and has no pages to list.
             if pdf.page_count() == 0 {
-                return sidebar.set_outline(Some(&sidebar::outline_note(
-                    "Opening…",
-                    "Reading the document.",
-                )));
+                let (title, body) = match pdf.opening() {
+                    true => ("Opening…", "Reading the document."),
+                    false => ("No Outline", "This PDF could not be opened."),
+                };
+                return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
             let outline = pdf.outline();
             let content = gtk::Paned::builder()
@@ -1056,7 +1057,7 @@ impl App {
             });
         }
         if changed.shortcuts {
-            self.apply_accels();
+            self.refresh_accels();
         }
         for tab in self.open_tabs() {
             if changed.font {
