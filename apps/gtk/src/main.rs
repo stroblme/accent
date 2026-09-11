@@ -547,10 +547,14 @@ impl App {
             // because this path returned before either readout was asked again. The Outline
             // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
             // strip in the sidebar, and `sync_outline` already says "No Outline" for no
-            // document at all.
+            // document at all. So are the progress slot, where a PDF closed while it was still
+            // opening left "Opening the document…", and Split view's preview, which kept the last
+            // note.
             self.sync_status();
             self.sync_outline();
+            self.sync_opening();
             self.refresh_zoom();
+            self.clear_preview();
             return;
         };
         let key = doc.key();
@@ -584,11 +588,13 @@ impl App {
             Some(tab) => self.render(&tab),
             // Nothing here is markdown, so the preview shows nothing rather than the last note
             // it happened to be given.
-            None => {
-                if let Some(preview) = self.preview.borrow().as_ref() {
-                    preview.render("", "");
-                }
-            }
+            None => self.clear_preview(),
+        }
+    }
+
+    fn clear_preview(&self) {
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.render("", "");
         }
     }
 
