@@ -59,6 +59,10 @@ pub const DISCONNECTED: i64 = -32004;
 /// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
 /// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
 pub const CONNECTING: i64 = -32003;
+/// The server has no vault to serve — its root is not a folder, or its index would not open — and
+/// says so to the `hello`. Unlike a link that failed, another attempt meets the same answer until
+/// someone changes the host.
+pub const REFUSED: i64 = -32005;
 
 /// What the far end said instead of an answer.
 #[derive(Debug, Clone)]
@@ -452,7 +456,7 @@ fn refuse(e: &anyhow::Error, input: impl Read, mut output: impl Write) {
             .and_then(|msg| msg.get("id").cloned());
         if let Some(id) = id {
             let answer = json!({"jsonrpc": "2.0", "id": id, "error": {
-                "code": FAILED, "message": format!("{e:#}"),
+                "code": REFUSED, "message": format!("{e:#}"),
             }});
             let _ = writeln!(output, "{answer}").and_then(|()| output.flush());
             return;
@@ -1060,6 +1064,8 @@ mod tests {
             .call::<Hello>("hello", json!([VaultConfig::default()]))
             .unwrap_err();
         assert_eq!(e.message, format!("{} is not a folder", root.display()));
+        // Its own code, so the window can tell it from a link that failed and stop retrying.
+        assert_eq!(e.code, REFUSED);
         assert!(server.join().unwrap().is_err(), "serve must exit failing");
         assert!(!db.exists(), "no index for a vault that is not there");
     }

@@ -87,6 +87,10 @@ pub enum Event {
     /// The remote vault is not answering, and why. Reads stay served from whatever the UI already
     /// has; writes fail until [`Vault::reconnect`] succeeds.
     Disconnected(String),
+    /// The host answered and will not serve the vault, and why: its folder is not there, or its
+    /// index would not open. Otherwise [`Disconnected`](Self::Disconnected), except that trying
+    /// again meets the same answer until someone changes the host.
+    Refused(String),
     Error(String),
     /// What a language provider has to say about an open document, whole: an empty list clears.
     Diagnostics {

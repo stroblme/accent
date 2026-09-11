@@ -47,6 +47,26 @@ pub enum State {
     Disconnected(String),
 }
 
+/// Why an attempt to connect failed, which decides whether another attempt is worth making.
+enum Failure {
+    /// Anything on the way to the vault: ssh, the link, the upload, a server that went quiet.
+    Link(String),
+    /// The host's `serve` answered the `hello` and will not serve the vault.
+    Refused(String),
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Failure {
+        Failure::Link(why)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(why: &str) -> Failure {
+        Failure::Link(why.to_string())
+    }
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -186,7 +206,7 @@ impl Remote {
             tracing::debug!(method, ms = took.as_millis() as u64, "held the main thread");
         }
         if answer.is_err() && client.is_dead() {
-            self.disconnect(&self.lost());
+            self.disconnect(&self.lost(), Event::Disconnected);
         }
         answer
     }
@@ -482,7 +502,8 @@ impl Remote {
                     };
                     let _ = self.events.send(event);
                 }
-                Err(e) => self.disconnect(&e),
+                Err(Failure::Link(why)) => self.disconnect(&why, Event::Disconnected),
+                Err(Failure::Refused(why)) => self.disconnect(&why, Event::Refused),
             });
     }
 
@@ -499,14 +520,15 @@ impl Remote {
         });
     }
 
-    fn disconnect(&self, why: &str) {
+    /// Say the vault is not answering, as `event` says it: a link that went, or a refusal.
+    fn disconnect(&self, why: &str, event: fn(String) -> Event) {
         let mut state = self.locked(&self.state);
         if matches!(&*state, State::Disconnected(_)) {
             return;
         }
         *state = State::Disconnected(why.to_string());
         drop(state);
-        let _ = self.events.send(Event::Disconnected(why.to_string()));
+        let _ = self.events.send(event(why.to_string()));
     }
 
     /// What a dropped link is called, whichever side notices it first.
@@ -531,7 +553,7 @@ impl Remote {
         })
     }
 
-    fn connect(&self, quiet: bool) -> Result<(), String> {
+    fn connect(&self, quiet: bool) -> Result<(), Failure> {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
         self.teardown();
@@ -547,10 +569,10 @@ impl Remote {
             .map_err(|e| format!("cannot run ssh: {e}"))?;
         if !out.status.success() {
             let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(match why.is_empty() {
+            return Err(Failure::Link(match why.is_empty() {
                 true => format!("cannot connect to {}", self.url.host),
                 false => why,
-            });
+            }));
         }
 
         let hash = self.provision()?;
@@ -615,7 +637,7 @@ impl Remote {
         }
     }
 
-    fn spawn_server(&self, hash: &str) -> Result<(), String> {
+    fn spawn_server(&self, hash: &str) -> Result<(), Failure> {
         self.say("Opening the vault");
         let command = ssh::serve_cmd(&ssh::server_path(hash), &self.url.path);
         let mut child = self
@@ -641,7 +663,13 @@ impl Remote {
         let hello: Hello = client
             .call("hello", json!([self.config(), *self.locked(&self.ghost)]))
             // The server's own refusal ("/srv/x is not a folder") or the link's failure.
-            .map_err(|e| format!("cannot open the vault on {}: {e}", self.url.host))?;
+            .map_err(|e| {
+                let why = format!("cannot open the vault on {}: {e}", self.url.host);
+                match e.code {
+                    crate::rpc::REFUSED => Failure::Refused(why),
+                    _ => Failure::Link(why),
+                }
+            })?;
         *self.root.write().unwrap_or_else(|e| e.into_inner()) = hello.root;
         self.reopen(&client);
         *self.locked(&self.client) = Some(client);

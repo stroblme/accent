@@ -222,6 +222,11 @@ impl App {
                 self.connect.hide();
                 self.connection_down(&why);
             }
+            Event::Refused(why) => {
+                self.statusbar.set_progress(None);
+                self.connect.hide();
+                self.connection_refused(&why);
+            }
             Event::Error(message) => self.toast(&message),
             Event::Diagnostics { rel, items } => {
                 if let Some(tab) = self.tab_for(&rel) {
