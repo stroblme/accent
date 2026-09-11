@@ -56,6 +56,56 @@ fn column(view: &sourceview5::View) -> Option<&multicaret::View> {
         .filter(|view| view.has_carets())
 }
 
+/// Line ranges, first and last, sorted and made one where they share a line, so that no line is
+/// taken twice. Ranges that only meet stay apart: carets on neighbouring lines are two lines.
+fn runs(mut ranges: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    ranges.sort_unstable();
+    let mut runs: Vec<(i32, i32)> = Vec::new();
+    for (first, last) in ranges {
+        match runs.last_mut() {
+            Some(run) if first <= run.1 => run.1 = run.1.max(last),
+            _ => runs.push((first, last)),
+        }
+    }
+    runs
+}
+
+/// The runs of lines a column's carets cover: each caret's selection by [`last_copied`]'s rule,
+/// the caret's own line where it has none.
+fn covered(column: &multicaret::View) -> Vec<(i32, i32)> {
+    let ranges = column
+        .selections()
+        .iter()
+        .map(|(start, end)| {
+            let first = start.line();
+            (first, last_copied(first, end.line(), end.line_offset()))
+        })
+        .collect();
+    runs(ranges)
+}
+
+/// Whether any caret of `column` has something selected, which decides whether a cut or copy
+/// there takes the selections or whole lines.
+fn any_selected(column: &multicaret::View) -> bool {
+    column.selections().iter().any(|(start, end)| start != end)
+}
+
+/// What a cut or copy at a column takes, VS Code's two cases: each caret's selection, joined by
+/// newlines top to bottom, a caret with nothing selected giving an empty line; or, where no caret
+/// has anything selected, every caret's whole line.
+fn column_text(view: &sourceview5::View, column: &multicaret::View) -> String {
+    if !any_selected(column) {
+        return whole_lines(view);
+    }
+    let buffer = view.buffer();
+    let texts: Vec<String> = column
+        .selections()
+        .iter()
+        .map(|(start, end)| buffer.text(start, end, true).to_string())
+        .collect();
+    texts.join("\n")
+}
+
 /// What a cut or copy with nothing selected takes: the caret's whole line, or every caret's in a
 /// column, each once and top to bottom, as VS Code copies them.
 fn whole_lines(view: &sourceview5::View) -> String {
@@ -73,10 +123,12 @@ fn whole_lines(view: &sourceview5::View) -> String {
         .collect()
 }
 
-/// Delete `line` whole, its newline with it. A last line with no newline of its own takes the one
-/// separating it from the line above, or deleting it would leave the blank line it used to sit on.
-fn delete_whole_line(buffer: &gtk::TextBuffer, line: i32) {
-    let (mut start, mut end) = line_bounds(buffer, line);
+/// Delete lines `first` to `last` whole, the last one's newline with them. A last line with no
+/// newline of its own takes the one separating it from the line above, or deleting it would leave
+/// the blank line it used to sit on.
+fn delete_lines(buffer: &gtk::TextBuffer, first: i32, last: i32) {
+    let (mut start, _) = line_bounds(buffer, first);
+    let (_, mut end) = line_bounds(buffer, last);
     if !buffer.text(&start, &end, true).ends_with('\n') {
         start.backward_char();
     }
@@ -110,11 +162,11 @@ fn open_below(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
 
 /// VS Code's Copy Line Down: the lines the selection touches ([`last_copied`]) are repeated below
 /// themselves, and the caret and the selection move down onto the copy, in the same columns. At a
-/// column, each caret's line once, and each caret onto its copy.
+/// column, every run of lines the carets cover ([`covered`]), each onto its copy.
 pub(crate) fn duplicate_line(view: &sourceview5::View) {
     if let Some(column) = column(view) {
-        return column.each_line(|buffer, line| {
-            copy_down(buffer, line, line);
+        return column.each_block(&covered(column), |buffer, first, last| {
+            copy_down(buffer, first, last);
             None
         });
     }
@@ -130,17 +182,18 @@ pub(crate) fn duplicate_line(view: &sourceview5::View) {
     view.scroll_mark_onscreen(&buffer.get_insert());
 }
 
-/// Delete the caret's line, or every caret's in a column, each once.
+/// Delete the caret's line, or at a column every line the carets cover, each once.
 pub(crate) fn delete_line(view: &sourceview5::View) {
     if let Some(column) = column(view) {
-        return column.each_line(|buffer, line| {
-            delete_whole_line(buffer, line);
+        return column.each_block(&covered(column), |buffer, first, last| {
+            delete_lines(buffer, first, last);
             None
         });
     }
     let buffer = view.buffer();
+    let line = caret(&buffer).line();
     buffer.begin_user_action();
-    delete_whole_line(&buffer, caret(&buffer).line());
+    delete_lines(&buffer, line, line);
     buffer.end_user_action();
 }
 
@@ -148,10 +201,12 @@ pub(crate) fn delete_line(view: &sourceview5::View) {
 /// same indent, so a list item or an indented block carries on where it was. That is the idiom
 /// `typing.rs` already uses on Return; continuing the marker itself is Return's job, not this
 /// one's, because this is also how a line is opened *out* of a list. At a column, a line under
-/// each caret's line, once, with every caret on that line moved onto it.
+/// each run of lines the carets cover, with every caret of the run moved onto it.
 pub(crate) fn newline_below(view: &sourceview5::View) {
     if let Some(column) = column(view) {
-        return column.each_line(|buffer, line| Some(open_below(buffer, line)));
+        return column.each_block(&covered(column), |buffer, _, last| {
+            Some(open_below(buffer, last))
+        });
     }
     let buffer = view.buffer();
     // One user action, so one Ctrl+Z takes the whole line back.
@@ -164,8 +219,9 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
 
 /// Cut and copy, always as plain text, and VS Code's whole-line cut and copy: with nothing
 /// selected, `Ctrl+X` and `Ctrl+C` take the caret's whole line, its newline with it, so a later
-/// paste puts a line back instead of a fragment. At a column they take every caret's line, and
-/// the cut deletes them as one undo step, the column staying up.
+/// paste puts a line back instead of a fragment. At a column they take every caret's selection,
+/// or every caret's line where none has one ([`column_text`]), and the cut deletes what it took as
+/// one undo step, the column staying up.
 ///
 /// No key handling, and no accelerator either — DESIGN.md's never-bind list keeps `Ctrl+X`/`C`
 /// for the widget. Both chords and the context menu emit these two signals, and each handler runs
@@ -180,6 +236,12 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
 pub(crate) fn line_clipboard(view: &sourceview5::View) {
     view.connect_copy_clipboard(|view| {
         let buffer = view.buffer();
+        // Stopped here too, or the inherited one copies the primary's selection over it.
+        if let Some(column) = column(view) {
+            view.clipboard().set_text(&column_text(view, column));
+            view.stop_signal_emission_by_name("copy-clipboard");
+            return;
+        }
         if let Some((start, end)) = buffer.selection_bounds() {
             view.clipboard().set_text(&buffer.text(&start, &end, true));
             view.stop_signal_emission_by_name("copy-clipboard");
@@ -189,6 +251,18 @@ pub(crate) fn line_clipboard(view: &sourceview5::View) {
     });
     view.connect_cut_clipboard(|view| {
         let buffer = view.buffer();
+        if let Some(column) = column(view) {
+            view.clipboard().set_text(&column_text(view, column));
+            view.stop_signal_emission_by_name("cut-clipboard");
+            // A cut on a read-only view is a copy, as GTK's own is.
+            if view.is_editable() {
+                match any_selected(column) {
+                    true => column.delete_selections(),
+                    false => delete_line(view),
+                }
+            }
+            return;
+        }
         if let Some((start, end)) = buffer.selection_bounds() {
             view.clipboard().set_text(&buffer.text(&start, &end, true));
             // Refused on a read-only view, where a cut is a copy: what GTK's own cut does.
@@ -477,6 +551,15 @@ mod tests {
             "a last line has none"
         );
         assert_eq!(paste_ready("\n"), "\n", "an empty line is still a line");
+    }
+
+    /// What the line commands take at a column: every line a caret covers, each once, and carets
+    /// on neighbouring lines two runs rather than one.
+    #[test]
+    fn covered_lines_are_taken_once_and_neighbours_stay_apart() {
+        assert_eq!(runs(vec![(2, 2), (0, 0), (1, 1)]), [(0, 0), (1, 1), (2, 2)]);
+        assert_eq!(runs(vec![(0, 3), (2, 5), (5, 5)]), [(0, 5)]);
+        assert_eq!(runs(vec![(4, 4), (4, 4)]), [(4, 4)]);
     }
 
     #[test]

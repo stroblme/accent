@@ -104,6 +104,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         // The rest waits on the clipboard, which is read asynchronously even from this process.
         glib::spawn_future_local(async move {
             bench_column(&view).await;
+            bench_selections(&view).await;
             window.close();
             bench_quit(&app);
         });
@@ -119,14 +120,7 @@ async fn bench_column(view: &multicaret::View) {
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
         println!("bench column_{step} {text:?} {:?}", view.caret_positions());
     };
-    // Three carets down column 1 of `text`, or as many as it has lines for.
-    let column = |text: &str| {
-        view.clear_carets();
-        buffer.set_text(text);
-        buffer.place_cursor(&buffer.iter_at_offset(1));
-        view.add_caret(true);
-        view.add_caret(true);
-    };
+    let column = |text: &str| column(view, text);
     let (none, ctrl) = (gdk::ModifierType::empty(), gdk::ModifierType::CONTROL_MASK);
     let undo = || view.press(gdk::Key::z, ctrl);
 
@@ -233,6 +227,152 @@ async fn bench_column(view: &multicaret::View) {
         "bench column_page_down {:?} top={top}",
         view.caret_positions()
     );
+    view.clear_carets();
+}
+
+/// Three carets down column 1 of `text`, or as many as it has lines for, the primary on top.
+fn column(view: &multicaret::View, text: &str) {
+    let buffer = view.buffer();
+    view.clear_carets();
+    buffer.set_text(text);
+    buffer.place_cursor(&buffer.iter_at_offset(1));
+    view.add_caret(true);
+    view.add_caret(true);
+}
+
+/// A selection at every caret, VS Code's way: Shift extends each caret's own, typing and a delete
+/// take them, a plain arrow collapses them, copy and cut take their text, a paste spreads over
+/// them, the line commands take every line they cover, selections that grow into each other merge,
+/// Undo and Redo put them back, and Escape leaves the primary's. Prints the buffer and every
+/// selection as offsets, top to bottom, after each step.
+async fn bench_selections(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let show = |step: &str| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        let selections: Vec<(i32, i32)> = view
+            .selections()
+            .iter()
+            .map(|(start, end)| (start.offset(), end.offset()))
+            .collect();
+        println!("bench selection_{step} {text:?} {selections:?}");
+    };
+    let none = gdk::ModifierType::empty();
+    let (shift, ctrl) = (
+        gdk::ModifierType::SHIFT_MASK,
+        gdk::ModifierType::CONTROL_MASK,
+    );
+    let select = |key, times| {
+        for _ in 0..times {
+            view.press(key, shift);
+        }
+    };
+
+    // Shift+Right twice selects two characters at every caret; what is typed takes their place,
+    // and Undo and Redo put the selections back with the text.
+    column(view, "abcd\nefgh\nijkl");
+    select(gdk::Key::Right, 2);
+    show("extend");
+    view.press(gdk::Key::X, shift);
+    show("type_over");
+    view.press(gdk::Key::z, ctrl);
+    show("undo");
+    view.press(gdk::Key::Z, ctrl | shift);
+    show("redo");
+
+    // Backspace takes each selection and nothing more.
+    column(view, "abcd\nefgh\nijkl");
+    select(gdk::Key::Right, 2);
+    view.press(gdk::Key::BackSpace, none);
+    show("backspace");
+
+    // A plain Left collapses each onto its start and Right onto its end, going no further; Down
+    // leaves a selection from its end.
+    column(view, "abcd\nefgh\nijkl\nmnop");
+    select(gdk::Key::Right, 2);
+    view.press(gdk::Key::Left, none);
+    show("left");
+    select(gdk::Key::Right, 2);
+    view.press(gdk::Key::Right, none);
+    show("right");
+    select(gdk::Key::Left, 2);
+    view.press(gdk::Key::Down, none);
+    show("down");
+
+    // Copy takes each selection, joined by newlines; the cut deletes them as one step. Each on a
+    // column of its own: while the clipboard is read, the X server can hand the primary selection
+    // to someone else, and GTK lets the primary caret's selection go when it does.
+    column(view, "abcd\nefgh\nijkl");
+    select(gdk::Key::Right, 2);
+    view.emit_copy_clipboard();
+    let copied = view.clipboard().read_text_future().await;
+    println!("bench selection_copy {copied:?}");
+    column(view, "abcd\nefgh\nijkl");
+    select(gdk::Key::Right, 2);
+    view.emit_cut_clipboard();
+    show("cut");
+    let cut = view.clipboard().read_text_future().await;
+    println!("bench selection_cut_clipboard {cut:?}");
+
+    // A paste with a line per selection hands one to each, in place of it.
+    column(view, "abcd\nefgh\nijkl");
+    select(gdk::Key::Right, 2);
+    view.clipboard().set_text("1\n2\n3");
+    view.emit_paste_clipboard();
+    glib::timeout_future(Duration::from_millis(100)).await;
+    show("paste");
+
+    // Selections that only meet stay apart; grown into each other they are one caret, and the
+    // column with it.
+    column(view, "ab\ncd\nef\ngh");
+    select(gdk::Key::Down, 1);
+    show("meet");
+    select(gdk::Key::Down, 1);
+    show("merge");
+    println!("bench selection_merge_carets {}", view.has_carets());
+
+    // The line commands take every line a selection covers, each once. Selections within their
+    // lines duplicate line by line and ride down onto the copies; selections running into the
+    // next line cover one run, which is copied whole, deleted whole, or opened under once.
+    column(view, "ab\ncd\nef\ngh");
+    select(gdk::Key::End, 1);
+    editor::duplicate_line(view.upcast_ref());
+    show("duplicate");
+    for (step, command) in [
+        (
+            "duplicate_run",
+            editor::duplicate_line as fn(&sourceview5::View),
+        ),
+        ("delete_run", editor::delete_line),
+        ("newline_below_run", editor::newline_below),
+    ] {
+        column(view, "ab\ncd\nef\ngh\nij");
+        select(gdk::Key::Down, 1);
+        command(view.upcast_ref());
+        show(step);
+    }
+
+    // Escape is the column's own: it ends it and leaves the primary's selection.
+    column(view, "abcd\nefgh");
+    select(gdk::Key::Right, 2);
+    let stopped = view.press(gdk::Key::Escape, none) == glib::Propagation::Stop;
+    let primary = buffer
+        .selection_bounds()
+        .map(|(start, end)| (start.offset(), end.offset()));
+    println!(
+        "bench selection_escape stopped={stopped} carets={} primary={primary:?}",
+        view.has_carets()
+    );
+
+    // The colour the other selections are painted in: the scheme's own where it names one.
+    use sourceview5::prelude::BufferExt as _;
+    let source = buffer.downcast_ref::<sourceview5::Buffer>();
+    for id in ["Adwaita", "solarized-light"] {
+        let scheme = sourceview5::StyleSchemeManager::default().scheme(id);
+        if let Some(source) = source {
+            source.set_style_scheme(scheme.as_ref());
+        }
+        println!("bench selection_colour {id} {}", view.selection_colour());
+    }
     view.clear_carets();
 }
 
