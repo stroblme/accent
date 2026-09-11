@@ -11,7 +11,7 @@ use crate::geom::{self, PathCmd, Point, Rect};
 use crate::label::{self, Run};
 use crate::marker;
 use crate::model::{Cell, CellId, Geometry, Page};
-use crate::route::{self, EdgeInput, PerimeterKind, Terminal};
+use crate::route::{self, EdgeInput, Terminal};
 use crate::shapes;
 use crate::style::{Color, Resolved};
 
@@ -547,21 +547,7 @@ impl<'a> Builder<'a> {
 
     /// The vertex an edge end is attached to, as routing needs it.
     fn terminal(&self, id: Option<&str>) -> Option<Terminal> {
-        let cell = self.cell(id?)?;
-        if !cell.vertex {
-            return None;
-        }
-        let bounds = self.page.absolute_rect(&cell.id)?;
-        let style = cell.style.resolve(false);
-        Some(Terminal {
-            bounds,
-            rotation: style.num("rotation", 0.0),
-            perimeter: match style.get("perimeter") {
-                Some("ellipsePerimeter") => PerimeterKind::Ellipse,
-                _ => PerimeterKind::Rectangle,
-            },
-            perimeter_spacing: style.num("perimeterSpacing", 0.0),
-        })
+        Terminal::of(self.page, self.cell(id?)?)
     }
 
     /// A cell's label, placed as `mxCellRenderer.getLabelBounds` and `rotateLabelBounds` place

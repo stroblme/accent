@@ -26,6 +26,7 @@ pub use edit::{Editor, ZOrder};
 pub use geom::{PathCmd, Point, Rect};
 pub use label::{Marks, Run};
 pub use model::{Cell, CellId, File, Geometry, Page, Value};
+pub use route::{Constraint, anchors};
 pub use scene::{Align, Font, ImageSource, Paint, Prim, Scene, Stroke, VAlign, scene};
 pub use style::{Color, Resolved, Style, presets};
 pub use xml::decode_data_uri;
