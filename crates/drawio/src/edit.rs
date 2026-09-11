@@ -120,7 +120,7 @@ impl Editor {
         true
     }
 
-    /// A vertex at `rect` (absolute), inside `parent` or the page's first layer.
+    /// A vertex at `rect` (absolute), inside `parent` or the page's first unlocked layer.
     pub fn add_vertex(
         &mut self,
         page: usize,
@@ -144,8 +144,8 @@ impl Editor {
         })
     }
 
-    /// An edge in the page's first layer. An end without a cell dangles at its point; an end
-    /// with one keeps the point too, as draw.io writes it.
+    /// An edge in the page's first unlocked layer. An end without a cell dangles at its point;
+    /// an end with one keeps the point too, as draw.io writes it.
     pub fn add_edge(
         &mut self,
         page: usize,
@@ -516,11 +516,13 @@ fn cell_mut<'a>(page: &'a mut Page, id: &str) -> Result<&'a mut Cell, Error> {
         .ok_or_else(|| Error::NoCell(id.to_string()))
 }
 
-/// The layer new cells go into.
+/// The layer new cells go into ([`Page::default_parent`]), refused when there is none.
 fn default_layer(page: &Page) -> Result<CellId, Error> {
-    page.default_parent()
-        .map(str::to_string)
-        .ok_or(Error::Refused("the page has no layer"))
+    match page.default_parent() {
+        Some(id) => Ok(id.to_string()),
+        None if page.layers().is_empty() => Err(Error::Refused("the page has no layer")),
+        None => Err(Error::Refused("every layer on this page is locked")),
+    }
 }
 
 /// `roots` and every cell under them. A file in draw.io's order, parents before children,
@@ -660,6 +662,31 @@ mod tests {
             );
         }
         assert_eq!(made.iter().collect::<HashSet<_>>().len(), made.len());
+    }
+
+    #[test]
+    fn new_cells_go_into_the_first_unlocked_layer() {
+        let locked = |id| Cell {
+            style: Style::parse("locked=1;"),
+            ..Cell::layer(id, "0")
+        };
+        let mut e = open([Cell::layer("2", "0"), Cell::layer("3", "0")]);
+        e.file.pages[0].cells[1] = locked("1");
+        let v = e.add_vertex(0, None, Rect::default(), "", "").unwrap();
+        let ends = (None, Point::default());
+        let f = e.add_edge(0, ends, ends, "").unwrap();
+        let parent = |id: &str| e.page(0).unwrap().cell(id).unwrap().parent.clone();
+        assert_eq!(parent(&v).as_deref(), Some("2"));
+        assert_eq!(parent(&f).as_deref(), Some("2"));
+
+        let mut e = open(Vec::new());
+        e.file.pages[0].cells[1] = locked("1");
+        let r = e.add_vertex(0, None, Rect::default(), "", "");
+        assert!(matches!(
+            r,
+            Err(Error::Refused("every layer on this page is locked"))
+        ));
+        assert!(!e.can_undo());
     }
 
     #[test]

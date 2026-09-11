@@ -202,9 +202,17 @@ impl Page {
         }
     }
 
-    /// The layer new cells go into: the first one, which is where draw.io puts them too.
+    /// The layer new cells go into: the first one not locked (`locked=1`), so that what is drawn
+    /// can be picked again. draw.io puts them in its default parent, the first layer until the
+    /// reader picks another in the Layers dialog, and disables inserting while that layer is
+    /// locked (EditorUi.js `updateActionStates` 6004-6096, Graph.js `isCellLocked` 1431-1444).
+    /// `None` when every layer is locked or there is none.
+    // ponytail: a layer the reader picks, as draw.io's Layers dialog does, is the upgrade.
     pub fn default_parent(&self) -> Option<&str> {
-        self.layers().first().map(|c| c.id.as_str())
+        self.layers()
+            .into_iter()
+            .find(|c| c.style.get("locked") != Some("1"))
+            .map(|c| c.id.as_str())
     }
 
     /// The layer `id` sits in (itself for a layer), `None` for the root or an unknown cell.
