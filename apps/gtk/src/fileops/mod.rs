@@ -19,7 +19,7 @@ pub use paths::move_dest;
 pub use transfer::{download, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
+    already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
@@ -149,23 +149,36 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, templates: Vec<String>) {
             .as_ref()
             .filter(|_| is_markdown(&name))
             .and_then(|p| (p.selected() as usize).checked_sub(1))
-            .and_then(|i| templates.get(i));
-        if let Err(why) = make_parents(&ops, &rel) {
-            return (ops.toast)(&why);
-        }
-        match ops.vault.create_note(&rel, template.map(String::as_str)) {
-            Ok((created, stops)) => {
-                (ops.open)(&created, &stops);
-                // The tab is the report, unless the tree is not going to list what it holds.
-                if hidden_now(&ops, &created) {
-                    (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+            .and_then(|i| templates.get(i))
+            .cloned();
+        // The folders and then the file, on a worker: each is a round trip on a remote vault.
+        let vault = ops.vault.clone();
+        glib::spawn_future_local(async move {
+            let made = gio::spawn_blocking({
+                let name = name.clone();
+                move || {
+                    make_parents(&vault, &rel)?;
+                    vault.create_note(&rel, template.as_deref()).map_err(|e| {
+                        match already_exists(&e) {
+                            true => format!("Cannot create {name}: it already exists"),
+                            false => format!("Cannot create {name}: {}", why(&e)),
+                        }
+                    })
                 }
+            })
+            .await
+            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            match made {
+                Ok((created, stops)) => {
+                    (ops.open)(&created, &stops);
+                    // The tab is the report, unless the tree is not going to list what it holds.
+                    if hidden_now(&ops, &created) {
+                        (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+                    }
+                }
+                Err(why) => (ops.toast)(&why),
             }
-            Err(e) if already_exists(&e) => {
-                (ops.toast)(&format!("Cannot create {name}: it already exists"))
-            }
-            Err(e) => (ops.toast)(&format!("Cannot create {name}: {}", why(&e))),
-        }
+        });
     });
     focus_name(&entry, None);
 }
@@ -196,18 +209,35 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
             Err(why) => return (ops.toast)(why),
         };
         let name = basename(&rel).to_string();
-        // `create_dir_all` is happy to find the directory already there, so the collision the
-        // user cares about has to be asked about before the call rather than read off its error.
-        // Asked of the vault and not of this disk: `root()` is a path on the *remote* host, so
-        // the local `exists` there was always false and every clash went through as "Created".
-        if ops.vault.exists(&rel) {
-            return (ops.toast)(&format!("Cannot create {name}: it already exists"));
-        }
-        match ops.vault.create_dir(&rel) {
-            Ok(()) if hidden_now(&ops, &rel) => (ops.toast)(&format!("Created {name}; {HIDDEN}")),
-            Ok(()) => (ops.toast)(&format!("Created {name}")),
-            Err(e) => (ops.toast)(&made_what_it_could(&ops, &rel, &e.to_string())),
-        }
+        // Both questions on a worker, each being a round trip on a remote vault.
+        let vault = ops.vault.clone();
+        glib::spawn_future_local(async move {
+            let made = gio::spawn_blocking({
+                let (rel, name) = (rel.clone(), name.clone());
+                move || {
+                    // `create_dir_all` is happy to find the directory already there, so the
+                    // collision the user cares about has to be asked about before the call rather
+                    // than read off its error. Asked of the vault and not of this disk: `root()` is
+                    // a path on the *remote* host, so the local `exists` there was always false and
+                    // every clash went through as "Created".
+                    if vault.exists(&rel) {
+                        return Err(format!("Cannot create {name}: it already exists"));
+                    }
+                    vault
+                        .create_dir(&rel)
+                        .map_err(|e| made_what_it_could(&vault, &rel, &e.to_string()))
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            match made {
+                Ok(()) if hidden_now(&ops, &rel) => {
+                    (ops.toast)(&format!("Created {name}; {HIDDEN}"))
+                }
+                Ok(()) => (ops.toast)(&format!("Created {name}")),
+                Err(why) => (ops.toast)(&why),
+            }
+        });
     });
     focus_name(&entry, None);
 }
@@ -242,16 +272,22 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
         if response != CONFIRM {
             return;
         }
-        let Some(template) = templates.get(picker.selected() as usize) else {
+        let Some(template) = templates.get(picker.selected() as usize).cloned() else {
             return;
         };
-        let name = basename(template);
-        match ops.vault.note_from_template(template) {
-            Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
-            // The file changed under the dialog; nothing was created, so nothing to undo.
-            Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
-            Err(e) => (ops.toast)(&format!("Cannot create a note from {name}: {}", why(&e))),
-        }
+        let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
+        glib::spawn_future_local(async move {
+            let made = gio::spawn_blocking(move || vault.note_from_template(&template)).await;
+            match made {
+                Ok(Ok(Some((rel, stops)))) => (ops.open)(&rel, &stops),
+                // The file changed under the dialog; nothing was created, so nothing to undo.
+                Ok(Ok(None)) => (ops.toast)(&format!("{name} no longer says where its notes go")),
+                Ok(Err(e)) => {
+                    (ops.toast)(&format!("Cannot create a note from {name}: {}", why(&e)))
+                }
+                Err(_) => (ops.toast)(&format!("Cannot create a note from {name}")),
+            }
+        });
     });
 }
 
@@ -305,17 +341,19 @@ fn insert_template_with(ops: &Rc<Ops>, title: &str, insert: Insert, templates: V
         if response != CONFIRM {
             return;
         }
-        let Some(template) = templates.get(picker.selected() as usize) else {
+        let Some(template) = templates.get(picker.selected() as usize).cloned() else {
             return;
         };
-        match ops.vault.render_template(template, &title) {
-            Ok((text, stops)) => insert(&text, &stops),
-            Err(e) => (ops.toast)(&format!(
-                "Cannot insert {}: {}",
-                basename(template),
-                why(&e)
-            )),
-        }
+        let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
+        glib::spawn_future_local(async move {
+            let rendered =
+                gio::spawn_blocking(move || vault.render_template(&template, &title)).await;
+            match rendered {
+                Ok(Ok((text, stops))) => insert(&text, &stops),
+                Ok(Err(e)) => (ops.toast)(&format!("Cannot insert {name}: {}", why(&e))),
+                Err(_) => (ops.toast)(&format!("Cannot insert {name}")),
+            }
+        });
     });
 }
 
@@ -341,9 +379,9 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 /// what was asked for. A note that loses its `.md` stops being a note, which is the one rename
 /// that asks first ([`confirm_demote`]). The folders a path names are created with it.
 ///
-/// The extension starts outside the selection, so typing replaces the stem only, which is what
-/// every file manager does.
-pub fn rename(ops: &Rc<Ops>, rel: &str) {
+/// A file's extension starts outside the selection, so typing replaces the stem only, and a
+/// folder's name is selected whole, which is what every file manager does.
+pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
     let form = form();
@@ -375,8 +413,8 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
             false => plan(&ops, &rel, &to, verb(&rel, &to)),
         }
     });
-    let stem = split_ext(&current).0.chars().count() as i32;
-    focus_name(&entry, Some(stem));
+    let selected = renamed_part(&current, is_dir).chars().count() as i32;
+    focus_name(&entry, Some(selected));
 }
 
 /// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but
@@ -420,15 +458,22 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
 /// moving so a row that cannot take what is over it never lights up. What is left to refuse here
 /// is a name the destination already holds.
 pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
-    // Asked before the move rather than read off its error, as `new_folder` does: the error names
-    // an absolute path, which is not what anyone dropped anything on.
-    if ops.vault.exists(to) {
-        return (ops.toast)(&format!(
-            "Cannot move {}: it is already there",
-            basename(to)
-        ));
-    }
-    plan(ops, from, to, "Moved");
+    let (vault, ops) = (ops.vault.clone(), ops.clone());
+    let (from, to) = (from.to_string(), to.to_string());
+    glib::spawn_future_local(async move {
+        // Asked before the move rather than read off its error, as `new_folder` does: the error
+        // names an absolute path, which is not what anyone dropped anything on. On a worker, as
+        // the plan is, being a round trip on a remote vault.
+        let asked = to.clone();
+        match gio::spawn_blocking(move || vault.exists(&asked)).await {
+            Ok(false) => plan(&ops, &from, &to, "Moved"),
+            Ok(true) => (ops.toast)(&format!(
+                "Cannot move {}: it is already there",
+                basename(&to)
+            )),
+            Err(_) => (ops.toast)(&format!("Cannot move {}", basename(&from))),
+        }
+    });
 }
 
 /// Ask the vault what the move would touch, then either do it or confirm the link rewrites first.
@@ -502,13 +547,6 @@ fn link_body(rewrites: &[String]) -> String {
 /// Move the file, then report. A partly rewritten vault is a real outcome, so the notes that
 /// could not be updated are said out loud instead of being logged and forgotten.
 fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str) {
-    // Rename is the keyboard's move and a typed path may name folders that are not there yet, so
-    // they are made here — after the confirmation, so nothing exists until the move really
-    // happens. A dropped row never reaches it: every destination the tree offers is a row that is
-    // already there.
-    if let Err(why) = make_parents(ops, &plan.to) {
-        return (ops.toast)(&why);
-    }
     // The note being moved is flushed with the ones about to be rewritten: its own tab is about
     // to point at a path that no longer exists, and an unsaved buffer must not be the casualty.
     let mut dirty = plan.rewrites.clone();
@@ -520,7 +558,20 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
     let (vault, to, ops) = (ops.vault.clone(), plan.to.clone(), ops.clone());
     let name = basename(&plan.from).to_string();
     glib::spawn_future_local(async move {
-        let done = gio::spawn_blocking(move || vault.rename(&plan, update_links)).await;
+        let done = gio::spawn_blocking({
+            let name = name.clone();
+            move || {
+                // Rename is the keyboard's move and a typed path may name folders that are not
+                // there yet, so they are made here — after the confirmation, so nothing exists
+                // until the move really happens. A dropped row never needs one: every destination
+                // the tree offers is a row that is already there.
+                make_parents(&vault, &plan.to)?;
+                vault
+                    .rename(&plan, update_links)
+                    .map_err(|e| format!("Cannot rename {name}: {}", why(&e)))
+            }
+        })
+        .await;
         match done {
             Ok(Ok(report)) => {
                 let unsaved = (ops.reload)(&report.rewritten);
@@ -530,7 +581,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
                 }
                 (ops.toast)(&message);
             }
-            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
+            Ok(Err(why)) => (ops.toast)(&why),
             Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
         }
     });
@@ -655,19 +706,33 @@ fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
         if response != "delete" {
             return;
         }
-        let mut deleted = Vec::new();
-        for rel in rels {
-            match ops.vault.delete(&rel) {
-                Ok(()) => {
-                    (ops.close)(&rel);
-                    deleted.push(rel);
+        // A round trip per path on a remote vault, so on a worker; each tab closes once its file
+        // is gone.
+        let vault = ops.vault.clone();
+        glib::spawn_future_local(async move {
+            let done = gio::spawn_blocking(move || {
+                rels.into_iter()
+                    .map(|rel| (vault.delete(&rel), rel))
+                    .collect::<Vec<_>>()
+            })
+            .await;
+            let Ok(done) = done else {
+                return (ops.toast)("Cannot delete");
+            };
+            let mut deleted = Vec::new();
+            for (answer, rel) in done {
+                match answer {
+                    Ok(()) => {
+                        (ops.close)(&rel);
+                        deleted.push(rel);
+                    }
+                    Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
                 }
-                Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
             }
-        }
-        if !deleted.is_empty() {
-            (ops.toast)(&format!("Deleted {}", several(&deleted)));
-        }
+            if !deleted.is_empty() {
+                (ops.toast)(&format!("Deleted {}", several(&deleted)));
+            }
+        });
     });
 }
 
@@ -748,23 +813,21 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
 /// levels it did manage. They are named rather than cleaned up — deleting a directory because a
 /// deeper one could not be made is the more dangerous of the two guesses, and one of the levels
 /// may have been there all along.
-fn make_parents(ops: &Ops, rel: &str) -> Result<(), String> {
+fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
     let dir = parent_dir(rel);
-    if dir.is_empty() || ops.vault.exists(dir) {
+    if dir.is_empty() || vault.exists(dir) {
         return Ok(());
     }
-    match ops.vault.create_dir(dir) {
+    match vault.create_dir(dir) {
         Ok(()) => Ok(()),
-        Err(e) => Err(made_what_it_could(ops, dir, &e.to_string())),
+        Err(e) => Err(made_what_it_could(vault, dir, &e.to_string())),
     }
 }
 
 /// A failed `mkdir -p`, and the levels of it that are on disk now. Asked afterwards rather than
 /// tracked as it went: the vault is the only thing that knows how far the call got.
-fn made_what_it_could(ops: &Ops, dir: &str, why: &str) -> String {
-    let made: Vec<&str> = levels(dir)
-        .filter(|level| ops.vault.exists(level))
-        .collect();
+fn made_what_it_could(vault: &Vault, dir: &str, why: &str) -> String {
+    let made: Vec<&str> = levels(dir).filter(|level| vault.exists(level)).collect();
     match made.is_empty() {
         true => format!("Cannot create {dir}: {why}"),
         false => format!(

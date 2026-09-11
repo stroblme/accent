@@ -162,6 +162,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
+    ("win.copy-name", "Copy Name", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
     ("win.copy-absolute-path", "Copy Absolute Path", &[]),
     ("win.show-in-files", "Show in Files", &[]),
@@ -310,6 +311,12 @@ impl App {
                 }
                 self.config_changed();
             }
+            // No vault needed: the name is the last segment of a loose file's key as well.
+            "copy-name" => {
+                if let Some(rel) = self.menu_rel() {
+                    self.window.clipboard().set_text(doc::file_name(&rel));
+                }
+            }
             "copy-relative-path" => {
                 if let (Some(rel), Some(ops)) =
                     (self.menu_rel(), self.need_ops("copy a vault path"))
@@ -417,10 +424,10 @@ impl App {
             "rename" => {
                 let target = self
                     .selected_row()
-                    .map(|row| row.rel)
-                    .or_else(|| self.active().map(|tab| tab.rel()));
-                if let (Some(rel), Some(ops)) = (target, self.need_ops("rename a file")) {
-                    fileops::rename(ops, &rel);
+                    .map(|row| (row.is_dir(), row.rel))
+                    .or_else(|| self.active().map(|tab| (false, tab.rel())));
+                if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
+                    fileops::rename(ops, &rel, is_dir);
                 }
             }
             "new-from-template" => {
@@ -754,6 +761,7 @@ pub fn tab_menu() -> gio::Menu {
     }
     menu.append_section(None, &move_tab);
     for action in [
+        "win.copy-name",
         "win.copy-relative-path",
         "win.copy-absolute-path",
         "win.show-in-files",

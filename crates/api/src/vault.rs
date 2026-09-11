@@ -32,8 +32,8 @@ use crate::{
 /// Reads and writes are synchronous here, as they always were. A remote call is a round trip, and
 /// every window of the desktop app shares one main thread, so it makes them on worker threads,
 /// autosave included: a round trip once a second while someone typed held every window. What
-/// stays where it is called is a write the click that asked for it has to see land before it is
-/// done — a new note, or a tab closing with its buffer dirty.
+/// stays where it is called is a write that has to land before its caller can go on: a tab
+/// closing with its buffer dirty, and the writes behind a banner's buttons.
 pub struct Vault {
     pub(crate) backend: Backend,
     /// What this vault is called in the config, the recents and the session file: the root for a
