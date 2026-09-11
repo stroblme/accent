@@ -35,7 +35,8 @@ pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, restyle_companion, style_companion};
 use follow::Follow;
-use lines::line_clipboard;
+pub(crate) use lines::paste_primary;
+use lines::{line_clipboard, primary_paste};
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
@@ -400,6 +401,7 @@ pub fn open(
     // editor where Ctrl+X on no selection does nothing is one that makes the user select the line
     // first.
     line_clipboard(&view);
+    primary_paste(&view);
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
     // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
@@ -634,14 +636,6 @@ pub fn open(
         #[weak(rename_to = tab)]
         tab,
         move |_| tab.on_changed()
-    ));
-    // Copy and cut hand over plain text (`line_clipboard`), but the primary selection a middle
-    // click pastes is still GTK's rich copy, whose tags land after `changed` has re-tagged the
-    // text. Tagged again once the paste is in, so they do not stay on its last run.
-    buffer.connect_paste_done(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_, _| tab.analyse_text()
     ));
     buffer.connect_cursor_position_notify(glib::clone!(
         #[weak(rename_to = tab)]

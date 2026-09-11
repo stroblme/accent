@@ -18,8 +18,8 @@ use super::*;
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
-/// was styled on the keystroke or on the debounce, then whether a copy and paste out of a styled
-/// line brings its styling along.
+/// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
+/// or a drop out of a styled or folded line brings its tags along.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up.
@@ -1318,17 +1318,32 @@ fn bench_style(app: &Rc<App>, rel: &str) {
 /// carries a heading's or a bold's tags. GTK's own copy is rich text, and pasting it back inserts
 /// the copy run by run with each run's tags applied after `changed` has re-tagged the text, so the
 /// last run kept its tags: a selection ending one character into a bold word left that character
-/// bold. Every paste lands mid-line, so nothing it brings can start a heading of its own.
+/// bold. Every paste lands mid-line, so nothing it brings can start a heading of its own. The
+/// middle click and the drop are the other two ways text comes in from the buffer itself.
 async fn bench_style_paste(tab: &Rc<Tab>) {
     const HEADING: &str = "# Heading here\nplain line\n";
     const BOLD: &str = "Some **bold** words\nplain line\n";
-    for (case, text, selected, middle_click) in [
-        ("heading", HEADING, "ading he", false),
-        ("bold_tail", BOLD, "Some **b", false),
-        // The primary selection a middle click pastes is still GTK's rich copy.
-        ("primary", BOLD, "Some **b", true),
+    const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
+    for (case, text, selected, how) in [
+        ("heading", HEADING, "ading he", "copy"),
+        ("bold_tail", BOLD, "Some **b", "copy"),
+        // The primary selection a middle click pastes is this buffer itself, tags and all.
+        ("primary", BOLD, "Some **b", "primary"),
+        // Across a folded section, whose tag hides text rather than styling it.
+        ("primary_fold", FOLDED, "One\nhidden body\n", "primary"),
+        // A drag inside the note, dropped the way the view's drop target takes it. Across a fold
+        // the drag carries the visible text only, which a move then replaces the whole range with.
+        ("drop", BOLD, "Some **b", "drop"),
+        ("drop_fold", FOLDED, "One\nhidden body\n", "drop"),
     ] {
         tab.set_text(text);
+        if text == FOLDED {
+            let fold = accent_api::Fold {
+                start_line: 0,
+                end_line: 1,
+            };
+            crate::fold::fold(tab.buffer.upcast_ref(), fold);
+        }
         // ASCII throughout, so a byte offset is also the character offset the buffer counts in.
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let len = selected.len() as i32;
@@ -1337,16 +1352,45 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
             &tab.buffer.iter_at_offset(at(selected) + len),
         );
         let into = at("line");
-        if middle_click {
-            // What the view does on a middle click: the selection stays, the text goes in where
-            // the click was.
-            let clipboard = tab.view.primary_clipboard();
-            let iter = tab.buffer.iter_at_offset(into);
-            tab.buffer.paste_clipboard(&clipboard, Some(&iter), true);
-        } else {
-            tab.view.emit_copy_clipboard();
-            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(into));
-            tab.view.emit_paste_clipboard();
+        match how {
+            // What a middle click runs: the selection stays, the text goes in where the click was.
+            "primary" => crate::editor::paste_primary(&tab.view, &tab.buffer.iter_at_offset(into)),
+            // What the drag carries is the selection's content provider; the view's drop target
+            // reads it as a string and inserts that where its `gtk_drag_target` mark is.
+            "drop" => {
+                let stream = gio::MemoryOutputStream::new_resizable();
+                let content = tab.buffer.selection_content();
+                let source = content
+                    .value(gtk::TextBuffer::static_type())
+                    .expect("bench drag content");
+                let mime = "text/plain;charset=utf-8";
+                gdk::content_serialize_future(&stream, mime, &source, glib::Priority::DEFAULT)
+                    .await
+                    .expect("bench drag serialize");
+                stream
+                    .close(gio::Cancellable::NONE)
+                    .expect("bench drag stream");
+                let dropped = String::from_utf8_lossy(&stream.steal_as_bytes()).into_owned();
+                let mark = tab.buffer.mark("gtk_drag_target").expect("bench drag mark");
+                tab.buffer
+                    .move_mark(&mark, &tab.buffer.iter_at_offset(into));
+                let target = (0..)
+                    .map_while(|i| tab.view.observe_controllers().item(i))
+                    .filter_map(|c| c.downcast::<gtk::DropTarget>().ok())
+                    .find(|t| t.types().contains(&glib::Type::STRING))
+                    .expect("bench drop target");
+                println!(
+                    "bench style_drop types={:?} text={dropped:?}",
+                    target.types()
+                );
+                let value = glib::BoxedValue(dropped.to_value());
+                target.emit_by_name::<bool>("drop", &[&value, &0.0f64, &0.0f64]);
+            }
+            _ => {
+                tab.view.emit_copy_clipboard();
+                tab.buffer.place_cursor(&tab.buffer.iter_at_offset(into));
+                tab.view.emit_paste_clipboard();
+            }
         }
         // The clipboard is read asynchronously, even when it is this process that owns it.
         glib::timeout_future(Duration::from_millis(100)).await;
@@ -1356,11 +1400,13 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
             })
         };
         // The line it landed in, so a paste that brought nothing cannot pass for a clean one.
-        let line = tab.text().lines().nth(1).unwrap_or_default().to_string();
+        let row = tab.buffer.iter_at_offset(into).line() as usize;
+        let line = tab.text().lines().nth(row).unwrap_or_default().to_string();
         println!(
-            "bench style_paste case={case} line={line:?} h1={} strong={}",
+            "bench style_paste case={case} line={line:?} h1={} strong={} fold={}",
             over("h1"),
-            over("strong")
+            over("strong"),
+            over("fold")
         );
     }
 }
@@ -1853,7 +1899,7 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
 
 /// Open a PDF, leave the reader halfway down its second page, and fit the page from there.
 ///
-/// Fit Page is fired as the window action the status bar's menu and the palette both fire, so a
+/// Fit Height is fired as the window action the status bar's menu and the palette both fire, so a
 /// route that never reaches the tab shows up here as a zoom that did not change.
 fn bench_pdf(app: &Rc<App>, rel: &str) {
     app.open_path(rel);

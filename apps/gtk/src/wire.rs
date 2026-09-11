@@ -313,7 +313,7 @@ pub fn wire_window(app: &Rc<App>) {
             // A popover parented by hand stays parented until it is unparented by hand — but not
             // while it is closing. `closed` is emitted from inside the item's own `clicked`, and
             // an unparented widget has no path to the window's action muxer, so unparenting there
-            // dropped the action the click had just asked for: the menu appeared, Fit Page did
+            // dropped the action the click had just asked for: the menu appeared, Fit Height did
             // nothing, and the page stayed fitted to the width. The idle runs once the click is
             // over.
             popover.connect_closed(|p| {

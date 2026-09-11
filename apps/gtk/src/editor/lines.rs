@@ -1,10 +1,12 @@
 //! What a tab does to whole lines: the clipboard's line cut and copy, Insert Line Below,
 //! duplicate and delete, the comment toggle, wrapping, and the template snippets whose Tab stops
-//! are walked through the text they inserted.
+//! are walked through the text they inserted. The plain-text middle-click paste sits beside the
+//! cut and copy.
 
 use super::{Tab, caret, line_end};
 use crate::comment;
 use gtk::prelude::*;
+use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
 
 /// The spaces and tabs a line opens with, which is what a line inserted below it copies.
@@ -98,6 +100,91 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
         buffer.delete(&mut start, &mut end);
         buffer.end_user_action();
     });
+}
+
+/// Middle-click paste, as plain text like every other way in. GTK's own reads the primary
+/// selection as a `GtkTextBuffer`, and when that is this buffer's selection it inserts it run by
+/// run with each run's tags: the highlighter re-derives its own, but a fold's tag came along and
+/// hid part of the paste behind no chevron. In the capture phase and claimed, so the view's own
+/// gesture never sees the press.
+pub(super) fn primary_paste(view: &sourceview5::View) {
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_MIDDLE)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    click.connect_pressed(|click, _, x, y| {
+        let Some(view) = click.widget().and_downcast::<sourceview5::View>() else {
+            return;
+        };
+        // Off, GTK's gesture does nothing with the press either.
+        if !view.settings().is_gtk_enable_primary_paste() {
+            return;
+        }
+        click.set_state(gtk::EventSequenceState::Claimed);
+        view.grab_focus();
+        let (x, y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
+        paste_primary(&view, &pressed_at(&view, x, y));
+    });
+    view.add_controller(click);
+}
+
+/// The place a press at buffer `x`, `y` means, as GTK's own gesture takes it: the character under
+/// it, or the end or start of the row it is beside. `iter_at_location` answers only over text, so
+/// beside a row that row is found by walking the paragraph's display rows down to `y`.
+fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextIter {
+    if let Some(at) = view.iter_at_location(x, y) {
+        return at;
+    }
+    let (mut row, _) = view.line_at_y(y);
+    let mut next = row;
+    while view.forward_display_line(&mut next)
+        && next.line() == row.line()
+        && view.iter_location(&next).y() <= y
+    {
+        row = next;
+    }
+    if x > view.iter_location(&row).x() {
+        view.forward_display_line_end(&mut row);
+    }
+    row
+}
+
+/// Insert the primary selection at `at` as text, hidden text included as a copy takes it. Onto
+/// the view's own selection it is nothing, as in GTK: that selection is what would be pasted.
+pub(crate) fn paste_primary(view: &sourceview5::View, at: &gtk::TextIter) {
+    let buffer = view.buffer();
+    if buffer
+        .selection_bounds()
+        .is_some_and(|(start, end)| start <= *at && *at <= end)
+    {
+        return;
+    }
+    // The read is asynchronous even from this process, and the text may change meanwhile.
+    let mark = buffer.create_mark(None, at, false);
+    view.primary_clipboard().read_value_async(
+        gtk::TextBuffer::static_type(),
+        glib::Priority::DEFAULT,
+        gio::Cancellable::NONE,
+        glib::clone!(
+            #[weak]
+            view,
+            move |value| {
+                let buffer = view.buffer();
+                let mut at = buffer.iter_at_mark(&mark);
+                buffer.delete_mark(&mark);
+                let Some(source) = value.ok().and_then(|v| v.get::<gtk::TextBuffer>().ok()) else {
+                    return;
+                };
+                let Some((start, end)) = source.selection_bounds() else {
+                    return;
+                };
+                let text = source.text(&start, &end, true);
+                buffer.begin_user_action();
+                buffer.insert_interactive(&mut at, &text, view.is_editable());
+                buffer.end_user_action();
+            }
+        ),
+    );
 }
 
 /// `text` as a snippet whose stops are the byte offsets `stops`, in Tab order.
