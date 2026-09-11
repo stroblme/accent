@@ -233,8 +233,11 @@ impl App {
             move |pdf| {
                 app.sync_opening();
                 app.sync_outline();
-                // The page count is known now, so the readout has something to say at last.
+                // The page count is known now, so the readouts have something to say at last.
                 app.sync_status();
+                if let Some(pane) = app.pane_of(&pdf.page) {
+                    pane.find.refresh_count();
+                }
                 // And the pages are there to paint the notes' highlights onto.
                 app.sync_pdf_links(pdf);
             }
