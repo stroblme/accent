@@ -351,18 +351,25 @@ impl App {
             tab.show_alert(Alert::Compare);
             return false;
         }
+        let vault = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned();
         // The read is off the main thread, so the status is asked for when the text lands rather
         // than here: a reload writes the buffer without an edit event, and nothing else would ask.
-        tab.reload_keep_cursor(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move |_: &Rc<Tab>, read: std::io::Result<()>| {
-                if let Err(e) = read {
-                    app.cannot("reload", e);
+        tab.reload_keep_cursor(
+            vault,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |_: &Rc<Tab>, read: std::io::Result<()>| {
+                    if let Err(e) = read {
+                        app.cannot("reload", e);
+                    }
+                    app.sync_status();
                 }
-                app.sync_status();
-            }
-        ));
+            ),
+        );
         true
     }
 

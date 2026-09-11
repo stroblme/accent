@@ -676,7 +676,7 @@ impl App {
         };
         // The same list whatever the tab holds: a note's headings and a source file's functions
         // are both what the language layer calls symbols.
-        let rows = lang::flatten(&tab.lang.symbols());
+        let rows = tab.lang.outline();
         if rows.is_empty() {
             let language = tab.language().unwrap_or_else(|| "this file".to_string());
             let (title, body) = match tab.lang.support().and_then(|s| s.missing.clone()) {
@@ -703,6 +703,29 @@ impl App {
                 move |at| tab.goto_pos(at)
             ),
         );
+        self.follow_outline();
+    }
+
+    /// Select the Outline row of the heading or symbol the caret is in and scroll it into view,
+    /// as VS Code's Follow Cursor does. Nothing while the pane is out of sight: showing it calls
+    /// this again, and it catches up then.
+    fn follow_outline(&self) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        if !self.sidebar_column.is_visible() || !sidebar.is_showing("outline") {
+            return;
+        }
+        let Some(tab) = self.active() else {
+            return;
+        };
+        let line = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())).line;
+        let row = tab.lang.outline_row(line);
+        // Above the first heading nothing is selected and the list goes back to its top, rather
+        // than showing a part of the file the caret is not in. A gap between two functions keeps
+        // the list where it is, or it would jump to the top and back as the caret crossed one.
+        let shown = row.or(tab.lang.above_outline(line).then_some(0));
+        sidebar.follow_outline(&tab.rel(), row, shown);
     }
 
     /// The file's own facts in the status bar: what it is, whether it is saved, and its one

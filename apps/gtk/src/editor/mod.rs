@@ -10,7 +10,7 @@
 //! and closed without `main` reaching inside it.
 
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret};
-use accent_api::{Diagnostic, Fold};
+use accent_api::{Diagnostic, Fold, Vault};
 use accent_core::fs::{self, Etag, SaveError};
 use accent_core::markdown::Link;
 use adw::prelude::*;
@@ -20,6 +20,7 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 mod banner;
@@ -923,9 +924,12 @@ impl Tab {
     ///
     /// The bytes are read on a worker thread, the way `open.rs` reads a file into a new tab: a
     /// watcher can fire this on any file, and a synchronous read of a large one held the window
-    /// for as long as the disk took. `done` is told how it ended, once.
+    /// for as long as the disk took. They come from `vault` as they did there, since on a remote
+    /// vault the tab's own path is on the host; a loose file has none and reads its path. `done`
+    /// is told how it ended, once.
     pub fn reload_keep_cursor(
         self: &Rc<Self>,
+        vault: Option<Arc<Vault>>,
         done: impl Fn(&Rc<Tab>, std::io::Result<()>) + 'static,
     ) {
         // Where the caret and the page are, measured before the read: replacing the buffer empties
@@ -938,10 +942,14 @@ impl Tab {
             top_y: self.view.line_yrange(&top_iter).0,
             scrolled: self.view.vadjustment().map_or(0.0, |v| v.value()),
         };
-        let path = self.path();
+        let (rel, path) = (self.rel(), self.path());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking(move || fs::read_text(&path)).await;
+            let read = gio::spawn_blocking(move || match vault {
+                Some(vault) => vault.read_text(&rel),
+                None => fs::read_text(&path),
+            })
+            .await;
             let Some(tab) = weak.upgrade() else { return };
             let text = match read {
                 Ok(Ok(fs::Read::Text(text))) => text,

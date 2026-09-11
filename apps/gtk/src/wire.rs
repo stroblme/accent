@@ -366,7 +366,10 @@ pub fn wire_window(app: &Rc<App>) {
     app.sidebar_column.connect_visible_notify(glib::clone!(
         #[weak]
         app,
-        move |_| app.save_session_soon()
+        move |_| {
+            app.save_session_soon();
+            app.follow_outline();
+        }
     ));
 
     // The mouse's back and forward buttons. GTK's own gestures stop at button 3, and a

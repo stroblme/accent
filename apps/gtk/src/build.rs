@@ -644,6 +644,13 @@ fn adopt_sidebar(
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
+    // The Outline pane does nothing while it is out of sight, so it catches up with the caret
+    // when it comes to the front.
+    pane.connect_pane_shown(glib::clone!(
+        #[weak]
+        app,
+        move || app.follow_outline()
+    ));
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }

@@ -686,7 +686,7 @@ impl App {
     /// work with anything else: the PDF engine and an image. That is the file itself on a local
     /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
     /// takes, so the asking is on a worker; a loose key is already a path here.
-    fn local_copy(
+    pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
         path: &Path,
@@ -1080,6 +1080,9 @@ impl App {
             self,
             move |tab| {
                 app.sync_scroll(tab);
+                if app.is_active(tab) {
+                    app.follow_outline();
+                }
                 // A code tab's references are about the symbol under the caret, so they follow
                 // it — but only while the pane is on screen, since nobody is reading it otherwise.
                 if !tab.flavour().is_note()
