@@ -50,9 +50,15 @@ pub fn present(
 
 /// Write `config` to disk, and say so in the log when that fails: the change is already in force
 /// on screen, and a preference that will not outlive the process is not worth a dialog.
+///
+/// A file changed by someone else is not written over. Taking the change in is the config
+/// watcher's (`Shell::config_file_changed`), which keeps this change on top and writes both, or
+/// warns once that the file does not parse; so a refusal here is only a debug line.
 pub fn save(config: &Config) {
-    if let Err(e) = config.save() {
-        tracing::warn!("saving config: {e:#}");
+    match config.save() {
+        Ok(true) => {}
+        Ok(false) => tracing::debug!("config.toml changed on disk; the write waits for it"),
+        Err(e) => tracing::warn!("saving config: {e:#}"),
     }
 }
 
