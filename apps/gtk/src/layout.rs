@@ -171,6 +171,9 @@ impl App {
         }
         match (on, self.presenting.get()) {
             (true, None) => {
+                // Presentation owns the chrome from here, so whatever typing faded comes back
+                // first: the status bar is only unrevealed, and a hover shows it as it is.
+                self.show_chrome();
                 self.presenting.set(Some(Presenting {
                     mode: self.mode.get(),
                     sidebar: self.sidebar_column.is_visible(),
@@ -178,6 +181,9 @@ impl App {
                 self.sidebar_column.set_visible(false);
                 self.toolbar.set_reveal_top_bars(false);
                 self.toolbar.set_reveal_bottom_bars(false);
+                // The status bar comes back over the document on a hover rather than pushing it
+                // up, so the presentation never reflows under the pointer.
+                self.toolbar.set_extend_content_to_bottom_edge(true);
                 self.apply_layout();
             }
             (false, Some(before)) => {
@@ -185,11 +191,33 @@ impl App {
                 self.sidebar_column.set_visible(before.sidebar);
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
+                self.toolbar.set_extend_content_to_bottom_edge(false);
                 // Puts the layout back and, with presenting cleared, lets the chrome show again.
                 self.set_mode(before.mode);
             }
             _ => {}
         }
+    }
+
+    /// While presenting, the status bar shows for as long as the pointer is over the strip at the
+    /// bottom of the editor column where it sits, and goes again when it leaves. `at` is the
+    /// pointer in the window's coordinates, `None` once it has left the window.
+    pub fn hover_status(&self, at: Option<(f64, f64)>) {
+        if self.presenting.get().is_none() {
+            return;
+        }
+        let bar = self.statusbar.widget();
+        let (_, height, _, _) = bar.measure(gtk::Orientation::Vertical, self.toolbar.width());
+        let over = at
+            .and_then(|(x, y)| {
+                let point = graphene::Point::new(x as f32, y as f32);
+                self.window.compute_point(&self.toolbar, &point)
+            })
+            .is_some_and(|p| {
+                let (x, y) = (f64::from(p.x()), f64::from(p.y()));
+                self.toolbar.contains(x, y) && y >= f64::from(self.toolbar.height() - height)
+            });
+        self.toolbar.set_reveal_bottom_bars(over);
     }
 
     fn ensure_preview(self: &Rc<Self>) {

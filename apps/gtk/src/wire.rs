@@ -451,8 +451,14 @@ pub fn wire_window(app: &Rc<App>) {
         move |_, x, y| {
             if last.replace(Some((x, y))) != Some((x, y)) {
                 app.show_chrome();
+                app.hover_status(Some((x, y)));
             }
         }
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak]
+        app,
+        move |_| app.hover_status(None)
     ));
     app.window.add_controller(motion);
     // A wheel or touchpad scroll is the reader looking around the document rather than writing

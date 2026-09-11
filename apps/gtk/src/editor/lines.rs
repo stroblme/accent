@@ -363,6 +363,9 @@ impl Tab {
                 self.loading.set(false);
                 self.buffer.set_modified(false);
                 self.analyse();
+                // The snippet put the caret on the first stop; a tab still opening scrolls there
+                // once it is laid out, as a jump does.
+                self.scroll_to_caret(0.3);
             }
         }
     }

@@ -158,7 +158,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "References Pane",
         &["<Control><Shift>b"],
     ),
-    ("win.view-mode", "Toggle Split View", &["<Control>m"]),
+    ("win.view-mode", "Toggle Preview", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
@@ -791,7 +791,7 @@ pub fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
 pub fn mode_switcher() -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
         .icon_name(Mode::Editor.icon())
-        .tooltip_text("Toggle Split View")
+        .tooltip_text(label_of("win.view-mode"))
         .valign(gtk::Align::Center)
         .build();
     button.add_css_class("flat");

@@ -206,6 +206,7 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
 }
 
 /// What New from Template would list: every template, and the destination each one names today.
+/// `=open` then makes each one's note as Create does, and prints whether its caret is on screen.
 ///
 /// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
 /// `accent-target:` directive and the rendered target end to end without a widget.
@@ -220,7 +221,30 @@ fn bench_templates(app: &Rc<App>) {
             println!("bench template_target {rel} {target}");
         }
     }
-    bench_quit(app);
+    if std::env::var("ACCENT_BENCH_TEMPLATE").as_deref() != Ok("open") {
+        return bench_quit(app);
+    }
+    let (app, vault) = (app.clone(), vault.clone());
+    glib::spawn_future_local(async move {
+        for template in templates {
+            let Ok(Some((rel, stops))) = vault.note_from_template(&template) else {
+                continue;
+            };
+            app.with_tab(&rel, Opened::Kept, move |_, tab| tab.place_stops(&stops));
+            glib::timeout_future(Duration::from_secs(1)).await;
+            let Some(tab) = app.tab_for(&rel) else {
+                continue;
+            };
+            let caret = tab
+                .view
+                .iter_location(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+            let seen = tab.view.visible_rect();
+            let on =
+                seen.y() <= caret.y() && caret.y() + caret.height() <= seen.y() + seen.height();
+            println!("bench template_caret {rel} on_screen={on}");
+        }
+        bench_quit(&app);
+    });
 }
 
 /// Cancel two dialogs and say whether either outlived its close, then quit with a note open, the
