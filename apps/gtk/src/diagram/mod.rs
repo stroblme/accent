@@ -500,8 +500,13 @@ impl DiagramTab {
                 Err(_) => Sheet::default(),
             }
         };
-        let mut selection = self.selection.borrow_mut();
-        selection.retain(|id| sheet.frame_of(id).is_some());
+        // Let go of the selection before the canvas hears of it: showing a page can scroll it,
+        // a scroll finishes an open label, and that is an edit that comes back here.
+        let selection = {
+            let mut selection = self.selection.borrow_mut();
+            selection.retain(|id| sheet.frame_of(id).is_some());
+            selection.clone()
+        };
         self.view.set_selection(&selection);
         self.view.show(sheet);
     }
@@ -533,6 +538,11 @@ impl DiagramTab {
             }
             Edit::Connect { source, target } => {
                 let style = Tool::Connector.style(&self.options.get());
+                let style = accent_drawio::presets::constrained(
+                    &style,
+                    source.2.as_ref(),
+                    target.2.as_ref(),
+                );
                 let mut added = None;
                 self.edit(|e, page| {
                     let (s, t) = (
@@ -607,7 +617,8 @@ impl DiagramTab {
             let Some(cell) = page.cell(&id) else { return };
             accent_drawio::label::to_markdown(cell.label(), cell.is_html())
         };
-        // Where the label is drawn, or the cell itself for one that has none yet.
+        // Where the label is drawn, or where it will be for a cell that has none yet: halfway
+        // along an edge, over the whole of a shape.
         let (mut place, size) = sheet
             .scene
             .prims
@@ -617,6 +628,10 @@ impl DiagramTab {
                     cell, rect, font, ..
                 } if *cell == id => Some((*rect, font.size)),
                 _ => None,
+            })
+            .or_else(|| {
+                let m = sheet.edge_middle(&id)?;
+                Some((accent_drawio::Rect::new(m.x, m.y, 0.0, 0.0), 11.0))
             })
             .unwrap_or_else(|| (sheet.frame_of(&id).unwrap_or_default(), 12.0));
         if let Some(r) = sheet.rect(&id).filter(|_| place.w < 1.0 || place.h < 1.0) {
@@ -663,10 +678,36 @@ impl DiagramTab {
             let id = editor.cell.clone();
             self.edit(|e, page| e.set_label_markdown(page, &id, &markdown));
         }
-        let view = self.view.clone();
+        // Not when another label opened meanwhile: a double click on a second label finishes
+        // the first and opens the second in one turn, and taking the focus back would finish
+        // that one too.
+        let tab = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
-            view.grab_focus();
+            if let Some(tab) = tab.upgrade().filter(|t| t.label.borrow().is_none()) {
+                tab.view.grab_focus();
+            }
         });
+    }
+
+    /// Typing over the one selected shape: its label is edited with `typed` in place of what it
+    /// said, as draw.io does. `false` when there is nothing to type into.
+    fn type_into_label(self: &Rc<Self>, typed: Option<char>) -> bool {
+        let Some(c) = typed.filter(|c| !c.is_control()) else {
+            return false;
+        };
+        let one = match self.selection.borrow().as_slice() {
+            [id] => self.view.sheet().is_some_and(|s| !s.is_pinned(id)),
+            _ => false,
+        };
+        if !one {
+            return false;
+        }
+        self.edit_label();
+        let Some(editor) = self.label.borrow().clone() else {
+            return false;
+        };
+        editor.type_text(&c.to_string());
+        true
     }
 
     /// The cell whose label is being edited, if one is.
@@ -851,6 +892,7 @@ impl DiagramTab {
             glib::Propagation::Proceed,
             move |_, key, _, state| {
                 let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                let alt = state.contains(gdk::ModifierType::ALT_MASK);
                 let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                 let step = if shift { 10.0 } else { 1.0 };
                 match key {
@@ -873,6 +915,7 @@ impl DiagramTab {
                         tab.run("win.diagram-select")
                     }
                     gdk::Key::Escape if tab.has_selection() => tab.select(Vec::new()),
+                    _ if !ctrl && !alt && tab.type_into_label(key.to_unicode()) => {}
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop

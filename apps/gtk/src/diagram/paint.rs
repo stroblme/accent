@@ -32,6 +32,17 @@ pub struct Cache {
     decoded: RefCell<HashMap<u64, Option<gdk::Texture>>>,
     /// By prim index: a label with a formula as the HTML the typesetter is given, and its key.
     math: RefCell<HashMap<usize, (u64, String)>>,
+    /// By prim index: where each label on screen was painted, for finding a label by its text.
+    boxes: RefCell<HashMap<usize, Painted>>,
+}
+
+/// Where a label was painted, in page units: the block its text took, turned `rotation`
+/// degrees about `anchor`.
+#[derive(Clone, Copy)]
+struct Painted {
+    block: Rect,
+    anchor: Point,
+    rotation: f64,
 }
 
 impl Cache {
@@ -40,6 +51,39 @@ impl Cache {
         self.layouts.borrow_mut().clear();
         self.textures.borrow_mut().clear();
         self.math.borrow_mut().clear();
+        self.boxes.borrow_mut().clear();
+    }
+
+    /// The topmost unlocked label whose painted text is under page point `p`. The display list
+    /// gives an edge's label no box of its own, only a point, so the text as painted is the
+    /// only place it can be aimed at.
+    pub fn label_at<'a>(&self, prims: &'a [Prim], p: Point) -> Option<&'a str> {
+        let boxes = self.boxes.borrow();
+        prims
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, prim)| {
+                !prim.locked()
+                    && boxes.get(i).is_some_and(|b| {
+                        b.block
+                            .contains(accent_drawio::geom::rotate(p, b.anchor, -b.rotation))
+                    })
+            })
+            .map(|(_, prim)| prim.cell())
+    }
+
+    /// Keep where label `index` was painted: `block` in content coordinates, turned about the
+    /// label's `anchor` (page units).
+    fn painted(&self, index: usize, frame: &Frame, block: Rect, anchor: Point, rotation: f64) {
+        let o = frame.to_page(Point::new(block.x, block.y));
+        let block = Rect::new(o.x, o.y, block.w / frame.scale, block.h / frame.scale);
+        let painted = Painted {
+            block,
+            anchor,
+            rotation,
+        };
+        self.boxes.borrow_mut().insert(index, painted);
     }
 
     fn texture(&self, index: usize, uri: &str) -> Option<gdk::Texture> {
@@ -143,7 +187,8 @@ pub fn prim(
                             border: *border,
                             opacity: *opacity,
                         };
-                        return typeset(snapshot, &rendered, &placed, *rotation, frame, look);
+                        let block = typeset(snapshot, &rendered, &placed, *rotation, frame, look);
+                        return cache.painted(index, frame, block, *anchor, *rotation);
                     }
                     Some(None) => {}
                     None => typesetter.ask(math::Label { key, html }),
@@ -161,7 +206,7 @@ pub fn prim(
                     }
                 }
             };
-            label(
+            let block = label(
                 snapshot,
                 &layout,
                 &placed,
@@ -171,6 +216,7 @@ pub fn prim(
                 *border,
                 *opacity,
             );
+            cache.painted(index, frame, block, *anchor, *rotation);
         }
         Prim::Image {
             rect,
@@ -357,7 +403,8 @@ struct Look {
     opacity: f64,
 }
 
-/// A label WebKit typeset, painted where Pango would have put the same block.
+/// A label WebKit typeset, painted where Pango would have put the same block, which is returned
+/// (content coordinates, unturned).
 fn typeset(
     snapshot: &gtk::Snapshot,
     rendered: &math::Rendered,
@@ -365,7 +412,7 @@ fn typeset(
     rotation: f64,
     frame: &Frame,
     look: Look,
-) {
+) -> Rect {
     let (w, h) = (rendered.size.0 * frame.scale, rendered.size.1 * frame.scale);
     let (x, y) = text_origin(at, (w, h), 0.0);
     let dest = Rect::new(x, y, w, h);
@@ -406,6 +453,7 @@ fn typeset(
             snapshot.pop();
         })
     });
+    dest
 }
 
 /// Where a label goes, in content coordinates.
@@ -417,6 +465,8 @@ struct Placed {
     wrap: bool,
 }
 
+/// A laid-out label, painted; the block its text took is returned (content coordinates,
+/// unturned).
 #[allow(clippy::too_many_arguments)]
 fn label(
     snapshot: &gtk::Snapshot,
@@ -427,13 +477,13 @@ fn label(
     background: Option<Color>,
     border: Option<Color>,
     opacity: f64,
-) {
+) -> Rect {
     let (_, logical) = layout.pixel_extents();
     let (tw, th) = (f64::from(logical.width()), f64::from(logical.height()));
     let (x, y) = text_origin(at, (tw, th), f64::from(logical.x()));
+    let block = Rect::new(x + f64::from(logical.x()), y, tw, th);
     rotated(snapshot, at.anchor, rotation, || {
         with_opacity(snapshot, opacity, || {
-            let block = Rect::new(x + f64::from(logical.x()), y, tw, th);
             if let Some(bg) = background {
                 snapshot.append_color(&rgba(bg), &grect(&block));
             }
@@ -451,6 +501,7 @@ fn label(
             snapshot.restore();
         })
     });
+    block
 }
 
 /// The top-left a laid-out block of `size` is drawn from. Wrapped, it sits in the rectangle by
