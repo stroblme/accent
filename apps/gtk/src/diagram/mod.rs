@@ -25,6 +25,7 @@ use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
+use crate::editor::{SaveState, Saves};
 use geometry::{Sheet, Zoom};
 pub use tools::{Options, Tool};
 use view::{DiagramView, Edit};
@@ -70,14 +71,8 @@ pub struct DiagramTab {
     selection: RefCell<Vec<CellId>>,
     tool: Cell<Tool>,
     options: Cell<Options>,
-    // What a note's tab keeps about its file (editor/mod.rs), so the save path can be the same.
-    pub modified: Cell<bool>,
-    pub etag: Cell<Option<Etag>>,
-    pub disk_changed: Cell<bool>,
-    pub edits: Cell<u64>,
-    pub flight: RefCell<Option<crate::editor::Flight>>,
-    pub save_again: Cell<Option<bool>>,
-    pub recheck: Cell<bool>,
+    /// What a note's tab keeps about its file, so the save path is the same one (`save.rs`).
+    pub save: SaveState,
     save_pending: Cell<bool>,
     /// A watch on the file itself, for a diagram from outside the vault, which no vault watcher
     /// covers. `None` for everything inside a vault, which the worker already reports on.
@@ -151,13 +146,7 @@ pub fn open(
         selection: RefCell::new(Vec::new()),
         tool: Cell::new(Tool::Select),
         options: Cell::new(Options::default()),
-        modified: Cell::new(false),
-        etag: Cell::new(Some(etag)),
-        disk_changed: Cell::new(false),
-        edits: Cell::new(0),
-        flight: RefCell::new(None),
-        save_again: Cell::new(None),
-        recheck: Cell::new(false),
+        save: SaveState::at(etag),
         save_pending: Cell::new(false),
         monitor: RefCell::new(None),
         on_zoom: RefCell::new(None),
@@ -258,7 +247,7 @@ impl DiagramTab {
     fn set_title(&self) {
         let name = crate::doc::file_name(&self.key()).to_string();
         // The dot a dirty note's tab wears (editor/mod.rs), so one symbol means one thing.
-        match self.modified.get() {
+        match self.save.modified.get() {
             true => self.page.set_title(&format!("• {name}")),
             false => self.page.set_title(&name),
         }
@@ -485,8 +474,8 @@ impl DiagramTab {
 
     /// After any change to the model, an undo included.
     fn changed(self: &Rc<Self>) {
-        self.edits.set(self.edits.get() + 1);
-        self.modified.set(true);
+        self.save.edits.set(self.save.edits.get() + 1);
+        self.save.modified.set(true);
         self.set_title();
         self.refresh();
         self.fill_props();
@@ -820,15 +809,15 @@ impl DiagramTab {
 
     /// A write of the model landed: the tab is clean at `etag`.
     pub fn mark_clean(&self, etag: Etag) {
-        self.etag.set(Some(etag));
-        self.modified.set(false);
+        self.save.etag.set(Some(etag));
+        self.save.modified.set(false);
         self.editor.borrow_mut().mark_saved();
         self.set_title();
     }
 
     /// The edits are given up on (a tab closing without saving them).
     pub fn discard(&self) {
-        self.modified.set(false);
+        self.save.modified.set(false);
         self.set_title();
     }
 
@@ -838,9 +827,9 @@ impl DiagramTab {
         let last = file.pages.len().saturating_sub(1);
         *self.editor.borrow_mut() = Editor::new(file);
         self.page_index.set(self.page_index.get().min(last));
-        self.etag.set(Some(etag));
-        self.modified.set(false);
-        self.disk_changed.set(false);
+        self.save.etag.set(Some(etag));
+        self.save.modified.set(false);
+        self.save.disk_changed.set(false);
         self.banner.set_revealed(false);
         self.set_title();
         self.refresh();
@@ -852,12 +841,12 @@ impl DiagramTab {
 
     /// The file moved under edits nobody has saved: the banner holds the question.
     pub fn show_changed(&self) {
-        self.disk_changed.set(true);
+        self.save.disk_changed.set(true);
         self.banner.set_revealed(true);
     }
 
     pub fn clear_changed(&self) {
-        self.disk_changed.set(false);
+        self.save.disk_changed.set(false);
         self.banner.set_revealed(false);
     }
 
@@ -1042,6 +1031,24 @@ impl DiagramTab {
     /// The Image tool: nothing to drag, the window's file dialog does the rest.
     pub fn ask_image(self: &Rc<Self>) {
         self.emit(&self.on_image);
+    }
+}
+
+impl Saves for DiagramTab {
+    fn save_state(&self) -> &SaveState {
+        &self.save
+    }
+
+    fn key(&self) -> String {
+        DiagramTab::key(self)
+    }
+
+    fn path(&self) -> PathBuf {
+        DiagramTab::path(self)
+    }
+
+    fn for_disk(&self) -> String {
+        self.text()
     }
 }
 

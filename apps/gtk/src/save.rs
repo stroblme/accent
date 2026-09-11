@@ -2,6 +2,7 @@
 //! unsaved-changes questions, and resolving a sync conflict.
 
 use super::*;
+use crate::editor::Saves;
 
 impl App {
     pub fn save_active(self: &Rc<Self>) {
@@ -20,16 +21,11 @@ impl App {
     /// answer to it. Ctrl+S raises the same dialog a refused write raises, so a reflex save is
     /// never silently dropped; an autosave says nothing beyond the banner already on screen.
     ///
-    /// The write runs on a worker and lands later ([`Self::land_save`]): every window shares the
-    /// one main thread, and on a remote vault a save is a round trip that held all of them, once
-    /// a second while anyone typed. One save per tab is on its way at a time; one asked for
-    /// meanwhile runs when it lands, gated on the etag it brought back.
-    ///
     /// The two paths a tab leaves by — a tab closing, a window closing — deliberately do *not*
     /// come through here. They write and then ask when the write is refused, because a buffer on
     /// its way out has nowhere else to be kept and refusing there would lose it outright.
     pub fn save_tab(self: &Rc<Self>, tab: &Rc<Tab>, explicit: bool) {
-        if !editor::may_save(tab.modified.get(), tab.disk_changed.get()) {
+        if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
             if explicit {
                 // A note deleted underneath us is asking to be written back, and its banner's
                 // button already says Save, so Ctrl+S does that rather than offering to
@@ -41,15 +37,33 @@ impl App {
             }
             return;
         }
-        if tab.flight.borrow().is_some() {
-            let asked = tab.save_again.get().unwrap_or(false);
-            tab.save_again.set(Some(asked || explicit));
+        self.start_save(tab, explicit, Self::save_tab, Self::land_save);
+    }
+
+    /// The save a note and a diagram share, once the tab's own save has let it through: `again`
+    /// is that save, for one asked for meanwhile, and `land` is how the tab takes the answer in.
+    ///
+    /// The write runs on a worker and lands later ([`Self::land_flight`]): every window shares the
+    /// one main thread, and on a remote vault a save is a round trip that held all of them, once
+    /// a second while anyone typed. One save per tab is on its way at a time; one asked for
+    /// meanwhile runs when it lands, gated on the etag it brought back.
+    pub(crate) fn start_save<T: Saves>(
+        self: &Rc<Self>,
+        tab: &Rc<T>,
+        explicit: bool,
+        again: fn(&Rc<Self>, &Rc<T>, bool),
+        land: fn(&Rc<Self>, &Rc<T>, bool) -> Option<bool>,
+    ) {
+        let save = tab.save_state();
+        if save.flight.borrow().is_some() {
+            let asked = save.save_again.get().unwrap_or(false);
+            save.save_again.set(Some(asked || explicit));
             return;
         }
-        let (write, text, expected) = (self.writer(tab), tab.for_disk(), tab.etag.get());
+        let (write, text, expected) = (self.writer(tab), tab.for_disk(), save.etag.get());
         let (tx, answer) = std::sync::mpsc::channel();
-        *tab.flight.borrow_mut() = Some(editor::Flight {
-            started: tab.edits.get(),
+        *save.flight.borrow_mut() = Some(editor::Flight {
+            started: save.edits.get(),
             expected,
             explicit,
             answer,
@@ -66,47 +80,67 @@ impl App {
                 return;
             };
             // One asked for meanwhile, unless this one failed: that would meet the same refusal.
-            let again = tab.save_again.take();
-            match (app.land_save(&tab, true), again) {
-                (Some(true), Some(explicit)) if tab.modified.get() => app.save_tab(&tab, explicit),
+            let asked = tab.save_state().save_again.take();
+            match (land(&app, &tab, true), asked) {
+                (Some(true), Some(explicit)) if tab.save_state().modified.get() => {
+                    again(&app, &tab, explicit);
+                }
                 (Some(true), Some(true)) => app.toast("Saved"),
                 _ => {}
             }
         });
     }
 
+    /// [`Self::land_flight`] for a note: `report` is false for a write about to go after it.
+    fn land_save(self: &Rc<Self>, tab: &Rc<Tab>, report: bool) -> Option<bool> {
+        self.land_flight(
+            tab,
+            Self::file_changed,
+            |app, tab, landed, explicit| match landed {
+                editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
+                    app.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
+                    app.sync_pdf_links_soon();
+                    if report && explicit {
+                        app.toast("Saved");
+                    }
+                }
+                editor::Landing::Failed(e) if report => app.refused(tab, e, explicit),
+                editor::Landing::Failed(_) | editor::Landing::Stale => {}
+            },
+        )
+    }
+
     /// Take in the save on its way for `tab`, waiting for its write if that has not finished:
     /// `None` when there was none, else whether it did not fail. Whoever comes first applies it:
-    /// the save's own landing, or a write that has to go after it, which passes `report: false`
+    /// the save's own landing, or a write that has to go after it, which does not report it
     /// because it is about to meet whatever refused this one and will say so itself.
-    fn land_save(self: &Rc<Self>, tab: &Rc<Tab>, report: bool) -> Option<bool> {
-        let flight = tab.flight.take()?;
+    ///
+    /// `apply` is what the landing means to the tab's kind, told whether a Ctrl+S asked for it;
+    /// `recheck` is the kind's watcher handler, for a stat that waited on the save.
+    pub(crate) fn land_flight<T: Saves>(
+        self: &Rc<Self>,
+        tab: &Rc<T>,
+        recheck: fn(&Rc<Self>, &Rc<T>),
+        apply: impl FnOnce(&Rc<Self>, &Rc<T>, editor::Landing, bool),
+    ) -> Option<bool> {
+        let save = tab.save_state();
+        let flight = save.flight.take()?;
         let written = flight
             .answer
             .recv()
             .unwrap_or_else(|_| Err(std::io::Error::other("the save worker panicked").into()));
-        log_write(tab, flight.expected, &written);
+        log_write(&tab.key(), flight.expected, &written);
         let landed = editor::landing(
             flight.started,
-            tab.edits.get(),
+            save.edits.get(),
             flight.expected,
-            tab.etag.get(),
+            save.etag.get(),
             written,
         );
         let landed_ok = !matches!(landed, editor::Landing::Failed(_));
-        match landed {
-            editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
-                self.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
-                self.sync_pdf_links_soon();
-                if report && flight.explicit {
-                    self.toast("Saved");
-                }
-            }
-            editor::Landing::Failed(e) if report => self.refused(tab, e, flight.explicit),
-            editor::Landing::Failed(_) | editor::Landing::Stale => {}
-        }
-        if tab.recheck.take() {
-            self.file_changed(tab);
+        apply(self, tab, landed, flight.explicit);
+        if save.recheck.take() {
+            recheck(self, tab);
         }
         Some(landed_ok)
     }
@@ -118,7 +152,7 @@ impl App {
             // used to be recorded only for an autosave, so a Ctrl+S that was cancelled left a
             // blocked tab with no banner on it.
             SaveError::ChangedOnDisk { .. } => {
-                tab.disk_changed.set(true);
+                tab.save.disk_changed.set(true);
                 tab.show_alert(Alert::Compare);
                 if explicit {
                     self.ask_overwrite(tab);
@@ -156,20 +190,11 @@ impl App {
     /// A loose tab is not in any vault, so it writes through core directly. Same atomic save,
     /// same etag gate; what it misses is the watcher being told the write was ours, which the
     /// tab's own file monitor makes harmless.
-    fn writer(
+    pub(crate) fn writer<T: Saves>(
         &self,
-        tab: &Tab,
+        tab: &Rc<T>,
     ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
-        self.writer_at(tab.rel(), tab.path())
-    }
-
-    /// [`writer`](Self::writer) for any file this window holds, by its key and its path: a
-    /// diagram's save goes through the same door.
-    pub(crate) fn writer_at(
-        &self,
-        rel: String,
-        path: PathBuf,
-    ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
+        let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         move |text, expected| match vault {
             Some(vault) => vault.save(&rel, text, expected),
@@ -186,7 +211,7 @@ impl App {
             // The tab is clean again, so the bar's dot goes with the one on the tab title.
             self.sync_status();
         } else {
-            tab.etag.set(Some(etag));
+            tab.save.etag.set(Some(etag));
         }
         lang::saved(tab);
         // Our own writes go through the vault, which tells the watcher they were ours, so no
@@ -206,7 +231,7 @@ impl App {
     ) -> Result<(), SaveError> {
         self.land_save(tab, false);
         let written = self.writer(tab)(&tab.for_disk(), expected);
-        log_write(tab, expected, &written);
+        log_write(&tab.rel(), expected, &written);
         self.wrote(tab, written?, true);
         Ok(())
     }
@@ -214,7 +239,7 @@ impl App {
     /// [`save_tab`](Self::save_tab) written before it returns, for a buffer whose file is about
     /// to move: an autosave in every other respect.
     pub fn save_tab_now(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if !editor::may_save(tab.modified.get(), tab.disk_changed.get()) {
+        if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
             return;
         }
         if let Err(e) = self.flush_tab(tab) {
@@ -227,13 +252,24 @@ impl App {
     /// paths a buffer leaves by, and for a file about to move with its buffer dirty.
     pub fn flush_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> Result<(), SaveError> {
         self.land_save(tab, false);
-        if !tab.modified.get() {
+        if !tab.save.modified.get() {
             return Ok(());
         }
-        self.write_tab(tab, tab.etag.get())
+        self.write_tab(tab, tab.save.etag.get())
     }
 
-    /// A watcher says the file under a tab moved.
+    /// A watcher says the file under a note moved ([`Self::check_disk`]).
+    ///
+    /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
+    /// the user was asked, and has to reload whatever the etag says.
+    pub fn file_changed(self: &Rc<Self>, tab: &Rc<Tab>) {
+        self.check_disk(tab, |app, tab| {
+            app.refresh_tab(tab);
+        });
+    }
+
+    /// A watcher says the file under a tab moved: `moved` runs when what is there is not what
+    /// the tab last read or wrote.
     ///
     /// Whose write it was is the first question. Every save is a rename into place, which a file
     /// monitor reports as a change like anyone else's, so the etag is the only thing that tells
@@ -242,9 +278,6 @@ impl App {
     /// second after every keystroke, and on a buffer typed into since the save it raised a
     /// "changed on disk" banner against our own bytes.
     ///
-    /// Only for a watcher. Every other caller of [`Self::refresh_tab`] is answering a question
-    /// the user was asked, and has to reload whatever the etag says.
-    ///
     /// A stat that failed is not an answer and must not read as one. It used to fall in with "no
     /// file there", which differs from any etag we hold and so raised the banner: on a remote
     /// vault a dropped ssh connection would report a conflict over a diff holding nothing but the
@@ -252,12 +285,9 @@ impl App {
     /// the etag gate refuses any save that would clobber one in the meantime.
     ///
     /// The stat runs on a worker, being a round trip on a remote vault.
-    pub fn file_changed(self: &Rc<Self>, tab: &Rc<Tab>) {
-        let vault = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.rel()))
-            .cloned();
-        let (rel, path) = (tab.rel(), tab.path());
+    pub(crate) fn check_disk<T: Saves>(self: &Rc<Self>, tab: &Rc<T>, moved: fn(&Rc<Self>, &Rc<T>)) {
+        let (rel, path) = (tab.key(), tab.path());
+        let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let looked = gio::spawn_blocking(move || match vault {
@@ -271,38 +301,44 @@ impl App {
             .await
             .unwrap_or_else(|_| Err(std::io::Error::other("the stat worker panicked")));
             if let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) {
-                app.compare_disk(&tab, looked);
+                app.compare_disk(&tab, looked, moved);
             }
         });
     }
 
-    /// What [`file_changed`](Self::file_changed) does once the stat is in.
-    fn compare_disk(self: &Rc<Self>, tab: &Rc<Tab>, looked: std::io::Result<Option<Etag>>) {
+    /// What [`check_disk`](Self::check_disk) does once the stat is in.
+    fn compare_disk<T: Saves>(
+        self: &Rc<Self>,
+        tab: &Rc<T>,
+        looked: std::io::Result<Option<Etag>>,
+        moved: fn(&Rc<Self>, &Rc<T>),
+    ) {
+        let save = tab.save_state();
         // A save still on its way has not put its etag in the tab yet, so our own write would
         // read as someone else's. Looked at again once it has landed.
-        if tab.flight.borrow().is_some() {
-            tab.recheck.set(true);
+        if save.flight.borrow().is_some() {
+            save.recheck.set(true);
             return;
         }
         let disk = match looked {
             Ok(disk) => disk,
             Err(e) => {
                 return tracing::debug!(
-                    target: SAVES, rel = %tab.rel(), error = %e, "watcher: could not stat"
+                    target: SAVES, rel = %tab.key(), error = %e, "watcher: could not stat"
                 );
             }
         };
-        let ours = tab.etag.get();
+        let ours = save.etag.get();
         tracing::debug!(
             target: SAVES,
-            rel = %tab.rel(),
+            rel = %tab.key(),
             ?ours,
             ?disk,
-            modified = tab.modified.get(),
+            modified = save.modified.get(),
             "watcher"
         );
         if ours != disk {
-            self.refresh_tab(tab);
+            moved(self, tab);
         }
     }
 
@@ -310,8 +346,8 @@ impl App {
     /// buffer is the only copy of them, so the banner asks instead of the reload deciding.
     /// Returns whether the tab was refreshed.
     pub fn refresh_tab(self: &Rc<Self>, tab: &Rc<Tab>) -> bool {
-        if tab.modified.get() {
-            tab.disk_changed.set(true);
+        if tab.save.modified.get() {
+            tab.save.disk_changed.set(true);
             tab.show_alert(Alert::Compare);
             return false;
         }
@@ -671,7 +707,7 @@ impl App {
     ) {
         let theirs_title = written_at(&conflict, &theirs_etag);
         self.with_tab(&original.clone(), Opened::Kept, move |app, tab| {
-            let mine_title = match tab.etag.get() {
+            let mine_title = match tab.save.etag.get() {
                 Some(etag) => written_at(&original, &etag),
                 None => original.clone(),
             };
@@ -707,7 +743,7 @@ impl App {
                 conflict,
                 move |_| {
                     tab.leave_compare();
-                    if tab.modified.get() {
+                    if tab.save.modified.get() {
                         app.save_tab(&tab, false);
                     }
                     app.finish_conflict(&original, &conflict);
@@ -763,11 +799,9 @@ impl App {
 }
 
 /// One write's outcome, on the `SAVES` target the save path has always logged to.
-fn log_write(tab: &Tab, expected: Option<Etag>, written: &Result<Etag, SaveError>) {
+fn log_write(rel: &str, expected: Option<Etag>, written: &Result<Etag, SaveError>) {
     match written {
-        Ok(etag) => tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, ?etag, "wrote"),
-        Err(e) => {
-            tracing::debug!(target: SAVES, rel = %tab.rel(), ?expected, error = %e, "refused");
-        }
+        Ok(etag) => tracing::debug!(target: SAVES, rel = %rel, ?expected, ?etag, "wrote"),
+        Err(e) => tracing::debug!(target: SAVES, rel = %rel, ?expected, error = %e, "refused"),
     }
 }

@@ -1,8 +1,6 @@
 //! The window's side of a diagram tab: opening one, saving it through the same etag gate a
 //! note's save goes through, what the watcher says about its file, and the diagram commands.
 
-use std::sync::mpsc::channel;
-
 use accent_core::fs::{Etag, SaveError};
 use accent_drawio::File;
 
@@ -274,90 +272,49 @@ impl App {
         });
     }
 
-    /// Ctrl+S or the autosave. The note's save (`save.rs`) in every respect that matters: nothing
-    /// is written while the file has moved under unsaved edits, one write is on its way at a
-    /// time, and a write is gated on the etag the tab last knew.
+    /// Ctrl+S or the autosave, through the note's save (`App::start_save`): nothing is written
+    /// while the file has moved under unsaved edits, one write is on its way at a time, and a
+    /// write is gated on the etag the tab last knew.
     pub(crate) fn save_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, explicit: bool) {
-        if !editor::may_save(tab.modified.get(), tab.disk_changed.get()) {
-            if explicit && tab.disk_changed.get() {
+        if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
+            if explicit && tab.save.disk_changed.get() {
                 self.resolve_diagram(tab);
             }
             return;
         }
-        if tab.flight.borrow().is_some() {
-            let asked = tab.save_again.get().unwrap_or(false);
-            tab.save_again.set(Some(asked || explicit));
-            return;
-        }
-        let write = self.writer_at(tab.key(), tab.path());
-        let (text, expected) = (tab.text(), tab.etag.get());
-        let (tx, answer) = channel();
-        *tab.flight.borrow_mut() = Some(editor::Flight {
-            started: tab.edits.get(),
-            expected,
-            explicit,
-            answer,
-        });
-        let worker = gio::spawn_blocking(move || tx.send(write(&text, expected)));
-        let (app, saved) = (Rc::downgrade(self), Rc::downgrade(tab));
-        glib::spawn_future_local(async move {
-            let _ = worker.await;
-            let (Some(app), Some(tab)) = (app.upgrade(), saved.upgrade()) else {
-                return;
-            };
-            let again = tab.save_again.take();
-            if let (Some(true), Some(explicit)) = (app.land_diagram(&tab, true), again)
-                && tab.modified.get()
-            {
-                app.save_diagram(&tab, explicit);
-            }
-        });
+        self.start_save(tab, explicit, Self::save_diagram, Self::land_diagram);
     }
 
-    /// Take in the save on its way, waiting for its write if need be: `None` when there was
-    /// none, else whether it did not fail. See `App::land_save`, which this mirrors.
+    /// `App::land_flight` for a diagram: `report` is false for a write about to go after it.
     fn land_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, report: bool) -> Option<bool> {
-        let flight = tab.flight.take()?;
-        let written = flight
-            .answer
-            .recv()
-            .unwrap_or_else(|_| Err(std::io::Error::other("the save worker panicked").into()));
-        let landed = editor::landing(
-            flight.started,
-            tab.edits.get(),
-            flight.expected,
-            tab.etag.get(),
-            written,
-        );
-        let ok = !matches!(landed, editor::Landing::Failed(_));
-        match landed {
-            editor::Landing::Clean(etag) => {
-                tab.mark_clean(etag);
-                self.sync_status();
-                if report && flight.explicit {
-                    self.toast("Saved");
+        self.land_flight(
+            tab,
+            Self::diagram_changed,
+            |app, tab, landed, explicit| match landed {
+                editor::Landing::Clean(etag) => {
+                    tab.mark_clean(etag);
+                    app.sync_status();
+                    if report && explicit {
+                        app.toast("Saved");
+                    }
                 }
-            }
-            editor::Landing::Behind(etag) => tab.etag.set(Some(etag)),
-            editor::Landing::Failed(SaveError::ChangedOnDisk { .. }) if report => {
-                tab.show_changed();
-                if flight.explicit {
-                    self.resolve_diagram(tab);
+                editor::Landing::Behind(etag) => tab.save.etag.set(Some(etag)),
+                editor::Landing::Failed(SaveError::ChangedOnDisk { .. }) if report => {
+                    tab.show_changed();
+                    if explicit {
+                        app.resolve_diagram(tab);
+                    }
                 }
-            }
-            editor::Landing::Failed(SaveError::Offline) if report => {
-                self.show_offline();
-                if flight.explicit {
-                    self.toast("Not connected, so nothing was saved");
+                editor::Landing::Failed(SaveError::Offline) if report => {
+                    app.show_offline();
+                    if explicit {
+                        app.toast("Not connected, so nothing was saved");
+                    }
                 }
-            }
-            editor::Landing::Failed(e) if report => self.cannot("save", e),
-            editor::Landing::Failed(_) | editor::Landing::Stale => {}
-        }
-        if tab.recheck.take() {
-            self.diagram_changed(tab);
-        }
-        Some(ok)
+                editor::Landing::Failed(e) if report => app.cannot("save", e),
+                editor::Landing::Failed(_) | editor::Landing::Stale => {}
+            },
+        )
     }
 
     /// Write the diagram now, gated on `expected`, and hand the error back: for a tab or a
@@ -368,7 +325,7 @@ impl App {
         expected: Option<Etag>,
     ) -> Result<(), SaveError> {
         self.land_diagram(tab, false);
-        let etag = self.writer_at(tab.key(), tab.path())(&tab.text(), expected)?;
+        let etag = self.writer(tab)(&tab.text(), expected)?;
         tab.mark_clean(etag);
         tab.clear_changed();
         self.sync_status();
@@ -379,43 +336,18 @@ impl App {
     /// write.
     pub(crate) fn flush_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) -> Result<(), SaveError> {
         self.land_diagram(tab, false);
-        if !tab.modified.get() {
+        if !tab.save.modified.get() {
             return Ok(());
         }
-        self.write_diagram(tab, tab.etag.get())
+        self.write_diagram(tab, tab.save.etag.get())
     }
 
-    /// The watcher says the file under a diagram moved. Our own write carries the etag the tab
-    /// holds, so only a different one is news (see `App::file_changed`).
+    /// The watcher says the file under a diagram moved, and it is not our own write
+    /// (`App::check_disk`): a diagram with no edits reloads, and one with edits asks.
     pub(crate) fn diagram_changed(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
-        let vault = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.key()))
-            .cloned();
-        let (key, path) = (tab.key(), tab.path());
-        let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
-        glib::spawn_future_local(async move {
-            let looked = gio::spawn_blocking(move || match vault {
-                Some(vault) => vault.stat(&key),
-                None => Etag::of(&path).map(Some),
-            })
-            .await;
-            let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) else {
-                return;
-            };
-            if tab.flight.borrow().is_some() {
-                tab.recheck.set(true);
-                return;
-            }
-            // A stat that failed says nothing about the file; the next event asks again.
-            let Ok(Ok(disk)) = looked else { return };
-            if disk == tab.etag.get() {
-                return;
-            }
-            match tab.modified.get() {
-                true => tab.show_changed(),
-                false => app.reload_diagram(&tab),
-            }
+        self.check_disk(tab, |app, tab| match tab.save.modified.get() {
+            true => tab.show_changed(),
+            false => app.reload_diagram(tab),
         });
     }
 

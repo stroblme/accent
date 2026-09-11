@@ -65,7 +65,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .open_tabs()
                 .into_iter()
                 .find(|t| &t.page == page)
-                .filter(|t| t.modified.get());
+                .filter(|t| t.save.modified.get());
             if let Some(tab) = dirty
                 && let Err(e) = app.flush_tab(&tab)
             {
@@ -86,7 +86,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .diagrams()
                 .into_iter()
                 .find(|d| &d.page == page)
-                .filter(|d| d.modified.get());
+                .filter(|d| d.save.modified.get());
             if let Some(diagram) = dirty
                 && let Err(e) = app.flush_diagram(&diagram)
             {
@@ -438,7 +438,7 @@ pub fn wire_window(app: &Rc<App>) {
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |_| {
-            for tab in app.open_tabs().iter().filter(|t| t.modified.get()) {
+            for tab in app.open_tabs().iter().filter(|t| t.save.modified.get()) {
                 let Err(e) = app.flush_tab(tab) else {
                     continue;
                 };
@@ -449,7 +449,7 @@ pub fn wire_window(app: &Rc<App>) {
                 });
                 return glib::Propagation::Stop;
             }
-            for diagram in app.diagrams().iter().filter(|d| d.modified.get()) {
+            for diagram in app.diagrams().iter().filter(|d| d.save.modified.get()) {
                 let Err(e) = app.flush_diagram(diagram) else {
                     continue;
                 };

@@ -78,7 +78,7 @@ pub fn may_save(modified: bool, disk_changed: bool) -> bool {
 /// A save on its way to the file, as its tab keeps it: what the write was started against, and
 /// the channel its answer arrives on. There is at most one per tab.
 pub struct Flight {
-    /// [`Tab::edits`] when the text was taken.
+    /// [`SaveState::edits`] when the text was taken.
     pub started: u64,
     /// The etag the write was gated on.
     pub expected: Option<Etag>,
@@ -119,6 +119,49 @@ pub fn landing(
         Ok(etag) => Landing::Behind(etag),
         Err(e) => Landing::Failed(e),
     }
+}
+
+/// What a tab keeps about the file under it for the save path (`save.rs`): a note's tab and a
+/// diagram's each hold one, so the two save through the same code.
+#[derive(Default)]
+pub struct SaveState {
+    pub etag: Cell<Option<Etag>>,
+    pub modified: Cell<bool>,
+    /// Someone else changed the file under a dirty tab. Autosave stops until the user has
+    /// answered the banner, so a conflict is never resolved behind their back.
+    pub disk_changed: Cell<bool>,
+    /// Counts every change to the buffer, typed or loaded, so a save that lands can tell whether
+    /// the buffer is still the text it wrote.
+    pub edits: Cell<u64>,
+    /// The save on its way, if one is.
+    pub flight: RefCell<Option<Flight>>,
+    /// A save asked for while one was on its way, run when that lands; `Some(true)` if any of the
+    /// asks was a Ctrl+S.
+    pub save_again: Cell<Option<bool>>,
+    /// The watcher spoke while a save was on its way, so its stat is taken again once the save
+    /// has landed and the tab holds the etag it wrote.
+    pub recheck: Cell<bool>,
+}
+
+impl SaveState {
+    /// A file as it was just read, at `etag`.
+    pub fn at(etag: Etag) -> SaveState {
+        SaveState {
+            etag: Cell::new(Some(etag)),
+            ..SaveState::default()
+        }
+    }
+}
+
+/// A tab the save path can write: its [`SaveState`], where its file is, and what the file should
+/// hold.
+pub trait Saves: 'static {
+    fn save_state(&self) -> &SaveState;
+    /// Vault-relative, or absolute for a file from outside the vault.
+    fn key(&self) -> String;
+    fn path(&self) -> PathBuf;
+    /// What the file should hold now.
+    fn for_disk(&self) -> String;
 }
 
 /// What kind of text a tab holds.
@@ -203,22 +246,7 @@ pub struct Tab {
     lossy: Cell<bool>,
     pub page: adw::TabPage,
     pub banner: adw::Banner,
-    pub etag: Cell<Option<Etag>>,
-    pub modified: Cell<bool>,
-    /// Someone else changed the file under a dirty tab. Autosave stops until the user has
-    /// answered the banner, so a conflict is never resolved behind their back.
-    pub disk_changed: Cell<bool>,
-    /// Counts every change to the buffer, typed or loaded, so a save that lands can tell whether
-    /// the buffer is still the text it wrote.
-    pub edits: Cell<u64>,
-    /// The save on its way, if one is.
-    pub flight: RefCell<Option<Flight>>,
-    /// A save asked for while one was on its way, run when that lands; `Some(true)` if any of the
-    /// asks was a Ctrl+S.
-    pub save_again: Cell<Option<bool>>,
-    /// The watcher spoke while a save was on its way, so its stat is taken again once the save
-    /// has landed and the tab holds the etag it wrote.
-    pub recheck: Cell<bool>,
+    pub save: SaveState,
     /// Every question standing about this file. The banner shows one of them ([`banner_alert`]);
     /// the rest wait rather than being overwritten.
     alerts: RefCell<Vec<Alert>>,
@@ -525,13 +553,7 @@ pub fn open(
         lossy: Cell::new(text.lossy),
         page,
         banner: banner.clone(),
-        etag: Cell::new(Some(text.etag)),
-        modified: Cell::new(false),
-        disk_changed: Cell::new(false),
-        edits: Cell::new(0),
-        flight: RefCell::new(None),
-        save_again: Cell::new(None),
-        recheck: Cell::new(false),
+        save: SaveState::at(text.etag),
         alerts: RefCell::new(Vec::new()),
         context,
         occurrence_tag,
@@ -863,7 +885,7 @@ impl Tab {
     /// reload left the server, the symbols, the folds and the diagnostics describing the text the
     /// file used to hold until the next keystroke.
     pub fn set_text(self: &Rc<Self>, text: &str) {
-        self.edits.set(self.edits.get() + 1);
+        self.save.edits.set(self.save.edits.get() + 1);
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
@@ -879,9 +901,9 @@ impl Tab {
     }
 
     pub fn mark_clean(&self, etag: Etag) {
-        self.etag.set(Some(etag));
-        self.modified.set(false);
-        self.disk_changed.set(false);
+        self.save.etag.set(Some(etag));
+        self.save.modified.set(false);
+        self.save.disk_changed.set(false);
         self.page.set_title(&self.tab_title());
     }
 
@@ -1079,8 +1101,8 @@ impl Tab {
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing
     /// downstream tries to save it on the way out.
     pub fn discard(&self) {
-        self.modified.set(false);
-        self.disk_changed.set(false);
+        self.save.modified.set(false);
+        self.save.disk_changed.set(false);
         self.page.set_title(&self.tab_title());
         self.clear_disk_alert();
     }
@@ -1097,7 +1119,7 @@ impl Tab {
             Some(comparing) => format!("{name} ({})", comparing.label),
             None => name.to_string(),
         };
-        match self.modified.get() {
+        match self.save.modified.get() {
             true => format!("• {name}"),
             false => name,
         }
@@ -1253,8 +1275,8 @@ impl Tab {
         if self.loading.get() {
             return;
         }
-        self.edits.set(self.edits.get() + 1);
-        if !self.modified.replace(true) {
+        self.save.edits.set(self.save.edits.get() + 1);
+        if !self.save.modified.replace(true) {
             self.page.set_title(&self.tab_title());
         }
         if let Some(id) = self.debounce.borrow_mut().take() {
@@ -1350,7 +1372,7 @@ impl Tab {
         if let Some(id) = self.autosave.borrow_mut().take() {
             id.remove();
         }
-        if self.disk_changed.get() {
+        if self.save.disk_changed.get() {
             return;
         }
         let id = glib::timeout_add_local_once(
@@ -1379,8 +1401,8 @@ impl Tab {
         if let Some(id) = self.autosave.borrow_mut().take() {
             id.remove();
         }
-        let modified = self.modified.get();
-        if modified && may_save(modified, self.disk_changed.get()) {
+        let modified = self.save.modified.get();
+        if modified && may_save(modified, self.save.disk_changed.get()) {
             self.emit(&self.on_autosave);
         }
     }
@@ -1401,6 +1423,24 @@ impl Tab {
             ),
         );
         *self.cursor.borrow_mut() = Some(id);
+    }
+}
+
+impl Saves for Tab {
+    fn save_state(&self) -> &SaveState {
+        &self.save
+    }
+
+    fn key(&self) -> String {
+        self.rel()
+    }
+
+    fn path(&self) -> PathBuf {
+        Tab::path(self)
+    }
+
+    fn for_disk(&self) -> String {
+        Tab::for_disk(self)
     }
 }
 
