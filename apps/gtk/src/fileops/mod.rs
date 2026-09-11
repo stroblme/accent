@@ -19,7 +19,7 @@ pub use paths::move_dest;
 pub use transfer::{download, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, renamed_path, split_ext, split_typed, typed_path, verb,
+    already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
@@ -379,9 +379,9 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 /// what was asked for. A note that loses its `.md` stops being a note, which is the one rename
 /// that asks first ([`confirm_demote`]). The folders a path names are created with it.
 ///
-/// The extension starts outside the selection, so typing replaces the stem only, which is what
-/// every file manager does.
-pub fn rename(ops: &Rc<Ops>, rel: &str) {
+/// A file's extension starts outside the selection, so typing replaces the stem only, and a
+/// folder's name is selected whole, which is what every file manager does.
+pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
     let form = form();
@@ -413,8 +413,8 @@ pub fn rename(ops: &Rc<Ops>, rel: &str) {
             false => plan(&ops, &rel, &to, verb(&rel, &to)),
         }
     });
-    let stem = split_ext(&current).0.chars().count() as i32;
-    focus_name(&entry, Some(stem));
+    let selected = renamed_part(&current, is_dir).chars().count() as i32;
+    focus_name(&entry, Some(selected));
 }
 
 /// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but

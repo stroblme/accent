@@ -417,10 +417,10 @@ impl App {
             "rename" => {
                 let target = self
                     .selected_row()
-                    .map(|row| row.rel)
-                    .or_else(|| self.active().map(|tab| tab.rel()));
-                if let (Some(rel), Some(ops)) = (target, self.need_ops("rename a file")) {
-                    fileops::rename(ops, &rel);
+                    .map(|row| (row.is_dir(), row.rel))
+                    .or_else(|| self.active().map(|tab| (false, tab.rel())));
+                if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
+                    fileops::rename(ops, &rel, is_dir);
                 }
             }
             "new-from-template" => {
