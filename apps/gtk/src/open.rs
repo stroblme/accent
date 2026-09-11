@@ -1080,6 +1080,9 @@ impl App {
             self,
             move |tab| {
                 app.sync_scroll(tab);
+                if app.is_active(tab) {
+                    app.follow_outline();
+                }
                 // A code tab's references are about the symbol under the caret, so they follow
                 // it — but only while the pane is on screen, since nobody is reading it otherwise.
                 if !tab.flavour().is_note()

@@ -2,8 +2,8 @@
 
 use crate::widgets::{label_factory, row_text, scroller, status_page};
 use adw::prelude::*;
-use gtk::pango;
-use std::cell::RefCell;
+use gtk::{glib, pango};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// The pane's icon, and the one its empty states are drawn with.
@@ -75,6 +75,12 @@ pub(super) struct List {
     /// Replaced on every refill, because an edit moves where the rows jump to even when they read
     /// the same.
     jump: Jump,
+    view: gtk::ListView,
+    selection: gtk::SingleSelection,
+    /// The row the caret is in, which the selection shows. Shared with the pointer-leave handler.
+    followed: Rc<Cell<u32>>,
+    /// A scroll is waiting for the list's first layout.
+    waiting: Rc<Cell<bool>>,
 }
 
 impl List {
@@ -82,6 +88,7 @@ impl List {
         let model = gtk::StringList::new(&[]);
         let rows: Rc<RefCell<Vec<(u8, String)>>> = Rc::default();
         let jump: Jump = Rc::new(RefCell::new(Rc::new(|_| {})));
+        let followed = Rc::new(Cell::new(gtk::INVALID_LIST_POSITION));
 
         let factory = label_factory(pango::EllipsizeMode::End, {
             let rows = rows.clone();
@@ -97,10 +104,11 @@ impl List {
             }
         });
 
-        let view = gtk::ListView::new(
-            Some(gtk::SingleSelection::new(Some(model.clone()))),
-            Some(factory),
-        );
+        // Nothing selected until the caret is in a section: the selection says where it is.
+        let selection = gtk::SingleSelection::new(Some(model.clone()));
+        selection.set_autoselect(false);
+        selection.set_can_unselect(true);
+        let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
         view.add_css_class("navigation-sidebar");
         view.set_single_click_activate(true);
         view.connect_activate({
@@ -110,12 +118,49 @@ impl List {
                 jump(row);
             }
         });
+        // Single-click activate also selects on hover, so the caret's row is put back once the
+        // pointer leaves, as the file tree does with the open file's.
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_leave({
+            let (selection, followed) = (selection.clone(), followed.clone());
+            move |_| select(&selection, followed.get())
+        });
+        view.add_controller(motion);
         List {
             key: key.to_string(),
             scroller: scroller(&view),
             model,
             rows,
             jump,
+            view,
+            selection,
+            followed,
+            waiting: Rc::default(),
+        }
+    }
+
+    /// Select `row`, the one the caret is in, and scroll it into view as little as it takes;
+    /// `None` selects nothing. Neither activates the row nor moves the focus, so the editor
+    /// keeps the keyboard and nothing jumps.
+    pub(super) fn follow(&self, row: Option<usize>) {
+        let row = row.map_or(gtk::INVALID_LIST_POSITION, |row| row as u32);
+        self.followed.set(row);
+        select(&self.selection, row);
+        if self.view.height() > 0 {
+            reveal(&self.view, row);
+        } else if !self.waiting.replace(true) {
+            // Not laid out yet — the list of a tab just switched to — so there is no viewport to
+            // scroll against, and GTK would leave the list at the top. The first frame that has
+            // one scrolls to wherever the caret is by then.
+            let (followed, waiting) = (self.followed.clone(), self.waiting.clone());
+            self.view.add_tick_callback(move |view, _| {
+                if view.height() == 0 {
+                    return glib::ControlFlow::Continue;
+                }
+                waiting.set(false);
+                reveal(view, followed.get());
+                glib::ControlFlow::Break
+            });
         }
     }
 
@@ -145,6 +190,20 @@ impl List {
                 on_jump(*target);
             }
         });
+    }
+}
+
+/// Put the selection on `row`, leaving it alone when it is already there.
+fn select(selection: &gtk::SingleSelection, row: u32) {
+    if selection.selected() != row {
+        selection.set_selected(row);
+    }
+}
+
+/// Scroll `row` into view, as little as it takes, without selecting or focusing it.
+fn reveal(view: &gtk::ListView, row: u32) {
+    if row != gtk::INVALID_LIST_POSITION {
+        view.scroll_to(row, gtk::ListScrollFlags::NONE, None);
     }
 }
 

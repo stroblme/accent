@@ -360,6 +360,21 @@ impl Sidebar {
         }
     }
 
+    /// Select `row` of the text document `key`'s outline, the one its caret is in, and scroll it
+    /// into view; `None` selects nothing.
+    pub fn follow_outline(&self, key: &str, row: Option<usize>) {
+        if let Some(list) = self.outline_list.borrow().as_ref()
+            && list.key == key
+        {
+            list.follow(row);
+        }
+    }
+
+    /// Call `f` whenever another pane comes to the front.
+    pub fn connect_pane_shown(&self, f: impl Fn() + 'static) {
+        self.stack.connect_visible_child_notify(move |_| f());
+    }
+
     /// What the Outline pane is showing, which is what `ACCENT_BENCH_TABS` reads to say whether a
     /// closed document left its outline behind.
     pub fn outline_child(&self) -> Option<gtk::Widget> {

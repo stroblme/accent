@@ -10,6 +10,7 @@ mod diagram;
 mod files;
 mod git;
 mod keys;
+mod outline;
 mod panes;
 mod pdf;
 mod style;
@@ -20,6 +21,7 @@ use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_press};
 use keys::{bench_keys, bench_shell_keys};
+use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
 use style::{bench_follow, bench_occurrences, bench_style};
@@ -55,6 +57,11 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// eye first, and its title and indicator are printed either side of that.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
 /// held, and prints what the Ctrl+hover underline covers.
+///
+/// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
+/// Outline row is selected, whether it is in view and who has the keyboard; then again after a
+/// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden.
+/// `=hold:<rel_note>` prints where to aim and then the pane's state as XTEST drives it, for 20 s.
 ///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
@@ -94,6 +101,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
+    let outline = std::env::var("ACCENT_BENCH_OUTLINE").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
@@ -108,6 +116,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && follow.is_none()
+        && outline.is_none()
         && layout.is_none()
         && git.is_none()
         && !keys
@@ -150,6 +159,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = follow {
             return bench_follow(&app, &rel);
+        }
+        if let Some(arg) = outline {
+            return bench_outline(&app, &arg);
         }
         if shell_keys {
             return bench_shell_keys(&app);
