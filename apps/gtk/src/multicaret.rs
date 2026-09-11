@@ -21,28 +21,31 @@
 //! * while a column of carets exists this widget paints every caret, the primary one included,
 //!   because GTK's blink phase cannot be read and two blinks out of step read worse than one:
 //!   GTK's own caret goes transparent (`main::install_chrome_css`) and comes back with the column;
-//! * the completion popup can open at several carets at once, since it follows the primary.
+//! * the completion popup can open at several carets at once, since it follows the primary, and
+//!   what is typed or accepted while it is up goes to the primary alone, which ends the column.
 //!
 //! It also paints the ghost text (`ghost.rs`): a suggestion is not in the buffer, so there is
 //! nothing to give it a text tag, and this widget is already the one drawing over the text. Focus
 //! mode's line fade (`fade.rs`) is drawn here for the same reason.
 //!
-//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, the arrow, Home
-//! and End motions, and the four wordwise chords `Ctrl+Left`, `Ctrl+Right`, `Ctrl+Delete` and
-//! `Ctrl+Backspace`, so a column of carets can be moved and edited as one. Everything else —
-//! Escape, any Alt combination, any other Ctrl combination, any other key — clears the carets and
-//! is then handled as usual, so undo, paste and every accelerator keep working on the primary
-//! caret. One undo step covers a whole multi-caret edit, because each replay runs inside a single
-//! `begin_user_action`.
+//! Mirrored at every caret: printable characters, Return, Tab, Backspace, Delete, the arrow, Home,
+//! End, Page Up and Page Down motions, and the four wordwise chords `Ctrl+Left`, `Ctrl+Right`,
+//! `Ctrl+Delete` and `Ctrl+Backspace`, so a column of carets can be moved and edited as one. A
+//! paste goes to every caret, and Undo and Redo put the carets back with the text. Every other key
+//! goes to GTK, as in VS Code: a modifier on its own or a chord nothing binds leaves the column up,
+//! and a caret move or an edit this widget did not make ends it (`constructed`), which is what
+//! `Ctrl+A`, `Ctrl+Home` and a click come down to. Escape ends it too, and so does a dead key
+//! ([`ends_column`]). One undo step covers a whole multi-caret edit, because each one runs inside a
+//! single `begin_user_action`.
 
 use crate::editor::{caret, line_end, line_prefix};
 use gtk::glib::translate::IntoGlib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, graphene, pango};
+use gtk::{gdk, gio, glib, graphene, pango};
 use sourceview5::prelude::ViewExt as _;
 
-/// What a key means at every caret. Anything outside this list clears the carets instead.
+/// What a key means at every caret. Anything outside this list is left to GTK.
 enum Edit {
     Insert(String),
     /// Resolved per caret, because what Tab inserts depends on the column it is pressed in.
@@ -64,12 +67,56 @@ enum Motion {
     Down,
     Home,
     End,
+    PageUp,
+    PageDown,
+}
+
+/// Whether `key` ends a column of carets instead of going to it: Escape, and a key that starts a
+/// sequence the input method finishes — a dead key, Compose, GTK's `Ctrl+Shift+U` — because the
+/// keys after it have to reach the input method and a column would take them first. A modifier
+/// on its own is not one: AltGr is how `@` is typed.
+fn ends_column(key: gdk::Key, state: gdk::ModifierType) -> bool {
+    let unicode_entry = state
+        .contains(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK)
+        && key.to_lower() == gdk::Key::u;
+    key == gdk::Key::Escape
+        || key == gdk::Key::Multi_key
+        || key.name().is_some_and(|name| name.starts_with("dead_"))
+        || unicode_entry
+}
+
+/// `Some(true)` for GtkTextView's Undo chord, `Ctrl+Z`, and `Some(false)` for its Redo,
+/// `Ctrl+Shift+Z` or `Ctrl+Y`.
+fn undo_or_redo(key: gdk::Key, state: gdk::ModifierType) -> Option<bool> {
+    if !state.contains(gdk::ModifierType::CONTROL_MASK)
+        || state.contains(gdk::ModifierType::ALT_MASK)
+    {
+        return None;
+    }
+    let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+    match key.to_lower() {
+        gdk::Key::z => Some(!shift),
+        gdk::Key::y if !shift => Some(false),
+        _ => None,
+    }
+}
+
+/// What each of `carets` carets gets from a paste of `text`, top to bottom: a line each where the
+/// text has exactly one line per caret, the whole of it at each otherwise. VS Code's
+/// `editor.multiCursorPaste: "spread"`, and what puts a copy from the same column back line by
+/// line; the trailing newline a copy of whole lines ends in does not count as a line.
+fn spread(text: &str, carets: usize) -> Vec<&str> {
+    let lines: Vec<&str> = text.lines().collect();
+    match carets > 1 && lines.len() == carets {
+        true => lines,
+        false => vec![text; carets],
+    }
 }
 
 /// The edit `key` with `state` held stands for, or `None` for a key this widget does not mirror.
 ///
 /// Ctrl has a table of its own — the four chords a column of carets is worth moving as one — and
-/// Alt has none, so every other combination still falls through to the primary caret alone.
+/// Alt has none, so every other combination is left to GTK.
 fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     if state.contains(gdk::ModifierType::ALT_MASK) {
         return None;
@@ -94,6 +141,8 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
         gdk::Key::Down | gdk::Key::KP_Down => Some(Edit::Move(Motion::Down)),
         gdk::Key::Home | gdk::Key::KP_Home => Some(Edit::Move(Motion::Home)),
         gdk::Key::End | gdk::Key::KP_End => Some(Edit::Move(Motion::End)),
+        gdk::Key::Page_Up | gdk::Key::KP_Page_Up => Some(Edit::Move(Motion::PageUp)),
+        gdk::Key::Page_Down | gdk::Key::KP_Page_Down => Some(Edit::Move(Motion::PageDown)),
         _ => key
             .to_unicode()
             .filter(|c| !c.is_control())
@@ -244,14 +293,26 @@ mod imp {
         pub goal: Option<i32>,
     }
 
+    /// Every caret's offset, the primary's first, either side of one undo step the column made.
+    pub struct Step {
+        pub before: Vec<i32>,
+        pub after: Vec<i32>,
+    }
+
     #[derive(Default)]
     pub struct View {
         /// One right-gravity mark per secondary caret, so they ride along with the text.
         pub carets: RefCell<Vec<Caret>>,
+        /// The column's own record of the undo steps it made, newest last, and of those undone,
+        /// for Redo: GTK's history keeps one caret per step, and puts it on the first caret the
+        /// step edited. `None` stands for a step from before the column, with nothing to put
+        /// back. A new column starts with both empty.
+        pub undo: RefCell<Vec<Option<Step>>>,
+        pub redo: RefCell<Vec<Option<Step>>>,
         /// The suggestion painted after the caret, if one is showing.
         pub ghost: RefCell<Option<String>>,
-        /// Set while a key is replayed, so the `mark-set` hook does not read our own edits as
-        /// the user moving the primary caret and drop every caret mid-edit.
+        /// Set while this widget edits the buffer or moves a caret itself, so the `mark-set` and
+        /// `changed` hooks do not read that as someone else's and drop every caret mid-edit.
         pub busy: Cell<bool>,
         /// The primary caret's goal column, the counterpart of [`Caret::goal`]. Dropped by any
         /// other movement, any edit and any caret move this widget did not make.
@@ -309,11 +370,18 @@ mod imp {
                     }
                 ));
                 // An edit is not vertical movement, so the column the caret was aiming for goes
-                // with it, whoever made the edit.
+                // with it, whoever made the edit. One this widget did not make — a completion,
+                // the input method, a chord GTK answers at the primary caret alone — went to one
+                // caret of the column, so it ends the column the way a caret move does.
                 obj.buffer().connect_changed(glib::clone!(
                     #[weak]
                     obj,
-                    move |_| obj.imp().goal.set(None)
+                    move |_| {
+                        obj.imp().goal.set(None);
+                        if !obj.imp().busy.get() {
+                            obj.clear_carets();
+                        }
+                    }
                 ));
             });
         }
@@ -390,6 +458,28 @@ mod imp {
                 return;
             }
             self.parent_delete_from_cursor(type_, count);
+        }
+
+        /// A paste at a column goes to every caret ([`super::View::paste_at_carets`]). The key
+        /// bindings and the context menu all come through here.
+        fn paste_clipboard(&self) {
+            let obj = self.obj();
+            if !obj.has_carets() {
+                return self.parent_paste_clipboard();
+            }
+            // Asynchronous even from this process; the marks ride out anything typed meanwhile.
+            obj.clipboard().read_text_async(
+                gio::Cancellable::NONE,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    move |text| {
+                        if let Ok(Some(text)) = text {
+                            obj.paste_at_carets(&text);
+                        }
+                    }
+                ),
+            );
         }
 
         /// Up and Down move by a line of the document where the view asked for it, and Home and
@@ -520,6 +610,11 @@ impl View {
         // A caret already there would be a second one on the same character, which is one caret.
         if self.caret_offsets().contains(&target.offset()) {
             return;
+        }
+        // A new column: the steps an earlier one recorded are not its to put back.
+        if !self.has_carets() {
+            self.imp().undo.take();
+            self.imp().redo.take();
         }
         let mark = buffer.create_mark(None, &target, false);
         self.imp().carets.borrow_mut().push(imp::Caret {
@@ -693,15 +788,26 @@ impl View {
     /// drives the carets the way that dispatcher does, which is the only way to see them without
     /// a screen.
     pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-        if self.imp().carets.borrow().is_empty() {
+        if !self.has_carets() {
             return glib::Propagation::Proceed;
         }
-        let Some(edit) = edit_for(key, state).filter(|_| key != gdk::Key::Escape) else {
+        if ends_column(key, state) {
             self.clear_carets();
             return glib::Propagation::Proceed;
-        };
-        self.replay(&edit);
-        glib::Propagation::Stop
+        }
+        if let Some(back) = undo_or_redo(key, state) {
+            self.step_history(back);
+            return glib::Propagation::Stop;
+        }
+        match edit_for(key, state) {
+            Some(edit) => {
+                self.replay(&edit);
+                glib::Propagation::Stop
+            }
+            // GTK's, with the column left up: what GTK does ends it only if it moves a caret or
+            // edits, which the hooks in `constructed` see.
+            None => glib::Propagation::Proceed,
+        }
     }
 
     /// Apply `edit` at every caret as one undoable step.
@@ -719,9 +825,12 @@ impl View {
             .map(|caret| (caret.mark.clone(), caret.goal))
             .collect();
         carets.push((insert.clone(), imp.goal.get()));
+        // Measured before anything moves.
+        let page =
+            matches!(edit, Edit::Move(Motion::PageUp | Motion::PageDown)).then(|| self.page());
+        let page_lines = page.map_or(0, |(lines, _)| lines);
 
-        imp.busy.set(true);
-        buffer.begin_user_action();
+        let opened = self.begin_step();
         for (mark, goal) in &mut carets {
             let mut at = buffer.iter_at_mark(mark);
             // Only vertical movement leaves a column behind to aim at; everything else drops it.
@@ -769,18 +878,17 @@ impl View {
                         Motion::WordRight => {
                             at.forward_visible_word_end();
                         }
-                        Motion::Up | Motion::Down => {
-                            let step = if matches!(motion, Motion::Down) {
-                                1
-                            } else {
-                                -1
+                        Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown => {
+                            let step = match motion {
+                                Motion::Up => -1,
+                                Motion::Down => 1,
+                                Motion::PageUp => -page_lines,
+                                _ => page_lines,
                             };
-                            let line = at.line() + step;
-                            if let Some(mut moved) = (0..buffer.line_count())
-                                .contains(&line)
-                                .then(|| buffer.iter_at_line(line))
-                                .flatten()
-                            {
+                            // A page stops at either end of the document, and a line step there
+                            // lands where the caret already is.
+                            let line = (at.line() + step).clamp(0, buffer.line_count() - 1);
+                            if let Some(mut moved) = buffer.iter_at_line(line) {
                                 let (column, kept) = vertical_step(
                                     *goal,
                                     at.line_offset(),
@@ -794,32 +902,197 @@ impl View {
                         Motion::Home => at.set_line_offset(0),
                         Motion::End => at = line_end(&buffer, at.line()),
                     }
-                    // `place_cursor` also carries the selection bound along, which `move_mark`
-                    // would leave behind as a selection nobody asked for.
-                    match *mark == insert {
-                        true => buffer.place_cursor(&at),
-                        false => buffer.move_mark(mark, &at),
-                    }
+                    self.put(mark, &at);
                 }
             }
             *goal = aim;
         }
-        buffer.end_user_action();
         // Back into the cells the goals came out of; the primary's is the one pushed last.
         imp.goal.set(carets.pop().and_then(|(_, goal)| goal));
         for (caret, (_, goal)) in imp.carets.borrow_mut().iter_mut().zip(&carets) {
             caret.goal = *goal;
         }
-        imp.busy.set(false);
+        self.end_step(opened);
+        // Where GTK's own page keys leave the caret: as high up the screen as it was, a page on.
+        if let Some((_, align)) = page {
+            self.scroll_to_mark(&insert, 0.0, true, 0.0, align);
+        }
+    }
 
+    /// How far Page Up and Page Down move a column: the lines of the document on screen. And
+    /// where the primary caret sits among them, 0 at the top and 1 at the bottom, so the view can
+    /// scroll by the same page and leave it there.
+    fn page(&self) -> (i32, f64) {
+        let rect = self.visible_rect();
+        let (top, _) = self.line_at_y(rect.y());
+        let (bottom, _) = self.line_at_y(rect.y() + rect.height());
+        let y = self.iter_location(&caret(&self.buffer())).y() - rect.y();
+        let align = f64::from(y) / f64::from(rect.height().max(1));
+        ((bottom.line() - top.line()).max(1), align.clamp(0.0, 1.0))
+    }
+
+    /// Move one caret to `at`: `place_cursor` for the primary, because it also carries the
+    /// selection bound along, which `move_mark` would leave behind as a selection nobody asked
+    /// for.
+    fn put(&self, mark: &gtk::TextMark, at: &gtk::TextIter) {
+        let buffer = self.buffer();
+        match *mark == buffer.get_insert() {
+            true => buffer.place_cursor(at),
+            false => buffer.move_mark(mark, at),
+        }
+    }
+
+    /// Every caret's mark, the primary's first.
+    fn marks(&self) -> Vec<gtk::TextMark> {
+        let mut marks = vec![self.buffer().get_insert()];
+        marks.extend(self.imp().carets.borrow().iter().map(|c| c.mark.clone()));
+        marks
+    }
+
+    /// The lines the carets are on, each once, top to bottom.
+    pub(crate) fn caret_lines(&self) -> Vec<i32> {
+        let buffer = self.buffer();
+        let mut lines: Vec<i32> = self
+            .marks()
+            .iter()
+            .map(|mark| buffer.iter_at_mark(mark).line())
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    /// Open one undo step made at every caret: the edits and caret moves from here on are the
+    /// column's own, and where the carets stood is kept for Undo.
+    fn begin_step(&self) -> (Vec<i32>, i32) {
+        let before = (self.caret_offsets(), self.buffer().char_count());
+        self.imp().busy.set(true);
+        self.buffer().begin_user_action();
+        before
+    }
+
+    /// Close the step [`Self::begin_step`] opened: record it for Undo and Redo if it edited the
+    /// text, merge the carets it drove together and settle the column.
+    fn end_step(&self, (before, length): (Vec<i32>, i32)) {
+        let buffer = self.buffer();
+        let imp = self.imp();
+        buffer.end_user_action();
+        imp.busy.set(false);
         self.collapse();
-        // Solid again from here, and back to GTK's caret if the column has collapsed into one.
+        // Every column edit inserts or deletes, so GTK recorded a step exactly when the length
+        // of the text moved.
+        if buffer.char_count() != length {
+            let after = self.caret_offsets();
+            imp.undo
+                .borrow_mut()
+                .push(Some(imp::Step { before, after }));
+            imp.redo.take();
+        }
+        self.settle();
+    }
+
+    /// Solid again from here, back to GTK's caret if the column has collapsed into one, and the
+    /// primary caret on screen.
+    fn settle(&self) {
         match self.has_carets() {
             true => self.blink_on(),
             false => self.blink_off(),
         }
-        self.scroll_mark_onscreen(&insert);
+        self.scroll_mark_onscreen(&self.buffer().get_insert());
         self.queue_draw();
+    }
+
+    /// `op` once on the line of every caret, from the bottom up so that a line's number still
+    /// holds when its turn comes, as one undo step: Duplicate Line, Delete Line and Insert Line
+    /// Below at a column (`editor::lines`). `op` edits line `n` and answers where the carets on
+    /// it go, or `None` where the edit already took them there.
+    pub(crate) fn each_line(&self, op: impl Fn(&gtk::TextBuffer, i32) -> Option<gtk::TextIter>) {
+        let buffer = self.buffer();
+        let marks = self.marks();
+        let lines = self.caret_lines();
+        let opened = self.begin_step();
+        for line in lines.into_iter().rev() {
+            let on: Vec<_> = marks
+                .iter()
+                .filter(|mark| buffer.iter_at_mark(*mark).line() == line)
+                .collect();
+            if let Some(to) = op(&buffer, line) {
+                for mark in on {
+                    self.put(mark, &to);
+                }
+            }
+        }
+        self.end_step(opened);
+    }
+
+    /// Paste `text` at every caret as one undo step, a line each where it [`spread`]s.
+    fn paste_at_carets(&self, text: &str) {
+        let buffer = self.buffer();
+        // Top to bottom, the order a spread hands its lines out in.
+        let mut marks = self.marks();
+        marks.sort_by_key(|mark| buffer.iter_at_mark(mark).offset());
+        let pieces = spread(text, marks.len());
+        let opened = self.begin_step();
+        for (mark, piece) in marks.iter().zip(pieces) {
+            buffer.insert(&mut buffer.iter_at_mark(mark), piece);
+        }
+        self.end_step(opened);
+    }
+
+    /// Undo (`back`) or Redo at a column, which keeps the column. GTK puts the text back and one
+    /// caret with it; the column's record of the step puts every caret where the step found them,
+    /// or, going forward, where it left them. A step with no record — made before the column —
+    /// leaves the carets wherever the text took them.
+    fn step_history(&self, back: bool) {
+        let buffer = self.buffer();
+        let imp = self.imp();
+        let can = match back {
+            true => buffer.can_undo(),
+            false => buffer.can_redo(),
+        };
+        if !can {
+            return;
+        }
+        imp.busy.set(true);
+        match back {
+            true => buffer.undo(),
+            false => buffer.redo(),
+        }
+        imp.busy.set(false);
+        let (from, to) = match back {
+            true => (&imp.undo, &imp.redo),
+            false => (&imp.redo, &imp.undo),
+        };
+        let step = from.borrow_mut().pop().flatten();
+        if let Some(step) = &step {
+            self.put_carets(if back { &step.before } else { &step.after });
+        }
+        to.borrow_mut().push(step);
+        self.collapse();
+        self.settle();
+    }
+
+    /// Put the column back as `offsets` has it, the primary first. Made afresh, since carets that
+    /// merged after the step was recorded are back.
+    fn put_carets(&self, offsets: &[i32]) {
+        let buffer = self.buffer();
+        let imp = self.imp();
+        let Some((primary, rest)) = offsets.split_first() else {
+            return;
+        };
+        imp.busy.set(true);
+        buffer.place_cursor(&buffer.iter_at_offset(*primary));
+        imp.busy.set(false);
+        let carets = rest
+            .iter()
+            .map(|offset| imp::Caret {
+                mark: buffer.create_mark(None, &buffer.iter_at_offset(*offset), false),
+                goal: None,
+            })
+            .collect();
+        for caret in imp.carets.replace(carets) {
+            buffer.delete_mark(&caret.mark);
+        }
     }
 
     /// Two carets driven onto the same character are one caret from here on.
@@ -845,8 +1118,61 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        blink_alpha, spaces_ahead, spaces_behind, tab_insert, vertical_step, visual_column,
+        blink_alpha, ends_column, spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo,
+        vertical_step, visual_column,
     };
+    use gtk::gdk::{Key, ModifierType as Mod};
+
+    /// A modifier pressed on its own leaves the column where it is — AltGr and Shift come before
+    /// the character they type — and only Escape and the keys an input method finishes end it.
+    #[test]
+    fn only_escape_and_composing_keys_end_a_column() {
+        for key in [
+            Key::ISO_Level3_Shift,
+            Key::ISO_Level5_Shift,
+            Key::Shift_L,
+            Key::Control_R,
+            Key::Alt_L,
+            Key::Super_L,
+            Key::Meta_L,
+            Key::Hyper_L,
+            Key::Caps_Lock,
+            Key::Num_Lock,
+            Key::F4,
+            Key::at,
+        ] {
+            assert!(!ends_column(key, Mod::empty()), "{:?}", key.name());
+        }
+        assert!(!ends_column(Key::s, Mod::CONTROL_MASK));
+        assert!(!ends_column(Key::u, Mod::CONTROL_MASK));
+        assert!(ends_column(Key::Escape, Mod::empty()));
+        assert!(ends_column(Key::dead_acute, Mod::empty()));
+        assert!(ends_column(Key::Multi_key, Mod::empty()));
+        assert!(ends_column(Key::U, Mod::CONTROL_MASK | Mod::SHIFT_MASK));
+    }
+
+    #[test]
+    fn undo_and_redo_are_gtks_chords() {
+        assert_eq!(undo_or_redo(Key::z, Mod::CONTROL_MASK), Some(true));
+        assert_eq!(
+            undo_or_redo(Key::Z, Mod::CONTROL_MASK | Mod::SHIFT_MASK),
+            Some(false)
+        );
+        assert_eq!(undo_or_redo(Key::y, Mod::CONTROL_MASK), Some(false));
+        assert_eq!(undo_or_redo(Key::z, Mod::empty()), None);
+        assert_eq!(undo_or_redo(Key::v, Mod::CONTROL_MASK), None);
+    }
+
+    /// A paste with one line per caret hands them out; any other puts all of it at every caret.
+    #[test]
+    fn a_paste_spreads_only_when_its_lines_match_the_carets() {
+        assert_eq!(spread("a\nb", 2), ["a", "b"]);
+        assert_eq!(spread("a\nb\n", 2), ["a", "b"], "a copy of whole lines");
+        assert_eq!(spread("a\r\nb\r\n", 2), ["a", "b"]);
+        assert_eq!(spread("a\nb", 3), ["a\nb"; 3]);
+        assert_eq!(spread("x", 2), ["x", "x"]);
+        assert_eq!(spread("a\n", 1), ["a\n"], "one caret is a plain paste");
+    }
 
     /// A caret moving into a shorter line stops at its end rather than off it, and keeps aiming
     /// at the column it came from, so the line after that brings it back.

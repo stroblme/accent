@@ -1,10 +1,10 @@
 //! What a tab does to whole lines: the clipboard's line cut and copy, Insert Line Below,
 //! duplicate and delete, the comment toggle, wrapping, and the template snippets whose Tab stops
 //! are walked through the text they inserted. The plain-text middle-click paste sits beside the
-//! cut and copy.
+//! cut and copy. The line commands and the line cut and copy act at every caret of a column.
 
 use super::{Tab, caret, line_end};
-use crate::comment;
+use crate::{comment, multicaret};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
@@ -37,11 +37,12 @@ fn paste_ready(line: &str) -> String {
     }
 }
 
-/// The caret's line, from its start to the start of the next one, so the trailing newline is part
-/// of it except on a last line that has none.
-pub(super) fn line_bounds(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::TextIter) {
-    let mut start = caret(buffer);
-    start.set_line_offset(0);
+/// Line `line`, from its start to the start of the next one, so the trailing newline is part of
+/// it except on a last line that has none.
+fn line_bounds(buffer: &gtk::TextBuffer, line: i32) -> (gtk::TextIter, gtk::TextIter) {
+    let start = buffer
+        .iter_at_line(line)
+        .unwrap_or_else(|| buffer.end_iter());
     let mut end = start;
     // On the last line this lands on the end of the buffer and reports failure, which is
     // exactly where the line ends, so the answer is the same either way.
@@ -49,9 +50,122 @@ pub(super) fn line_bounds(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::Text
     (start, end)
 }
 
+/// The column of carets `view` holds, if it holds one.
+fn column(view: &sourceview5::View) -> Option<&multicaret::View> {
+    view.downcast_ref::<multicaret::View>()
+        .filter(|view| view.has_carets())
+}
+
+/// What a cut or copy with nothing selected takes: the caret's whole line, or every caret's in a
+/// column, each once and top to bottom, as VS Code copies them.
+fn whole_lines(view: &sourceview5::View) -> String {
+    let buffer = view.buffer();
+    let lines = match column(view) {
+        Some(column) => column.caret_lines(),
+        None => vec![caret(&buffer).line()],
+    };
+    lines
+        .into_iter()
+        .map(|line| {
+            let (start, end) = line_bounds(&buffer, line);
+            paste_ready(&buffer.text(&start, &end, true))
+        })
+        .collect()
+}
+
+/// Delete `line` whole, its newline with it. A last line with no newline of its own takes the one
+/// separating it from the line above, or deleting it would leave the blank line it used to sit on.
+fn delete_whole_line(buffer: &gtk::TextBuffer, line: i32) {
+    let (mut start, mut end) = line_bounds(buffer, line);
+    if !buffer.text(&start, &end, true).ends_with('\n') {
+        start.backward_char();
+    }
+    buffer.delete(&mut start, &mut end);
+}
+
+/// Repeat lines `first` to `last` below themselves.
+///
+/// The copy is inserted *above* the lines, at the start of the first one, and that is what moves
+/// the carets and the selection down onto it: their marks have right gravity, so text put in front
+/// of them carries them along onto the lower of the two blocks. It also means a last line with no
+/// newline of its own needs no special case.
+fn copy_down(buffer: &gtk::TextBuffer, first: i32, last: i32) {
+    let Some(mut from) = buffer.iter_at_line(first) else {
+        return;
+    };
+    let lines = buffer.text(&from, &line_end(buffer, last), true);
+    buffer.insert(&mut from, &format!("{lines}\n"));
+}
+
+/// Open a line under `line` with its indent, and answer where the caret goes: at the end of it.
+fn open_below(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
+    // Before the line's own newline, or at the end of the buffer on a last line that has none.
+    let mut at = line_end(buffer, line);
+    let mut start = at;
+    start.set_line_offset(0);
+    let indent = leading_indent(&buffer.text(&start, &at, true)).to_string();
+    buffer.insert(&mut at, &format!("\n{indent}"));
+    at
+}
+
+/// VS Code's Copy Line Down: the lines the selection touches ([`last_copied`]) are repeated below
+/// themselves, and the caret and the selection move down onto the copy, in the same columns. At a
+/// column, each caret's line once, and each caret onto its copy.
+pub(crate) fn duplicate_line(view: &sourceview5::View) {
+    if let Some(column) = column(view) {
+        return column.each_line(|buffer, line| {
+            copy_down(buffer, line, line);
+            None
+        });
+    }
+    let buffer = view.buffer();
+    let (from, end) = buffer.selection_bounds().unwrap_or_else(|| {
+        let at = caret(&buffer);
+        (at, at)
+    });
+    let last = last_copied(from.line(), end.line(), end.line_offset());
+    buffer.begin_user_action();
+    copy_down(&buffer, from.line(), last);
+    buffer.end_user_action();
+    view.scroll_mark_onscreen(&buffer.get_insert());
+}
+
+/// Delete the caret's line, or every caret's in a column, each once.
+pub(crate) fn delete_line(view: &sourceview5::View) {
+    if let Some(column) = column(view) {
+        return column.each_line(|buffer, line| {
+            delete_whole_line(buffer, line);
+            None
+        });
+    }
+    let buffer = view.buffer();
+    buffer.begin_user_action();
+    delete_whole_line(&buffer, caret(&buffer).line());
+    buffer.end_user_action();
+}
+
+/// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
+/// same indent, so a list item or an indented block carries on where it was. That is the idiom
+/// `typing.rs` already uses on Return; continuing the marker itself is Return's job, not this
+/// one's, because this is also how a line is opened *out* of a list. At a column, a line under
+/// each caret's line, once, with every caret on that line moved onto it.
+pub(crate) fn newline_below(view: &sourceview5::View) {
+    if let Some(column) = column(view) {
+        return column.each_line(|buffer, line| Some(open_below(buffer, line)));
+    }
+    let buffer = view.buffer();
+    // One user action, so one Ctrl+Z takes the whole line back.
+    buffer.begin_user_action();
+    let at = open_below(&buffer, caret(&buffer).line());
+    buffer.end_user_action();
+    buffer.place_cursor(&at);
+    view.scroll_mark_onscreen(&buffer.get_insert());
+}
+
 /// Cut and copy, always as plain text, and VS Code's whole-line cut and copy: with nothing
 /// selected, `Ctrl+X` and `Ctrl+C` take the caret's whole line, its newline with it, so a later
-/// paste puts a line back instead of a fragment.
+/// paste puts a line back instead of a fragment. At a column they take every caret's line, and
+/// the cut deletes them as one undo step, the column staying up.
 ///
 /// No key handling, and no accelerator either — DESIGN.md's never-bind list keeps `Ctrl+X`/`C`
 /// for the widget. Both chords and the context menu emit these two signals, and each handler runs
@@ -63,7 +177,7 @@ pub(super) fn line_bounds(buffer: &gtk::TextBuffer) -> (gtk::TextIter, gtk::Text
 ///
 /// After a whole-line cut the caret is where the deletion left it, at the start of the following
 /// line; VS Code lands on the same line but keeps the column.
-pub(super) fn line_clipboard(view: &sourceview5::View) {
+pub(crate) fn line_clipboard(view: &sourceview5::View) {
     view.connect_copy_clipboard(|view| {
         let buffer = view.buffer();
         if let Some((start, end)) = buffer.selection_bounds() {
@@ -71,9 +185,7 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
             view.stop_signal_emission_by_name("copy-clipboard");
             return;
         }
-        let (start, end) = line_bounds(&buffer);
-        view.clipboard()
-            .set_text(&paste_ready(&buffer.text(&start, &end, true)));
+        view.clipboard().set_text(&whole_lines(view));
     });
     view.connect_cut_clipboard(|view| {
         let buffer = view.buffer();
@@ -88,17 +200,8 @@ pub(super) fn line_clipboard(view: &sourceview5::View) {
         if !view.is_editable() {
             return;
         }
-        let (mut start, mut end) = line_bounds(&buffer);
-        let line = buffer.text(&start, &end, true);
-        view.clipboard().set_text(&paste_ready(&line));
-        // A last line with no newline of its own takes the one above it, or the cut leaves the
-        // blank line it used to sit on. `delete_line` does the same.
-        if !line.ends_with('\n') {
-            start.backward_char();
-        }
-        buffer.begin_user_action();
-        buffer.delete(&mut start, &mut end);
-        buffer.end_user_action();
+        view.clipboard().set_text(&whole_lines(view));
+        delete_line(view);
     });
 }
 
@@ -280,64 +383,19 @@ impl Tab {
 
     // --- line operations -----------------------------------------------------------------
 
-    /// The caret's whole line; see [`line_bounds`], which the clipboard handlers share.
-    fn line_bounds(&self) -> (gtk::TextIter, gtk::TextIter) {
-        line_bounds(self.buffer.upcast_ref())
-    }
-
-    /// VS Code's Insert Line Below: open a line under the caret's and put the caret on it, at the
-    /// same indent, so a list item or an indented block carries on where it was. That is the idiom
-    /// `typing.rs` already uses on Return; continuing the marker itself is Return's job, not this
-    /// one's, because this is also how a line is opened *out* of a list.
+    /// [`newline_below`] in this tab.
     pub fn newline_below(&self) {
-        let (start, end) = self.line_bounds();
-        let line = self.buffer.text(&start, &end, true);
-        let indent = leading_indent(&line).to_string();
-        // Insert before the line's own newline, or at the end of the buffer on a last line that
-        // has none. One user action, so one Ctrl+Z takes the whole line back.
-        let mut at = end;
-        if line.ends_with('\n') {
-            at.backward_char();
-        }
-        self.buffer.begin_user_action();
-        self.buffer.insert(&mut at, &format!("\n{indent}"));
-        self.buffer.end_user_action();
-        self.buffer.place_cursor(&at);
-        self.view.scroll_mark_onscreen(&self.buffer.get_insert());
+        newline_below(&self.view);
     }
 
-    /// VS Code's Copy Line Down: the lines the selection touches ([`last_copied`]) are repeated
-    /// below themselves, and the caret and the selection move down onto the copy, in the same
-    /// columns.
-    ///
-    /// The copy is inserted *above* the lines, at the start of the first one, and that is what
-    /// moves them: the buffer's insert and selection-bound marks have right gravity, so text put
-    /// in front of them carries them along onto the lower of the two blocks. It also means a last
-    /// line with no newline of its own needs no special case.
+    /// [`duplicate_line`] in this tab.
     pub fn duplicate_line(&self) {
-        let (mut from, end) = self.buffer.selection_bounds().unwrap_or_else(|| {
-            let at = caret(&self.buffer);
-            (at, at)
-        });
-        let last = last_copied(from.line(), end.line(), end.line_offset());
-        from.set_line_offset(0);
-        let lines = self.buffer.text(&from, &line_end(&self.buffer, last), true);
-        self.buffer.begin_user_action();
-        self.buffer.insert(&mut from, &format!("{lines}\n"));
-        self.buffer.end_user_action();
-        self.view.scroll_mark_onscreen(&self.buffer.get_insert());
+        duplicate_line(&self.view);
     }
 
+    /// [`delete_line`] in this tab.
     pub fn delete_line(&self) {
-        let (mut start, mut end) = self.line_bounds();
-        // A last line with no newline of its own takes the one separating it from the line
-        // above, or deleting it would leave the blank line it used to sit on.
-        if !self.buffer.text(&start, &end, true).ends_with('\n') {
-            start.backward_char();
-        }
-        self.buffer.begin_user_action();
-        self.buffer.delete(&mut start, &mut end);
-        self.buffer.end_user_action();
+        delete_line(&self.view);
     }
 
     /// Put the caret on a template's first `{{cursor}}` and make the rest Tab stops.

@@ -8,17 +8,20 @@ use super::*;
 ///
 /// A view of its own in a window of its own, so nothing is written into a vault and the drills do
 /// not depend on a document being open. It needs a display, which is why this is a bench hook and
-/// not a unit test, but it needs no key press and no pointer: the two signals are actions, and
+/// not a unit test, but it needs no key press and no pointer: the signals are actions, and
 /// [`multicaret::View::press`] is the key controller's own handler.
 pub(super) fn bench_keys(app: &Rc<App>) {
     let view = multicaret::View::new();
     // The drills are about the code flavours, which is where the logical-line moves are wanted.
     view.set_logical_lines(true);
     view.set_wrap_mode(gtk::WrapMode::Word);
+    // A tab's whole-line cut and copy, which the column drills go through.
+    editor::line_clipboard(view.upcast_ref());
+    // Scrolled, as in a tab, so a page is what is on screen rather than the whole buffer.
     let window = gtk::Window::builder()
         .default_width(320)
         .default_height(240)
-        .child(&view)
+        .child(&gtk::ScrolledWindow::builder().child(&view).build())
         .build();
     window.present();
     let app = app.clone();
@@ -98,9 +101,139 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         view.clear_carets();
         println!("bench caret_blink {}", view.has_css_class("accent-carets"));
 
-        window.close();
-        bench_quit(&app);
+        // The rest waits on the clipboard, which is read asynchronously even from this process.
+        glib::spawn_future_local(async move {
+            bench_column(&view).await;
+            window.close();
+            bench_quit(&app);
+        });
     });
+}
+
+/// A column of carets under VS Code's rules: the keys it survives and the ones that end it, a
+/// paste spread over it or not, the line commands and the clipboard at every caret, Page Down, and
+/// Undo and Redo putting the carets back. Prints the buffer and every caret after each step.
+async fn bench_column(view: &multicaret::View) {
+    let buffer = view.buffer();
+    let show = |step: &str| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        println!("bench column_{step} {text:?} {:?}", view.caret_positions());
+    };
+    // Three carets down column 1 of `text`, or as many as it has lines for.
+    let column = |text: &str| {
+        view.clear_carets();
+        buffer.set_text(text);
+        buffer.place_cursor(&buffer.iter_at_offset(1));
+        view.add_caret(true);
+        view.add_caret(true);
+    };
+    let (none, ctrl) = (gdk::ModifierType::empty(), gdk::ModifierType::CONTROL_MASK);
+    let undo = || view.press(gdk::Key::z, ctrl);
+
+    // Modifiers pressed on their own leave the column up, so what AltGr and Shift type — `@` and
+    // `Q` arrive as plain keys with nothing held that the column reads — lands at every caret.
+    column("ab\ncd\nef");
+    for key in [
+        gdk::Key::ISO_Level3_Shift,
+        gdk::Key::Shift_L,
+        gdk::Key::Control_L,
+        gdk::Key::Caps_Lock,
+    ] {
+        view.press(key, none);
+    }
+    view.press(gdk::Key::at, none);
+    view.press(gdk::Key::Q, gdk::ModifierType::SHIFT_MASK);
+    show("modifiers");
+    // Undo takes the keys back one at a time with the carets where each found them; Redo repeats.
+    undo();
+    show("undo");
+    undo();
+    show("undo");
+    view.press(gdk::Key::Z, ctrl | gdk::ModifierType::SHIFT_MASK);
+    show("redo");
+
+    // A forward delete undone leaves every caret in front of what came back, not after it.
+    column("abc\ndef\nghi");
+    view.press(gdk::Key::Delete, none);
+    show("delete");
+    undo();
+    show("delete_undo");
+
+    // A chord nothing binds leaves the column up; Escape ends it, the primary where it was.
+    view.press(gdk::Key::F4, none);
+    println!("bench column_f4 {}", view.has_carets());
+    view.press(gdk::Key::Escape, none);
+    show("escape");
+    // A dead key hands the keys after it to the input method, so it ends the column.
+    column("ab\ncd\nef");
+    view.press(gdk::Key::dead_acute, none);
+    println!("bench column_dead_key {}", view.has_carets());
+
+    // Ctrl+A is GTK's, and the select-all it answers with moves the caret, ending the column.
+    column("ab\ncd\nef");
+    let passed = view.press(gdk::Key::a, ctrl) == glib::Propagation::Proceed;
+    view.emit_select_all(true);
+    let selection = buffer
+        .selection_bounds()
+        .map(|(start, end)| (start.offset(), end.offset()));
+    println!(
+        "bench column_select_all passed={passed} carets={} selection={selection:?}",
+        view.has_carets()
+    );
+    // So does an edit the column did not make, rather than landing at one caret of it.
+    column("ab\ncd\nef");
+    buffer.insert_at_cursor("z");
+    println!("bench column_foreign_edit {}", view.has_carets());
+
+    // A paste with one line per caret hands them out; any other goes whole to every caret.
+    for clip in ["1\n2\n3\n", "x\ny"] {
+        column("ab\ncd\nef");
+        view.clipboard().set_text(clip);
+        view.emit_paste_clipboard();
+        glib::timeout_future(Duration::from_millis(100)).await;
+        show(&format!("paste {clip:?}"));
+        undo();
+        show("paste_undo");
+    }
+
+    // The line commands take every caret's line once. Duplicate moves each caret onto its copy,
+    // Insert Line Below onto its new line at the indent; Delete merges the carets it strands.
+    column("ab\ncd\nef\ngh");
+    editor::duplicate_line(view.upcast_ref());
+    show("duplicate");
+    undo();
+    show("duplicate_undo");
+    column("  ab\n  cd");
+    editor::newline_below(view.upcast_ref());
+    show("newline_below");
+    undo();
+    show("newline_below_undo");
+    column("ab\ncd\nef\ngh");
+    editor::delete_line(view.upcast_ref());
+    show("delete_line");
+
+    // Copy and cut take every caret's whole line, top to bottom, the cut as one step.
+    column("ab\ncd\nef\ngh");
+    view.emit_copy_clipboard();
+    let copied = view.clipboard().read_text_future().await;
+    println!("bench column_copy {copied:?} carets={}", view.has_carets());
+    view.emit_cut_clipboard();
+    show("cut");
+
+    // Page Down moves every caret by the lines on screen, the column's shape kept.
+    let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+    column(&lines.join("\n"));
+    // Laid out first, or the lines' heights are still estimates and "on screen" is all of them.
+    glib::timeout_future(Duration::from_millis(200)).await;
+    view.press(gdk::Key::Page_Down, none);
+    glib::timeout_future(Duration::from_millis(200)).await;
+    // The view scrolls by the same page, so the top line on screen is the primary's again.
+    let top = view.line_at_y(view.visible_rect().y()).0.line();
+    println!(
+        "bench column_page_down {:?} top={top}",
+        view.caret_positions()
+    );
+    view.clear_carets();
 }
 
 /// A shell focused in a window that does not have the keyboard must not narrow the application's
