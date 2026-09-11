@@ -389,7 +389,7 @@ pub(super) fn bench_shell_keys(app: &Rc<App>) {
     let Some(other) = app
         .shell
         .upgrade()
-        .and_then(|shell| shell.loose_window(&gtk_app))
+        .and_then(|shell| shell.loose_window(&gtk_app, crate::shell::Loose::Documents))
     else {
         return bench_quit(app);
     };
