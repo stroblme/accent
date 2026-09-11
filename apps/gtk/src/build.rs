@@ -820,7 +820,9 @@ thread_local! {
 /// is as tall as its tallest child however that child is aligned, and so either of them appearing
 /// lifted the bar from 29 px to 46 px. Dropping the minimum and the vertical padding puts them on
 /// the caption's own line height, and they stay buttons rather than becoming labels, so the click,
-/// the focus ring and the tooltip stay.
+/// the focus ring and the tooltip stay. `.accent-statusbar` spaces the status bar with padding
+/// rather than margins, so its background covers the whole bar where presentation mode shows it
+/// over the document.
 ///
 /// The last rules are corrections to GtkSourceView, which styles itself from its style scheme
 /// (a widget-level provider at priority 598) and from its own CSS (599). A display provider at
@@ -908,6 +910,7 @@ fn install_chrome_css() {
                background-color: var(--accent-bg-color); }} \
              .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
+             .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
                box-shadow: 0 1px 4px var(--shade-color); }} \
              .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \

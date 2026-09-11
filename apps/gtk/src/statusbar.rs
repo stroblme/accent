@@ -47,10 +47,7 @@ impl Bar {
         row.add_css_class("accent-flat");
         // The bar goes with the rest of the chrome while the user types (DESIGN.md).
         row.add_css_class("chrome-fade");
-        row.set_margin_start(12);
-        row.set_margin_end(12);
-        row.set_margin_top(6);
-        row.set_margin_bottom(6);
+        row.add_css_class("accent-statusbar");
 
         let progress = label(false);
         // The branch is the Sync control as well as the readout: it names the repository the
