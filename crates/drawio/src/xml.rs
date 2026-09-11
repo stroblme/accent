@@ -10,7 +10,7 @@ use quick_xml::{Reader, XmlVersion};
 use crate::Error;
 use crate::geom::{Point, Rect};
 use crate::model::{Cell, Element, File, Geometry, Page, Value, guid};
-use crate::style::Style;
+use crate::style::{Style, parse_num};
 
 /// Parse a whole file.
 pub fn parse(bytes: &[u8]) -> Result<File, Error> {
@@ -158,13 +158,22 @@ fn page(diagram: Element) -> Result<Page, Error> {
     Ok(model_page(attrs, model))
 }
 
+/// The most one compressed page may inflate to. Each page of a real 36-page slide deck
+/// inflates to well under 1 MiB and the whole file is 8.8 MB, so only a zip bomb comes near.
+const MAX_INFLATED: usize = 64 << 20;
+
 /// A compressed page's model: base64 of raw deflate of `encodeURIComponent` of the XML
 /// (`Graph.decompress`).
 fn decompress(text: &str) -> Result<String, Error> {
+    decompress_within(text, MAX_INFLATED)
+}
+
+/// [`decompress`], refusing a page that inflates to more than `limit` bytes.
+fn decompress_within(text: &str, limit: usize) -> Result<String, Error> {
     let broken = |what: &str| Error::Format(format!("a compressed page is not valid {what}"));
     let deflated = crate::base64::decode(text).ok_or_else(|| broken("base64"))?;
-    let inflated =
-        miniz_oxide::inflate::decompress_to_vec(&deflated).map_err(|_| broken("deflate data"))?;
+    let inflated = miniz_oxide::inflate::decompress_to_vec_with_limit(&deflated, limit)
+        .map_err(|_| broken("deflate data"))?;
     let escaped = std::str::from_utf8(&inflated).map_err(|_| broken("text"))?;
     let xml = percent_decode(escaped).ok_or_else(|| broken("URI encoding"))?;
     Ok(zap_gremlins(&xml))
@@ -308,10 +317,7 @@ fn rect(e: &Element) -> Rect {
 
 /// A numeric attribute; 0, draw.io's default, when it is missing or not a finite number.
 fn num(e: &Element, name: &str) -> f64 {
-    e.attr(name)
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|n: &f64| n.is_finite())
-        .unwrap_or(0.0)
+    e.attr(name).and_then(parse_num).unwrap_or(0.0)
 }
 
 /// The file as XML, uncompressed.
@@ -678,6 +684,17 @@ mod tests {
             Rect::new(10.0, 20.0, 80.0, 40.0)
         );
         assert!(write(&file).contains(r#"<mxCell id="v" value="Grüße &amp; 100%""#));
+    }
+
+    #[test]
+    fn a_page_inflating_past_the_limit_is_refused() {
+        // Raw deflate of 1000 × `a`: a zip bomb in miniature.
+        let bomb = "S0wcBaNgFAx3AAA=";
+        assert!(matches!(
+            decompress_within(bomb, 999),
+            Err(Error::Format(_))
+        ));
+        assert_eq!(decompress_within(bomb, 1000).unwrap().len(), 1000);
     }
 
     #[test]

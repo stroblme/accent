@@ -9,8 +9,10 @@
 //! port can be compared against later releases.
 
 use crate::geom::{self, Point, Rect};
+use crate::marker::DEFAULT_MARKERSIZE;
+use crate::model::{Cell, Page};
 use crate::perimeter;
-use crate::style::Resolved;
+use crate::style::{Resolved, parse_num};
 
 /// Which outline an end attaches to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -30,6 +32,24 @@ pub struct Terminal {
     pub perimeter: PerimeterKind,
     /// The terminal's own `perimeterSpacing`.
     pub perimeter_spacing: f64,
+}
+
+impl Terminal {
+    /// Vertex `cell` of `page` as an edge end; `None` for an edge, a layer or a cell placed
+    /// relative to its parent.
+    pub(crate) fn of(page: &Page, cell: &Cell) -> Option<Terminal> {
+        let bounds = page.absolute_rect(&cell.id)?;
+        let style = cell.style.resolve(false);
+        Some(Terminal {
+            bounds,
+            rotation: style.num("rotation", 0.0),
+            perimeter: match style.get("perimeter") {
+                Some("ellipsePerimeter") => PerimeterKind::Ellipse,
+                _ => PerimeterKind::Rectangle,
+            },
+            perimeter_spacing: style.num("perimeterSpacing", 0.0),
+        })
+    }
 }
 
 /// Everything routing one edge needs, in absolute page coordinates.
@@ -92,11 +112,111 @@ struct State<'a> {
 
 /// A connection constraint (`mxConnectionConstraint`): a point relative to the terminal's
 /// bounds, an offset in page units, and whether the point is moved onto the outline.
-struct Constraint {
-    point: Point,
-    dx: f64,
-    dy: f64,
-    perimeter: bool,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Constraint {
+    /// In 0..1 of the terminal's bounds, (0, 0) its top-left.
+    pub point: Point,
+    pub dx: f64,
+    pub dy: f64,
+    pub perimeter: bool,
+}
+
+/// A constraint on the outline at (`x`, `y`) of the bounds, with no offset.
+const fn on_outline(x: f64, y: f64) -> Constraint {
+    Constraint {
+        point: Point::new(x, y),
+        dx: 0.0,
+        dy: 0.0,
+        perimeter: true,
+    }
+}
+
+/// `mxRectangleShape.prototype.constraints`: the corners and the quarters of each side.
+// Shapes.js 9092-9107
+const RECTANGLE_CONSTRAINTS: [Constraint; 16] = [
+    on_outline(0.0, 0.0),
+    on_outline(0.25, 0.0),
+    on_outline(0.5, 0.0),
+    on_outline(0.75, 0.0),
+    on_outline(1.0, 0.0),
+    on_outline(0.0, 0.25),
+    on_outline(0.0, 0.5),
+    on_outline(0.0, 0.75),
+    on_outline(1.0, 0.25),
+    on_outline(1.0, 0.5),
+    on_outline(1.0, 0.75),
+    on_outline(0.0, 1.0),
+    on_outline(0.25, 1.0),
+    on_outline(0.5, 1.0),
+    on_outline(0.75, 1.0),
+    on_outline(1.0, 1.0),
+];
+
+/// `mxEllipse.prototype.constraints`: the corners, which land on the ellipse, and the middle of
+/// each side.
+// Shapes.js 9108-9111
+const ELLIPSE_CONSTRAINTS: [Constraint; 8] = [
+    on_outline(0.0, 0.0),
+    on_outline(1.0, 0.0),
+    on_outline(0.0, 1.0),
+    on_outline(1.0, 1.0),
+    on_outline(0.5, 0.0),
+    on_outline(0.5, 1.0),
+    on_outline(0.0, 0.5),
+    on_outline(1.0, 0.5),
+];
+
+/// The connection points of vertex `id`, draw.io's snap points: where an edge end can be
+/// pinned, each in page coordinates and turned with the shape, with the constraint that pins it
+/// there. Empty for an edge, a layer and an unknown id.
+///
+/// A `points` style lists them; a list that does not parse gives none. Without one they are
+/// the shape's own: an ellipse's eight, a rectangle's sixteen.
+// Graph.getAllConnectionConstraints, Graph.js 18456-18519
+// ponytail: shapes whose points depend on their size (`getConstraints(style, w, h)`), stencils'
+// own points, the other shapes sharing the ellipse's table (`rhombus`, `doubleEllipse`, …) and
+// `direction` are not ported; they take the rectangle's sixteen.
+pub fn anchors(page: &Page, id: &str) -> Vec<(Point, Constraint)> {
+    let Some(cell) = page.cell(id) else {
+        return Vec::new();
+    };
+    let Some(terminal) = Terminal::of(page, cell) else {
+        return Vec::new();
+    };
+    let style = cell.style.resolve(false);
+    let constraints = match style.get("points") {
+        Some(list) => points_style(list).unwrap_or_default(),
+        None if style.shape() == "ellipse" => ELLIPSE_CONSTRAINTS.to_vec(),
+        None => RECTANGLE_CONSTRAINTS.to_vec(),
+    };
+    constraints
+        .into_iter()
+        .map(|c| (connection_point(&terminal, &c), c))
+        .collect()
+}
+
+/// A `points` style: JSON of `[[x, y, perimeter, dx, dy], …]`, the last three optional. The
+/// perimeter is on unless it is `0` (or `"0"`, or `false`), the offsets 0 unless given. `None`
+/// for anything else.
+// Graph.js 18462-18485
+fn points_style(list: &str) -> Option<Vec<Constraint>> {
+    let list: String = list.chars().filter(|c| !c.is_whitespace()).collect();
+    let items = list.strip_prefix("[[")?.strip_suffix("]]")?;
+    let value = |v: &str| parse_num(v.trim_matches('"'));
+    let constraint = |item: &str| {
+        let v: Vec<&str> = item.split(',').collect();
+        let perimeter = v
+            .get(2)
+            .is_none_or(|&p| !(p == "\"0\"" || p == "false" || parse_num(p) == Some(0.0)));
+        let offset = |i: usize| v.get(i).and_then(|&d| value(d)).unwrap_or(0.0);
+        Some(Constraint {
+            point: Point::new(value(v[0])?, value(v.get(1)?)?),
+            dx: offset(3),
+            dy: offset(4),
+            perimeter,
+        })
+    };
+    items.split("],[").map(constraint).collect()
 }
 
 /// The constraint the edge style sets for an end: `exitX`/`exitY`/`exitDx`/`exitDy`/
@@ -108,7 +228,7 @@ fn connection_constraint(style: &Resolved, source: bool) -> Option<Constraint> {
     } else {
         ["entryX", "entryY", "entryDx", "entryDy", "entryPerimeter"]
     };
-    let num = |key| style.get(key).and_then(|v| v.trim().parse::<f64>().ok());
+    let num = |key| style.get(key).and_then(parse_num);
     Some(Constraint {
         point: Point::new(num(x)?, num(y)?),
         dx: style.num(dx, 0.0),
@@ -268,8 +388,8 @@ fn update_points(input: &EdgeInput, state: &State) -> Vec<Option<Point>> {
     match get_edge_style(input) {
         Some(EdgeStyle::Loop) => loop_style(state, src, points, &mut pts),
         Some(EdgeStyle::Elbow) => elbow_connector(state, src, trg, points, &mut pts),
-        Some(EdgeStyle::SideToSide) => side_to_side(state, src, trg, points, &mut pts),
-        Some(EdgeStyle::TopToBottom) => top_to_bottom(state, src, trg, points, &mut pts),
+        Some(EdgeStyle::SideToSide) => elbow_segment(state, src, trg, points, &mut pts, false),
+        Some(EdgeStyle::TopToBottom) => elbow_segment(state, src, trg, points, &mut pts, true),
         Some(EdgeStyle::Segment) => segment_connector(state, src, trg, points, &mut pts),
         Some(EdgeStyle::Orth) => orth_connector(state, src, trg, points, &mut pts),
         // ponytail: EntityRelation is not ported; such an edge keeps its waypoints as they are.
@@ -458,11 +578,8 @@ fn elbow_connector(
             }
         }
     }
-    if !horizontal && (vertical || state.style.get("elbow") == Some("vertical")) {
-        top_to_bottom(state, source, target, points, result);
-    } else {
-        side_to_side(state, source, target, points, result);
-    }
+    let vertical = !horizontal && (vertical || state.style.get("elbow") == Some("vertical"));
+    elbow_segment(state, source, target, points, result, vertical);
 }
 
 /// The boxes the elbow styles route between: a fixed end is a point.
@@ -477,105 +594,59 @@ fn elbow_ends(
     Some((s, t))
 }
 
-/// A vertical segment halfway between the terminals, or at the waypoint's x.
-// mxEdgeStyle.SideToSide, mxEdgeStyle.js 398-481
-fn side_to_side(
+/// SideToSide: a vertical segment halfway between the terminals or at the waypoint's x, met
+/// at the height of each terminal's centre, or of the waypoint where it is within the
+/// terminal's height. With `vertical`, TopToBottom: the same with x and y swapped.
+// mxEdgeStyle.SideToSide and TopToBottom, mxEdgeStyle.js 398-576
+fn elbow_segment(
     state: &State,
     source: Option<&Terminal>,
     target: Option<&Terminal>,
     points: &[Point],
     result: &mut Vec<Option<Point>>,
+    vertical: bool,
 ) {
-    let pt = points.first().copied();
+    // Worked out as SideToSide; TopToBottom's input and output have x and y swapped.
+    let swap = |p: Point| if vertical { Point::new(p.y, p.x) } else { p };
+    let swap_rect = |r: Rect| {
+        if vertical {
+            Rect::new(r.y, r.x, r.h, r.w)
+        } else {
+            r
+        }
+    };
+    let pt = points.first().copied().map(swap);
     let Some((s, t)) = elbow_ends(state, source, target) else {
         return;
     };
+    let (s, t) = (swap_rect(s), swap_rect(t));
     let l = s.x.max(t.x);
     let r = s.right().min(t.right());
     let x = match pt {
         Some(p) => p.x,
         None => js_round(r + (l - r) / 2.0),
     };
-    let mut y1 = s.centre().y;
-    let mut y2 = t.centre().y;
-    if let Some(p) = pt {
-        if p.y >= s.y && p.y <= s.bottom() {
-            y1 = p.y;
+    let meet = |b: Rect| match pt {
+        Some(p) if p.y >= b.y && p.y <= b.bottom() => p.y,
+        _ => b.centre().y,
+    };
+    let outside = |y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
+    for y in [meet(s), meet(t)] {
+        if outside(y) {
+            result.push(Some(swap(Point::new(x, y))));
         }
-        if p.y >= t.y && p.y <= t.bottom() {
-            y2 = p.y;
-        }
-    }
-    let outside = |x: f64, y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
-    if outside(x, y1) {
-        result.push(Some(Point::new(x, y1)));
-    }
-    if outside(x, y2) {
-        result.push(Some(Point::new(x, y2)));
     }
     if result.len() == 1 {
-        match pt {
-            Some(p) => {
-                if outside(x, p.y) {
-                    result.push(Some(Point::new(x, p.y)));
-                }
-            }
+        let y = match pt {
+            Some(p) if outside(p.y) => p.y,
+            Some(_) => return,
             None => {
                 let top = s.y.max(t.y);
                 let bottom = s.bottom().min(t.bottom());
-                result.push(Some(Point::new(x, top + (bottom - top) / 2.0)));
+                top + (bottom - top) / 2.0
             }
-        }
-    }
-}
-
-/// A horizontal segment halfway between the terminals, or at the waypoint's y.
-// mxEdgeStyle.TopToBottom, mxEdgeStyle.js 489-576
-fn top_to_bottom(
-    state: &State,
-    source: Option<&Terminal>,
-    target: Option<&Terminal>,
-    points: &[Point],
-    result: &mut Vec<Option<Point>>,
-) {
-    let pt = points.first().copied();
-    let Some((s, t)) = elbow_ends(state, source, target) else {
-        return;
-    };
-    let top = s.y.max(t.y);
-    let bottom = s.bottom().min(t.bottom());
-    let x = match pt {
-        Some(p) if p.x >= s.x && p.x <= s.right() => p.x,
-        _ => s.centre().x,
-    };
-    let y = match pt {
-        Some(p) => p.y,
-        None => js_round(bottom + (top - bottom) / 2.0),
-    };
-    let outside = |x: f64, y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
-    if outside(x, y) {
-        result.push(Some(Point::new(x, y)));
-    }
-    let x = match pt {
-        Some(p) if p.x >= t.x && p.x <= t.right() => p.x,
-        _ => t.centre().x,
-    };
-    if outside(x, y) {
-        result.push(Some(Point::new(x, y)));
-    }
-    if result.len() == 1 {
-        match pt {
-            Some(p) => {
-                if outside(p.x, y) {
-                    result.push(Some(Point::new(p.x, y)));
-                }
-            }
-            None => {
-                let l = s.x.max(t.x);
-                let r = s.right().min(t.right());
-                result.push(Some(Point::new(l + (r - l) / 2.0, y)));
-            }
-        }
+        };
+        result.push(Some(swap(Point::new(x, y))));
     }
 }
 
@@ -768,8 +839,6 @@ fn segment_connector(
 
 /// `mxEdgeStyle.orthBuffer`: the default jetty, the stub an orthogonal edge leaves a side with.
 const ORTH_BUFFER: f64 = 10.0;
-/// `mxConstants.DEFAULT_MARKERSIZE`.
-const DEFAULT_MARKERSIZE: f64 = 6.0;
 
 // mxConstants.DIRECTION_MASK_*: the sides an end may leave by.
 const WEST: u32 = 1;
@@ -1199,8 +1268,9 @@ fn orth_connector(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Cell;
     use crate::style::Style;
-    use crate::style::presets::{EdgeKind, edge};
+    use crate::style::presets::{EdgeKind, constrained, edge};
 
     fn rect(x: f64, y: f64) -> Terminal {
         Terminal {
@@ -1297,6 +1367,44 @@ mod tests {
     }
 
     #[test]
+    fn side_to_side_crosses_halfway_or_at_the_waypoint() {
+        let style = Style::parse("edgeStyle=sideToSideEdgeStyle;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 100.0)));
+        assert_points(
+            &pts,
+            &[(80.0, 20.0), (140.0, 20.0), (140.0, 120.0), (200.0, 120.0)],
+        );
+        let hint = [Point::new(150.0, 30.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &hint,
+            ..input(&style, rect(0.0, 0.0), rect(200.0, 100.0))
+        });
+        assert_points(
+            &pts,
+            &[(80.0, 30.0), (150.0, 30.0), (150.0, 120.0), (200.0, 120.0)],
+        );
+    }
+
+    #[test]
+    fn top_to_bottom_crosses_halfway_or_at_the_waypoint() {
+        let style = Style::parse("edgeStyle=topToBottomEdgeStyle;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 100.0)));
+        assert_points(
+            &pts,
+            &[(40.0, 40.0), (40.0, 70.0), (240.0, 70.0), (240.0, 100.0)],
+        );
+        let hint = [Point::new(60.0, 80.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &hint,
+            ..input(&style, rect(0.0, 0.0), rect(200.0, 100.0))
+        });
+        assert_points(
+            &pts,
+            &[(60.0, 40.0), (60.0, 80.0), (240.0, 80.0), (240.0, 100.0)],
+        );
+    }
+
+    #[test]
     fn edge_style_none_is_straight_through_waypoints() {
         let style = Style::parse("edgeStyle=none;").resolve(true);
         let bend = [Point::new(140.0, 100.0)];
@@ -1359,5 +1467,89 @@ mod tests {
         };
         let pts = route(&input(&style, source, rect(200.0, 0.0)));
         assert_points(&pts, &[(60.0, 20.0), (200.0, 20.0)]);
+    }
+
+    #[test]
+    fn a_constraint_that_is_not_a_finite_number_leaves_the_end_floating() {
+        let style = Style::parse("exitX=1e999;exitY=0.5;exitPerimeter=0;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 0.0)));
+        assert_points(&pts, &[(80.0, 20.0), (200.0, 20.0)]);
+    }
+
+    #[test]
+    fn a_flat_ellipse_is_met_at_its_centre() {
+        let style = Style::parse("").resolve(true);
+        let flat = Terminal {
+            bounds: Rect::new(0.0, 20.0, 80.0, 0.0),
+            perimeter: PerimeterKind::Ellipse,
+            ..Terminal::default()
+        };
+        let bend = [Point::new(140.0, 20.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &bend,
+            ..input(&style, flat, rect(200.0, 0.0))
+        });
+        assert_points(&pts, &[(40.0, 20.0), (140.0, 20.0), (200.0, 20.0)]);
+    }
+
+    /// A page holding vertex `a` in `style`, 80 × 40 at the origin like [`rect`].
+    fn shape(style: &str) -> Page {
+        let mut page = Page::blank("P", "p");
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        page.cells.push(Cell::new_vertex("a", "1", r, style, ""));
+        page
+    }
+
+    /// The anchor of `a` whose constraint is at (`x`, `y`) of its bounds.
+    fn anchor(page: &Page, x: f64, y: f64) -> (Point, Constraint) {
+        let all = anchors(page, "a");
+        let at = all.into_iter().find(|(_, c)| c.point == Point::new(x, y));
+        at.expect("an anchor there")
+    }
+
+    #[test]
+    fn a_rectangle_has_draw_ios_sixteen_anchors() {
+        let page = shape("");
+        assert_eq!(anchors(&page, "a").len(), 16);
+        assert_points(&[anchor(&page, 1.0, 0.5).0], &[(80.0, 20.0)]);
+        assert!(anchors(&page, "1").is_empty() && anchors(&page, "nope").is_empty());
+    }
+
+    #[test]
+    fn an_ellipses_corner_anchors_lie_on_it() {
+        let page = shape("ellipse;");
+        assert_eq!(anchors(&page, "a").len(), 8);
+        for (x, y) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+            let p = anchor(&page, x, y).0;
+            let (u, v) = ((p.x - 40.0) / 40.0, (p.y - 20.0) / 20.0);
+            assert!((u * u + v * v - 1.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn a_points_style_replaces_the_shapes_anchors() {
+        let page = shape("points=[[0,0.5],[1, 0.5, 0, 5, -5]];");
+        let all = anchors(&page, "a");
+        assert_eq!(all.len(), 2);
+        assert_points(&[all[0].0, all[1].0], &[(0.0, 20.0), (85.0, 15.0)]);
+        assert!(all[0].1.perimeter && !all[1].1.perimeter);
+        for broken in ["points=[[0,0.5],[1", "points=[];"] {
+            assert!(anchors(&shape(broken), "a").is_empty(), "{broken}");
+        }
+    }
+
+    #[test]
+    fn a_turned_shapes_anchors_turn_with_it() {
+        let page = shape("rotation=90;");
+        assert_points(&[anchor(&page, 1.0, 0.5).0], &[(40.0, 60.0)]);
+    }
+
+    #[test]
+    fn an_edge_pinned_to_an_anchor_leaves_from_it() {
+        let (at, c) = anchor(&shape(""), 1.0, 0.5);
+        let style = constrained(&edge(EdgeKind::Orthogonal, true), Some(&c), None);
+        let style = Style::parse(&style).resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 100.0)));
+        assert_points(&pts[..1], &[(at.x, at.y)]);
     }
 }

@@ -39,15 +39,6 @@ pub enum Run {
     Bullet,
 }
 
-/// No marks: the label's own font.
-const PLAIN: Marks = Marks {
-    bold: false,
-    italic: false,
-    underline: false,
-    color: None,
-    size: None,
-};
-
 /// An HTML label (`html=1`) as runs. `math` is the page's `math` switch.
 ///
 /// Bold, italic, underline, colour and size come from the tags and inline styles that set them;
@@ -90,12 +81,16 @@ pub fn html_to_runs(html: &str, math: bool) -> Vec<Run> {
                 if name == "li" {
                     runs.push(Run::Bullet);
                 }
-                let mut marks = open.last().map_or(PLAIN, |(_, m)| m.clone());
+                let mut marks = open.last().map_or_else(Marks::default, |(_, m)| m.clone());
                 tag.apply(&mut marks);
                 open.push((tag.name, marks));
             }
         } else {
-            collapse(&mut runs, c, open.last().map_or(&PLAIN, |(_, m)| m));
+            collapse(
+                &mut runs,
+                c,
+                open.last().map_or(&Marks::default(), |(_, m)| m),
+            );
             rest = &rest[len..];
         }
     }
@@ -123,24 +118,6 @@ pub fn plain_to_runs(text: &str, math: bool) -> Vec<Run> {
         }
     }
     if math { find_math(runs) } else { runs }
-}
-
-/// The text alone, one line per break.
-pub fn runs_to_plain(runs: &[Run]) -> String {
-    let mut out = String::new();
-    for run in runs {
-        match run {
-            Run::Text { text, .. } => out.push_str(text),
-            Run::Math {
-                tex,
-                display: false,
-            } => out.push_str(&format!("\\({tex}\\)")),
-            Run::Math { tex, display: true } => out.push_str(&format!("$${tex}$$")),
-            Run::Break => out.push('\n'),
-            Run::Bullet => out.push_str("• "),
-        }
-    }
-    out
 }
 
 /// Runs as the Markdown the label editor shows: `**bold**`, `*italic*`, `<u>underline</u>`,
@@ -376,7 +353,7 @@ fn font_size(value: &str) -> Option<f64> {
     let value = value.trim();
     let n: i32 = value.parse().ok()?;
     let step = if value.starts_with(['+', '-']) {
-        3 + n
+        n.saturating_add(3)
     } else {
         n
     };
@@ -726,7 +703,7 @@ mod tests {
             bold: look.contains('b'),
             italic: look.contains('i'),
             underline: look.contains('u'),
-            ..PLAIN
+            ..Marks::default()
         };
         Run::Text {
             text: s.into(),
@@ -762,6 +739,10 @@ mod tests {
             (
                 "<font color='#009682' size=5>a</font>",
                 vec![sized("a", "", 24.0, teal)],
+            ),
+            (
+                "<font size='+2147483647'>a</font>",
+                vec![sized("a", "", 48.0, None)],
             ),
             (
                 "<span style='font-size: 28px; color: #009682'>a</span>",

@@ -65,6 +65,10 @@ pub struct Sidebar {
     /// The list in `outline_bin` while it holds a text document's outline, kept to be refilled
     /// rather than rebuilt while that document is edited.
     outline_list: RefCell<Option<outline::List>>,
+    /// The Properties pane: the diagram in front's own widget, and the page, hidden while no
+    /// diagram is in front.
+    properties_bin: adw::Bin,
+    properties_page: adw::ViewStackPage,
 }
 
 /// The panes that read the vault's index.
@@ -173,6 +177,17 @@ impl Sidebar {
         outline_bin.set_child(Some(&outline::empty()));
         stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", outline::ICON);
 
+        let properties_bin = adw::Bin::builder().vexpand(true).build();
+        stack.add_titled_with_icon(
+            &properties_bin,
+            Some("properties"),
+            "Properties",
+            "document-properties-symbolic",
+        );
+        let properties_page = stack.page(&properties_bin);
+        // Hidden until a diagram is in front: nothing else has properties to show.
+        properties_page.set_visible(false);
+
         // Icons, because four labels do not fit a 200 px sidebar without truncating. The switcher
         // gives every toggle the page title as its tooltip, so icon-only stays discoverable. No
         // vertical alignment of its own: as a header title widget it takes the header's full
@@ -215,6 +230,28 @@ impl Sidebar {
             ),
             outline_bin,
             outline_list: RefCell::new(None),
+            properties_bin,
+            properties_page,
+        }
+    }
+
+    /// Show a diagram's properties in their pane, or with `None` take the pane away — to the
+    /// Outline first when it is the one on screen, so the stack is never left showing nothing.
+    pub fn set_properties(&self, content: Option<&gtk::Widget>) {
+        match content {
+            Some(widget) => {
+                if self.properties_bin.child().as_ref() != Some(widget) {
+                    self.properties_bin.set_child(Some(widget));
+                }
+                self.properties_page.set_visible(true);
+            }
+            None => {
+                if self.is_showing("properties") {
+                    self.stack.set_visible_child_name("outline");
+                }
+                self.properties_page.set_visible(false);
+                self.properties_bin.set_child(gtk::Widget::NONE);
+            }
         }
     }
 
@@ -336,7 +373,8 @@ impl Sidebar {
         }
     }
 
-    /// Show a pane by name: "files", "search", "tags", "references", "git", "ports" or "outline",
+    /// Show a pane by name: "files", "search", "tags", "references", "git", "ports", "outline"
+    /// or "properties",
     /// focusing its entry where there is one.
     pub fn show_pane(&self, name: &str) {
         // A pane this sidebar does not have leaves it where it was, which for a window with no

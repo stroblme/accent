@@ -65,6 +65,7 @@ impl App {
                 Spot::Caret(iter.line() + 1, iter.line_offset() + 1)
             }
             Doc::Pdf(pdf) => Spot::Page(pdf.anchor()),
+            Doc::Diagram(d) => Spot::Sheet(d.page_index()),
             _ => Spot::Whole,
         };
         Place { key: doc.key(), at }
@@ -144,6 +145,7 @@ impl App {
         match (&doc, to.at) {
             (Doc::Text(tab), Spot::Caret(line, column)) => tab.goto_line(line, column),
             (Doc::Pdf(pdf), Spot::Page(anchor)) => pdf.scroll_to(anchor),
+            (Doc::Diagram(d), Spot::Sheet(page)) => d.show_page(page),
             _ => {}
         }
         true
@@ -337,6 +339,7 @@ impl App {
             Some(Doc::Text(tab)) => tab.view.clone().upcast(),
             Some(Doc::Terminal(term)) => term.view.clone().upcast(),
             Some(Doc::Pdf(pdf)) => pdf.key_target(),
+            Some(Doc::Diagram(d)) => d.key_target(),
             _ => return,
         };
         // From an idle, as a new terminal's own focus is (see [`Self::open_terminal_at`]): the

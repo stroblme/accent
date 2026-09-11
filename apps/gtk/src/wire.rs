@@ -35,7 +35,11 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             pane,
             #[upgrade_or]
             None,
-            move || app.pdf_of(&pane).map(|pdf| pdf.page_count())
+            move || {
+                app.pdf_of(&pane)
+                    .map(|pdf| pdf.page_count())
+                    .or_else(|| app.diagram_of(&pane).map(|d| d.page_count()))
+            }
         )),
         mark: Box::new(glib::clone!(
             #[weak]
@@ -70,6 +74,25 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     if close {
                         // Only once the answer is in: a cancelled close must not have moved the
                         // selection off the tab it kept.
+                        app.select_survivor(&page);
+                        app.forget_page(&page);
+                    }
+                    tabs.close_page_finish(&page, close);
+                });
+                return glib::Propagation::Stop;
+            }
+            // A diagram is the same, through its own save.
+            let dirty = app
+                .diagrams()
+                .into_iter()
+                .find(|d| &d.page == page)
+                .filter(|d| d.modified.get());
+            if let Some(diagram) = dirty
+                && let Err(e) = app.flush_diagram(&diagram)
+            {
+                let (tabs, page) = (tabs.clone(), page.clone());
+                app.ask_unsaved_diagram(&diagram, &e, move |app, close| {
+                    if close {
                         app.select_survivor(&page);
                         app.forget_page(&page);
                     }
@@ -420,6 +443,17 @@ pub fn wire_window(app: &Rc<App>) {
                     continue;
                 };
                 app.ask_unsaved(tab, &e, |app, close| {
+                    if close {
+                        app.window.close();
+                    }
+                });
+                return glib::Propagation::Stop;
+            }
+            for diagram in app.diagrams().iter().filter(|d| d.modified.get()) {
+                let Err(e) = app.flush_diagram(diagram) else {
+                    continue;
+                };
+                app.ask_unsaved_diagram(diagram, &e, |app, close| {
                     if close {
                         app.window.close();
                     }

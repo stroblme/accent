@@ -13,6 +13,7 @@ mod comment;
 mod completion;
 mod connect;
 mod diagnostics;
+mod diagram;
 mod dialogs;
 mod diff;
 mod doc;
@@ -552,6 +553,7 @@ impl App {
             // note.
             self.sync_status();
             self.sync_outline();
+            self.sync_properties();
             self.sync_opening();
             self.refresh_zoom();
             self.clear_preview();
@@ -582,6 +584,7 @@ impl App {
         self.refresh_references();
         self.sync_status();
         self.sync_outline();
+        self.sync_properties();
         self.sync_opening();
         self.refresh_zoom();
         match note {
@@ -650,6 +653,24 @@ impl App {
             content.set_end_child(Some(&pdf.thumbnails()));
             return sidebar.set_outline(Some(content.upcast_ref()));
         }
+        // A diagram's outline is its pages, as a PDF's is its bookmarks.
+        if let Some(d) = doc.diagram() {
+            let rows: Vec<(u8, String, usize)> = d
+                .page_names()
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| (1, name, i))
+                .collect();
+            let list = sidebar::outline_list(
+                &rows,
+                glib::clone!(
+                    #[weak]
+                    d,
+                    move |page| d.goto_page(page)
+                ),
+            );
+            return sidebar.set_outline(Some(&list));
+        }
         let Some(tab) = doc.tab() else {
             return sidebar.set_outline(None);
         };
@@ -716,6 +737,7 @@ impl App {
                 };
                 (Some("PDF".to_string()), facts)
             }
+            Some(Doc::Diagram(d)) => (Some("Diagram".to_string()), d.facts()),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
@@ -724,11 +746,11 @@ impl App {
         self.statusbar.set_facts(facts.as_deref());
         // Only a text tab has a buffer that can be ahead of the disk; the dot is the tab's own,
         // so one symbol means "unsaved" in both places.
-        self.statusbar.set_unsaved(
-            doc.as_ref()
-                .and_then(Doc::tab)
-                .is_some_and(|t| t.modified.get()),
-        );
+        self.statusbar.set_unsaved(match &doc {
+            Some(Doc::Text(t)) => t.modified.get(),
+            Some(Doc::Diagram(d)) => d.modified.get(),
+            _ => false,
+        });
         self.sync_branch();
     }
 
@@ -1076,6 +1098,10 @@ impl App {
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());
+        }
+        for diagram in self.diagrams() {
+            diagram.set_spellcheck(config.spellcheck);
+            diagram.set_font(config.editor_font.as_deref());
         }
         if let Some(git) = self.git.get() {
             git.set_tree(config.git_tree);

@@ -7,6 +7,8 @@ impl App {
     pub fn save_active(self: &Rc<Self>) {
         if let Some(tab) = self.active() {
             self.save_tab(&tab, true);
+        } else if let Some(diagram) = self.active_diagram() {
+            self.save_diagram(&diagram, true);
         }
     }
 
@@ -141,7 +143,7 @@ impl App {
     ///
     /// A save can notice the link is down before the connection thread has reported it, and the
     /// banner it would raise then must not overwrite the reason a real `Event::Disconnected` gave.
-    fn show_offline(&self) {
+    pub(crate) fn show_offline(&self) {
         if !self.connection.is_revealed() {
             self.show_connection_banner("The vault is not answering");
         }
@@ -158,11 +160,17 @@ impl App {
         &self,
         tab: &Tab,
     ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
-        let vault = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.rel()))
-            .cloned();
-        let (rel, path) = (tab.rel(), tab.path());
+        self.writer_at(tab.rel(), tab.path())
+    }
+
+    /// [`writer`](Self::writer) for any file this window holds, by its key and its path: a
+    /// diagram's save goes through the same door.
+    pub(crate) fn writer_at(
+        &self,
+        rel: String,
+        path: PathBuf,
+    ) -> impl FnOnce(&str, Option<Etag>) -> Result<Etag, SaveError> + Send + 'static {
+        let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         move |text, expected| match vault {
             Some(vault) => vault.save(&rel, text, expected),
             None => accent_core::fs::write_note(&path, text, expected),
@@ -367,7 +375,43 @@ impl App {
         error: &SaveError,
         after: impl Fn(&Rc<Self>, bool) + 'static,
     ) {
-        let rel = tab.rel();
+        let (discarded, written) = (tab.clone(), tab.clone());
+        self.ask_unsaved_about(
+            &tab.rel(),
+            error,
+            move || discarded.discard(),
+            move |app| app.write_tab(&written, None),
+            after,
+        );
+    }
+
+    /// The same question for a diagram on its way out.
+    pub(crate) fn ask_unsaved_diagram(
+        self: &Rc<Self>,
+        tab: &Rc<crate::diagram::DiagramTab>,
+        error: &SaveError,
+        after: impl Fn(&Rc<Self>, bool) + 'static,
+    ) {
+        let (discarded, written) = (tab.clone(), tab.clone());
+        self.ask_unsaved_about(
+            &tab.key(),
+            error,
+            move || discarded.discard(),
+            move |app| app.write_diagram(&written, None),
+            after,
+        );
+    }
+
+    /// The question itself, whatever kind of document holds the edits: `discard` throws them
+    /// away, `overwrite` writes them over whatever is on disk.
+    fn ask_unsaved_about(
+        self: &Rc<Self>,
+        rel: &str,
+        error: &SaveError,
+        discard: impl FnOnce() + 'static,
+        overwrite: impl FnOnce(&Rc<Self>) -> Result<(), SaveError> + 'static,
+        after: impl Fn(&Rc<Self>, bool) + 'static,
+    ) {
         let body = match error {
             SaveError::ChangedOnDisk { .. } => {
                 format!("{rel} changed on disk, so your edits could not be saved.")
@@ -386,14 +430,14 @@ impl App {
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
 
-        let (app, tab) = (self.clone(), tab.clone());
+        let app = self.clone();
         dialogs::choose(&dialog, Some(&self.window), move |response| {
             let close = match response.as_str() {
                 "discard" => {
-                    tab.discard();
+                    discard();
                     true
                 }
-                "overwrite" => match app.write_tab(&tab, None) {
+                "overwrite" => match overwrite(&app) {
                     Ok(()) => true,
                     Err(e) => {
                         app.cannot("save", e);
@@ -416,6 +460,13 @@ impl App {
             if let Some(at) = pdf.ring_at() {
                 self.ring_at.set(Some(at));
             }
+        }
+        // A diagram closing was asked about already (`wire.rs`), so a failure here is the
+        // answer "discard" having been given, or the file gone.
+        if let Some(Doc::Diagram(d)) = self.doc_for_page(page)
+            && let Err(e) = self.flush_diagram(&d)
+        {
+            tracing::debug!("a closing diagram was not written: {e}");
         }
         if let Some((pane, doc)) = self.pane_of(page).zip(self.doc_for_page(page)) {
             pane.nav.borrow_mut().forget(&doc.key());

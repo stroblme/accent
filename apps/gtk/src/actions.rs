@@ -119,6 +119,11 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.git-delete-branch", "Delete Branch…", &[]),
     ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
+    (
+        "win.pane-properties",
+        "Properties Pane",
+        &["<Control><Shift>a"],
+    ),
     // Back and forward walk the active pane's history, over every kind of document. They take
     // the chords a browser uses for the same idea, and the mouse's side buttons with them.
     ("win.back", "Back", &["<Alt>Left"]),
@@ -153,6 +158,30 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-circle", "Circle", &[]),
     ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
+    // The diagram tab. Undo, Redo, Delete Selection, Select All Shapes, Edit Label and the
+    // paging commands are the canvas's own keys, which fire these, and carry no chord for the
+    // PDF's reason: `Ctrl+Z`, `Ctrl+A`, `Delete` and `Return` belong to whatever has the
+    // keyboard. Duplicate Selection is `Ctrl+D`, which is Duplicate Line's chord and which
+    // `run_action` hands to a diagram in front.
+    ("win.diagram-undo", "Undo Diagram Edit", &[]),
+    ("win.diagram-redo", "Redo Diagram Edit", &[]),
+    ("win.diagram-delete", "Delete Selection", &[]),
+    ("win.diagram-duplicate", "Duplicate Selection", &[]),
+    ("win.diagram-select-all", "Select All Shapes", &[]),
+    ("win.diagram-edit-label", "Edit Label", &[]),
+    ("win.diagram-next-page", "Next Diagram Page", &[]),
+    ("win.diagram-previous-page", "Previous Diagram Page", &[]),
+    ("win.diagram-add-page", "Add Diagram Page", &[]),
+    ("win.diagram-rename-page", "Rename Diagram Page…", &[]),
+    ("win.diagram-delete-page", "Delete Diagram Page", &[]),
+    ("win.diagram-to-front", "Bring to Front", &[]),
+    ("win.diagram-to-back", "Send to Back", &[]),
+    ("win.diagram-select", "Select and Move", &[]),
+    ("win.diagram-rect", "Add Rectangle", &[]),
+    ("win.diagram-ellipse", "Add Ellipse", &[]),
+    ("win.diagram-text", "Add Text", &[]),
+    ("win.diagram-connector", "Add Connector", &[]),
+    ("win.diagram-image", "Add Image…", &[]),
     (
         "win.pane-references",
         "References Pane",
@@ -194,6 +223,10 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
 
 impl App {
     fn run_action(self: &Rc<Self>, name: &str) {
+        if name.starts_with("diagram-") {
+            self.diagram_action(name);
+            return;
+        }
         match name {
             "save" => self.save_active(),
             "open-file" => self.open_file_dialog(),
@@ -262,7 +295,12 @@ impl App {
             "goto-line" => self.open_find(find::Mode::Goto),
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
-            "duplicate-line" => self.with_active(Tab::duplicate_line),
+            // `Ctrl+D` over a diagram duplicates the selection: an application accelerator is
+            // dispatched at the window, so the canvas cannot claim the chord for itself.
+            "duplicate-line" => match self.active_diagram() {
+                Some(d) => d.duplicate(),
+                None => self.with_active(Tab::duplicate_line),
+            },
             "toggle-comment" => self.with_active(Tab::toggle_comment),
             "toggle-wrap" => self.with_active(Tab::toggle_wrap),
             "delete-line" => self.with_active(Tab::delete_line),
@@ -270,7 +308,8 @@ impl App {
                 // `Ctrl+Return` belongs to the git commit box while the keyboard is in it
                 // (DESIGN.md, Git pane). A window accelerator is dispatched ahead of any
                 // controller on the focused widget, so the box cannot claim the chord itself.
-                let committed = self.git.get().is_some_and(|git| git.commit_if_focused());
+                let committed = self.git.get().is_some_and(|git| git.commit_if_focused())
+                    || self.active_diagram().is_some_and(|d| d.commit_label());
                 if !committed && let Some(tab) = self.active() {
                     tab.newline_below();
                 }
@@ -284,8 +323,15 @@ impl App {
             "forward" => self.navigate(true),
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
             "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
-            "pdf-undo" => self.with_pdf(|pdf| pdf.undo()),
-            "pdf-redo" => self.with_pdf(|pdf| pdf.redo()),
+            // The header's Undo and Redo fire these over a diagram too.
+            "pdf-undo" => match self.active_diagram() {
+                Some(d) => d.undo(),
+                None => self.with_pdf(|pdf| pdf.undo()),
+            },
+            "pdf-redo" => match self.active_diagram() {
+                Some(d) => d.redo(),
+                None => self.with_pdf(|pdf| pdf.redo()),
+            },
             "pdf-copy-link" => self.with_pdf(|pdf| pdf.copy_link()),
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
@@ -411,6 +457,7 @@ impl App {
                 }
             }
             "pane-outline" => self.show_pane("outline"),
+            "pane-properties" => self.show_pane("properties"),
             "pane-references" => {
                 self.show_pane("references");
                 self.refresh_references();
@@ -496,6 +543,11 @@ impl App {
                     _ => None,
                 },
             ),
+            Some(Doc::Diagram(d)) => match name {
+                "zoom-in" => d.zoom_step(false),
+                "zoom-out" => d.zoom_step(true),
+                _ => d.fit_page(),
+            },
             Some(Doc::Status(_)) | None => {}
         }
     }
@@ -1018,6 +1070,13 @@ mod tests {
             "win.pdf-previous-page",
             "win.pdf-undo",
             "win.pdf-redo",
+            "win.diagram-undo",
+            "win.diagram-redo",
+            "win.diagram-delete",
+            "win.diagram-select-all",
+            "win.diagram-edit-label",
+            "win.diagram-next-page",
+            "win.diagram-previous-page",
         ] {
             let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
             let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));

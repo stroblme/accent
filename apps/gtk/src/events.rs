@@ -126,6 +126,7 @@ impl App {
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
                     // rather than sending the reader back to page one.
                     Doc::Pdf(pdf) => pdf.refresh(),
+                    Doc::Diagram(d) => self.diagram_changed(d),
                     // Neither a diff nor a shell is keyed by a path, so a file changing under one
                     // reaches none of these.
                     Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}

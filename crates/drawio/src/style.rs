@@ -38,11 +38,6 @@ impl Style {
             .and_then(|(_, v)| v.as_deref())
     }
 
-    /// Whether the bare named style `name` is in the string.
-    pub fn has(&self, name: &str) -> bool {
-        self.items.iter().any(|(k, v)| k == name && v.is_none())
-    }
-
     /// Set `key` in place, append it if it is new, or remove it for `None`.
     pub fn set(&mut self, key: &str, value: Option<&str>) {
         match value {
@@ -52,10 +47,6 @@ impl Style {
                 None => self.items.push((key.to_string(), Some(value.to_string()))),
             },
         }
-    }
-
-    pub fn items(&self) -> &[(String, Option<String>)] {
-        &self.items
     }
 
     pub fn is_empty(&self) -> bool {
@@ -213,10 +204,7 @@ impl Resolved {
 
     /// A number, or `default` when the key is missing or not a number.
     pub fn num(&self, key: &str, default: f64) -> f64 {
-        self.get(key)
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|n| n.is_finite())
-            .unwrap_or(default)
+        self.get(key).and_then(parse_num).unwrap_or(default)
     }
 
     /// A switch: any number but 0 is on, and so is `true`.
@@ -247,6 +235,12 @@ impl Resolved {
     pub fn shape(&self) -> &str {
         self.get("shape").unwrap_or("label")
     }
+}
+
+/// A number as a file writes it, spaces around it allowed. `None` for anything else, infinities
+/// and NaN included, which would otherwise carry into every coordinate worked out from them.
+pub(crate) fn parse_num(v: &str) -> Option<f64> {
+    v.trim().parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 /// An sRGB colour with straight alpha.
@@ -360,6 +354,9 @@ fn split_args(s: &str) -> Vec<&str> {
 /// The styles draw.io itself gives a new cell from its sidebar, so what accent inserts looks and
 /// behaves the same when the file is opened there.
 pub mod presets {
+    use super::Style;
+    use crate::route::Constraint;
+
     pub const RECT: &str = "rounded=0;whiteSpace=wrap;html=1;";
     pub const ROUNDED: &str = "rounded=1;whiteSpace=wrap;html=1;";
     pub const ELLIPSE: &str = "ellipse;whiteSpace=wrap;html=1;";
@@ -389,6 +386,32 @@ pub mod presets {
         format!("{route}rounded=0;{end}html=1;")
     }
 
+    /// `style` with its ends pinned to connection points, as `mxGraph.setConnectionConstraint`
+    /// writes them: `exitX`, `exitY`, `exitDx`, `exitDy` and, for a point off the outline,
+    /// `exitPerimeter=0`; the `entry` keys likewise for the target. An end given `None` keeps
+    /// what the style says.
+    // mxGraph.setConnectionConstraint, mxGraph.js 7163-7213
+    pub fn constrained(
+        style: &str,
+        exit: Option<&Constraint>,
+        entry: Option<&Constraint>,
+    ) -> String {
+        let mut style = Style::parse(style);
+        for (end, c) in [("exit", exit), ("entry", entry)] {
+            let Some(c) = c else { continue };
+            for (key, n) in [
+                ("X", c.point.x),
+                ("Y", c.point.y),
+                ("Dx", c.dx),
+                ("Dy", c.dy),
+            ] {
+                style.set(&format!("{end}{key}"), Some(&n.to_string()));
+            }
+            style.set(&format!("{end}Perimeter"), (!c.perimeter).then_some("0"));
+        }
+        style.to_string()
+    }
+
     /// An embedded picture. draw.io leaves `;base64` out of the data URI, the `;` being the
     /// style's own separator.
     pub fn image(mime: &str, bytes: &[u8]) -> String {
@@ -402,6 +425,8 @@ pub mod presets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Point;
+    use crate::route::Constraint;
 
     #[test]
     fn a_style_writes_back_as_it_came() {
@@ -444,6 +469,26 @@ mod tests {
         assert_eq!(plain.color("fillColor"), Some(Color::WHITE));
         assert_eq!(plain.color("strokeColor"), Some(Color::BLACK));
         assert_eq!(plain.shape(), "label");
+    }
+
+    #[test]
+    fn a_pinned_end_is_written_as_draw_io_writes_it() {
+        let on = Constraint {
+            point: Point::new(0.25, 0.0),
+            dx: 0.0,
+            dy: 0.0,
+            perimeter: true,
+        };
+        let off = Constraint {
+            point: Point::new(1.0, 0.5),
+            dx: 2.5,
+            dy: 0.0,
+            perimeter: false,
+        };
+        assert_eq!(
+            presets::constrained("html=1;exitPerimeter=0;", Some(&on), Some(&off)),
+            "html=1;exitX=0.25;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=2.5;entryDy=0;entryPerimeter=0;"
+        );
     }
 
     #[test]

@@ -55,6 +55,8 @@ pub enum Doc {
     Diff(Rc<DiffTab>),
     /// A shell. A document like any other, so it splits and drags with the rest.
     Terminal(Rc<Term>),
+    /// A draw.io diagram.
+    Diagram(Rc<crate::diagram::DiagramTab>),
 }
 
 impl Doc {
@@ -66,6 +68,7 @@ impl Doc {
             Doc::Image(v) | Doc::Status(v) => v.key(),
             Doc::Diff(d) => d.key(),
             Doc::Terminal(t) => t.key(),
+            Doc::Diagram(d) => d.key(),
         }
     }
 
@@ -82,6 +85,7 @@ impl Doc {
             Doc::Image(v) | Doc::Status(v) => &v.page,
             Doc::Diff(d) => &d.page,
             Doc::Terminal(t) => &t.page,
+            Doc::Diagram(d) => &d.page,
         }
     }
 
@@ -113,6 +117,13 @@ impl Doc {
         }
     }
 
+    pub fn diagram(&self) -> Option<&Rc<crate::diagram::DiagramTab>> {
+        match self {
+            Doc::Diagram(d) => Some(d),
+            _ => None,
+        }
+    }
+
     /// A file from outside the vault, opened by its absolute path. There is no index behind it,
     /// so it has no backlinks, never appears in search, and reloads from a file monitor of its
     /// own rather than from the vault's watcher.
@@ -125,6 +136,7 @@ impl Doc {
         match self {
             Doc::Text(tab) => tab.retarget(root, key),
             Doc::Pdf(pdf) => pdf.retarget(root, key),
+            Doc::Diagram(d) => d.retarget(root, key),
             // Neither a diff nor a shell is a file, so a rename has nothing to point them at.
             Doc::Diff(_) | Doc::Terminal(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
@@ -152,6 +164,7 @@ pub enum Kind {
     Note,
     Image,
     Pdf,
+    Diagram,
     Text,
 }
 
@@ -160,6 +173,7 @@ pub fn kind_of(key: &str) -> Kind {
         FileType::Note => Kind::Note,
         FileType::Pdf => Kind::Pdf,
         FileType::Image => Kind::Image,
+        FileType::Diagram => Kind::Diagram,
         // A table, a source file, LICENSE and anything unknown open as text, if the bytes agree.
         _ => Kind::Text,
     }
@@ -174,6 +188,7 @@ pub fn icon_for(key: &str) -> &'static str {
     match file_type(key) {
         FileType::Note => "filetype-markdown-symbolic",
         FileType::Pdf => "filetype-pdf-symbolic",
+        FileType::Diagram => "filetype-diagram-symbolic",
         FileType::Table => "filetype-table-symbolic",
         FileType::Image => "filetype-image-symbolic",
         FileType::Code => "filetype-code-symbolic",
@@ -192,6 +207,7 @@ mod tests {
         assert_eq!(kind_of("Notes/A.MD"), Kind::Note);
         assert_eq!(kind_of("a.markdown"), Kind::Note);
         assert_eq!(kind_of("Attachments/paper.pdf"), Kind::Pdf);
+        assert_eq!(kind_of("Figures/flow.drawio"), Kind::Diagram);
         assert_eq!(kind_of("logo.svg"), Kind::Image);
         assert_eq!(kind_of("shot.JPG"), Kind::Image);
         assert_eq!(kind_of("src/main.rs"), Kind::Text);
@@ -206,13 +222,13 @@ mod tests {
     fn every_file_icon_is_shipped() {
         let xml = include_str!("../data/accent.gresource.xml");
         let keys = [
-            "a.md", "a.pdf", "a.csv", "a.png", "a.rs", "a.toml", "a.txt", "a.zip",
+            "a.md", "a.pdf", "a.drawio", "a.csv", "a.png", "a.rs", "a.toml", "a.txt", "a.zip",
         ];
         let mut names: Vec<&str> = keys.into_iter().map(icon_for).collect();
         names.push(FOLDER_ICON);
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 9, "one name per file type, and the folder");
+        assert_eq!(names.len(), 10, "one name per file type, and the folder");
         for name in names {
             assert!(
                 xml.contains(&format!("icons/scalable/actions/{name}.svg")),

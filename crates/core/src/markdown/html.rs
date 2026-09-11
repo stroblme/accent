@@ -51,7 +51,7 @@ fn latex<'a>(src: &'a str, storage: &'a Storage) -> Result<Vec<LatexEvent<'a>>, 
 /// The renderer itself never reports a failure — it writes `<merror>` and carries on — so the
 /// parser events are collected first, and that is what decides between MathML and the caller's
 /// raw-source fallback. WebKit draws MathML natively, so no stylesheet or script goes with it.
-fn mathml(src: &str, display: bool) -> Option<String> {
+pub fn mathml(src: &str, display: bool) -> Option<String> {
     use pulldown_latex::RenderConfig;
     use pulldown_latex::config::DisplayMode;
 

@@ -101,17 +101,8 @@ fn near(lines: &[Vec<Point>], p: Point, reach: f64) -> bool {
 mod tests {
     use super::*;
     use crate::scene::{Align, Font, Paint, Stroke, VAlign};
+    use crate::shapes::rect as outline;
     use crate::style::Color;
-
-    fn outline(r: Rect) -> Vec<PathCmd> {
-        vec![
-            PathCmd::MoveTo(Point::new(r.x, r.y)),
-            PathCmd::LineTo(Point::new(r.right(), r.y)),
-            PathCmd::LineTo(Point::new(r.right(), r.bottom())),
-            PathCmd::LineTo(Point::new(r.x, r.bottom())),
-            PathCmd::Close,
-        ]
-    }
 
     fn path(cell: &str, path: Vec<PathCmd>, filled: bool, width: f64) -> Prim {
         Prim::Path {

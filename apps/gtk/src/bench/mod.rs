@@ -6,6 +6,7 @@ use super::*;
 
 mod chrome;
 mod compare;
+mod diagram;
 mod files;
 mod git;
 mod keys;
@@ -15,6 +16,7 @@ mod style;
 
 use chrome::bench_chrome;
 use compare::bench_compare;
+use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_press};
 use keys::{bench_keys, bench_shell_keys};
@@ -65,6 +67,9 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
+/// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
+/// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
+///
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
 /// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
@@ -92,7 +97,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
+    let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     if expand.is_none()
+        && diagram.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
@@ -131,6 +138,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
+        }
+        if let Some(arg) = diagram {
+            return bench_diagram(&app, &arg);
         }
         if let Some(rels) = tabs {
             return bench_tabs(&app, &rels);

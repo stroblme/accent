@@ -223,6 +223,16 @@ impl App {
                 }
                 places
             },
+            diagram: {
+                let mut places = self
+                    .vault()
+                    .map(|v| v.session().diagram)
+                    .unwrap_or_default();
+                for d in self.diagrams() {
+                    places.insert(d.key(), d.place());
+                }
+                places
+            },
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
@@ -697,6 +707,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
         accent_core::config::touch(&mut stored.recent_commands, action, RECENT_COMMANDS);
     }
     stored.pdf.extend(now.pdf);
+    stored.diagram.extend(now.diagram);
     stored
 }
 

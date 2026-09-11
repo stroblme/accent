@@ -33,7 +33,7 @@ mod text;
 
 pub use banner::Alert;
 use compare::Comparing;
-pub use compare::{companion, restyle_companion, style_companion};
+pub use compare::{companion, overlay_view, restyle_companion, style_companion};
 use follow::Follow;
 pub(crate) use lines::paste_primary;
 use lines::{line_clipboard, primary_paste};
