@@ -216,6 +216,10 @@ impl App {
                 self.refresh_corpus();
                 self.restore_session();
                 self.sync_active();
+                // A remote shell the drop ended kept its tab, and starts again in it.
+                for term in self.terminals() {
+                    term.reopen();
+                }
             }
             Event::Disconnected(why) => {
                 self.statusbar.set_progress(None);

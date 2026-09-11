@@ -439,8 +439,9 @@ impl Bar {
     }
 
     /// The go-to row's "of N lines", read again whenever it can have changed while the row is up:
-    /// on opening it, on every edit, and when another tab comes to the front.
-    fn refresh_count(&self) {
+    /// on opening it, on every edit, when another tab comes to the front, and when a PDF finishes
+    /// opening.
+    pub fn refresh_count(&self) {
         if !self.showing("goto") {
             return;
         }
