@@ -165,7 +165,9 @@ impl Editor {
 
     /// Move cells by (`dx`, `dy`): a vertex by its position, an edge by its waypoints and end
     /// points. A cell inside another that moves goes with it, and so does an edge whose both
-    /// ends move. A label on an edge stays where it is along the edge.
+    /// ends move. A label on an edge stays where it is along the edge. An edge moved without the
+    /// shape one of its ends is on lets go of that shape, the end staying where it is drawn and
+    /// moving with the rest, as mxGraph's `disconnectOnMove` has it.
     pub fn move_cells(
         &mut self,
         page: usize,
@@ -177,6 +179,7 @@ impl Editor {
             check(p, ids)?;
             let top: HashSet<CellId> = topmost(p, ids).into_iter().collect();
             let moved = with_subtrees(p, top.iter().cloned());
+            disconnect(p, &top, &moved);
             let moves = |end: &Option<CellId>| end.as_ref().is_some_and(|id| moved.contains(id));
             for cell in &mut p.cells {
                 let between = cell.edge
@@ -548,6 +551,52 @@ fn topmost(page: &Page, ids: &[CellId]) -> Vec<CellId> {
 
 /// Move a geometry as `mxGeometry.translate` does: a vertex's position, an edge's end points
 /// and waypoints. A relative geometry, a label on an edge, keeps its place along the edge.
+/// Let go of the shapes the edges among `top` leave behind: each end whose shape is not in
+/// `moved` becomes a point of its own where the end is drawn now, for the move to take along.
+/// Its `exit`/`entry` keys stay, as draw.io leaves them.
+// mxGraph.disconnectGraph, mxGraph.js 7459-7535; mxGraph.disconnectOnMove, 1557
+fn disconnect(page: &mut Page, top: &HashSet<CellId>, moved: &HashSet<CellId>) {
+    let stays = |end: &Option<CellId>| end.as_ref().is_some_and(|id| !moved.contains(id));
+    let edges: Vec<CellId> = page
+        .cells
+        .iter()
+        .filter(|c| c.edge && top.contains(&c.id) && (stays(&c.source) || stays(&c.target)))
+        .map(|c| c.id.clone())
+        .collect();
+    if edges.is_empty() {
+        return;
+    }
+    let routes = crate::scene::routes(page);
+    for id in edges {
+        // An edge not drawn (on a hidden layer) has no end to keep.
+        let Some(drawn) = routes.get(&id).filter(|p| p.len() >= 2) else {
+            continue;
+        };
+        let origin = page.origin_of(&id);
+        let local = |p: Point| Some(Point::new(p.x - origin.x, p.y - origin.y));
+        let Some(cell) = page.cell_mut(&id) else {
+            continue;
+        };
+        let (from, to) = (stays(&cell.source), stays(&cell.target));
+        let g = cell.geometry.get_or_insert_with(|| Geometry {
+            relative: true,
+            ..Geometry::default()
+        });
+        if from {
+            g.source_point = local(drawn[0]);
+        }
+        if to {
+            g.target_point = local(drawn[drawn.len() - 1]);
+        }
+        if from {
+            cell.source = None;
+        }
+        if to {
+            cell.target = None;
+        }
+    }
+}
+
 fn translate(g: &mut Geometry, dx: f64, dy: f64) {
     if !g.relative {
         g.x += dx;
@@ -689,6 +738,31 @@ mod tests {
         assert_eq!(e.page(0).unwrap().absolute_rect(&c), Some(r));
         e.resize(0, &c, Rect::new(120.0, 60.0, 50.0, 50.0)).unwrap();
         assert_eq!(geometry(&e, &c).rect(), Rect::new(20.0, 10.0, 50.0, 50.0));
+    }
+
+    #[test]
+    fn an_edge_moved_on_its_own_lets_go_of_its_shapes_where_it_is_drawn() {
+        let mut e = editor();
+        let drawn = crate::scene::routes(e.page(0).unwrap())["e"].clone();
+        e.move_cells(0, &list(&["e"]), 10.0, 5.0).unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(
+            (cell.source.as_deref(), cell.target.as_deref()),
+            (None, None)
+        );
+        let g = geometry(&e, "e");
+        let shifted = |p: Point| Some(Point::new(p.x + 10.0, p.y + 5.0));
+        assert_eq!(g.source_point, shifted(drawn[0]));
+        assert_eq!(g.target_point, shifted(drawn[drawn.len() - 1]));
+        assert_eq!(g.points, Some(vec![Point::new(80.0, 65.0)]));
+        // Moved with one of its shapes, it keeps that end and lets go of the other.
+        let mut e = editor();
+        e.move_cells(0, &list(&["a", "e"]), 10.0, 0.0).unwrap();
+        let cell = e.page(0).unwrap().cell("e").unwrap();
+        assert_eq!(
+            (cell.source.as_deref(), cell.target.as_deref()),
+            (Some("a"), None)
+        );
     }
 
     #[test]
