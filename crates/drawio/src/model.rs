@@ -79,10 +79,6 @@ impl File {
     pub fn page(&self, i: usize) -> Result<&Page, Error> {
         self.pages.get(i).ok_or(Error::NoPage(i))
     }
-
-    pub fn page_mut(&mut self, i: usize) -> Result<&mut Page, Error> {
-        self.pages.get_mut(i).ok_or(Error::NoPage(i))
-    }
 }
 
 /// One `<diagram>`: a page of the file, holding one `<mxGraphModel>`.
@@ -213,40 +209,6 @@ impl Page {
             .into_iter()
             .find(|c| c.style.get("locked") != Some("1"))
             .map(|c| c.id.as_str())
-    }
-
-    /// The layer `id` sits in (itself for a layer), `None` for the root or an unknown cell.
-    pub fn layer_of(&self, id: &str) -> Option<&Cell> {
-        let root = self.root()?.id.as_str();
-        let mut cell = self.cell(id)?;
-        loop {
-            let parent = cell.parent.as_deref()?;
-            if parent == root {
-                return Some(cell);
-            }
-            cell = self.cell(parent)?;
-        }
-    }
-
-    /// Whether `ancestor` is `id` or above it.
-    pub fn is_within(&self, id: &str, ancestor: &str) -> bool {
-        let mut at = Some(id);
-        while let Some(cur) = at {
-            if cur == ancestor {
-                return true;
-            }
-            at = self.cell(cur).and_then(|c| c.parent.as_deref());
-        }
-        false
-    }
-
-    /// `id` and every cell under it, in document order.
-    pub fn subtree(&self, id: &str) -> Vec<CellId> {
-        self.cells
-            .iter()
-            .filter(|c| self.is_within(&c.id, id))
-            .map(|c| c.id.clone())
-            .collect()
     }
 
     /// Where a cell's geometry is measured from: the absolute top-left of its parent vertex, or
@@ -490,9 +452,6 @@ mod tests {
             p.absolute_rect("a"),
             Some(Rect::new(110.0, 70.0, 30.0, 40.0))
         );
-        assert_eq!(p.layer_of("a").map(|c| c.id.as_str()), Some("1"));
-        assert_eq!(p.subtree("g"), ["g", "a"]);
-        assert!(p.is_within("a", "1") && !p.is_within("g", "a"));
         assert_eq!(p.default_parent(), Some("1"));
     }
 

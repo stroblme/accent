@@ -30,8 +30,8 @@ pub struct Editor {
     ids: Ids,
 }
 
-/// What an undo or redo step puts back: one page, or the whole page list when pages were added,
-/// removed or moved.
+/// What an undo or redo step puts back: one page, or the whole page list when pages were added
+/// or removed.
 // ponytail: snapshots clone a whole page, fine at a few thousand cells for the hundred steps
 // kept; command objects are the upgrade when memory or diffing matters.
 #[derive(Debug, Clone)]
@@ -436,17 +436,6 @@ impl Editor {
         Ok(())
     }
 
-    /// Move page `from` so that it becomes page `to`.
-    pub fn move_page(&mut self, from: usize, to: usize) -> Result<(), Error> {
-        self.file.page(from)?;
-        self.file.page(to)?;
-        self.edit_pages(|pages| {
-            let moving = pages.remove(from);
-            pages.insert(to, moving);
-        });
-        Ok(())
-    }
-
     /// Change a copy of page `index` and put it in place if `change` succeeds and changed
     /// something, the page as it was becoming the undo step.
     fn edit<T>(
@@ -806,11 +795,10 @@ mod tests {
         let before = e.file().pages.clone();
         assert_eq!(e.add_page("Two"), 1);
         e.rename_page(1, "Second").unwrap();
-        e.move_page(1, 0).unwrap();
-        e.set_page_attr(1, "background", Some("#ff0000")).unwrap();
-        assert_eq!(e.page(0).unwrap().name(), "Second");
-        assert_eq!(e.page(1).unwrap().model_attr("background"), Some("#ff0000"));
-        e.delete_page(0).unwrap();
+        e.set_page_attr(0, "background", Some("#ff0000")).unwrap();
+        assert_eq!(e.page(1).unwrap().name(), "Second");
+        assert_eq!(e.page(0).unwrap().model_attr("background"), Some("#ff0000"));
+        e.delete_page(1).unwrap();
         assert_eq!(e.file().pages.len(), 1);
         while e.undo() {}
         assert_eq!(e.file().pages, before);

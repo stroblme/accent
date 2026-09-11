@@ -125,24 +125,6 @@ pub fn plain_to_runs(text: &str, math: bool) -> Vec<Run> {
     if math { find_math(runs) } else { runs }
 }
 
-/// The text alone, one line per break.
-pub fn runs_to_plain(runs: &[Run]) -> String {
-    let mut out = String::new();
-    for run in runs {
-        match run {
-            Run::Text { text, .. } => out.push_str(text),
-            Run::Math {
-                tex,
-                display: false,
-            } => out.push_str(&format!("\\({tex}\\)")),
-            Run::Math { tex, display: true } => out.push_str(&format!("$${tex}$$")),
-            Run::Break => out.push('\n'),
-            Run::Bullet => out.push_str("• "),
-        }
-    }
-    out
-}
-
 /// Runs as the Markdown the label editor shows: `**bold**`, `*italic*`, `<u>underline</u>`,
 /// `- ` bullets and formulas as written. Colour and size have no Markdown and are left out, so
 /// a label edited as Markdown loses them.

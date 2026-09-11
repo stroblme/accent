@@ -38,11 +38,6 @@ impl Style {
             .and_then(|(_, v)| v.as_deref())
     }
 
-    /// Whether the bare named style `name` is in the string.
-    pub fn has(&self, name: &str) -> bool {
-        self.items.iter().any(|(k, v)| k == name && v.is_none())
-    }
-
     /// Set `key` in place, append it if it is new, or remove it for `None`.
     pub fn set(&mut self, key: &str, value: Option<&str>) {
         match value {
@@ -52,10 +47,6 @@ impl Style {
                 None => self.items.push((key.to_string(), Some(value.to_string()))),
             },
         }
-    }
-
-    pub fn items(&self) -> &[(String, Option<String>)] {
-        &self.items
     }
 
     pub fn is_empty(&self) -> bool {
