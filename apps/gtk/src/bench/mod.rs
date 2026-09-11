@@ -1,0 +1,283 @@
+//! The `ACCENT_BENCH_*` drills: headless runs under Xvfb that time or probe one interaction,
+//! print what they saw to stdout and quit. `install_bench_hooks` says which variable starts which.
+//! The drills live in a module per area and share the helpers at the end of this one.
+
+use super::*;
+
+mod chrome;
+mod compare;
+mod files;
+mod git;
+mod keys;
+mod panes;
+mod pdf;
+mod style;
+
+use chrome::bench_chrome;
+use compare::bench_compare;
+use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
+use git::{bench_git, bench_git_press};
+use keys::{bench_keys, bench_shell_keys};
+use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
+use pdf::bench_pdf;
+use style::{bench_follow, bench_occurrences, bench_style};
+
+/// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
+/// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
+/// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
+/// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
+/// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
+/// times, plus the branch readout and how many history rows a background fetch marked as not
+/// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
+/// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// an XTEST press held while the repository changes.
+/// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
+/// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
+/// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
+/// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
+/// drives a path entry's completion, and prints widths and the text its keys apply.
+/// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
+/// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
+/// or a drop out of a styled or folded line brings its tags along.
+/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
+/// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
+/// what the panes hold and whether their rows line up.
+/// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
+/// prints what `Ctrl+S` activates.
+/// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
+/// and prints the layout either side of it. Point it at a document of several pages: a one-page
+/// PDF is wholly on screen whatever the scroll offset was.
+/// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
+/// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
+/// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
+/// eye first, and its title and indicator are printed either side of that.
+/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
+/// held, and prints what the Ctrl+hover underline covers.
+///
+/// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
+/// highlight made of each selection, plus the two match colours and the priorities of the tags
+/// they are painted with.
+///
+/// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
+/// and prints how many references to the vault the closed window left behind and whether either
+/// dialog outlived it; it exits 1 unless nothing did.
+///
+/// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
+/// Show Hidden Files off and on again, printing them after each.
+///
+/// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
+/// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
+/// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
+/// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
+/// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
+/// `=focus:<rel>` gives it the keyboard instead. On a remote vault they wait for the host to
+/// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
+/// way Ctrl+Q does.
+pub fn install_bench_hooks(app: &Rc<App>) {
+    let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
+    let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
+    let style = std::env::var("ACCENT_BENCH_STYLE").ok();
+    let git = std::env::var("ACCENT_BENCH_GIT").ok();
+    let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
+    let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
+    let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
+    let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
+    let panes = std::env::var("ACCENT_BENCH_PANES").ok();
+    let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
+    let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
+    let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
+    let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
+    let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
+    let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
+    let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
+    let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
+    if expand.is_none()
+        && switcher.is_none()
+        && style.is_none()
+        && panes.is_none()
+        && compare.is_none()
+        && pdf.is_none()
+        && tabs.is_none()
+        && occur.is_none()
+        && follow.is_none()
+        && layout.is_none()
+        && git.is_none()
+        && !keys
+        && chrome.is_none()
+        && !templates
+        && !paths
+        && !shell_keys
+        && !close
+        && !hidden
+    {
+        return;
+    }
+    // Not after the first frame: a restore has landed every tab by then.
+    if let Some(arg) = layout.as_deref().filter(|arg| arg.contains(':')) {
+        return bench_layout_pick(app, arg);
+    }
+    let app = app.clone();
+    // After the first frame, so widget realisation is not counted in the numbers.
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        if let Some(rels) = panes {
+            return bench_panes(&app, &rels);
+        }
+        if let Some(arg) = layout {
+            return bench_layout(&app, &arg);
+        }
+        if let Some(rel) = compare {
+            return bench_compare(&app, &rel);
+        }
+        if let Some(rel) = pdf {
+            return bench_pdf(&app, &rel);
+        }
+        if let Some(rels) = tabs {
+            return bench_tabs(&app, &rels);
+        }
+        if let Some(rel) = occur {
+            return bench_occurrences(&app, &rel);
+        }
+        if let Some(rel) = follow {
+            return bench_follow(&app, &rel);
+        }
+        if shell_keys {
+            return bench_shell_keys(&app);
+        }
+        if close {
+            return bench_close(&app);
+        }
+        if hidden {
+            return bench_hidden(&app);
+        }
+        if paths {
+            return bench_paths(&app);
+        }
+        if templates {
+            return bench_templates(&app);
+        }
+        if let Some(notes) = chrome {
+            return bench_chrome(&app, &notes);
+        }
+        if keys {
+            return bench_keys(&app);
+        }
+        if let Some(arg) = git {
+            return match arg.strip_prefix("press:") {
+                Some(path) => bench_git_press(&app, path),
+                None => bench_git(&app),
+            };
+        }
+        if let Some(rel) = style {
+            return bench_style(&app, &rel);
+        }
+        if let Some(rel) = expand {
+            bench_expand(&app, &rel);
+        }
+        let Some(query) = switcher else {
+            bench_quit(&app);
+            return;
+        };
+        let t0 = Instant::now();
+        let _ = WidgetExt::activate_action(&app.window, "win.palette-files", None);
+        println!("bench switcher_open_ms {:.1}", ms_since(t0));
+
+        // A query of "1" just means "open it"; anything else is typed into the entry so the
+        // debounce, the lazy corpus load and the match all get exercised.
+        let entry = (query != "1")
+            .then(|| {
+                app.window
+                    .visible_dialog()
+                    .and_then(|d| find_search_entry(d.upcast_ref()))
+            })
+            .flatten();
+        let Some(entry) = entry else {
+            bench_quit(&app);
+            return;
+        };
+        let t1 = Instant::now();
+        entry.set_text(&query);
+        // Debounced, so the keystroke itself must return immediately.
+        println!("bench switcher_keystroke_ms {:.1}", ms_since(t1));
+        // Long enough for GtkSearchEntry's own ~150 ms delay plus our 50 ms debounce.
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || bench_quit(&app));
+    });
+}
+
+/// First `GtkSearchEntry` in `w`'s subtree, which the bench drives directly because the headless
+/// image has no xdotool.
+///
+/// The caller must pass the palette dialog, not the window: a window holds the sidebar's search
+/// entry too, and it comes first in tree order, so searching from the window typed the benchmark's
+/// query into the sidebar and measured nothing.
+fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
+    if let Ok(e) = w.clone().downcast::<gtk::SearchEntry>() {
+        return Some(e);
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        if let Some(found) = find_search_entry(&c) {
+            return Some(found);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// The first widget in `root`'s subtree, `root` included, that `found` accepts.
+fn find_widget(root: &gtk::Widget, found: &dyn Fn(&gtk::Widget) -> bool) -> Option<gtk::Widget> {
+    if found(root) {
+        return Some(root.clone());
+    }
+    let mut child = root.first_child();
+    while let Some(c) = child {
+        if let Some(hit) = find_widget(&c, found) {
+            return Some(hit);
+        }
+        child = c.next_sibling();
+    }
+    None
+}
+
+/// Emit a key press on the entry's own key controller: the headless image has no window manager
+/// to give the toplevel the keyboard, and no xdotool to press anything with.
+fn press_key(entry: &gtk::Entry, key: gdk::Key) {
+    use glib::translate::IntoGlib;
+    let controllers = entry.observe_controllers();
+    for i in 0..controllers.n_items() {
+        let Some(keys) = controllers
+            .item(i)
+            .and_downcast::<gtk::EventControllerKey>()
+        else {
+            continue;
+        };
+        keys.emit_by_name::<bool>(
+            "key-pressed",
+            &[&key.into_glib(), &0u32, &gdk::ModifierType::empty()],
+        );
+    }
+}
+
+/// Turn the main loop until it has nothing left to dispatch. The find bar's own highlight is
+/// scanned on an idle, so its tag is on nothing at all the instant its query is set.
+fn bench_pump() {
+    let context = glib::MainContext::default();
+    for _ in 0..10_000 {
+        if !context.iteration(false) {
+            return;
+        }
+    }
+}
+
+/// Closing the window is not enough to end the process while a dialog is up: quit the
+/// application so the bench always terminates.
+fn bench_quit(app: &Rc<App>) {
+    match app.window.application() {
+        Some(gtk_app) => gtk_app.quit(),
+        None => app.window.close(),
+    }
+}
+
+fn ms_since(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1e3
+}
