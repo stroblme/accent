@@ -387,8 +387,8 @@ fn update_points(input: &EdgeInput, state: &State) -> Vec<Option<Point>> {
     match get_edge_style(input) {
         Some(EdgeStyle::Loop) => loop_style(state, src, points, &mut pts),
         Some(EdgeStyle::Elbow) => elbow_connector(state, src, trg, points, &mut pts),
-        Some(EdgeStyle::SideToSide) => side_to_side(state, src, trg, points, &mut pts),
-        Some(EdgeStyle::TopToBottom) => top_to_bottom(state, src, trg, points, &mut pts),
+        Some(EdgeStyle::SideToSide) => elbow_segment(state, src, trg, points, &mut pts, false),
+        Some(EdgeStyle::TopToBottom) => elbow_segment(state, src, trg, points, &mut pts, true),
         Some(EdgeStyle::Segment) => segment_connector(state, src, trg, points, &mut pts),
         Some(EdgeStyle::Orth) => orth_connector(state, src, trg, points, &mut pts),
         // ponytail: EntityRelation is not ported; such an edge keeps its waypoints as they are.
@@ -577,11 +577,8 @@ fn elbow_connector(
             }
         }
     }
-    if !horizontal && (vertical || state.style.get("elbow") == Some("vertical")) {
-        top_to_bottom(state, source, target, points, result);
-    } else {
-        side_to_side(state, source, target, points, result);
-    }
+    let vertical = !horizontal && (vertical || state.style.get("elbow") == Some("vertical"));
+    elbow_segment(state, source, target, points, result, vertical);
 }
 
 /// The boxes the elbow styles route between: a fixed end is a point.
@@ -596,105 +593,59 @@ fn elbow_ends(
     Some((s, t))
 }
 
-/// A vertical segment halfway between the terminals, or at the waypoint's x.
-// mxEdgeStyle.SideToSide, mxEdgeStyle.js 398-481
-fn side_to_side(
+/// SideToSide: a vertical segment halfway between the terminals or at the waypoint's x, met
+/// at the height of each terminal's centre, or of the waypoint where it is within the
+/// terminal's height. With `vertical`, TopToBottom: the same with x and y swapped.
+// mxEdgeStyle.SideToSide and TopToBottom, mxEdgeStyle.js 398-576
+fn elbow_segment(
     state: &State,
     source: Option<&Terminal>,
     target: Option<&Terminal>,
     points: &[Point],
     result: &mut Vec<Option<Point>>,
+    vertical: bool,
 ) {
-    let pt = points.first().copied();
+    // Worked out as SideToSide; TopToBottom's input and output have x and y swapped.
+    let swap = |p: Point| if vertical { Point::new(p.y, p.x) } else { p };
+    let swap_rect = |r: Rect| {
+        if vertical {
+            Rect::new(r.y, r.x, r.h, r.w)
+        } else {
+            r
+        }
+    };
+    let pt = points.first().copied().map(swap);
     let Some((s, t)) = elbow_ends(state, source, target) else {
         return;
     };
+    let (s, t) = (swap_rect(s), swap_rect(t));
     let l = s.x.max(t.x);
     let r = s.right().min(t.right());
     let x = match pt {
         Some(p) => p.x,
         None => js_round(r + (l - r) / 2.0),
     };
-    let mut y1 = s.centre().y;
-    let mut y2 = t.centre().y;
-    if let Some(p) = pt {
-        if p.y >= s.y && p.y <= s.bottom() {
-            y1 = p.y;
+    let meet = |b: Rect| match pt {
+        Some(p) if p.y >= b.y && p.y <= b.bottom() => p.y,
+        _ => b.centre().y,
+    };
+    let outside = |y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
+    for y in [meet(s), meet(t)] {
+        if outside(y) {
+            result.push(Some(swap(Point::new(x, y))));
         }
-        if p.y >= t.y && p.y <= t.bottom() {
-            y2 = p.y;
-        }
-    }
-    let outside = |x: f64, y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
-    if outside(x, y1) {
-        result.push(Some(Point::new(x, y1)));
-    }
-    if outside(x, y2) {
-        result.push(Some(Point::new(x, y2)));
     }
     if result.len() == 1 {
-        match pt {
-            Some(p) => {
-                if outside(x, p.y) {
-                    result.push(Some(Point::new(x, p.y)));
-                }
-            }
+        let y = match pt {
+            Some(p) if outside(p.y) => p.y,
+            Some(_) => return,
             None => {
                 let top = s.y.max(t.y);
                 let bottom = s.bottom().min(t.bottom());
-                result.push(Some(Point::new(x, top + (bottom - top) / 2.0)));
+                top + (bottom - top) / 2.0
             }
-        }
-    }
-}
-
-/// A horizontal segment halfway between the terminals, or at the waypoint's y.
-// mxEdgeStyle.TopToBottom, mxEdgeStyle.js 489-576
-fn top_to_bottom(
-    state: &State,
-    source: Option<&Terminal>,
-    target: Option<&Terminal>,
-    points: &[Point],
-    result: &mut Vec<Option<Point>>,
-) {
-    let pt = points.first().copied();
-    let Some((s, t)) = elbow_ends(state, source, target) else {
-        return;
-    };
-    let top = s.y.max(t.y);
-    let bottom = s.bottom().min(t.bottom());
-    let x = match pt {
-        Some(p) if p.x >= s.x && p.x <= s.right() => p.x,
-        _ => s.centre().x,
-    };
-    let y = match pt {
-        Some(p) => p.y,
-        None => js_round(bottom + (top - bottom) / 2.0),
-    };
-    let outside = |x: f64, y: f64| !t.contains(Point::new(x, y)) && !s.contains(Point::new(x, y));
-    if outside(x, y) {
-        result.push(Some(Point::new(x, y)));
-    }
-    let x = match pt {
-        Some(p) if p.x >= t.x && p.x <= t.right() => p.x,
-        _ => t.centre().x,
-    };
-    if outside(x, y) {
-        result.push(Some(Point::new(x, y)));
-    }
-    if result.len() == 1 {
-        match pt {
-            Some(p) => {
-                if outside(p.x, y) {
-                    result.push(Some(Point::new(p.x, y)));
-                }
-            }
-            None => {
-                let l = s.x.max(t.x);
-                let r = s.right().min(t.right());
-                result.push(Some(Point::new(l + (r - l) / 2.0, y)));
-            }
-        }
+        };
+        result.push(Some(swap(Point::new(x, y))));
     }
 }
 
@@ -1413,6 +1364,44 @@ mod tests {
                 (140.0, 120.0),
                 (200.0, 120.0),
             ],
+        );
+    }
+
+    #[test]
+    fn side_to_side_crosses_halfway_or_at_the_waypoint() {
+        let style = Style::parse("edgeStyle=sideToSideEdgeStyle;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 100.0)));
+        assert_points(
+            &pts,
+            &[(80.0, 20.0), (140.0, 20.0), (140.0, 120.0), (200.0, 120.0)],
+        );
+        let hint = [Point::new(150.0, 30.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &hint,
+            ..input(&style, rect(0.0, 0.0), rect(200.0, 100.0))
+        });
+        assert_points(
+            &pts,
+            &[(80.0, 30.0), (150.0, 30.0), (150.0, 120.0), (200.0, 120.0)],
+        );
+    }
+
+    #[test]
+    fn top_to_bottom_crosses_halfway_or_at_the_waypoint() {
+        let style = Style::parse("edgeStyle=topToBottomEdgeStyle;").resolve(true);
+        let pts = route(&input(&style, rect(0.0, 0.0), rect(200.0, 100.0)));
+        assert_points(
+            &pts,
+            &[(40.0, 40.0), (40.0, 70.0), (240.0, 70.0), (240.0, 100.0)],
+        );
+        let hint = [Point::new(60.0, 80.0)];
+        let pts = route(&EdgeInput {
+            waypoints: &hint,
+            ..input(&style, rect(0.0, 0.0), rect(200.0, 100.0))
+        });
+        assert_points(
+            &pts,
+            &[(60.0, 40.0), (60.0, 80.0), (240.0, 80.0), (240.0, 100.0)],
         );
     }
 
