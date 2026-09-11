@@ -4,6 +4,9 @@
 use super::links::{is_image, percent_encode, slugs, split_anchor};
 use super::options;
 use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
+use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
+use std::error::Error;
+use std::ops::Range;
 
 fn esc_attr(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -37,19 +40,23 @@ fn is_block_start(ev: &Event) -> bool {
     )
 }
 
+/// A formula's LaTeX as parser events, or why it does not parse: the one test of whether a
+/// formula renders, which [`mathml`] and [`math_errors`] both ask.
+fn latex<'a>(src: &'a str, storage: &'a Storage) -> Result<Vec<LatexEvent<'a>>, ParserError> {
+    pulldown_latex::Parser::new(src, storage).collect()
+}
+
 /// A `$…$` or `$$…$$` formula as MathML, or `None` if the LaTeX does not parse.
 ///
 /// The renderer itself never reports a failure — it writes `<merror>` and carries on — so the
 /// parser events are collected first, and that is what decides between MathML and the caller's
 /// raw-source fallback. WebKit draws MathML natively, so no stylesheet or script goes with it.
 fn mathml(src: &str, display: bool) -> Option<String> {
+    use pulldown_latex::RenderConfig;
     use pulldown_latex::config::DisplayMode;
-    use pulldown_latex::{ParserError, RenderConfig, Storage};
 
     let storage = Storage::new();
-    let events = pulldown_latex::Parser::new(src, &storage)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?;
+    let events = latex(src, &storage).ok()?;
     let mut out = String::new();
     pulldown_latex::push_mathml(
         &mut out,
@@ -65,6 +72,31 @@ fn mathml(src: &str, display: bool) -> Option<String> {
     )
     .ok()?;
     Some(out)
+}
+
+/// Every formula in `text` the preview shows as source instead of MathML: where it is written,
+/// `$` delimiters included, and why its LaTeX does not parse.
+///
+/// Meant to run on every edit, so a note without a `$` is not parsed at all.
+pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
+    if !text.contains('$') {
+        return Vec::new();
+    }
+    Parser::new_ext(text, options())
+        .into_offset_iter()
+        .filter_map(|(ev, r)| match ev {
+            Event::InlineMath(src) | Event::DisplayMath(src) => {
+                let err = latex(&src, &Storage::new()).err()?;
+                // Its `Display` draws the offending text with carets under it; the source is the
+                // reason alone, which is what fits on the end of an editor line.
+                let why = err
+                    .source()
+                    .map_or_else(|| err.to_string(), ToString::to_string);
+                Some((r, why))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Render a note to an HTML fragment for the preview pane (wikilinks become `<a href="accent://…">`).
@@ -257,6 +289,29 @@ mod tests {
         let h = bare("$\\nosuchcommand$");
         assert!(h.contains("class=\"math math-inline\""), "{h}");
         assert!(h.contains("\\nosuchcommand"), "{h}");
+    }
+
+    /// Exactly the formulas the preview shows as source are reported, where they are written,
+    /// dollars included; a `$` in code is not a formula.
+    #[test]
+    fn math_errors_are_the_formulas_the_preview_cannot_render() {
+        let src = "ok $x^2$ and $\\left( x$\n\n$$\\frac{a}{b}$$\n\n$$\n\\nosuchcommand\n$$\n\n\
+                   `$\\left( x$`\n\n```\n$\\left( x$\n```\n";
+        let errors = math_errors(src);
+        let written: Vec<&str> = errors.iter().map(|(r, _)| &src[r.clone()]).collect();
+        assert_eq!(
+            written,
+            ["$\\left( x$", "$$\n\\nosuchcommand\n$$"],
+            "{errors:?}"
+        );
+        assert_eq!(errors[0].0, 13..23);
+        assert!(errors[0].1.starts_with("unbalanced group"), "{errors:?}");
+        // The reason alone, not the parser's drawing of where it happened.
+        assert!(!errors[1].1.contains('\n'), "{errors:?}");
+        for (r, _) in &errors {
+            assert!(bare(&src[r.clone()]).contains("class=\"math"), "{r:?}");
+        }
+        assert!(math_errors("no formulas, `$\\left( x$` in code").is_empty());
     }
 
     /// A task item carries the class the preview drops the bullet for, so it shows the checkbox
