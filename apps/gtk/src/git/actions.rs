@@ -23,17 +23,17 @@ impl Panel {
     ///
     /// `what` is the verb phrase a refusal is reported with — "commit", "switch to main" — so
     /// every failure here reads `Cannot <what>: <why>`, the wording the rest of the window uses.
-    /// `hold` goes insensitive while the job runs, which is what a transfer needs; it is also what
-    /// marks the job as one the user is waiting on, so [`Hooks::syncing`] runs with it and the
-    /// status bar can spin for the same span.
+    /// `sync` marks the job as the sync, the one transfer the user waits on: the Sync button gives
+    /// way to a spinner while it runs, and [`Hooks::syncing`] greys the status bar's branch for
+    /// the same span.
     fn command(
         self: &Rc<Self>,
         what: String,
-        hold: Option<gtk::Button>,
+        sync: bool,
         on_err: Fail,
         job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
     ) {
-        self.command_then(what, hold, on_err, job, |_| ());
+        self.command_then(what, sync, on_err, job, |_| ());
     }
 
     /// [`Panel::command`] with something to do back on the main thread once it worked, which only
@@ -41,7 +41,7 @@ impl Panel {
     fn command_then(
         self: &Rc<Self>,
         what: String,
-        hold: Option<gtk::Button>,
+        sync: bool,
         on_err: Fail,
         job: impl FnOnce(&Vault, &Repo) -> anyhow::Result<String> + Send + 'static,
         then: impl FnOnce(&Rc<Panel>) + 'static,
@@ -53,8 +53,8 @@ impl Panel {
                 None => return,
             }
         };
-        if let Some(button) = &hold {
-            button.set_sensitive(false);
+        if sync {
+            self.sync_slot.set_visible_child_name("spinner");
             self.sync_busy.set(true);
             (self.hooks.syncing)(true);
         }
@@ -62,8 +62,10 @@ impl Panel {
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
             let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
-            if let Some(button) = &hold {
-                button.set_sensitive(true);
+            // The button comes back as `sync_state` last left it, which the refresh below
+            // brings up to date.
+            if sync {
+                panel.sync_slot.set_visible_child_name("button");
                 panel.sync_busy.set(false);
                 (panel.hooks.syncing)(false);
             }
@@ -123,7 +125,7 @@ impl Panel {
         // where it was written rather than make the user type it again.
         self.command_then(
             "commit".to_string(),
-            None,
+            false,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -138,8 +140,8 @@ impl Panel {
     /// repository. The pane's selection follows, so the status bar's branch and the pane never
     /// end up talking about two different repositories.
     pub fn sync(self: &Rc<Self>, key: Option<&str>) {
-        // One at a time. The pane's own button is insensitive for the duration, but the status
-        // bar's branch is a second surface on the same action and stays clickable.
+        // One at a time. The pane's button and the status bar's branch are out of reach for the
+        // duration, but the palette still names the action.
         if self.sync_busy.get() {
             return;
         }
@@ -163,21 +165,15 @@ impl Panel {
             .get(index)
             .map(|s| (s.branch.behind, s.branch.ahead))
             .unwrap_or_default();
-        let hold = self.sync.clone();
-        self.command(
-            "sync".to_string(),
-            Some(hold),
-            Fail::Say,
-            move |vault, repo| {
-                vault.git_sync(repo).map(|transcript| {
-                    tracing::debug!("git sync: {transcript}");
-                    match moved {
-                        (0, 0) => "Synced".to_string(),
-                        (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
-                    }
-                })
-            },
-        );
+        self.command("sync".to_string(), true, Fail::Say, move |vault, repo| {
+            vault.git_sync(repo).map(|transcript| {
+                tracing::debug!("git sync: {transcript}");
+                match moved {
+                    (0, 0) => "Synced".to_string(),
+                    (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
+                }
+            })
+        });
     }
 
     /// Switch the selected repository to a local branch.
@@ -194,7 +190,7 @@ impl Panel {
         let asked = branch.clone();
         self.command(
             format!("switch to {branch}"),
-            None,
+            false,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -210,7 +206,7 @@ impl Panel {
         let asked = remote.clone();
         self.command(
             format!("check out {remote}"),
-            None,
+            false,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -242,7 +238,7 @@ impl Panel {
             let asked = name.clone();
             panel.command(
                 format!("create {name}"),
-                None,
+                false,
                 Fail::Say,
                 move |vault, repo| {
                     vault
@@ -268,7 +264,7 @@ impl Panel {
         };
         self.command(
             format!("delete {name}"),
-            None,
+            false,
             on_err,
             move |vault, repo| {
                 vault
@@ -393,7 +389,7 @@ impl Panel {
         let asked = branch.clone();
         self.command(
             format!("merge {branch}"),
-            None,
+            false,
             Fail::Say,
             move |vault, repo| {
                 vault.git_merge(repo, &asked).map(|merged| match merged {
@@ -431,7 +427,7 @@ impl Panel {
             }
             panel.command(
                 "abort the merge".to_string(),
-                None,
+                false,
                 Fail::Say,
                 |vault, repo| {
                     vault
@@ -451,7 +447,7 @@ impl Panel {
         let asked = oid.clone();
         self.command(
             format!("check out {}", short(&oid)),
-            None,
+            false,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -489,7 +485,7 @@ impl Panel {
         if paths.is_empty() {
             return;
         }
-        self.command(what.to_string(), None, Fail::Say, move |vault, repo| {
+        self.command(what.to_string(), false, Fail::Say, move |vault, repo| {
             job(vault, repo, &paths)
         });
     }

@@ -188,6 +188,13 @@ pub const CURRENT_MARK_ALPHA: f32 = 0.6;
 pub const GHOST_ALPHA: f32 = 0.6;
 pub const PAGE_EDGE_ALPHA: f32 = 0.15;
 
+/// libadwaita's text selection as its stylesheet writes it: the accent at 30 % while the text has
+/// the keyboard (`selection:focus-within`), the text colour at 10 % when it does not. GTK paints
+/// the primary caret's selection from that rule, and a column's other carets are painted to match
+/// (`multicaret::View::selection_colour`).
+pub const TEXT_SELECTION_ALPHA: f32 = 0.3;
+pub const UNFOCUSED_SELECTION_ALPHA: f32 = 0.1;
+
 /// How much of the page a highlighter lets through. It also multiplies rather than covers, so
 /// this is about how strong the colour is, not about whether the text survives.
 pub const HIGHLIGHTER_ALPHA: f32 = 0.4;

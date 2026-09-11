@@ -19,8 +19,8 @@ pub struct Shell {
     pub config_broken: Cell<bool>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
-    /// `None` for the one window opened on files rather than on a folder.
-    pub windows: RefCell<Vec<(Option<PathBuf>, Rc<App>)>>,
+    /// Keyed by what each window was opened on, so a vault-less one is found again by its kind.
+    pub windows: RefCell<Vec<(WindowKey, Rc<App>)>>,
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     pub start: glib::WeakRef<adw::ApplicationWindow>,
@@ -31,6 +31,36 @@ pub struct Shell {
     /// One flag, not one per window, because the table is the application's: a window keeping
     /// its own left every other window without its chords while a shell here had the keyboard.
     pub shell_keys: Cell<bool>,
+}
+
+/// What a window in [`Shell::windows`] was opened on: a vault, by its `Vault::key`, or no vault at
+/// all, as one of the [`Loose`] kinds.
+#[derive(PartialEq)]
+pub enum WindowKey {
+    Vault(PathBuf),
+    Loose(Loose),
+}
+
+impl WindowKey {
+    /// The vault's key, or `None` for a window with no vault.
+    fn vault(&self) -> Option<&Path> {
+        match self {
+            WindowKey::Vault(root) => Some(root),
+            WindowKey::Loose(_) => None,
+        }
+    }
+}
+
+/// The two windows with no vault (DESIGN.md, Window without a vault), one of each at most. The
+/// launch that builds one decides which it is, for good: a shell or a file opened in it by hand
+/// afterwards stays in it without making it the other kind.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Loose {
+    /// Where every `accent --terminal` opens its shell.
+    Terminal,
+    /// Where every file from outside the open vaults opens: `accent <file>`, or the file
+    /// manager's Open With.
+    Documents,
 }
 
 /// What an `app.` action does, given the shell and the application it was fired at.
@@ -307,7 +337,8 @@ impl Shell {
     ) -> glib::ExitCode {
         let args = command_line.arguments();
         // `accent --terminal [dir]` is accent as a terminal: a window with no vault holding one
-        // shell. A second one joins that window as another tab, the way a second loose file does.
+        // shell. A second one joins that window as another tab, and a loose file opened meanwhile
+        // goes to a window of its own rather than in among the shells.
         if args.iter().any(|a| a == "--terminal" || a == "-t") {
             let cwd = terminal_cwd(&args).and_then(|arg| {
                 // Resolved against the invoking process's directory, as a vault path is.
@@ -326,7 +357,7 @@ impl Shell {
                     }
                 }
             });
-            if let Some(app) = self.loose_window(gtk_app) {
+            if let Some(app) = self.loose_window(gtk_app, Loose::Terminal) {
                 app.window.present();
                 app.open_terminal_at(cwd);
             }
@@ -489,19 +520,19 @@ impl Shell {
             }
             return;
         }
-        self.add_window(gtk_app, Some(root), note);
+        self.add_window(gtk_app, WindowKey::Vault(root), note);
     }
 
-    /// Build a window on `root` — a vault, or `None` for the one with no vault — and take charge
+    /// Build a window on `key` — a vault, or one of the windows with no vault — and take charge
     /// of it. The only place a window joins `windows`, so the handler that takes it out again is
     /// written once.
     fn add_window(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
-        root: Option<PathBuf>,
+        key: WindowKey,
         note: Option<String>,
     ) -> Option<Rc<App>> {
-        let app = build_window(gtk_app, self, root.clone(), note)?;
+        let app = build_window(gtk_app, self, key.vault().map(Path::to_path_buf), note)?;
         // A second `close-request` handler. `wire_window`'s is connected first and can still stop
         // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
         // handler does, so this one only ever sees a close that is really happening.
@@ -514,7 +545,7 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((root, app.clone()));
+        self.windows.borrow_mut().push((key, app.clone()));
         Some(app)
     }
 
@@ -641,20 +672,15 @@ impl Shell {
 
     fn app_for(&self, root: &Path) -> Option<Rc<App>> {
         let windows = self.windows.borrow();
-        let (_, app) = windows
-            .iter()
-            .find(|(path, _)| path.as_deref() == Some(root))?;
+        let (_, app) = windows.iter().find(|(key, _)| key.vault() == Some(root))?;
         Some(app.clone())
     }
 
-    /// Open `path` wherever it belongs: in the window whose vault contains it, or in the one
-    /// window this process keeps for files that are in no vault.
-    ///
-    /// ponytail: one vault-less window per process, so a second loose file joins it as a tab.
-    /// Give it a window each the day two of them need to sit side by side.
+    /// Open `path` wherever it belongs: in the window whose vault contains it, or in the window
+    /// kept for documents that are in no vault — never the one `accent --terminal` opened.
     fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) {
-        let inside = self.windows.borrow().iter().find_map(|(root, app)| {
-            let rel = path.strip_prefix(root.as_ref()?).ok()?;
+        let inside = self.windows.borrow().iter().find_map(|(key, app)| {
+            let rel = path.strip_prefix(key.vault()?).ok()?;
             Some((app.clone(), rel.to_string_lossy().into_owned()))
         });
         if let Some((app, rel)) = inside {
@@ -662,26 +688,31 @@ impl Shell {
             app.open_path(&rel);
             return;
         }
-        let Some(app) = self.loose_window(gtk_app) else {
+        let Some(app) = self.loose_window(gtk_app, Loose::Documents) else {
             return;
         };
         app.window.present();
         app.open_path(&path.to_string_lossy());
     }
 
-    /// The window with no vault, built if this is the first thing to want one. One per process, so
-    /// a second loose file — or a second shell — joins it as a tab.
-    pub fn loose_window(self: &Rc<Self>, gtk_app: &adw::Application) -> Option<Rc<App>> {
+    /// The window with no vault of this `kind`, built if this is the first thing to want one since
+    /// the last one closed. One of each, so a second shell joins the terminal window as a tab and
+    /// a second loose file the documents window.
+    pub fn loose_window(
+        self: &Rc<Self>,
+        gtk_app: &adw::Application,
+        kind: Loose,
+    ) -> Option<Rc<App>> {
         let loose = self
             .windows
             .borrow()
             .iter()
-            .find(|(root, _)| root.is_none())
+            .find(|(key, _)| *key == WindowKey::Loose(kind))
             .map(|(_, app)| app.clone());
         if let Some(app) = loose {
             return Some(app);
         }
-        self.add_window(gtk_app, None, None)
+        self.add_window(gtk_app, WindowKey::Loose(kind), None)
     }
 }
 
