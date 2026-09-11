@@ -657,11 +657,24 @@ impl DiagramTab {
             self.font.borrow().as_deref(),
             self.spellcheck.get(),
         );
+        // A click outside finishes the label, from an idle rather than the handler: leaving is
+        // GTK moving the focus, and taking the editor off the canvas meanwhile left GTK walking
+        // up from a widget that was gone, over and over (the freeze). Only the editor that left:
+        // another may have opened by the time the idle runs.
         let focus = gtk::EventControllerFocus::new();
+        let left = Rc::downgrade(&editor);
         focus.connect_leave(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_| tab.finish_label()
+            move |_| {
+                let (tab, left) = (tab.clone(), left.clone());
+                glib::idle_add_local_once(move || {
+                    let open = tab.label.borrow().as_ref().map(Rc::downgrade);
+                    if open.is_some_and(|open| open.ptr_eq(&left)) {
+                        tab.finish_label();
+                    }
+                });
+            }
         ));
         editor.view().add_controller(focus);
         label::wire_keys(
@@ -672,7 +685,10 @@ impl DiagramTab {
                 move || tab.finish_label()
             ),
         );
-        *self.label.borrow_mut() = Some(editor);
+        *self.label.borrow_mut() = Some(editor.clone());
+        // Only now: a focus controller hears the focus leave only if it saw it come in, so a
+        // click outside finishes the label only when the grab comes after the wiring.
+        editor.focus();
     }
 
     /// Put the label editor away, writing what was typed into the cell. Safe to call twice:
