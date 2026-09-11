@@ -1056,7 +1056,7 @@ impl App {
             });
         }
         if changed.shortcuts {
-            self.apply_accels();
+            self.refresh_accels();
         }
         for tab in self.open_tabs() {
             if changed.font {
