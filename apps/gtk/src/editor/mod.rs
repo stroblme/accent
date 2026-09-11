@@ -750,6 +750,28 @@ pub fn language_for(key: &str, text: &str) -> Option<sourceview5::Language> {
     guess_language(Path::new(key), text)
 }
 
+/// Watch the file at `path` and call `f` when someone else writes it, for as long as the monitor
+/// returned is kept. `None` when the file cannot be watched.
+///
+/// Only for a tab outside every vault: inside one, the vault's own watcher reports the change
+/// and knows which writes were ours, which a bare file monitor cannot.
+pub fn watch_file(path: &Path, f: impl Fn() + 'static) -> Option<gio::FileMonitor> {
+    let monitor = gio::File::for_path(path)
+        .monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
+        .ok()?;
+    monitor.connect_changed(move |_, _, _, event| {
+        // `ChangesDoneHint` is the settled write; `Created` is the rename an atomic save lands
+        // as, ours included, which the etag check then makes a no-op.
+        if matches!(
+            event,
+            gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::Created
+        ) {
+            f();
+        }
+    });
+    Some(monitor)
+}
+
 // ---------------------------------------------------------------------------------------- tab
 
 impl Tab {
@@ -783,31 +805,16 @@ impl Tab {
         self.buffer.language().map(|l| l.name().to_string())
     }
 
-    /// Watch the file behind this tab and call `f` when someone else writes it.
-    ///
-    /// Only for a tab outside every vault: inside one, the vault's own watcher reports the change
-    /// and knows which writes were ours, which a bare file monitor cannot.
+    /// Watch the file behind this tab and call `f` when someone else writes it ([`watch_file`]).
     pub fn watch_file(self: &Rc<Self>, f: impl Fn(&Rc<Tab>) + 'static) {
-        let file = gio::File::for_path(self.path());
-        let Ok(monitor) = file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE)
-        else {
-            return;
-        };
-        monitor.connect_changed(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_, _, _, event| {
-                // `ChangesDoneHint` is the settled write; `Created` is the rename an atomic save
-                // lands as, ours included, which the etag check then makes a no-op.
-                if matches!(
-                    event,
-                    gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::Created
-                ) {
-                    f(&tab);
-                }
-            }
-        ));
-        *self.monitor.borrow_mut() = Some(monitor);
+        *self.monitor.borrow_mut() = watch_file(
+            &self.path(),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || f(&tab)
+            ),
+        );
     }
 
     /// The buffer in the shape the file should hold it: trailing whitespace off code lines, and

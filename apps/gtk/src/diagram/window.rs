@@ -115,6 +115,14 @@ impl App {
             place,
         );
         self.wire_diagram(&tab);
+        // Nothing else watches a loose file: the vault's worker only reports on its own tree.
+        if doc::is_loose_key(key) {
+            tab.watch_file(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |tab| app.diagram_changed(tab)
+            ));
+        }
         {
             let config = self.config.borrow();
             tab.set_spellcheck(config.spellcheck);

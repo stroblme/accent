@@ -79,6 +79,9 @@ pub struct DiagramTab {
     pub save_again: Cell<Option<bool>>,
     pub recheck: Cell<bool>,
     save_pending: Cell<bool>,
+    /// A watch on the file itself, for a diagram from outside the vault, which no vault watcher
+    /// covers. `None` for everything inside a vault, which the worker already reports on.
+    monitor: RefCell<Option<gio::FileMonitor>>,
     on_zoom: Hook,
     on_page: Hook,
     /// Fired just before a page switch the reader asked for, so the pane can record where they
@@ -156,6 +159,7 @@ pub fn open(
         save_again: Cell::new(None),
         recheck: Cell::new(false),
         save_pending: Cell::new(false),
+        monitor: RefCell::new(None),
         on_zoom: RefCell::new(None),
         on_page: RefCell::new(None),
         on_jump: RefCell::new(None),
@@ -855,6 +859,19 @@ impl DiagramTab {
     pub fn clear_changed(&self) {
         self.disk_changed.set(false);
         self.banner.set_revealed(false);
+    }
+
+    /// Watch the file behind this tab and call `f` when someone else writes it
+    /// (`editor::watch_file`).
+    pub fn watch_file(self: &Rc<Self>, f: impl Fn(&Rc<DiagramTab>) + 'static) {
+        *self.monitor.borrow_mut() = crate::editor::watch_file(
+            &self.path(),
+            glib::clone!(
+                #[weak(rename_to = tab)]
+                self,
+                move || f(&tab)
+            ),
+        );
     }
 
     /// Write the file a moment after the last edit, as a note's autosave does.
