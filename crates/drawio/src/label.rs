@@ -39,15 +39,6 @@ pub enum Run {
     Bullet,
 }
 
-/// No marks: the label's own font.
-const PLAIN: Marks = Marks {
-    bold: false,
-    italic: false,
-    underline: false,
-    color: None,
-    size: None,
-};
-
 /// An HTML label (`html=1`) as runs. `math` is the page's `math` switch.
 ///
 /// Bold, italic, underline, colour and size come from the tags and inline styles that set them;
@@ -90,12 +81,16 @@ pub fn html_to_runs(html: &str, math: bool) -> Vec<Run> {
                 if name == "li" {
                     runs.push(Run::Bullet);
                 }
-                let mut marks = open.last().map_or(PLAIN, |(_, m)| m.clone());
+                let mut marks = open.last().map_or_else(Marks::default, |(_, m)| m.clone());
                 tag.apply(&mut marks);
                 open.push((tag.name, marks));
             }
         } else {
-            collapse(&mut runs, c, open.last().map_or(&PLAIN, |(_, m)| m));
+            collapse(
+                &mut runs,
+                c,
+                open.last().map_or(&Marks::default(), |(_, m)| m),
+            );
             rest = &rest[len..];
         }
     }
@@ -708,7 +703,7 @@ mod tests {
             bold: look.contains('b'),
             italic: look.contains('i'),
             underline: look.contains('u'),
-            ..PLAIN
+            ..Marks::default()
         };
         Run::Text {
             text: s.into(),

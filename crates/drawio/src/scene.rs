@@ -222,6 +222,10 @@ pub fn scene(page: &Page) -> Scene {
 const BASE_SPACING_TOP: f64 = 5.0;
 const BASE_SPACING_BOTTOM: f64 = 1.0;
 
+/// `mxConstants.DEFAULT_FONTSIZE`: a label's size when its style has none. The stylesheet gives
+/// every vertex 12 and every edge 11, so this is for a style that skips it (a leading `;`).
+const DEFAULT_FONTSIZE: f64 = 11.0;
+
 struct Builder<'a> {
     page: &'a Page,
     /// The page has `math="1"`: `\(…\)` in labels is a formula.
@@ -513,7 +517,7 @@ impl<'a> Builder<'a> {
             kind,
             &mut points[tip],
             unit,
-            style.num(size, 6.0),
+            style.num(size, marker::DEFAULT_MARKERSIZE),
             line.width,
             style.flag(fill, true),
         )?;
@@ -658,7 +662,7 @@ impl<'a> Builder<'a> {
             wrap: style.get("whiteSpace") == Some("wrap") && size.0 > 0.0,
             rotation,
             font: Font {
-                size: style.num("fontSize", if cell.edge { 11.0 } else { 12.0 }),
+                size: style.num("fontSize", DEFAULT_FONTSIZE),
                 family: style.get("fontFamily").unwrap_or("Helvetica").to_string(),
                 color: style.color("fontColor").unwrap_or(Color::BLACK),
                 bold: bits & 1 != 0,
@@ -860,6 +864,17 @@ mod tests {
         // A picture's label hangs under it.
         let (_, anchor, _) = text(&s, "img");
         assert_eq!(anchor, Point::new(20.0, 240.0 + 2.0 + 5.0));
+    }
+
+    #[test]
+    fn a_label_whose_style_has_no_font_size_takes_draw_ios_default() {
+        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let p = page(vec![Cell::new_vertex("a", "1", r, ";", "A")]);
+        let size = scene(&p).prims.iter().find_map(|prim| match prim {
+            Prim::Text { font, .. } => Some(font.size),
+            _ => None,
+        });
+        assert_eq!(size, Some(11.0));
     }
 
     #[test]

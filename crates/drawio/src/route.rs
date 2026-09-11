@@ -9,6 +9,7 @@
 //! port can be compared against later releases.
 
 use crate::geom::{self, Point, Rect};
+use crate::marker::DEFAULT_MARKERSIZE;
 use crate::model::{Cell, Page};
 use crate::perimeter;
 use crate::style::{Resolved, parse_num};
@@ -838,8 +839,6 @@ fn segment_connector(
 
 /// `mxEdgeStyle.orthBuffer`: the default jetty, the stub an orthogonal edge leaves a side with.
 const ORTH_BUFFER: f64 = 10.0;
-/// `mxConstants.DEFAULT_MARKERSIZE`.
-const DEFAULT_MARKERSIZE: f64 = 6.0;
 
 // mxConstants.DIRECTION_MASK_*: the sides an end may leave by.
 const WEST: u32 = 1;
