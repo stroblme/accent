@@ -11,6 +11,12 @@ pub struct Shell {
     pub applied: RefCell<Config>,
     /// The write [`Shell::save_config_soon`] has scheduled and not yet done.
     pub config_write: RefCell<Option<glib::SourceId>>,
+    /// Watches `config.toml` for someone else's edits ([`Shell::watch_config`]); kept only so it
+    /// lives as long as the shell.
+    pub config_monitor: RefCell<Option<gio::FileMonitor>>,
+    /// Whether the file has been found not to parse and that has been said, so it is said once
+    /// until the file parses again.
+    pub config_broken: Cell<bool>,
     /// The open vaults, and the only strong reference to each window's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
     /// `None` for the one window opened on files rather than on a folder.
@@ -174,12 +180,75 @@ impl Shell {
         self.config_write.replace(Some(id));
     }
 
-    /// Do a write [`Self::save_config_soon`] still has waiting, now: the process is ending, or
-    /// the file is about to be read back.
+    /// Do a write [`Self::save_config_soon`] still has waiting, now: the process is ending.
     pub fn flush_config(&self) {
         if let Some(id) = self.config_write.take() {
             id.remove();
             settings::save(&self.config.borrow());
+        }
+    }
+
+    /// Take in what someone else writes to `config.toml` while accent runs — a hand edit, most
+    /// likely — as it lands. Accent's own writes come back through here too and are told apart by
+    /// their text ([`Config::reread`]).
+    pub fn watch_config(self: &Rc<Self>) {
+        let file = gio::File::for_path(accent_core::config::config_path());
+        let monitor = match file.monitor_file(gio::FileMonitorFlags::NONE, gio::Cancellable::NONE) {
+            Ok(monitor) => monitor,
+            Err(e) => return tracing::warn!("cannot watch config.toml: {e}"),
+        };
+        let shell = Rc::downgrade(self);
+        monitor.connect_changed(move |_, _, _, event| {
+            // The settled write and the rename an atomic save lands as, as for a tab's file: an
+            // in-place write is seen half done before that.
+            let settled = matches!(
+                event,
+                gio::FileMonitorEvent::ChangesDoneHint | gio::FileMonitorEvent::Created
+            );
+            if let Some(shell) = shell.upgrade().filter(|_| settled) {
+                shell.config_file_changed();
+            }
+        });
+        self.config_monitor.replace(Some(monitor));
+    }
+
+    /// `config.toml` changed on disk. A change that parses is put into effect like any other
+    /// (only what it moved is redone) with accent's own unwritten changes kept on top, and is not
+    /// written back unless those need it. One that does not parse is left alone and said once;
+    /// accent keeps its running config and writes nothing until the file parses again.
+    fn config_file_changed(self: &Rc<Self>) {
+        let reread = self.config.borrow().reread();
+        match reread {
+            Ok(None) => {}
+            Ok(Some(taken)) => {
+                self.config_broken.set(false);
+                *self.config.borrow_mut() = taken.config.clone();
+                self.apply_config(&taken.config);
+                match taken.unwritten {
+                    true => self.save_config_soon(),
+                    // A write still waiting has nothing left of ours to carry.
+                    false => {
+                        if let Some(id) = self.config_write.take() {
+                            id.remove();
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if self.config_broken.replace(true) {
+                    return;
+                }
+                tracing::warn!("{e:#}; keeping the running settings, and not writing the file");
+                let app = gio::Application::default()
+                    .and_downcast::<gtk::Application>()
+                    .and_then(|gtk_app| gtk_app.active_window())
+                    .and_then(|window| self.app_at(&window));
+                if let Some(app) = app {
+                    app.toast(
+                        "config.toml does not parse. Changes made here are kept and written once it does",
+                    );
+                }
+            }
         }
     }
 

@@ -398,8 +398,16 @@ impl Config {
     /// not do; the copy is theirs to fix and move back.
     pub fn load() -> Config {
         let path = config_path();
-        match Config::read(&path) {
-            Ok(c) => c,
+        let text = std::fs::read_to_string(&path);
+        let parsed = match &text {
+            Ok(text) => Config::parse(text, &path),
+            Err(e) => Err(anyhow::anyhow!("reading {}: {e}", path.display())),
+        };
+        match parsed {
+            Ok(c) => {
+                set_known(text.ok());
+                c
+            }
             Err(e) => {
                 if path.exists() {
                     let aside = path.with_extension("toml.broken");
@@ -415,6 +423,7 @@ impl Config {
                         ),
                     }
                 }
+                set_known(None);
                 Config::default()
             }
         }
@@ -423,6 +432,11 @@ impl Config {
     pub fn read(path: &Path) -> Result<Config> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Config::parse(&text, path)
+    }
+
+    /// `text` as a config; `path` is only for the messages.
+    fn parse(text: &str, path: &Path) -> Result<Config> {
         let table: toml::Table = text
             .parse()
             .with_context(|| format!("parsing {}", path.display()))?;
@@ -434,12 +448,60 @@ impl Config {
             .with_context(|| format!("parsing {}", path.display()))
     }
 
-    pub fn save(&self) -> Result<()> {
-        self.write(&config_path())
+    /// Write the config, unless the file holds a change accent has not taken in yet
+    /// ([`reread`](Self::reread)): then nothing is written and the answer is `false`. That is
+    /// what keeps a hand edit — or a file that no longer parses — from being written over.
+    pub fn save(&self) -> Result<bool> {
+        let path = config_path();
+        let on_disk = std::fs::read_to_string(&path).ok();
+        if on_disk.is_some() && on_disk != known() {
+            return Ok(false);
+        }
+        let text = toml::to_string_pretty(self)?;
+        replace(&path, text.as_bytes())?;
+        set_known(Some(text));
+        Ok(true)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
         replace(path, toml::to_string_pretty(self)?.as_bytes())
+    }
+
+    /// Take in a change someone else made to `config.toml`: the file's config, with whatever
+    /// accent changed since it last read or wrote the file kept on top, key by key. Where both
+    /// changed one key the file wins, since that is what someone just typed, and the log names
+    /// the key. `None` when the file holds nothing new; an error when it does not parse, and then
+    /// nothing is taken in and [`save`](Self::save) keeps refusing until it does.
+    pub fn reread(&self) -> Result<Option<Reread>> {
+        let path = config_path();
+        let text = std::fs::read_to_string(&path).ok();
+        let known = known();
+        let Some(file) = theirs(text.as_deref(), known.as_deref(), &path)? else {
+            return Ok(None);
+        };
+        // What accent last had on disk, which is what both sides moved on from.
+        let base = known
+            .as_deref()
+            .and_then(|k| Config::parse(k, &path).ok())
+            .unwrap_or_default();
+        let (base, ours, file) = (
+            toml::Value::try_from(base)?,
+            toml::Value::try_from(self)?,
+            toml::Value::try_from(file)?,
+        );
+        let mut lost = Vec::new();
+        let merged = merge(Some(&base), Some(&ours), Some(&file), "", &mut lost)
+            .context("merging config.toml")?;
+        for key in lost {
+            tracing::warn!(
+                "config.toml: `{key}` was changed by hand and here at once; the file's value is kept"
+            );
+        }
+        set_known(text);
+        Ok(Some(Reread {
+            unwritten: merged != file,
+            config: merged.try_into().context("merging config.toml")?,
+        }))
     }
 
     /// The stored entry for `root`, or the defaults.
@@ -543,6 +605,73 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         }
     }
     out
+}
+
+/// A change to `config.toml` taken in by [`Config::reread`].
+#[derive(Debug)]
+pub struct Reread {
+    pub config: Config,
+    /// Whether it holds a change of accent's the file does not, and so still wants a save.
+    pub unwritten: bool,
+}
+
+/// The text accent last read from `config.toml` or wrote to it, so a change of someone else's can
+/// be told from accent's own write coming back. Process-wide, like the file.
+static KNOWN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn known() -> Option<String> {
+    KNOWN.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn set_known(text: Option<String>) {
+    *KNOWN.lock().unwrap_or_else(|e| e.into_inner()) = text;
+}
+
+/// The config in `text`, where that is a change of someone else's: `None` for no file, or for the
+/// text accent itself last read or wrote; an error for a change that does not parse.
+fn theirs(text: Option<&str>, known: Option<&str>, path: &Path) -> Result<Option<Config>> {
+    match text {
+        Some(text) if Some(text) != known => Config::parse(text, path).map(Some),
+        _ => Ok(None),
+    }
+}
+
+/// Three-way merge of two configs that both moved on from `base`, as TOML values, key by key down
+/// through the tables: a key the file (`theirs`) changed takes the file's value, every other key
+/// keeps accent's. A key both changed differently is pushed to `lost` by its dotted path, `at`
+/// being where this value sits. `None` stands for a key that is absent.
+fn merge(
+    base: Option<&toml::Value>,
+    ours: Option<&toml::Value>,
+    theirs: Option<&toml::Value>,
+    at: &str,
+    lost: &mut Vec<String>,
+) -> Option<toml::Value> {
+    use toml::Value::Table;
+    if let (Some(Table(o)), Some(Table(t))) = (ours, theirs) {
+        let b = match base {
+            Some(Table(b)) => b.clone(),
+            _ => toml::Table::new(),
+        };
+        let keys: std::collections::BTreeSet<&String> =
+            b.keys().chain(o.keys()).chain(t.keys()).collect();
+        let merged = keys.into_iter().filter_map(|k| {
+            let at = if at.is_empty() {
+                k.clone()
+            } else {
+                format!("{at}.{k}")
+            };
+            Some((k.clone(), merge(b.get(k), o.get(k), t.get(k), &at, lost)?))
+        });
+        return Some(Table(merged.collect()));
+    }
+    if theirs == base {
+        return ours.cloned();
+    }
+    if ours != base && ours != theirs {
+        lost.push(at.to_string());
+    }
+    theirs.cloned()
 }
 
 /// Write `bytes` where `path` is, atomically: a torn config or state file is read back as the
@@ -802,6 +931,77 @@ daily_template = "DailyNote.md"
             "recent_vaults = [ oops",
             "the user's file survives the save that follows"
         );
+    }
+
+    #[test]
+    fn only_a_parsing_change_of_someone_elses_is_taken_in() {
+        let p = Path::new("config.toml");
+        let known = "minimap = false\n";
+        // Nothing there, or accent's own write coming back: nothing to take in.
+        assert!(theirs(None, Some(known), p).unwrap().is_none());
+        assert!(theirs(Some(known), Some(known), p).unwrap().is_none());
+        let changed = theirs(Some("minimap = true\n"), Some(known), p).unwrap();
+        assert!(changed.is_some_and(|c| c.minimap));
+        // A file accent never read is someone else's too.
+        assert!(theirs(Some("minimap = true\n"), None, p).unwrap().is_some());
+        assert!(theirs(Some("minimap = [ oops"), Some(known), p).is_err());
+    }
+
+    #[test]
+    fn a_merge_keeps_both_sides_and_the_file_wins_a_key_both_changed() {
+        let value = |c: Config| toml::Value::try_from(c).unwrap();
+        let base = Config::default();
+        let mut ours = base.clone();
+        ours.minimap = true;
+        ours.drawing.pen_width = 3.0;
+        ours.theme = Theme::Light;
+        let mut file = base.clone();
+        file.drawing.mouse = true;
+        file.theme = Theme::Dark;
+
+        let mut lost = Vec::new();
+        let merged = merge(
+            Some(&value(base)),
+            Some(&value(ours)),
+            Some(&value(file)),
+            "",
+            &mut lost,
+        );
+        let merged: Config = merged.unwrap().try_into().unwrap();
+        assert!(merged.minimap);
+        // Down through a table: one key from each side.
+        assert_eq!(merged.drawing.pen_width, 3.0);
+        assert!(merged.drawing.mouse);
+        assert_eq!(merged.theme, Theme::Dark);
+        assert_eq!(lost, ["theme"]);
+    }
+
+    /// The `!BUG`: a hand edit made while accent ran was written over by accent's next save.
+    #[test]
+    fn a_hand_edit_is_never_written_over_and_is_taken_in_under_accents_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        with_xdg(tmp.path(), || {
+            let p = config_path();
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "minimap = false\n").unwrap();
+            let mut c = Config::load();
+            assert!(c.reread().unwrap().is_none(), "nothing new yet");
+
+            c.line_numbers = true;
+            std::fs::write(&p, "minimap = true\n").unwrap();
+            assert!(!c.save().unwrap(), "the hand edit is not written over");
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "minimap = true\n");
+
+            let taken = c.reread().unwrap().unwrap();
+            assert!(taken.config.minimap && taken.config.line_numbers);
+            assert!(taken.unwritten);
+            assert!(
+                taken.config.save().unwrap(),
+                "taken in, so saving goes ahead"
+            );
+            assert!(Config::read(&p).unwrap().line_numbers);
+            assert!(taken.config.reread().unwrap().is_none(), "its own write");
+        });
     }
 
     #[test]
