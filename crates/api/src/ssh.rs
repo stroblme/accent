@@ -497,13 +497,30 @@ pub fn cache_dir(url: &Url) -> PathBuf {
         .join(id(url))
 }
 
+/// Where the etag each cached file was fetched at is kept: `<id>.etag`, a tree of its own beside
+/// the cache. A stamp beside its file (`a.etag` for `a.pdf`) was shared by `a.pdf` and `a.png`,
+/// and a vault file called `x.etag` was overwritten by its own; the ones an older build left
+/// there are orphans now.
+fn stamp_dir(url: &Url) -> PathBuf {
+    cache_dir(url).with_extension("etag")
+}
+
 /// Join a remote-relative path onto the cache, refusing anything that would land outside it.
 ///
 /// `rel` comes back over the wire, so a `..` in it is the remote deciding where this machine
 /// writes. The test is the lexical walk `Vault::resolve` does, for the same reason: it never
 /// touches the filesystem, so it works on paths that do not exist yet.
 pub fn cache_path(url: &Url, rel: &str) -> Option<PathBuf> {
-    let base = cache_dir(url);
+    inside(cache_dir(url), rel)
+}
+
+/// Where the stamp of `rel`'s cached copy goes: its [`cache_path`] in the stamp tree.
+pub fn stamp_path(url: &Url, rel: &str) -> Option<PathBuf> {
+    inside(stamp_dir(url), rel)
+}
+
+/// `rel` joined onto `base`, or `None` where it would land outside it (see [`cache_path`]).
+fn inside(base: PathBuf, rel: &str) -> Option<PathBuf> {
     let mut out = base.clone();
     for part in Path::new(rel).components() {
         match part {
@@ -969,5 +986,21 @@ mod tests {
         assert_eq!(cache_path(&url, "../../etc/passwd"), None);
         assert_eq!(cache_path(&url, "notes/../../../etc/passwd"), None);
         assert_eq!(cache_path(&url, "/etc/passwd"), None);
+    }
+
+    #[test]
+    fn a_stamp_has_a_tree_of_its_own_beside_the_cache() {
+        let url = ported();
+        let (cache, stamps) = (cache_dir(&url), stamp_dir(&url));
+        assert_eq!(stamps.parent(), cache.parent());
+        assert!(!stamps.starts_with(&cache) && !cache.starts_with(&stamps));
+        assert_eq!(
+            stamp_path(&url, "notes/a.pdf"),
+            Some(stamps.join("notes/a.pdf"))
+        );
+        // Two files that differ only in their extension, and a file named like a stamp.
+        assert_ne!(stamp_path(&url, "a.pdf"), stamp_path(&url, "a.png"));
+        assert_ne!(stamp_path(&url, "x"), cache_path(&url, "x.etag"));
+        assert_eq!(stamp_path(&url, "../../etc/passwd"), None);
     }
 }

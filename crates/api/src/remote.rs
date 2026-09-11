@@ -328,7 +328,10 @@ impl Remote {
     /// they need a real file, and the protocol deliberately carries no bytes. The etag decides —
     /// same as on disk, no transfer.
     pub fn fetch(&self, rel: &str) -> std::io::Result<PathBuf> {
-        let Some(dest) = ssh::cache_path(&self.url, rel) else {
+        let (Some(dest), Some(stamp)) = (
+            ssh::cache_path(&self.url, rel),
+            ssh::stamp_path(&self.url, rel),
+        ) else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("{rel} is outside the vault"),
@@ -345,7 +348,6 @@ impl Remote {
         };
         // The remote etag against the one the cached copy was written with. Size and mtime are
         // enough here: the inode is the remote's, and it is in the etag we stored.
-        let stamp = dest.with_extension("etag");
         let cached = std::fs::read(&stamp)
             .ok()
             .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
@@ -353,7 +355,7 @@ impl Remote {
             return Ok(dest);
         }
 
-        if let Some(dir) = dest.parent() {
+        for dir in [dest.parent(), stamp.parent()].into_iter().flatten() {
             std::fs::create_dir_all(dir)?;
         }
         let out = self.ssh_output(&format!("cat {}", ssh::quote(&self.remote_path(rel))))?;

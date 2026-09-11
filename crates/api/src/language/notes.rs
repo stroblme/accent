@@ -193,7 +193,12 @@ pub(crate) fn symbols_of(text: &str, headings: &[markdown::Heading]) -> Vec<Symb
             let (_, done) = open.pop().expect("just looked at it");
             close(&mut open, &mut out, done);
         }
-        let end = section_end(text, headings, i);
+        // A section that runs to the end of the note takes in the empty line after its final
+        // newline too: that is where a caret sent to the end lands, and it is under this heading.
+        let end = match section_end(text, headings, i) {
+            last if last + 1 == text.len() => text.len(),
+            end => end,
+        };
         open.push((
             h.level,
             Symbol {
@@ -848,8 +853,8 @@ mod tests {
         assert_eq!(two.children[0].name, "Three", "a deeper heading nests");
         assert_eq!(syms[1].name, "Four");
         assert_eq!(
-            syms[1].range.end.line, 5,
-            "the last section runs to the end"
+            syms[1].range.end.line, 6,
+            "the last section runs to the end, the line after the final newline included"
         );
     }
 

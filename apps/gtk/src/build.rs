@@ -644,6 +644,13 @@ fn adopt_sidebar(
     app.sidebar_header.set_title_widget(Some(pane.switcher()));
     // The panes fade while the user types, on the same transition as the bars.
     pane.widget().add_css_class("chrome-fade");
+    // The Outline pane does nothing while it is out of sight, so it catches up with the caret
+    // when it comes to the front.
+    pane.connect_pane_shown(glib::clone!(
+        #[weak]
+        app,
+        move || app.follow_outline()
+    ));
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }
@@ -715,7 +722,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 let under = rels
                     .iter()
                     .any(|rel| fileops::trashed_with(rel, &tab.rel()));
-                if under && tab.modified.get() {
+                if under && tab.save.modified.get() {
                     app.save_tab_now(&tab);
                 }
             }
@@ -916,6 +923,7 @@ fn install_chrome_css() {
              .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
                color: var(--accent-fg-color); }} \
              .accent-ring-hub {{ opacity: 0.75; }} \
+             .accent-ring-dim:not(:hover):not(:focus-visible) {{ opacity: var(--dim-opacity); }} \
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \

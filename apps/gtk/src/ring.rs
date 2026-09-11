@@ -184,12 +184,16 @@ impl<T: Tool> Ring<T> {
 
     /// Show which tool is in hand. The buttons fire actions, so this only reflects the state; it
     /// must not toggle them back or pressing one would fight its own handler.
+    ///
+    /// While a tool is in hand the others dim, so the options on the outer orbit read as its own.
     pub fn set_tool(&self, tool: T) {
+        let holding = tool != T::none();
         for (held, button) in &self.buttons {
             let wanted = *held == tool;
             if button.is_active() != wanted {
                 button.set_active(wanted);
             }
+            crate::widgets::set_class(button, "accent-ring-dim", holding && !wanted);
         }
         self.tool.set(tool);
     }

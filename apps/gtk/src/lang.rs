@@ -53,6 +53,9 @@ pub struct State {
     support: RefCell<Option<Rc<Support>>>,
     /// The document's symbols, most recent answer.
     symbols: RefCell<Vec<Symbol>>,
+    /// The same symbols as the Outline pane lists them, flattened once per answer rather than
+    /// once per caret move.
+    rows: RefCell<Vec<Row>>,
     /// The pending post-edit refresh. Replaced rather than queued, so the latest edit wins.
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
     /// The buffer's own edit counter, and how far the server has been told. A bool could only
@@ -88,6 +91,28 @@ impl State {
 
     pub fn symbols(&self) -> Vec<Symbol> {
         self.symbols.borrow().clone()
+    }
+
+    /// The Outline pane's rows, as the pane takes them: how deep, what name, where a click lands.
+    pub fn outline(&self) -> Vec<(u8, String, Pos)> {
+        self.rows
+            .borrow()
+            .iter()
+            .map(|row| (row.depth, row.name.clone(), row.at))
+            .collect()
+    }
+
+    /// The Outline row of the symbol a caret on `line` is in: see [`row_at`].
+    pub fn outline_row(&self, line: u32) -> Option<usize> {
+        row_at(&self.rows.borrow(), line)
+    }
+
+    /// Whether a caret on `line` is before every symbol: above a note's first heading.
+    pub fn above_outline(&self, line: u32) -> bool {
+        self.rows
+            .borrow()
+            .first()
+            .is_some_and(|row| line < row.lines.0)
     }
 
     /// Whether the "no language server" toast still has to be said, marking it said.
@@ -356,7 +381,10 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     pause(rest).await;
     let rel = tab.rel();
     match vault.symbols(&rel).await {
-        Ok(symbols) => *tab.lang.symbols.borrow_mut() = symbols,
+        Ok(symbols) => {
+            *tab.lang.rows.borrow_mut() = flatten(&symbols);
+            *tab.lang.symbols.borrow_mut() = symbols;
+        }
         Err(e) => tracing::debug!("symbols for {rel}: {e:#}"),
     }
     match vault.folds(&rel).await {
@@ -369,19 +397,53 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     }
 }
 
-/// The symbol tree as the Outline pane reads it: one row per symbol, depth first, carrying how
-/// deep it is (1 for a top-level one, which is what the pane indents from) and where a click on
-/// it should land.
-pub fn flatten(symbols: &[Symbol]) -> Vec<(u8, String, Pos)> {
-    fn walk(rows: &mut Vec<(u8, String, Pos)>, symbols: &[Symbol], depth: u8) {
+/// One row of the Outline pane: a symbol lifted out of the tree.
+struct Row {
+    /// 1 for a top-level symbol, which is what the pane indents from.
+    depth: u8,
+    name: String,
+    /// Where a click on the row lands.
+    at: Pos,
+    /// The first and the last line of the whole symbol: the section under a heading, the body
+    /// of a function.
+    lines: (u32, u32),
+    /// The row of the symbol this one is nested in.
+    parent: Option<usize>,
+}
+
+/// The symbol tree as the Outline pane reads it: one row per symbol, depth first, which is the
+/// order of the file.
+fn flatten(symbols: &[Symbol]) -> Vec<Row> {
+    fn walk(rows: &mut Vec<Row>, symbols: &[Symbol], depth: u8, parent: Option<usize>) {
         for symbol in symbols {
-            rows.push((depth, symbol.name.clone(), symbol.selection.start));
-            walk(rows, &symbol.children, depth.saturating_add(1));
+            let this = rows.len();
+            rows.push(Row {
+                depth,
+                name: symbol.name.clone(),
+                at: symbol.selection.start,
+                lines: (symbol.range.start.line, symbol.range.end.line),
+                parent,
+            });
+            walk(rows, &symbol.children, depth.saturating_add(1), Some(this));
         }
     }
     let mut rows = Vec::new();
-    walk(&mut rows, symbols, 1);
+    walk(&mut rows, symbols, 1, None);
     rows
+}
+
+/// The row of the innermost symbol whose range holds `line`, or `None` where no symbol does.
+///
+/// A search rather than a walk, since it runs on every caret move: the rows are in the order of
+/// the file, so the last one to start at or before `line` is found by bisection. When that one
+/// has already ended — a caret after a function's closing brace — the answer is one of the
+/// symbols around it, because nothing that ended before it started can still hold the line.
+fn row_at(rows: &[Row], line: u32) -> Option<usize> {
+    let mut row = rows.partition_point(|r| r.lines.0 <= line).checked_sub(1)?;
+    while rows[row].lines.1 < line {
+        row = rows[row].parent?;
+    }
+    Some(row)
 }
 
 /// The line to pin above the view when `top` is the first line on screen: the line naming the
@@ -476,7 +538,7 @@ mod tests {
         ];
         let rows: Vec<(u8, String)> = flatten(&tree)
             .into_iter()
-            .map(|(depth, name, _)| (depth, name))
+            .map(|row| (row.depth, row.name))
             .collect();
         assert_eq!(
             rows,
@@ -487,6 +549,63 @@ mod tests {
                 (1, "Next".to_string()),
             ]
         );
+    }
+
+    /// The deepest row whose range holds the line, and no row at all where none does: above the
+    /// first heading, or between two functions with nothing around them.
+    #[test]
+    fn the_caret_is_in_the_innermost_symbol_holding_its_line() {
+        let span = |name: &str, first: u32, last: u32, children: Vec<Symbol>| {
+            let mut s = symbol(name, first, children);
+            s.range.end.line = last;
+            s
+        };
+        // A note: sections run on to the next heading that is not below them.
+        let note = flatten(&[span(
+            "Title",
+            2,
+            30,
+            vec![
+                span("A", 5, 19, vec![span("A.1", 9, 19, vec![])]),
+                span("B", 20, 30, vec![]),
+            ],
+        )]);
+        fn at(rows: &[Row], line: u32) -> Option<&str> {
+            row_at(rows, line).map(|row| rows[row].name.as_str())
+        }
+        assert_eq!(at(&note, 0), None, "above the first heading");
+        assert_eq!(at(&note, 2), Some("Title"), "on the heading itself");
+        assert_eq!(at(&note, 7), Some("A"));
+        assert_eq!(at(&note, 12), Some("A.1"));
+        assert_eq!(at(&note, 20), Some("B"));
+        assert_eq!(at(&note, 30), Some("B"), "the last line");
+        // Code: a method is inside its impl, and a gap has only what encloses it.
+        let code = flatten(&[
+            span(
+                "Impl",
+                0,
+                20,
+                vec![span("one", 2, 5, vec![]), span("two", 8, 12, vec![])],
+            ),
+            span("main", 25, 30, vec![]),
+        ]);
+        assert_eq!(at(&code, 3), Some("one"));
+        assert_eq!(at(&code, 15), Some("Impl"), "after its last method");
+        assert_eq!(at(&code, 22), None, "between two items");
+        assert_eq!(at(&code, 40), None, "past the last one");
+    }
+
+    /// Above the first symbol is the one place without a row that sends the list to its top: a
+    /// gap between two functions keeps it where it is.
+    #[test]
+    fn only_a_caret_before_every_symbol_is_above_the_outline() {
+        let state = State::default();
+        let mut first = symbol("first", 3, vec![]);
+        first.range.end.line = 5;
+        *state.rows.borrow_mut() = flatten(&[first, symbol("second", 9, vec![])]);
+        assert!(state.above_outline(0));
+        assert!(!state.above_outline(3), "on the first one");
+        assert!(!state.above_outline(7), "between the two");
     }
 
     /// Every kind names a file that is actually in the GResource directory: a missing icon is a

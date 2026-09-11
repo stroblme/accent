@@ -19,6 +19,9 @@ pub const DRAG_SLOP: f64 = 3.0;
 pub const TOLERANCE: f64 = 4.0;
 /// A new shape dropped with a click rather than drawn: draw.io's own default vertex.
 pub const DEFAULT_SIZE: (f64, f64) = (120.0, 60.0);
+/// How far beyond a selected shape's top-right corner its rotate handle sits, in pixels:
+/// draw.io's `rotationHandleVSpacing` (Graph.js 25334).
+pub const ROTATE_GAP: f64 = 12.0;
 /// The smallest a shape can be resized to, in page units.
 pub const MIN_SIZE: f64 = 10.0;
 
@@ -108,8 +111,9 @@ pub fn snap_move(origin: Point, delta: Point, grid: f64) -> Point {
 
 /// [`resize_by`] for a shape turned `rotation` degrees: the pointer's move is taken into the
 /// shape's own frame, the box resized there, and the result placed so that the side the handle
-/// does not hold stays where it was on the page — draw.io's rule. No grid for a turned shape,
-/// whose edges do not run along it.
+/// does not hold stays where it was on the page — draw.io's rule. On the grid, a turned shape's
+/// size snaps rather than its edges, which the placing moves off the grid anyway
+/// (`mxVertexHandler.union`, 1703-1709).
 pub fn resize_rotated(
     r: &Rect,
     rotation: f64,
@@ -122,6 +126,7 @@ pub fn resize_rotated(
     }
     let origin = Point::default();
     let local = resize_by(r, handle, rotate(delta, origin, -rotation), None);
+    let local = grid.map_or(local, |g| snap_size(&local, handle, g));
     let (old, new) = (r.centre(), local.centre());
     let shift = rotate(Point::new(new.x - old.x, new.y - old.y), origin, rotation);
     let centre = Point::new(old.x + shift.x, old.y + shift.y);
@@ -133,17 +138,52 @@ pub fn resize_rotated(
     )
 }
 
-/// The four corners of `r` turned `rotation` degrees about its centre, clockwise from the top
-/// left: a turned shape's outline.
-pub fn corners(r: &Rect, rotation: f64) -> [Point; 4] {
-    let c = r.centre();
-    [
-        Point::new(r.x, r.y),
-        Point::new(r.right(), r.y),
-        Point::new(r.right(), r.bottom()),
-        Point::new(r.x, r.bottom()),
-    ]
-    .map(|p| rotate(p, c, rotation))
+/// `r` with the sides `handle` moves placed so its size is on the grid, the other sides kept.
+fn snap_size(r: &Rect, handle: Handle, grid: f64) -> Rect {
+    let (left, top, right, bottom) = handle.edges();
+    let size = |v: f64| snap(v, grid).max(MIN_SIZE);
+    let (mut l, mut t, mut rr, mut b) = (r.x, r.y, r.right(), r.bottom());
+    if right {
+        rr = l + size(r.w);
+    } else if left {
+        l = rr - size(r.w);
+    }
+    if bottom {
+        b = t + size(r.h);
+    } else if top {
+        t = b - size(r.h);
+    }
+    Rect::new(l, t, rr - l, b - t)
+}
+
+/// Where the rotate handle of a shape drawn at `r` (content coordinates) sits before its turn:
+/// beyond the top-right corner, where draw.io puts it (Graph.js 25335-25341).
+pub fn rotate_handle(r: &Rect) -> Point {
+    Point::new(r.right() + ROTATE_GAP, r.y - ROTATE_GAP)
+}
+
+/// The compass bearing of `p` from `centre`, in degrees clockwise from straight up.
+fn bearing(centre: Point, p: Point) -> f64 {
+    (p.x - centre.x).atan2(centre.y - p.y).to_degrees()
+}
+
+/// The turn a shape centred on `centre` takes when its rotate handle, at `handle` before the
+/// turn, is dragged to `pointer` (all in content coordinates): the pointer's bearing less the
+/// handle's, as `mxVertexHandler.rotateVertex` (953-992) has it. On the grid it snaps to 15°
+/// while the pointer is near the handle's circle, to 5° a little outside it and to 1° further
+/// out; `free`, to a tenth. Kept within (-180, 180].
+pub fn rotation_to(centre: Point, handle: Point, pointer: Point, free: bool) -> f64 {
+    let alpha = bearing(centre, pointer) - bearing(centre, handle);
+    let raster = match pointer.distance(centre) - handle.distance(centre) {
+        _ if free => 0.1,
+        out if out < 2.0 => 15.0,
+        out if out < 25.0 => 5.0,
+        _ => 1.0,
+    };
+    let turn = ((alpha / raster).round() * raster).rem_euclid(360.0);
+    let turn = if turn > 180.0 { turn - 360.0 } else { turn };
+    // A tenth is as fine as it goes; rounding there keeps float dust out of the file.
+    (turn * 10.0).round() / 10.0
 }
 
 /// The point halfway along `path` by length: where draw.io puts an edge's label. A curve is
@@ -212,6 +252,26 @@ impl Handle {
             Handle::South => Point::new(cx, r.bottom()),
             Handle::SouthEast => Point::new(r.right(), r.bottom()),
         }
+    }
+
+    /// The handles in compass order, clockwise from the top.
+    const COMPASS: [Handle; 8] = [
+        Handle::North,
+        Handle::NorthEast,
+        Handle::East,
+        Handle::SouthEast,
+        Handle::South,
+        Handle::SouthWest,
+        Handle::West,
+        Handle::NorthWest,
+    ];
+
+    /// The handle that points the way this one does once its shape is turned `rotation`
+    /// degrees: whose resize cursor to show over it.
+    pub fn turned(self, rotation: f64) -> Handle {
+        let at = Handle::COMPASS.iter().position(|h| *h == self).unwrap_or(0);
+        let steps = (rotation / 45.0).round() as i64;
+        Handle::COMPASS[(at as i64 + steps).rem_euclid(8) as usize]
     }
 
     /// The pointer a handle shows, by its CSS cursor name.
@@ -304,6 +364,8 @@ pub struct Sheet {
     /// Each unlocked, connectable vertex's connection points, with the constraint that pins an
     /// edge end to each.
     anchors: HashMap<CellId, Vec<(Point, Constraint)>>,
+    /// Vertices whose style says they are not to be turned (`rotatable=0`).
+    unturnable: HashSet<CellId>,
 }
 
 impl Sheet {
@@ -359,6 +421,9 @@ impl Sheet {
             {
                 sheet.pinned.insert(cell.id.clone());
             }
+            if cell.style.get("rotatable") == Some("0") {
+                sheet.unturnable.insert(cell.id.clone());
+            }
             let connectable = !cell
                 .attrs
                 .iter()
@@ -395,6 +460,11 @@ impl Sheet {
 
     pub fn is_pinned(&self, id: &str) -> bool {
         self.pinned.contains(id)
+    }
+
+    /// Whether vertex `id` takes a rotate handle: one that can be moved and turned.
+    pub fn is_turnable(&self, id: &str) -> bool {
+        self.rects.contains_key(id) && !self.is_pinned(id) && !self.unturnable.contains(id)
     }
 
     /// How far a vertex is turned, in degrees.
@@ -531,6 +601,7 @@ impl Sheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accent_drawio::geom::corners;
 
     fn near(a: Point, b: Point) -> bool {
         a.distance(b) < 1e-9
@@ -588,13 +659,13 @@ mod tests {
     fn a_turned_shape_resizes_in_its_own_frame_keeping_its_far_side() {
         // A quarter turn: the east handle sits at the bottom on the page.
         let r = Rect::new(0.0, 0.0, 100.0, 20.0);
-        let before = corners(&r, 90.0);
+        let before = corners(&r, r.centre(), 90.0);
         let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 10.0), Some(10.0));
         assert!(
             (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
             "{after:?}"
         );
-        let moved = corners(&after, 90.0);
+        let moved = corners(&after, after.centre(), 90.0);
         // The west side (the top edge on the page) is where it was.
         for (a, b) in [(before[0], moved[0]), (before[3], moved[3])] {
             assert!(a.distance(b) < 1e-9, "{a:?} vs {b:?}");
@@ -674,6 +745,49 @@ mod tests {
         let (_, free) =
             sheet.connect_ends(Point::new(91.0, 61.0), Point::new(400.0, 400.0), 1.0, 3.0);
         assert_eq!(free, (None, Point::new(400.0, 400.0), None));
+    }
+
+    #[test]
+    fn a_rotation_follows_the_pointer_s_bearing_and_snaps_near_the_handle() {
+        let c = Point::new(0.0, 0.0);
+        // A handle straight up, dragged a quarter round on its own circle: 90°.
+        let up = Point::new(0.0, -50.0);
+        assert_eq!(rotation_to(c, up, Point::new(50.0, 0.0), false), 90.0);
+        // Near the circle, 15° steps; well outside it, whole degrees; free, tenths.
+        let near = Point::new(50.0, -8.0);
+        assert_eq!(rotation_to(c, up, near, false), 75.0);
+        let far = Point::new(200.0, -32.0);
+        assert_eq!(rotation_to(c, up, far, false), 81.0);
+        assert_eq!(rotation_to(c, up, far, true), 80.9);
+        // A handle to the upper right held straight down is turned past a half: -135°, not 225°.
+        let corner = Point::new(50.0, -50.0);
+        assert_eq!(
+            rotation_to(c, corner, Point::new(-50.0, 50.0), false),
+            180.0
+        );
+        assert_eq!(
+            rotation_to(c, corner, Point::new(-50.0, 0.0), false),
+            -135.0
+        );
+    }
+
+    #[test]
+    fn a_turned_handle_shows_the_cursor_of_the_way_it_points() {
+        assert_eq!(Handle::East.turned(90.0), Handle::South);
+        assert_eq!(Handle::North.turned(-45.0), Handle::NorthWest);
+        assert_eq!(Handle::NorthWest.turned(30.0), Handle::North);
+    }
+
+    #[test]
+    fn a_turned_shape_resizes_to_a_size_on_the_grid() {
+        let r = Rect::new(3.0, 7.0, 100.0, 20.0);
+        let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 14.0), Some(10.0));
+        assert!(
+            (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
+            "{after:?}"
+        );
+        let free = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 14.0), None);
+        assert!((free.w - 114.0).abs() < 1e-9, "{free:?}");
     }
 
     #[test]

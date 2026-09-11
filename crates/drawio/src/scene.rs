@@ -176,44 +176,62 @@ impl Prim {
 /// The display list of `page`: every visible cell in paint order — layers bottom first, each
 /// cell's shape, then its picture, then its label, then its children.
 pub fn scene(page: &Page) -> Scene {
-    let mut b = Builder {
-        page,
-        math: page.model_attr("math") == Some("1"),
-        prims: Vec::new(),
-        edge_points: HashMap::new(),
-        index: page
-            .cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.id.as_str(), i))
-            .collect(),
-        children: HashMap::new(),
-    };
-    for (i, cell) in page.cells.iter().enumerate() {
-        if let Some(parent) = cell.parent.as_deref() {
-            b.children.entry(parent).or_default().push(i);
-        }
-    }
-    if let Some(root) = page.root() {
-        for &layer in b
-            .children
-            .get(root.id.as_str())
-            .cloned()
-            .unwrap_or_default()
-            .iter()
-        {
-            let layer = &page.cells[layer];
-            if !layer.is_visible() {
-                continue;
-            }
-            let locked = layer.style.get("locked") == Some("1");
-            b.walk(&layer.id, Point::default(), locked);
-        }
-    }
+    let b = Builder::run(page);
     Scene {
         prims: b.prims,
         page_size: page.size(),
         background: page.background(),
+    }
+}
+
+/// The points each edge drawn on `page` runs through, absolute and first end first: where its
+/// ends are on the page (mxGraph's `absolutePoints`).
+pub(crate) fn routes(page: &Page) -> HashMap<CellId, Vec<Point>> {
+    Builder::run(page)
+        .edge_points
+        .into_iter()
+        .map(|(id, points)| (id.to_string(), points))
+        .collect()
+}
+
+impl<'a> Builder<'a> {
+    /// Every visible layer of `page` walked, bottom first.
+    fn run(page: &'a Page) -> Builder<'a> {
+        let mut b = Builder {
+            page,
+            math: page.model_attr("math") == Some("1"),
+            prims: Vec::new(),
+            edge_points: HashMap::new(),
+            index: page
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id.as_str(), i))
+                .collect(),
+            children: HashMap::new(),
+        };
+        for (i, cell) in page.cells.iter().enumerate() {
+            if let Some(parent) = cell.parent.as_deref() {
+                b.children.entry(parent).or_default().push(i);
+            }
+        }
+        if let Some(root) = page.root() {
+            for &layer in b
+                .children
+                .get(root.id.as_str())
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+            {
+                let layer = &page.cells[layer];
+                if !layer.is_visible() {
+                    continue;
+                }
+                let locked = layer.style.get("locked") == Some("1");
+                b.walk(&layer.id, Point::default(), locked);
+            }
+        }
+        b
     }
 }
 
@@ -756,7 +774,8 @@ fn stroke(style: &Resolved) -> Option<Stroke> {
             .get("dashPattern")
             .unwrap_or("3 3")
             .split_whitespace()
-            .filter_map(|v| v.parse::<f64>().ok())
+            .filter_map(crate::style::parse_num)
+            .filter(|v| *v >= 0.0)
             .map(|v| v * scale)
             .collect();
         match pattern.is_empty() {
@@ -981,6 +1000,13 @@ mod tests {
             point_along(&line, 0.5, 10.0, Point::new(1.0, 2.0)),
             Point::new(76.0, -8.0)
         );
+    }
+
+    #[test]
+    fn a_dash_pattern_keeps_only_lengths_a_line_can_be_drawn_with() {
+        let style = crate::style::Style::parse("dashed=1;dashPattern=1e999 -2 NaN 3;");
+        let dash = stroke(&style.resolve(false)).unwrap().dash;
+        assert_eq!(dash, Some(vec![3.0]));
     }
 
     #[test]
