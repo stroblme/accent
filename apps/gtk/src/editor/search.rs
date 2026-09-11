@@ -9,8 +9,8 @@ use crate::{fold, lang};
 use accent_api::Pos;
 use accent_api::language::pos_of;
 use accent_core::markdown;
-use gtk::gdk;
 use gtk::prelude::*;
+use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 use std::ops::Range;
 
@@ -213,9 +213,38 @@ impl Tab {
     pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
         fold::reveal(self.text_buffer(), iter);
         self.buffer.place_cursor(iter);
-        self.view
-            .scroll_to_mark(&self.buffer.get_insert(), 0.0, true, 0.0, align);
+        self.scroll_to_caret(align);
         self.view.grab_focus();
+    }
+
+    /// Scroll the caret to `align` down the view, once the view can say where the caret is.
+    ///
+    /// A tab that has just opened cannot yet: GTK flushes a queued `scroll_to_mark` from an idle
+    /// that runs before the view's first allocation, against a height of 0, and it measures lines
+    /// lazily, so until the lines above the caret are measured the caret sits too high and the
+    /// animated scroll heads for that spot. Either way the view settles short of the caret. So a
+    /// jump into a tab that is still opening waits for a frame in which the view has a size, then
+    /// for a default idle, which GLib runs only once GTK's measuring idle
+    /// (`GTK_TEXT_VIEW_PRIORITY_VALIDATE`, a higher priority) has measured every line.
+    pub(crate) fn scroll_to_caret(&self, align: f64) {
+        let scroll = move |view: &sourceview5::View| {
+            view.scroll_to_mark(&view.buffer().get_insert(), 0.0, true, 0.0, align)
+        };
+        if self.view.height() > 0 {
+            return scroll(&self.view);
+        }
+        self.view.add_tick_callback(move |view, _| {
+            if view.height() == 0 {
+                return glib::ControlFlow::Continue;
+            }
+            let view = view.downgrade();
+            glib::idle_add_local_once(move || {
+                if let Some(view) = view.upgrade() {
+                    scroll(&view);
+                }
+            });
+            glib::ControlFlow::Break
+        });
     }
 
     /// Put the caret on a 1-based line and column, both clamped to what the note has.
