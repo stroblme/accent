@@ -4,8 +4,8 @@
 //! 16 seconds and then every 30, each attempt a quiet one that cannot raise a prompt. The banner
 //! counts down to the next ("Lost the connection to host · Reconnecting in 8 s"), and its
 //! Reconnect Now is the attempt that may ask for a passphrase. A first connection that failed,
-//! and an outage that has outlasted ten minutes, keep the plain Reconnect button: there was
-//! nothing to come back to, or it is not coming back by itself.
+//! an outage that has outlasted ten minutes, and a host that refuses the vault keep the plain
+//! Reconnect button: there was nothing to come back to, or it is not coming back by itself.
 
 use super::*;
 
@@ -82,6 +82,13 @@ impl App {
         let n = retry.attempts.get();
         retry.attempts.set(n + 1);
         self.count_down(Instant::now() + backoff(n));
+    }
+
+    /// The host will not serve the vault. No attempt of ours changes that, so none is counted
+    /// down to: the banner keeps the plain Reconnect, for after someone has fixed the host.
+    pub fn connection_refused(&self, why: &str) {
+        self.retry.stop();
+        self.show_connection_banner(why);
     }
 
     /// The banner's button: an attempt that may prompt, whatever was counting down.

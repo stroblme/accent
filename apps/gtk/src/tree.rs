@@ -105,19 +105,23 @@ type Asked = Rc<RefCell<HashMap<String, u64>>>;
 /// than when it is asked for, so one still on its way after a toggle is filtered by the new value.
 type ShowHidden = Rc<Cell<bool>>;
 
+/// Run when a listing of the root lands, whether or not it changed the store.
+type Landed = Option<Rc<dyn Fn()>>;
+
 /// Bring `store` in step with the direct children of `prefix`.
 ///
 /// The listing is asked for on a worker thread and spliced in when it lands, so the store this
 /// returns to is empty for a frame or two. That is what lets a vault on another machine expand a
 /// directory without the click waiting for a round trip; on a local vault the index answers in
 /// well under a frame and nobody sees the gap. `list_dir` already returns directories first, then
-/// names case-insensitively.
+/// names case-insensitively. `landed` runs once the listing is in.
 fn fill(
     store: &gio::ListStore,
     vault: &Arc<Vault>,
     asked: &Asked,
     show_hidden: &ShowHidden,
     prefix: &str,
+    landed: Landed,
 ) {
     let ticket = {
         let mut asked = asked.borrow_mut();
@@ -143,7 +147,12 @@ fn fill(
             return;
         }
         match listed {
-            Ok(Ok(rows)) => splice(&store, rows, show_hidden.get()),
+            Ok(Ok(rows)) => {
+                splice(&store, rows, show_hidden.get());
+                if let Some(landed) = landed {
+                    landed();
+                }
+            }
             // Leaving the rows alone beats blanking a directory the index simply could not answer
             // for — or, on a remote vault, one the connection could not reach.
             Ok(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
@@ -216,6 +225,8 @@ pub struct Tree {
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
     asked: Asked,
     show_hidden: ShowHidden,
+    /// The root's [`Landed`], which tells the empty page the host has answered.
+    landed: Rc<dyn Fn()>,
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
@@ -290,7 +301,15 @@ impl Tree {
         };
         for (dir, store) in stores {
             if dir.is_empty() {
-                fill(&store, &self.vault, &self.asked, &self.show_hidden, dir);
+                let landed = Some(self.landed.clone());
+                fill(
+                    &store,
+                    &self.vault,
+                    &self.asked,
+                    &self.show_hidden,
+                    dir,
+                    landed,
+                );
                 continue;
             }
             // A directory that is gone keeps no model: a same-named one created later must be
@@ -312,7 +331,7 @@ impl Tree {
                 })
                 .await;
                 match there {
-                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir),
+                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
                     Ok(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                     }
@@ -479,7 +498,7 @@ fn children_model(
     }
     let t0 = Instant::now();
     let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, vault, asked, show_hidden, rel);
+    fill(&store, vault, asked, show_hidden, rel, None);
     cache.borrow_mut().insert(rel.to_string(), store.clone());
     tracing::debug!(
         dir = rel,
@@ -621,8 +640,6 @@ pub fn build(
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
-    // Populated straight from the index: the window must be up before the reconcile finishes.
-    fill(root, &vault, &asked, &show_hidden, "");
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden) = (
@@ -841,6 +858,9 @@ pub fn build(
     // A vault with nothing in it gets the sentence every other pane's emptiness gets, rather than
     // a blank column that reads as a tree that failed to load (DESIGN.md, States). Driven by the
     // root store, which is filled from a worker thread and so is empty for a frame either way.
+    // A remote vault is not known to be empty until its root has been listed: until then the host
+    // has not answered, or refused, and the tree says what it is waiting for, as the document
+    // column does.
     let body = gtk::Stack::builder().vexpand(true).build();
     body.add_named(&scroller, Some("list"));
     body.add_named(
@@ -851,21 +871,47 @@ pub fn build(
         ),
         Some("empty"),
     );
+    let remote_host = vault.remote().map(|r| r.url().host.clone());
+    if let Some(host) = &remote_host {
+        body.add_named(
+            &status_page(
+                "network-server-symbolic",
+                &format!("Waiting for {host}"),
+                "Its files will show here when it answers.",
+            ),
+            Some("waiting"),
+        );
+    }
+    let listed = Rc::new(Cell::new(remote_host.is_none()));
     // Weak: `body` holds the list, the list the model, and the model this store, so a strong
     // handle is a cycle that keeps the tree, and the vault in the model's create-func, alive after
     // the window has closed.
     let show_rows = glib::clone!(
         #[weak]
         body,
+        #[strong]
+        listed,
         move |rows: u32| {
-            body.set_visible_child_name(match rows {
-                0 => "empty",
+            body.set_visible_child_name(match (rows, listed.get()) {
+                (0, true) => "empty",
+                (0, false) => "waiting",
                 _ => "list",
             });
         }
     );
     show_rows(root.n_items());
+    // An empty vault's listing changes nothing in the store, so the store alone never says it
+    // came.
+    let landed: Rc<dyn Fn()> = Rc::new({
+        let (root, show_rows) = (root.clone(), show_rows.clone());
+        move || {
+            listed.set(true);
+            show_rows(root.n_items());
+        }
+    });
     root.connect_items_changed(move |store, _, _, _| show_rows(store.n_items()));
+    // Populated straight from the index: the window must be up before the reconcile finishes.
+    fill(root, &vault, &asked, &show_hidden, "", Some(landed.clone()));
 
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&vault_row);
@@ -879,6 +925,7 @@ pub fn build(
         cache,
         asked,
         show_hidden,
+        landed,
         ignored,
         active,
     }

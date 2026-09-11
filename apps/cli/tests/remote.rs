@@ -347,7 +347,8 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let (vault, events) = Vault::open_remote(&missing, VaultConfig::default()).unwrap();
     let why = loop {
         match events.recv_timeout(BUDGET) {
-            Ok(Event::Disconnected(why)) => break why,
+            Ok(Event::Refused(why)) => break why,
+            Ok(Event::Disconnected(why)) => panic!("{missing} failed as a link would: {why}"),
             Ok(Event::Connected) => panic!("connected to {missing}"),
             Ok(_) => {}
             Err(_) => panic!("{missing} neither failed nor connected in {BUDGET:?}"),
