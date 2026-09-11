@@ -19,7 +19,7 @@ use super::geometry::{
 use super::paint::{self, Cache};
 use super::tools::Tool;
 use crate::theme;
-use accent_drawio::geom::rotate;
+use accent_drawio::geom::{self, rotate};
 
 /// What a gesture on the canvas asks of the diagram.
 #[derive(Debug, Clone, PartialEq)]
@@ -558,7 +558,10 @@ impl DiagramView {
             Tool::Image => None,
             _ => Some("crosshair"),
         };
-        self.set_cursor_from_name(name);
+        // Only when it changes: this runs on every motion.
+        if self.cursor().and_then(|c| c.name()).as_deref() != name {
+            self.set_cursor_from_name(name);
+        }
         // The connector shows the connection points under the pointer before it is pressed.
         if imp.tool.get() == Tool::Connector {
             imp.pointer.set(p);
@@ -577,19 +580,23 @@ impl DiagramView {
                 &[accent; 4],
             );
         };
-        let drag = imp.drag.borrow().clone();
+        // Borrowed, not cloned: this runs every frame, and nothing it calls changes either.
+        let drag = imp.drag.borrow();
         let pointer = imp.pointer.get();
         let free = imp.free.get();
-        let selection = imp.selection.borrow().clone();
-        let moving =
-            matches!(drag, Some(Drag::Move { .. } | Drag::Rotate { .. })) && imp.moved.get();
+        let selection = imp.selection.borrow();
+        let moving = matches!(drag.as_ref(), Some(Drag::Move { .. } | Drag::Rotate { .. }))
+            && imp.moved.get();
         // A page rectangle turned `rotation` degrees, outlined on screen.
         let turned = |r: &Rect, rotation: f64| {
             if rotation == 0.0 {
                 return outline(&frame.rect(r));
             }
             let builder = gsk::PathBuilder::new();
-            for (i, corner) in geometry::corners(r, rotation).into_iter().enumerate() {
+            for (i, corner) in geom::corners(r, r.centre(), rotation)
+                .into_iter()
+                .enumerate()
+            {
                 let c = frame.to_content(corner);
                 match i {
                     0 => builder.move_to(c.x as f32, c.y as f32),
@@ -599,7 +606,7 @@ impl DiagramView {
             builder.close();
             snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
         };
-        for id in &selection {
+        for id in selection.iter() {
             if let Some(r) = sheet.frame_of(id) {
                 turned(&r, sheet.rotation(id));
             }
@@ -653,14 +660,14 @@ impl DiagramView {
                 }
             }
         }
-        let Some(drag) = drag.filter(|_| imp.moved.get()) else {
+        let Some(drag) = drag.as_ref().filter(|_| imp.moved.get()) else {
             return;
         };
         match drag {
             Drag::Move {
                 from, ids, origin, ..
             } => {
-                let d = self.move_delta(from, pointer, origin, free);
+                let d = self.move_delta(*from, pointer, *origin, free);
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(
                     (d.x * frame.scale) as f32,
@@ -694,13 +701,13 @@ impl DiagramView {
                 let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
                 let grid = self.grid(free);
                 turned(
-                    &geometry::resize_rotated(&rect, rotation, handle, delta, grid),
-                    rotation,
+                    &geometry::resize_rotated(rect, *rotation, *handle, delta, grid),
+                    *rotation,
                 );
             }
-            Drag::Rotate { rect, .. } => turned(&rect, self.turn_to(&rect, pointer, free)),
+            Drag::Rotate { rect, .. } => turned(rect, self.turn_to(rect, pointer, free)),
             Drag::Band { from, .. } => {
-                let r = frame.rect(&Rect::from_corners(from, pointer));
+                let r = frame.rect(&Rect::from_corners(*from, pointer));
                 snapshot.append_color(
                     &theme::at(accent, theme::HIGHLIGHT_ALPHA),
                     &paint::grect(&r),
@@ -708,7 +715,7 @@ impl DiagramView {
                 outline(&r);
             }
             Drag::Draw { tool, from } => {
-                let r = frame.rect(&Rect::from_corners(from, pointer));
+                let r = frame.rect(&Rect::from_corners(*from, pointer));
                 let builder = gsk::PathBuilder::new();
                 match tool {
                     Tool::Ellipse => builder.add_rounded_rect(&gsk::RoundedRect::from_rect(
@@ -721,7 +728,7 @@ impl DiagramView {
             }
             Drag::Connect { from } => {
                 let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
-                let (s, t) = sheet.connect_ends(from, pointer, tolerance, reach);
+                let (s, t) = sheet.connect_ends(*from, pointer, tolerance, reach);
                 let (a, b) = (frame.to_content(s.1), frame.to_content(t.1));
                 let builder = gsk::PathBuilder::new();
                 builder.move_to(a.x as f32, a.y as f32);

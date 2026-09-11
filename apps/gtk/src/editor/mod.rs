@@ -75,6 +75,18 @@ pub fn may_save(modified: bool, disk_changed: bool) -> bool {
     !(modified && disk_changed)
 }
 
+/// A spell checker over `buffer`, its suggestions in `view`'s context menu, switched off until
+/// told otherwise. The adapter *is* the action group its own menu items resolve through.
+pub fn spell_adapter(
+    buffer: &sourceview5::Buffer,
+    view: &sourceview5::View,
+) -> libspelling::TextBufferAdapter {
+    let adapter = libspelling::TextBufferAdapter::new(buffer, &libspelling::Checker::default());
+    view.insert_action_group("spelling", Some(&adapter));
+    view.set_extra_menu(Some(&adapter.menu_model()));
+    adapter
+}
+
 /// A save on its way to the file, as its tab keeps it: what the write was started against, and
 /// the channel its answer arrives on. There is at most one per tab.
 pub struct Flight {
@@ -1138,13 +1150,7 @@ impl Tab {
             Some(adapter) => adapter,
             None if !on => return,
             None => {
-                let adapter = libspelling::TextBufferAdapter::new(
-                    &self.buffer,
-                    &libspelling::Checker::default(),
-                );
-                // The adapter *is* the action group its own menu items resolve through.
-                self.view.insert_action_group("spelling", Some(&adapter));
-                self.view.set_extra_menu(Some(&adapter.menu_model()));
+                let adapter = spell_adapter(&self.buffer, &self.view);
                 *self.spell.borrow_mut() = Some(adapter.clone());
                 adapter
             }

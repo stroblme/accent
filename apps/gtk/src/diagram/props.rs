@@ -83,18 +83,14 @@ impl ColourRow {
         self.switch.set_active(colour.is_some());
         self.button.set_sensitive(colour.is_some());
         if let Some(c) = colour {
-            self.button.set_rgba(&crate::diagram::paint::rgba(c));
+            self.button.set_rgba(&super::paint::rgba(c));
         }
     }
 
     /// What the row says now, as a style value: the colour, or `none`.
     fn value(&self) -> String {
         match self.switch.is_active() {
-            true => {
-                let c = self.button.rgba();
-                let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                Color::rgb(byte(c.red()), byte(c.green()), byte(c.blue())).hex()
-            }
+            true => hex(self.button.rgba()),
             false => "none".to_string(),
         }
     }
@@ -524,11 +520,10 @@ impl Props {
     }
 }
 
-/// The colour a picker button shows, for the drill that reads it back.
-#[cfg(test)]
-fn rgba_hex(c: &gtk::gdk::RGBA) -> String {
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Color::rgb(byte(c.red()), byte(c.green()), byte(c.blue())).hex()
+/// A picked colour as a style value.
+fn hex(c: gtk::gdk::RGBA) -> String {
+    let [r, g, b] = crate::theme::rgb_of(c);
+    Color::rgb(r, g, b).hex()
 }
 
 #[cfg(test)]
@@ -538,6 +533,6 @@ mod tests {
         assert_eq!(super::number(12.0), "12");
         assert_eq!(super::number(1.5), "1.5");
         let c = gtk::gdk::RGBA::new(0.0, 150.0 / 255.0, 130.0 / 255.0, 1.0);
-        assert_eq!(super::rgba_hex(&c), "#009682");
+        assert_eq!(super::hex(c), "#009682");
     }
 }

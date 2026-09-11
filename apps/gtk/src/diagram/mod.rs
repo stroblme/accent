@@ -55,6 +55,8 @@ pub struct DiagramTab {
     overlay: gtk::Overlay,
     view: DiagramView,
     ring: Rc<tools::DiagramRing>,
+    /// The frame callback waiting to put the ring out, while one is.
+    ring_tick: RefCell<Option<gtk::TickCallbackId>>,
     /// The Properties pane's content for this diagram, which the sidebar shows while it is in
     /// front.
     props: Rc<props::Props>,
@@ -136,6 +138,7 @@ pub fn open(
         overlay,
         view,
         ring,
+        ring_tick: RefCell::new(None),
         props: props::Props::new(),
         label: RefCell::new(None),
         spellcheck: Cell::new(false),
@@ -329,20 +332,28 @@ impl DiagramTab {
     /// down with it.
     pub fn show_ring(&self, shown: bool, at: Option<(f64, f64)>) {
         self.ring_shown.set(shown);
+        // One waiting at a time: every tab switch asks again, and a ring put away before its
+        // first frame must stay away.
+        if let Some(tick) = self.ring_tick.take() {
+            tick.remove();
+        }
         if !shown {
             self.ring.set_visible(false, at);
             return self.set_tool(Tool::Select);
         }
         // The ring finds its corner from the canvas's width, which a tab that has only just
         // opened does not have yet: it comes out on the first frame that has one.
-        let ring = self.ring.clone();
-        self.overlay.add_tick_callback(move |overlay, _| {
+        let ring = Rc::downgrade(&self.ring);
+        let tick = self.overlay.add_tick_callback(move |overlay, _| {
             if overlay.width() == 0 {
                 return glib::ControlFlow::Continue;
             }
-            ring.set_visible(true, at);
+            if let Some(ring) = ring.upgrade() {
+                ring.set_visible(true, at);
+            }
             glib::ControlFlow::Break
         });
+        self.ring_tick.replace(Some(tick));
     }
 
     /// Where the reader dragged the ring, for the next tab's to open at.

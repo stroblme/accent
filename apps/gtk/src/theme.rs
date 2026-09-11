@@ -216,7 +216,11 @@ pub fn accent() -> gdk::RGBA {
 /// so the value is resolved here and handed over, and this stays the only file that says what a
 /// colour is.
 pub fn accent_rgb() -> [u8; 3] {
-    let c = accent();
+    rgb_of(accent())
+}
+
+/// A colour on screen as bytes, on its way into a file: the way back from [`rgba`].
+pub fn rgb_of(c: gdk::RGBA) -> [u8; 3] {
     [byte(c.red()), byte(c.green()), byte(c.blue())]
 }
 

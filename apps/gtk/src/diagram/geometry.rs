@@ -186,19 +186,6 @@ pub fn rotation_to(centre: Point, handle: Point, pointer: Point, free: bool) -> 
     (turn * 10.0).round() / 10.0
 }
 
-/// The four corners of `r` turned `rotation` degrees about its centre, clockwise from the top
-/// left: a turned shape's outline.
-pub fn corners(r: &Rect, rotation: f64) -> [Point; 4] {
-    let c = r.centre();
-    [
-        Point::new(r.x, r.y),
-        Point::new(r.right(), r.y),
-        Point::new(r.right(), r.bottom()),
-        Point::new(r.x, r.bottom()),
-    ]
-    .map(|p| rotate(p, c, rotation))
-}
-
 /// The point halfway along `path` by length: where draw.io puts an edge's label. A curve is
 /// taken as the line to its end.
 pub fn midpoint(path: &[PathCmd]) -> Option<Point> {
@@ -614,6 +601,7 @@ impl Sheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use accent_drawio::geom::corners;
 
     fn near(a: Point, b: Point) -> bool {
         a.distance(b) < 1e-9
@@ -671,13 +659,13 @@ mod tests {
     fn a_turned_shape_resizes_in_its_own_frame_keeping_its_far_side() {
         // A quarter turn: the east handle sits at the bottom on the page.
         let r = Rect::new(0.0, 0.0, 100.0, 20.0);
-        let before = corners(&r, 90.0);
+        let before = corners(&r, r.centre(), 90.0);
         let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 10.0), Some(10.0));
         assert!(
             (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
             "{after:?}"
         );
-        let moved = corners(&after, 90.0);
+        let moved = corners(&after, after.centre(), 90.0);
         // The west side (the top edge on the page) is where it was.
         for (a, b) in [(before[0], moved[0]), (before[3], moved[3])] {
             assert!(a.distance(b) < 1e-9, "{a:?} vs {b:?}");
