@@ -120,14 +120,14 @@ impl App {
                     // opening it was, which on a remote vault fetches a fresh copy.
                     Doc::Image(_) => {
                         let picture = picture_of(doc.page()).map(|p| p.downgrade());
-                        self.local_copy(&rel, &self.root().join(&rel), move |_, copy| {
+                        self.local_copy(&rel, &self.root().join(&rel), move |app, copy| {
                             match (picture.and_then(|p| p.upgrade()), copy) {
                                 (Some(picture), Ok(copy)) => {
                                     picture.set_file(gio::File::NONE);
                                     picture.set_filename(Some(copy));
                                 }
-                                (_, Err(e)) => tracing::debug!("reloading an image: {e}"),
-                                (None, Ok(_)) => {}
+                                (Some(_), Err(e)) => app.cannot("reload", e),
+                                (None, _) => {}
                             }
                         });
                     }
@@ -136,11 +136,11 @@ impl App {
                     // reader has a cached copy open, which is fetched again first.
                     Doc::Pdf(pdf) => {
                         let pdf = Rc::downgrade(pdf);
-                        self.local_copy(&rel, &self.root().join(&rel), move |_, copy| {
+                        self.local_copy(&rel, &self.root().join(&rel), move |app, copy| {
                             match (pdf.upgrade(), copy) {
                                 (Some(pdf), Ok(_)) => pdf.refresh(),
-                                (_, Err(e)) => tracing::debug!("reloading a PDF: {e}"),
-                                (None, Ok(_)) => {}
+                                (Some(_), Err(e)) => app.cannot("reload", e),
+                                (None, _) => {}
                             }
                         });
                     }
