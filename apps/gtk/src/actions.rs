@@ -162,6 +162,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
+    ("win.copy-name", "Copy Name", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
     ("win.copy-absolute-path", "Copy Absolute Path", &[]),
     ("win.show-in-files", "Show in Files", &[]),
@@ -304,14 +305,16 @@ impl App {
             // A preference, not this window's state: written, then put into effect in every
             // window the way a switch in Preferences is, which also moves each window's check mark.
             "show-hidden-files" => {
-                let config = {
+                {
                     let mut config = self.config.borrow_mut();
                     config.show_hidden = !config.show_hidden;
-                    config.clone()
-                };
-                settings::save(&config);
-                if let Some(shell) = self.shell.upgrade() {
-                    shell.apply_config(&config);
+                }
+                self.config_changed();
+            }
+            // No vault needed: the name is the last segment of a loose file's key as well.
+            "copy-name" => {
+                if let Some(rel) = self.menu_rel() {
+                    self.window.clipboard().set_text(doc::file_name(&rel));
                 }
             }
             "copy-relative-path" => {
@@ -421,10 +424,10 @@ impl App {
             "rename" => {
                 let target = self
                     .selected_row()
-                    .map(|row| row.rel)
-                    .or_else(|| self.active().map(|tab| tab.rel()));
-                if let (Some(rel), Some(ops)) = (target, self.need_ops("rename a file")) {
-                    fileops::rename(ops, &rel);
+                    .map(|row| (row.is_dir(), row.rel))
+                    .or_else(|| self.active().map(|tab| (false, tab.rel())));
+                if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
+                    fileops::rename(ops, &rel, is_dir);
                 }
             }
             "new-from-template" => {
@@ -499,7 +502,7 @@ impl App {
     /// Push the accelerators in force into the application and rebuild this window's captured
     /// chords. The table is the application's and lives with the [`Shell`]; the captured
     /// controller is the window's own.
-    pub fn apply_accels(&self) {
+    pub fn refresh_accels(&self) {
         let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) else {
             return;
         };
@@ -669,7 +672,7 @@ pub fn install_actions(app: &Rc<App>) {
     app.captured
         .set_propagation_phase(gtk::PropagationPhase::Capture);
     app.window.add_controller(app.captured.clone());
-    app.apply_accels();
+    app.refresh_accels();
 
     // A focused shell keeps the keyboard, which means the table has to be rebuilt whenever it
     // crosses into or out of a terminal. `focus-widget` hears every way that happens inside a
@@ -697,16 +700,12 @@ pub fn nav_action(button: u32) -> Option<&'static str> {
     }
 }
 
-pub fn label_of(action: &'static str) -> &'static str {
-    label_of_owned(action).unwrap_or(action)
-}
-
-/// The same lookup for a name built at run time, where there is no static string to fall back to.
-fn label_of_owned(action: &str) -> Option<&'static str> {
+/// The label [`ACTIONS`] gives `action`, or the name itself for one it does not list.
+pub fn label_of(action: &str) -> &str {
     ACTIONS
         .iter()
         .find(|(name, _, _)| *name == action)
-        .map(|(_, label, _)| *label)
+        .map_or(action, |(_, label, _)| *label)
 }
 
 pub fn menu_button() -> gtk::MenuButton {
@@ -752,16 +751,17 @@ pub fn tab_menu() -> gio::Menu {
     let split = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
         let action = format!("win.split-{}", side.action());
-        split.append(label_of_owned(&action), Some(&action));
+        split.append(Some(label_of(&action)), Some(&action));
     }
     menu.append_section(None, &split);
     let move_tab = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
         let action = format!("win.move-tab-{}", side.action());
-        move_tab.append(label_of_owned(&action), Some(&action));
+        move_tab.append(Some(label_of(&action)), Some(&action));
     }
     menu.append_section(None, &move_tab);
     for action in [
+        "win.copy-name",
         "win.copy-relative-path",
         "win.copy-absolute-path",
         "win.show-in-files",

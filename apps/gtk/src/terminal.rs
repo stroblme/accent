@@ -20,6 +20,7 @@
 //! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
 //! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -48,11 +49,23 @@ pub struct Term {
     key: String,
     pub page: adw::TabPage,
     pub view: vte4::Terminal,
+    /// What it runs, kept so a remote shell can be run again once its link is back.
+    shell: Shell,
+    /// Whether a dropped link ended the shell and the tab is waiting for [`reopen`](Self::reopen).
+    lost: Cell<bool>,
 }
 
 impl Term {
     pub fn key(&self) -> String {
         self.key.clone()
+    }
+
+    /// Start the shell a dropped link ended again, in the same tab: what was on screen stays above
+    /// it, and the new one lands at the vault root. Nothing to do for a shell that is still running.
+    pub fn reopen(&self) {
+        if self.lost.replace(false) {
+            spawn(&self.view, &self.shell);
+        }
     }
 
     pub fn restyle(&self) {
@@ -113,6 +126,7 @@ pub fn has_focus(gtk_app: &gtk::Application) -> bool {
 /// and a build the user starts in it has to see them. It is an ordinary tab either way — the
 /// same split, the same drag, the same chords — because it is the same widget with a different
 /// argument vector.
+#[derive(Clone)]
 pub enum Shell {
     /// The user's own shell, in a directory on this machine.
     Local(PathBuf),
@@ -169,6 +183,22 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         }
     ));
 
+    spawn(&view, shell);
+    install_keys(&view, tabs);
+    install_links(&view);
+
+    Rc::new(Term {
+        key,
+        page,
+        view,
+        shell: shell.clone(),
+        lost: Cell::new(false),
+    })
+}
+
+/// Run `shell` in `view`, which may have run one before: VTE takes a new child once the last has
+/// exited.
+fn spawn(view: &vte4::Terminal, shell: &Shell) {
     let (cwd, argv) = match shell {
         Shell::Local(cwd) => (Some(cwd.clone()), vec![user_shell()]),
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
@@ -191,21 +221,41 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
             }
         },
     );
-
-    install_keys(&view, tabs);
-    install_links(&view);
-
-    Rc::new(Term { key, page, view })
 }
 
 /// The shell exited: hand the terminal back so the caller can close its tab.
+///
+/// Except a remote shell whose link went. Its tab stays, saying so, and [`Term::reopen`] starts
+/// the shell again when the vault is back; closing the tab meanwhile is what gives up on it. A
+/// local command's 255 is an ordinary exit.
 pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
-    term.view.connect_child_exited(move |_, _| {
-        if let Some(term) = weak.upgrade() {
-            done(&term);
+    term.view.connect_child_exited(move |view, status| {
+        let Some(term) = weak.upgrade() else {
+            return;
+        };
+        match &term.shell {
+            Shell::Remote { host, .. } if link_lost(status) => {
+                term.lost.set(true);
+                let line = format!(
+                    "\r\n[The connection to {host} went. The shell reopens when it is back.]\r\n"
+                );
+                view.feed(line.as_bytes());
+            }
+            _ => done(&term),
         }
     });
+}
+
+/// Whether ssh ended itself rather than the shell it carried: it exits 255 on its own errors, a
+/// dropped link among them, and with the remote command's status otherwise. `status` is the wait
+/// status VTE passes on, as `waitpid` gave it: an exit is a zero signal byte, and its code is the
+/// byte above.
+///
+/// ponytail: a remote `exit 255` reads as a lost link too, and keeps its tab until the next
+/// reconnect or a close.
+fn link_lost(status: i32) -> bool {
+    status & 0x7f == 0 && (status >> 8) & 0xff == 255
 }
 
 /// What the terminal answers itself: moving between tabs, which `AdwTabView` binds at the window
@@ -436,6 +486,17 @@ mod tests {
         assert_eq!(key(3), "terminal:3");
         // Not loose, which is what would send it through the file machinery.
         assert!(!crate::doc::is_loose_key(&key(1)));
+    }
+
+    /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.
+    #[test]
+    fn only_ssh_ending_itself_is_a_lost_link() {
+        assert!(link_lost(255 << 8));
+        // The remote shell's own exit, clean or not.
+        assert!(!link_lost(0));
+        assert!(!link_lost(1 << 8));
+        // Killed by a signal, whatever the byte above says.
+        assert!(!link_lost((255 << 8) | 9));
     }
 
     /// The shell's output is untrusted, so this is the one that has to be a list.

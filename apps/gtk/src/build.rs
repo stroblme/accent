@@ -54,10 +54,10 @@ pub fn build_window(
     };
     // A remote window says which machine it is on, under the vault's name. Nothing else in the
     // chrome differs: it is the same vault, and the point is that it behaves like one.
-    let host = root
+    let host = vault
         .as_deref()
-        .and_then(|r| ssh::parse(&r.to_string_lossy()).ok())
-        .map(|url| url.host)
+        .and_then(Vault::remote)
+        .map(|r| r.url().host.clone())
         .unwrap_or_default();
     let title = adw::WindowTitle::new(&vault_name, &host);
     // What the task manager and the window switcher show, which is the one place a window has to
@@ -286,7 +286,7 @@ pub fn build_window(
         toolbar,
         editor_column,
         header,
-        modes: modes.clone(),
+        modes,
         drawing_button: drawing.clone(),
         undo_button: undo,
         redo_button: redo,
@@ -345,7 +345,7 @@ pub fn build_window(
     wire_pane(&app, &first);
 
     install_actions(&app);
-    wire_window(&app, &modes);
+    wire_window(&app);
     if vault.is_some() {
         wire_tree(&app);
     }

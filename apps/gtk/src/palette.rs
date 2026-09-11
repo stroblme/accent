@@ -7,7 +7,7 @@
 //! every command row carries its accelerator.
 //!
 //! Opening must be instant, so file mode goes up showing the most recently modified notes (one
-//! indexed query, no matching at all) and only pulls the full note list the first time the user
+//! indexed query, no matching at all) and only matches against the full note list once the user
 //! types something. Keystrokes are debounced, so holding a key down cannot queue up one full match
 //! per character.
 
@@ -69,7 +69,7 @@ impl Item {
     }
 }
 
-/// Where the three modes get their rows. The two loaders are called at most once per dialog.
+/// Where the three modes get their rows.
 pub struct Sources {
     /// Shown in file mode until the first keystroke; never matched against. It is the window's
     /// own list followed by the index's modification-time one, which is a browse page rather than
@@ -78,12 +78,12 @@ pub struct Sources {
     /// What this window opened, newest first. This is the recency a typed query is ranked by, so
     /// it holds nothing but the user's own moves.
     pub mru: Vec<String>,
-    pub load_files: Box<dyn Fn() -> Vec<String>>,
+    /// Every file and every tag in the vault: the window's own lists, shared rather than copied.
+    pub files: Rc<Vec<String>>,
     pub commands: Vec<Item>,
-    pub load_tags: Box<dyn Fn() -> Vec<String>>,
+    pub tags: Rc<Vec<String>>,
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
-    /// Names the config already holds, pruned of folders that have gone, so it is passed whole
-    /// rather than behind a loader.
+    /// Names the config already holds, pruned of folders that have gone.
     pub vaults: Vec<String>,
     /// Chords no command of ours holds but that a widget does, each with the name of what it does
     /// there. They are not rows in the palette — nothing can run them — but the rebind dialog has
@@ -219,10 +219,10 @@ fn rank(
         .collect()
 }
 
-/// Corpus for one mode, loaded at most once.
+/// What `load` computes, computed at most once.
 ///
-/// `load` reaches into the index and must never run while `slot` is borrowed, so this borrows,
-/// clones the handle and drops before calling.
+/// `load` must never run while `slot` is borrowed, so this borrows, clones the handle and drops
+/// before calling.
 fn cache<T>(slot: &Cached<T>, load: &dyn Fn() -> T) -> Rc<T> {
     let cached = slot.borrow().clone();
     cached.unwrap_or_else(|| {
@@ -519,9 +519,9 @@ pub fn present(
     let Sources {
         recent,
         mru,
-        load_files,
+        files,
         commands,
-        load_tags,
+        tags,
         vaults,
         taken,
         on_rebind,
@@ -555,9 +555,6 @@ pub fn present(
             .collect(),
     );
     let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
-    // Filled on first use, then reused for the life of the dialog.
-    let notes: Cached<Vec<String>> = Rc::new(RefCell::new(None));
-    let tags: Cached<Vec<String>> = Rc::new(RefCell::new(None));
     // Where each file sits in the window's most-recent list. Cached with the corpus it indexes:
     // it is one pass over every path in the vault, and the corpus does not change while the
     // dialog is up.
@@ -627,7 +624,7 @@ pub fn present(
 
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
-        let (recent, notes, tags) = (recent.clone(), notes.clone(), tags.clone());
+        let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
         let (mru, note_recent) = (mru.clone(), note_recent.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
         let (commands, command_text, command_recent, matcher) = (
@@ -650,13 +647,12 @@ pub fn present(
                         .map(|rel| Rc::new(Item::File(rel.clone())))
                         .collect(),
                     Mode::Files => {
-                        let corpus = cache(&notes, &load_files);
-                        let used = cache(&note_recent, &|| places(&corpus, &mru));
+                        let used = cache(&note_recent, &|| places(&files, &mru));
                         let mut m = matcher.borrow_mut();
                         m.config = Config::DEFAULT.match_paths();
-                        rank(&corpus, &used, query, &mut m)
+                        rank(&files, &used, query, &mut m)
                             .into_iter()
-                            .map(|i| Rc::new(Item::File(corpus[i].clone())))
+                            .map(|i| Rc::new(Item::File(files[i].clone())))
                             .collect()
                     }
                     // Labels and tags are not paths, so they score better under the plain config.
@@ -669,12 +665,11 @@ pub fn present(
                             .collect()
                     }
                     Mode::Tags => {
-                        let corpus = cache(&tags, &load_tags);
                         let mut m = matcher.borrow_mut();
                         m.config = Config::DEFAULT;
-                        rank(&corpus, &[], query, &mut m)
+                        rank(&tags, &[], query, &mut m)
                             .into_iter()
-                            .map(|i| Rc::new(Item::Tag(corpus[i].clone())))
+                            .map(|i| Rc::new(Item::Tag(tags[i].clone())))
                             .collect()
                     }
                     // The two ways of opening a vault that is *not* in the list end the rows, and are

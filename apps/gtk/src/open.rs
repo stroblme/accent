@@ -233,8 +233,11 @@ impl App {
             move |pdf| {
                 app.sync_opening();
                 app.sync_outline();
-                // The page count is known now, so the readout has something to say at last.
+                // The page count is known now, so the readouts have something to say at last.
                 app.sync_status();
+                if let Some(pane) = app.pane_of(&pdf.page) {
+                    pane.find.refresh_count();
+                }
                 // And the pages are there to paint the notes' highlights onto.
                 app.sync_pdf_links(pdf);
             }
@@ -338,10 +341,16 @@ impl App {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Weak: the template is rendered on a worker, and the tab may close before it lands.
+        let tab = Rc::downgrade(&tab);
         fileops::insert_template(
             ops,
             &title,
-            Box::new(move |text, stops| tab.insert_stops(text, stops)),
+            Box::new(move |text, stops| {
+                if let Some(tab) = tab.upgrade() {
+                    tab.insert_stops(text, stops);
+                }
+            }),
         );
     }
 

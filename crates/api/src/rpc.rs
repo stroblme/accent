@@ -34,7 +34,8 @@ use accent_core::fs::{Etag, SaveError};
 
 /// How long a call waits before giving up on the far end. Generous next to a round trip on any
 /// link a person would edit over, and short enough that a wedged server is a message rather than
-/// a hang.
+/// a hang. A method the host itself allows longer — a commit whose hooks run for a minute — is
+/// given its own bound on top of this (the `methods!` table in `vault.rs` says which).
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
 /// How often the client says it is still there.
@@ -59,6 +60,10 @@ pub const DISCONNECTED: i64 = -32004;
 /// The link is still being made, so there is nobody to ask yet. Not a failure of the call: the
 /// same call answers once [`Event::Connected`](crate::Event::Connected) has arrived.
 pub const CONNECTING: i64 = -32003;
+/// The server has no vault to serve — its root is not a folder, or its index would not open — and
+/// says so to the `hello`. Unlike a link that failed, another attempt meets the same answer until
+/// someone changes the host.
+pub const REFUSED: i64 = -32005;
 
 /// What the far end said instead of an answer.
 #[derive(Debug, Clone)]
@@ -270,20 +275,21 @@ impl Client {
         self.dead.load(Ordering::SeqCst)
     }
 
-    /// Ask, and wait for the answer.
+    /// Ask, and wait up to [`DEADLINE`] for the answer.
     pub fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, RpcError> {
-        self.call_tracked(method, params, &Mutex::new(None))
+        self.call_tracked(method, params, &Mutex::new(None), DEADLINE)
     }
 
-    /// The same, leaving the request id in `asked` so a caller that gives up on the answer can
-    /// [`cancel`](Self::cancel) it at the server.
+    /// The same, waiting up to `deadline` and leaving the request id in `asked`, so a caller that
+    /// gives up on the answer can [`cancel`](Self::cancel) it at the server.
     pub fn call_tracked<T: DeserializeOwned>(
         &self,
         method: &str,
         params: Value,
         asked: &Mutex<Option<u64>>,
+        deadline: Duration,
     ) -> Result<T, RpcError> {
-        let value = self.call_value(method, params, asked)?;
+        let value = self.call_value(method, params, asked, deadline)?;
         serde_json::from_value(value)
             .map_err(|e| RpcError::failed(format!("{method} answered something unreadable: {e}")))
     }
@@ -302,6 +308,7 @@ impl Client {
         method: &str,
         params: Value,
         asked: &Mutex<Option<u64>>,
+        deadline: Duration,
     ) -> Result<Value, RpcError> {
         if self.is_dead() {
             return Err(RpcError::disconnected("not connected"));
@@ -319,7 +326,7 @@ impl Client {
             )));
         }
 
-        match rx.recv_timeout(DEADLINE) {
+        match rx.recv_timeout(deadline) {
             Ok(answer) => answer,
             // The sender was dropped: the reader thread saw EOF and cleared the map.
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -452,7 +459,7 @@ fn refuse(e: &anyhow::Error, input: impl Read, mut output: impl Write) {
             .and_then(|msg| msg.get("id").cloned());
         if let Some(id) = id {
             let answer = json!({"jsonrpc": "2.0", "id": id, "error": {
-                "code": FAILED, "message": format!("{e:#}"),
+                "code": REFUSED, "message": format!("{e:#}"),
             }});
             let _ = writeln!(output, "{answer}").and_then(|()| output.flush());
             return;
@@ -968,6 +975,46 @@ mod tests {
         assert!(e.message.contains("connect"), "{e}");
     }
 
+    /// A call waits as long as its caller gave it: a method the host may take longer over is
+    /// answered, where the same call given less gives up at its own deadline.
+    #[test]
+    fn a_call_waits_for_as_long_as_it_was_given() {
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, mut server_out) = std::io::pipe().unwrap();
+        // A host that takes 300 ms over every answer, and ignores the pings.
+        let server = std::thread::spawn(move || {
+            for line in BufReader::new(server_in).lines().map_while(Result::ok) {
+                let Some(id) = serde_json::from_str::<Value>(&line)
+                    .unwrap()
+                    .get("id")
+                    .cloned()
+                else {
+                    continue;
+                };
+                std::thread::sleep(Duration::from_millis(300));
+                let answer = json!({"jsonrpc": "2.0", "id": id, "result": "done"});
+                if writeln!(server_out, "{answer}").is_err() {
+                    break;
+                }
+            }
+        });
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        );
+        let ask = |deadline| {
+            client.call_tracked::<String>("slow", json!([]), &Mutex::new(None), deadline)
+        };
+
+        let e = ask(Duration::from_millis(100)).unwrap_err();
+        assert_eq!(e.message, "slow timed out");
+        assert_eq!(ask(Duration::from_secs(2)).unwrap(), "done");
+        client.shutdown();
+        server.join().unwrap();
+    }
+
     /// The reader is the first to know the link has gone, and says so once. An end the client
     /// asked for is not a lost link, or every window close would read as one.
     #[test]
@@ -1060,6 +1107,8 @@ mod tests {
             .call::<Hello>("hello", json!([VaultConfig::default()]))
             .unwrap_err();
         assert_eq!(e.message, format!("{} is not a folder", root.display()));
+        // Its own code, so the window can tell it from a link that failed and stop retrying.
+        assert_eq!(e.code, REFUSED);
         assert!(server.join().unwrap().is_err(), "serve must exit failing");
         assert!(!db.exists(), "no index for a vault that is not there");
     }

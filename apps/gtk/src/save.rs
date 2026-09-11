@@ -439,21 +439,31 @@ impl App {
                 Err(e) => self.cannot("save", e),
             },
             // Looked up again rather than remembered: the copy may have been resolved from
-            // another window, or by Syncthing, since the banner went up.
+            // another window, or by Syncthing, since the banner went up. On a worker, being a
+            // round trip on a remote vault.
             Some(Alert::Conflict) => {
+                let Some(vault) = self.vault().cloned() else {
+                    return;
+                };
                 let rel = tab.rel();
-                match self
-                    .vault()
-                    .and_then(|v| v.conflicts_of(&rel).ok())
-                    .unwrap_or_default()
-                    .first()
-                {
-                    Some(conflict) => self.resolve_conflict(&rel, conflict),
-                    None => {
-                        tab.clear_alert(Alert::Conflict);
-                        self.toast("The conflict copy is gone");
+                let (app, asked) = (Rc::downgrade(self), Rc::downgrade(tab));
+                glib::spawn_future_local(async move {
+                    let copies = gio::spawn_blocking({
+                        let rel = rel.clone();
+                        move || vault.conflicts_of(&rel)
+                    })
+                    .await;
+                    let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) else {
+                        return;
+                    };
+                    match copies.ok().and_then(Result::ok).unwrap_or_default().first() {
+                        Some(conflict) => app.resolve_conflict(&rel, conflict),
+                        None => {
+                            tab.clear_alert(Alert::Conflict);
+                            app.toast("The conflict copy is gone");
+                        }
                     }
-                }
+                });
             }
             None => tab.hide_banner(),
         }
@@ -461,13 +471,31 @@ impl App {
 
     /// The unsaved buffer against the file underneath it, in the tab itself: the editor is the
     /// Mine pane, so a merge is typed straight into the note.
+    ///
+    /// The file is read on a worker, being a round trip on a remote vault.
     pub fn compare_with_disk(self: &Rc<Self>, tab: &Rc<Tab>) {
+        let vault = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .cloned();
+        let (rel, path) = (tab.rel(), tab.path());
+        let (app, asked) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let read = gio::spawn_blocking(move || match vault {
+                Some(vault) => vault.read(&rel),
+                None => accent_core::fs::read_note(&path),
+            })
+            .await;
+            if let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) {
+                app.compare_with(&tab, read.ok().and_then(Result::ok));
+            }
+        });
+    }
+
+    /// What [`compare_with_disk`](Self::compare_with_disk) does once the file is read.
+    fn compare_with(self: &Rc<Self>, tab: &Rc<Tab>, read: Option<(String, Etag)>) {
         let rel = tab.rel();
-        let read = match self.vault().filter(|_| !doc::is_loose_key(&rel)) {
-            Some(vault) => vault.read(&rel),
-            None => accent_core::fs::read_note(&tab.path()),
-        };
-        let Ok((disk, disk_etag)) = read else {
+        let Some((disk, disk_etag)) = read else {
             return self.toast(&format!("Cannot read {rel} from disk"));
         };
         let keep_theirs = gtk::Button::with_label("Keep Theirs");
@@ -558,14 +586,35 @@ impl App {
 
     /// A sync conflict copy beside the note it was copied from, in the note's own tab: the editor
     /// is Mine, live, so an unsaved edit is in the comparison rather than older than it.
+    ///
+    /// The copy is read on a worker, being a round trip on a remote vault.
     fn resolve_conflict(self: &Rc<Self>, original: &str, conflict: &str) {
-        let Some(vault) = self.vault() else {
+        let Some(vault) = self.vault().cloned() else {
             return;
         };
-        let Ok((theirs, theirs_etag)) = vault.read(conflict) else {
-            return self.toast("Cannot read the conflict copy");
-        };
         let (original, conflict) = (original.to_string(), conflict.to_string());
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let asked = conflict.clone();
+            let read = gio::spawn_blocking(move || vault.read(&asked)).await;
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            match read {
+                Ok(Ok((theirs, etag))) => app.compare_conflict(original, conflict, theirs, etag),
+                _ => app.toast("Cannot read the conflict copy"),
+            }
+        });
+    }
+
+    /// What [`resolve_conflict`](Self::resolve_conflict) does once the copy is read.
+    fn compare_conflict(
+        self: &Rc<Self>,
+        original: String,
+        conflict: String,
+        theirs: String,
+        theirs_etag: Etag,
+    ) {
         let theirs_title = written_at(&conflict, &theirs_etag);
         self.with_tab(&original.clone(), Opened::Kept, move |app, tab| {
             let mine_title = match tab.etag.get() {
@@ -588,13 +637,7 @@ impl App {
                 conflict,
                 move |_| {
                     tab.leave_compare();
-                    let Some(vault) = app.vault() else { return };
-                    if let Err(e) = vault.adopt_conflict(&original, &conflict) {
-                        return app.cannot("resolve", e);
-                    }
-                    tab.discard();
-                    app.refresh_tab(&tab);
-                    app.finish_conflict(&original, &conflict);
+                    app.keep_theirs(&tab, &original, &conflict);
                 }
             ));
             // Keeping mine is only the copy going away: the merge is the buffer, and the buffer
@@ -625,6 +668,34 @@ impl App {
                 "Sync Conflict",
             );
             tab.comparing_answers(Alert::Conflict);
+        });
+    }
+
+    /// The copy takes the original's place and the tab reloads over it. The copy is adopted on a
+    /// worker, being a round trip on a remote vault.
+    fn keep_theirs(self: &Rc<Self>, tab: &Rc<Tab>, original: &str, conflict: &str) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let (original, conflict) = (original.to_string(), conflict.to_string());
+        let (app, kept) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let adopted = gio::spawn_blocking({
+                let (original, conflict) = (original.clone(), conflict.clone());
+                move || vault.adopt_conflict(&original, &conflict)
+            })
+            .await;
+            let (Some(app), Some(tab)) = (app.upgrade(), kept.upgrade()) else {
+                return;
+            };
+            match adopted {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return app.cannot("resolve", e),
+                Err(_) => return app.cannot("resolve", "the worker panicked"),
+            }
+            tab.discard();
+            app.refresh_tab(&tab);
+            app.finish_conflict(&original, &conflict);
         });
     }
 

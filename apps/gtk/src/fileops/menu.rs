@@ -57,8 +57,10 @@ pub fn context_menu(
         return popup(host, &menu, anchor);
     };
     // Rename is the move as well as the name: a path typed into it carries the file, which is
-    // what replaced Move to… when the tree learned to take a drop.
-    menu.append_item(&item("Rename", "rename", rel));
+    // what replaced Move to… when the tree learned to take a drop. A folder's is an action of its
+    // own because the dialog selects a folder's whole name and only a file's stem.
+    let rename = if is_dir { "rename-folder" } else { "rename" };
+    menu.append_item(&item("Rename", rename, rel));
     // Only a directory can be left out: `[search] exclude` is a list of folders, and the path is
     // right here, which is why this beats a preferences row nobody can point at a folder from.
     if is_dir {
@@ -155,7 +157,8 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
-    add("rename", Box::new(rename));
+    add("rename", Box::new(|ops, rel| rename(ops, rel, false)));
+    add("rename-folder", Box::new(|ops, rel| rename(ops, rel, true)));
     add("copy-name", Box::new(copy_name));
     add("copy-rel", Box::new(copy_relative_path));
     add("copy-abs", Box::new(copy_absolute_path));

@@ -1227,77 +1227,58 @@ impl Compare {
     /// How many rows GTK lays out at a different height than the last relayout meant them to
     /// have, on either side: the number the alignment stands or falls on, and 0 is the claim.
     pub fn misaligned(&self) -> usize {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let grid = self.grid.borrow();
-        let Grid {
-            heights,
-            extra,
-            tops,
-        } = &*grid;
-        if tops.len() != rows.len() {
-            return rows.len();
+        let rows = self.rows.borrow().len();
+        if self.grid.borrow().tops.len() != rows {
+            return rows;
         }
-        let off = |side: Side, r: usize| -> bool {
-            let pane = self.pane(side);
-            let Some(own) = heights[side.idx()][r] else {
-                return false;
-            };
-            let Some(n) = side.of(&rows[r]).and_then(|i| side.number(&lines[i])) else {
-                return false;
-            };
-            let tallest = heights[0][r].unwrap_or(0).max(heights[1][r].unwrap_or(0)) + extra[r];
-            let expected = tops[r] + pane.view.pixels_above_lines() + (tallest - own);
-            let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-            pane.view.iter_location(&iter).y() != expected
+        let off = |r, side| {
+            self.laid(r, side)
+                .is_some_and(|(expected, actual, ..)| expected != actual)
         };
-        (0..rows.len())
-            .filter(|&r| off(Side::Old, r) || off(Side::New, r))
+        (0..rows)
+            .filter(|&r| off(r, Side::Old) || off(r, Side::New))
             .count()
     }
 
     /// The first row [`Compare::misaligned`] counts, spelled out: which row and side, what the
     /// relayout expected, what GTK laid out, and the line. For the bench to print.
     pub fn first_misaligned(&self) -> Option<String> {
+        let rows = self.rows.borrow().len();
+        (0..rows)
+            .flat_map(|r| [Side::Old, Side::New].map(|side| (r, side)))
+            .find_map(|(r, side)| {
+                let (expected, actual, own, tallest) =
+                    self.laid(r, side).filter(|(e, a, ..)| e != a)?;
+                let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+                let text = side
+                    .of(&rows[r])
+                    .map(|i| lines[i].text.clone())
+                    .unwrap_or_default();
+                Some(format!(
+                    "row={r} side={side:?} expected={expected} actual={actual} own={own} tallest={tallest} text={text:?}"
+                ))
+            })
+    }
+
+    /// Row `r`'s line on `side` as laid out: where the last relayout meant it to start, where GTK
+    /// put it, its own height and its row's, in buffer pixels. `None` where the side has no line.
+    fn laid(&self, r: usize, side: Side) -> Option<(i32, i32, i32, i32)> {
         let (lines, rows, starts) = (
             self.lines.borrow(),
             self.rows.borrow(),
             self.starts.borrow(),
         );
         let grid = self.grid.borrow();
-        for (r, row) in rows.iter().enumerate() {
-            for side in [Side::Old, Side::New] {
-                let pane = self.pane(side);
-                let (Some(own), Some(n)) = (
-                    grid.heights
-                        .get(side.idx())
-                        .and_then(|h| h.get(r).copied().flatten()),
-                    side.of(row).and_then(|i| side.number(&lines[i])),
-                ) else {
-                    continue;
-                };
-                let tallest = grid.heights[0][r]
-                    .unwrap_or(0)
-                    .max(grid.heights[1][r].unwrap_or(0))
-                    + grid.extra[r];
-                let expected = grid.tops[r] + pane.view.pixels_above_lines() + (tallest - own);
-                let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-                let actual = pane.view.iter_location(&iter).y();
-                if actual != expected {
-                    let text = side
-                        .of(row)
-                        .map(|i| lines[i].text.clone())
-                        .unwrap_or_default();
-                    return Some(format!(
-                        "row={r} side={side:?} expected={expected} actual={actual} own={own} tallest={tallest} text={text:?}"
-                    ));
-                }
-            }
-        }
-        None
+        let own = grid.heights[side.idx()].get(r).copied().flatten()?;
+        let n = side.of(&rows[r]).and_then(|i| side.number(&lines[i]))?;
+        let tallest = grid.heights[0][r]
+            .unwrap_or(0)
+            .max(grid.heights[1][r].unwrap_or(0))
+            + grid.extra[r];
+        let pane = self.pane(side);
+        let expected = grid.tops[r] + pane.view.pixels_above_lines() + (tallest - own);
+        let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
+        Some((expected, pane.view.iter_location(&iter).y(), own, tallest))
     }
 
     /// What the `Take` (or, with `keep_own`, the `Both`) button on the `i`th hunk does.

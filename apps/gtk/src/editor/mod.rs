@@ -1338,7 +1338,7 @@ impl Tab {
         let Some(head) = head.as_ref() else {
             return;
         };
-        let lines = accent_core::diff::lines(head, &self.text());
+        let lines = accent_core::diff::line_ops(head, &self.text());
         self.marks.set_marks(crate::marks::marks(
             &lines,
             self.buffer.line_count() as usize,

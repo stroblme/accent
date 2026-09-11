@@ -27,6 +27,15 @@ pub(super) fn split_ext(name: &str) -> (&str, &str) {
     }
 }
 
+/// The part of a name Rename selects, so typing replaces it: a file's stem, keeping the
+/// extension, and a folder's whole name, since the dot in `Archive.2024` starts no extension.
+pub(super) fn renamed_part(name: &str, is_dir: bool) -> &str {
+    match is_dir {
+        true => name,
+        false => split_ext(name).0,
+    }
+}
+
 /// `name` inside `dir`, where "" is the vault root.
 pub(super) fn child_path(dir: &str, name: &str) -> String {
     match dir.trim_end_matches('/') {
@@ -148,6 +157,12 @@ mod tests {
         assert_eq!(split_ext("archive.tar.gz"), ("archive.tar", ".gz"));
         assert_eq!(split_ext("README"), ("README", ""));
         assert_eq!(split_ext(".gitignore"), (".gitignore", ""));
+    }
+
+    #[test]
+    fn renamed_part_leaves_a_file_its_extension_and_a_folder_nothing() {
+        assert_eq!(renamed_part("note.md", false), "note");
+        assert_eq!(renamed_part("Archive.2024", true), "Archive.2024");
     }
 
     #[test]

@@ -142,11 +142,14 @@ fn main() -> glib::ExitCode {
         applied: RefCell::new(config.clone()),
         config: Rc::new(RefCell::new(config)),
         config_write: RefCell::new(None),
+        config_monitor: RefCell::new(None),
+        config_broken: Cell::new(false),
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
         shell_keys: Cell::new(false),
     });
+    shell.watch_config();
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
     // leaves exactly that behind. Said once per process; there is no migration.
     for name in shell.config.borrow().shortcuts.keys() {
@@ -544,10 +547,14 @@ impl App {
             // because this path returned before either readout was asked again. The Outline
             // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
             // strip in the sidebar, and `sync_outline` already says "No Outline" for no
-            // document at all.
+            // document at all. So are the progress slot, where a PDF closed while it was still
+            // opening left "Opening the document…", and Split view's preview, which kept the last
+            // note.
             self.sync_status();
             self.sync_outline();
+            self.sync_opening();
             self.refresh_zoom();
+            self.clear_preview();
             return;
         };
         let key = doc.key();
@@ -581,11 +588,13 @@ impl App {
             Some(tab) => self.render(&tab),
             // Nothing here is markdown, so the preview shows nothing rather than the last note
             // it happened to be given.
-            None => {
-                if let Some(preview) = self.preview.borrow().as_ref() {
-                    preview.render("", "");
-                }
-            }
+            None => self.clear_preview(),
+        }
+    }
+
+    fn clear_preview(&self) {
+        if let Some(preview) = self.preview.borrow().as_ref() {
+            preview.render("", "");
         }
     }
 
@@ -601,12 +610,13 @@ impl App {
         // A PDF's outline is its bookmarks, with the page thumbnails under them.
         if let Some(pdf) = doc.pdf() {
             // Still being opened on the render thread, so there is nothing to say yet and
-            // "No Bookmarks" would be a guess.
+            // "No Bookmarks" would be a guess; or it never opened, and has no pages to list.
             if pdf.page_count() == 0 {
-                return sidebar.set_outline(Some(&sidebar::outline_note(
-                    "Opening…",
-                    "Reading the document.",
-                )));
+                let (title, body) = match pdf.opening() {
+                    true => ("Opening…", "Reading the document."),
+                    false => ("No Outline", "This PDF could not be opened."),
+                };
+                return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
             let outline = pdf.outline();
             let content = gtk::Paned::builder()
@@ -1047,7 +1057,7 @@ impl App {
             });
         }
         if changed.shortcuts {
-            self.apply_accels();
+            self.refresh_accels();
         }
         for tab in self.open_tabs() {
             if changed.font {
@@ -1088,28 +1098,9 @@ impl App {
         }
     }
 
+    /// The config it shows is already the file's: a hand edit is taken in as it lands
+    /// (`Shell::watch_config`), so nothing is read again here.
     fn preferences(self: &Rc<Self>) {
-        // The config is read once at startup and every row here writes the whole struct back, so
-        // an edit made in the file while accent runs would be undone by the next switch touched.
-        // Re-reading as the dialog opens keeps the file the source of truth; a file that no
-        // longer parses is left alone, exactly as at startup. A ring pick still waiting to be
-        // written goes first, or the read would take it back.
-        if let Some(shell) = self.shell.upgrade() {
-            shell.flush_config();
-        }
-        match Config::read(&accent_core::config::config_path()) {
-            Ok(fresh) => {
-                *self.config.borrow_mut() = fresh;
-                let config = self.config.borrow().clone();
-                if let Some(shell) = self.shell.upgrade() {
-                    shell.apply_config(&config);
-                }
-            }
-            Err(e) if accent_core::config::config_path().exists() => {
-                tracing::warn!("re-reading the config: {e:#}")
-            }
-            Err(_) => {}
-        }
         // Every window, not just the one the dialog is over: the config is the process's.
         let shell = self.shell.clone();
         settings::present(

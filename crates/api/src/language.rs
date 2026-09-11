@@ -825,7 +825,10 @@ fn remote_task<T: DeserializeOwned + Send + 'static>(
     let asked: Arc<crate::remote::Asked> = Arc::default();
     Task::blocking({
         let (r, asked) = (r.clone(), asked.clone());
-        move || r.call_tracked(method, params, &asked).map_err(remote_err)
+        move || {
+            r.call_tracked(method, params, &asked, crate::rpc::DEADLINE)
+                .map_err(remote_err)
+        }
     })
     .cancelled_by(move || r.cancel(&asked))
 }
