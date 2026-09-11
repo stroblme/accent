@@ -145,9 +145,9 @@ pub fn build_window(
         .sync_create()
         .build();
     let modes = mode_switcher();
-    // Split View keeps its action, its chord and its place in the primary menu; what it loses is
-    // the header button, whose place the drawing tools take. The widget stays because the window
-    // still reads and writes its pressed state.
+    // Toggle Preview keeps its action, its chord and its place in the primary menu; what it loses
+    // is the header button, whose place the drawing tools take. The widget stays because the
+    // window still reads and writes its pressed state.
     let drawing = gtk::ToggleButton::builder()
         .icon_name("document-edit-symbolic")
         .tooltip_text(label_of("win.pdf-draw"))
