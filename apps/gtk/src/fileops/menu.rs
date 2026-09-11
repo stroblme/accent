@@ -121,7 +121,7 @@ fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle) {
     // is closing. `closed` is emitted from inside the item's own `clicked`, and an unparented
     // widget has no path to the action group on the host, so unparenting there dropped whatever
     // the click had just asked for — every item in this menu, not only the ones that open a
-    // dialog, exactly as it dropped the status bar's Fit Page. The idle runs once the click is
+    // dialog, exactly as it dropped the status bar's Fit Height. The idle runs once the click is
     // over.
     popover.connect_closed(|p| {
         let p = p.clone();

@@ -239,7 +239,8 @@ pub enum PdfZoom {
     /// The widest page fills the width. What a reader wants for text, so it is the default.
     #[default]
     FitWidth,
-    /// The tallest page fits entirely, so one page is one screen.
+    /// The tallest page fits entirely, so one page is one screen. Fit Height in the interface,
+    /// and what a reset goes back to; `fit-page` here because sessions have saved it as that.
     FitPage,
     /// A fixed multiple of the page's natural size.
     Scale(f64),

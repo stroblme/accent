@@ -1899,7 +1899,7 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
 
 /// Open a PDF, leave the reader halfway down its second page, and fit the page from there.
 ///
-/// Fit Page is fired as the window action the status bar's menu and the palette both fire, so a
+/// Fit Height is fired as the window action the status bar's menu and the palette both fire, so a
 /// route that never reaches the tab shows up here as a zoom that did not change.
 fn bench_pdf(app: &Rc<App>, rel: &str) {
     app.open_path(rel);

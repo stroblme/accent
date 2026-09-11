@@ -77,7 +77,7 @@ impl Bar {
         let words = label(true);
 
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
-        // and Fit Width for a PDF.
+        // and Fit Height for a PDF.
         let zoom_label = label(true);
         let zoom = bar_button(&zoom_label, "win.zoom-reset", "Reset Zoom");
 
@@ -190,13 +190,13 @@ impl Bar {
         self.unsaved.set_visible(unsaved);
     }
 
-    /// The zoom, while it is worth saying: "110 %", or a PDF's "Fit Width" / "Fit Page".
+    /// The zoom, while it is worth saying: "110 %", or a PDF's "Fit Width" / "Fit Height".
     pub fn set_zoom(&self, text: Option<&str>) {
         set(&self.zoom_label, text);
         self.zoom.set_visible(text.is_some());
     }
 
-    /// The zoom control itself, which the window hangs its Fit Width / Fit Page menu off.
+    /// The zoom control itself, which the window hangs its Fit Width / Fit Height menu off.
     pub fn zoom(&self) -> &gtk::Widget {
         self.zoom.upcast_ref()
     }

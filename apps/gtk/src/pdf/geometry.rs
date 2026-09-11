@@ -17,11 +17,11 @@ pub const MAX_SCALE: f64 = 8.0;
 pub use accent_core::config::PdfZoom;
 
 /// The status bar's readout for a zoom. A PDF always has one, so there is always something to
-/// click to get back to Fit Width.
+/// click to get back to Fit Height.
 pub fn zoom_label(zoom: PdfZoom) -> Option<String> {
     match zoom {
         PdfZoom::FitWidth => Some("Fit Width".to_string()),
-        PdfZoom::FitPage => Some("Fit Page".to_string()),
+        PdfZoom::FitPage => Some("Fit Height".to_string()),
         PdfZoom::Scale(z) => Some(format!("{} %", (z * 100.0).round() as i32)),
     }
 }

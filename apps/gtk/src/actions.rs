@@ -134,7 +134,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-next-page", "Next Page", &[]),
     ("win.pdf-previous-page", "Previous Page", &[]),
     ("win.pdf-fit-width", "Fit Width", &[]),
-    ("win.pdf-fit-page", "Fit Page", &[]),
+    ("win.pdf-fit-page", "Fit Height", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
     ("win.pdf-copy", "Copy Selection", &[]),
     // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
@@ -469,8 +469,9 @@ impl App {
     /// the readout says have to be the same list, or the bar says 120 % over something drawn at
     /// its own size.
     fn zoom_action(self: &Rc<Self>, name: &str) {
-        // Reset is 100 % for anything counted in percentages, and Fit Width for a PDF, which is
-        // what a page was fitted to before anyone zoomed it.
+        // Reset is 100 % for anything counted in percentages, and Fit Height for a PDF: one whole
+        // page, which is what a reader resetting a zoom wants back, though a PDF opens at Fit
+        // Width.
         let stepped = |from: f64| match name {
             "zoom-in" => stepped_zoom(from, false),
             "zoom-out" => stepped_zoom(from, true),
@@ -480,7 +481,7 @@ impl App {
             Some(Doc::Pdf(pdf)) => match name {
                 "zoom-in" => pdf.zoom_step(false),
                 "zoom-out" => pdf.zoom_step(true),
-                _ => pdf.set_zoom(PdfZoom::FitWidth),
+                _ => pdf.set_zoom(PdfZoom::FitPage),
             },
             Some(Doc::Terminal(term)) => {
                 term.set_zoom(stepped(term.zoom()));

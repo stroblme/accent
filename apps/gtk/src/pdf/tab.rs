@@ -983,7 +983,7 @@ impl PdfTab {
         // while it is closing. `closed` is emitted from inside the item's own `clicked`, and an
         // unparented widget has no path to the action group on the host, so unparenting there
         // would drop the Copy the click had just asked for, exactly as it dropped the status
-        // bar's Fit Page. The idle runs once the click is over.
+        // bar's Fit Height. The idle runs once the click is over.
         popover.connect_closed(|p| {
             let p = p.clone();
             glib::idle_add_local_once(move || p.unparent());
