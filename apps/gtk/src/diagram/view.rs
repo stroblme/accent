@@ -47,6 +47,18 @@ pub enum Edit {
     },
     /// Edit this cell's label.
     Label(CellId),
+    /// Turn a shape to `degrees`.
+    Rotate {
+        id: CellId,
+        degrees: f64,
+    },
+}
+
+/// What a press on the one selected shape's frame takes hold of.
+#[derive(Debug, Clone, Copy)]
+enum Grip {
+    Rotate,
+    Resize(Handle),
 }
 
 /// A drag under way, in page units.
@@ -67,6 +79,11 @@ enum Drag {
         rect: Rect,
         /// The shape's turn, in degrees: its handles are in its own frame.
         rotation: f64,
+    },
+    /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
+    Rotate {
+        id: CellId,
+        rect: Rect,
     },
     Band {
         from: Point,
@@ -345,20 +362,20 @@ impl DiagramView {
         match imp.tool.get() {
             Tool::Select => {
                 if let [id] = selection.as_slice()
-                    && let Some(rect) = sheet.rect(id).filter(|_| !sheet.is_pinned(id))
+                    && let Some(grip) = self.grip_at(&sheet, id, p)
+                    && let Some(rect) = sheet.rect(id)
                 {
-                    // A turned shape's handles are found in its own frame.
-                    let rotation = sheet.rotation(id);
-                    let local = frame.to_content(rotate(p, rect.centre(), -rotation));
-                    if let Some(handle) = geometry::handle_at(&frame.rect(&rect), local, HANDLE) {
-                        return Some(Drag::Resize {
+                    let (id, rotation) = (id.clone(), sheet.rotation(id));
+                    return Some(match grip {
+                        Grip::Rotate => Drag::Rotate { id, rect },
+                        Grip::Resize(handle) => Drag::Resize {
                             from: p,
-                            id: id.clone(),
+                            id,
                             handle,
                             rect,
                             rotation,
-                        });
-                    }
+                        },
+                    });
                 }
                 let Some(pick) = sheet.pick(p, tolerance, &selection) else {
                     if !shift {
@@ -408,6 +425,27 @@ impl DiagramView {
         }
     }
 
+    /// The grip of the one selected shape `id` under page point `p`, found in the shape's own
+    /// frame: its rotate handle first, then a resize handle.
+    fn grip_at(&self, sheet: &Sheet, id: &str, p: Point) -> Option<Grip> {
+        let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
+        let frame = self.imp().frame.get();
+        let local = frame.to_content(rotate(p, r.centre(), -sheet.rotation(id)));
+        let b = frame.rect(&r);
+        if sheet.is_turnable(id) && geometry::rotate_handle(&b).distance(local) <= HANDLE {
+            return Some(Grip::Rotate);
+        }
+        geometry::handle_at(&b, local, HANDLE).map(Grip::Resize)
+    }
+
+    /// The turn a rotate handle dragged to `pointer` gives the shape at `rect` (page units).
+    fn turn_to(&self, rect: &Rect, pointer: Point, free: bool) -> f64 {
+        let frame = self.imp().frame.get();
+        let r = frame.rect(rect);
+        let handle = geometry::rotate_handle(&r);
+        geometry::rotation_to(r.centre(), handle, frame.to_content(pointer), free)
+    }
+
     /// A move of the selection from `from` to `to`, on the grid unless `free`.
     fn move_delta(&self, from: Point, to: Point, origin: Point, free: bool) -> Point {
         let raw = Point::new(to.x - from.x, to.y - from.y);
@@ -454,6 +492,10 @@ impl DiagramView {
                 let grid = self.grid(free);
                 let rect = geometry::resize_rotated(&rect, rotation, handle, delta, grid);
                 self.emit(Edit::Resize { id, rect });
+            }
+            Drag::Rotate { id, rect } if moved => {
+                let degrees = self.turn_to(&rect, p, free);
+                self.emit(Edit::Rotate { id, degrees });
             }
             Drag::Band { from, add } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
@@ -502,16 +544,14 @@ impl DiagramView {
         let p = self.page_at(x, y);
         let name = match imp.tool.get() {
             Tool::Select => {
-                let selection = self.selection();
-                let handle = match selection.as_slice() {
-                    [id] if !sheet.is_pinned(id) => sheet.rect(id).and_then(|r| {
-                        let local = rotate(p, r.centre(), -sheet.rotation(id));
-                        geometry::handle_at(&frame.rect(&r), frame.to_content(local), HANDLE)
-                    }),
+                let grip = match imp.selection.borrow().as_slice() {
+                    [id] => self.grip_at(&sheet, id, p).map(|g| (g, sheet.rotation(id))),
                     _ => None,
                 };
-                match handle {
-                    Some(h) => Some(h.cursor()),
+                match grip {
+                    Some((Grip::Rotate, _)) => Some("grab"),
+                    // A turned handle shows the cursor of the way it now points.
+                    Some((Grip::Resize(h), rotation)) => Some(h.turned(rotation).cursor()),
                     None => sheet.scene.hit(p, TOLERANCE / frame.scale).map(|_| "move"),
                 }
             }
@@ -541,7 +581,8 @@ impl DiagramView {
         let pointer = imp.pointer.get();
         let free = imp.free.get();
         let selection = imp.selection.borrow().clone();
-        let moving = matches!(drag, Some(Drag::Move { .. })) && imp.moved.get();
+        let moving =
+            matches!(drag, Some(Drag::Move { .. } | Drag::Rotate { .. })) && imp.moved.get();
         // A page rectangle turned `rotation` degrees, outlined on screen.
         let turned = |r: &Rect, rotation: f64| {
             if rotation == 0.0 {
@@ -573,6 +614,17 @@ impl DiagramView {
                 let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
                 let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
                 snapshot.append_color(&accent, &paint::grect(&square));
+            }
+            // The rotate handle, a ring beyond the top-right corner, turned with the frame.
+            if sheet.is_turnable(id) {
+                let b = frame.rect(&r);
+                let at = rotate(geometry::rotate_handle(&b), b.centre(), rotation);
+                let ring = gsk::PathBuilder::new();
+                ring.add_circle(
+                    &graphene::Point::new(at.x as f32, at.y as f32),
+                    (HANDLE / 2.0) as f32,
+                );
+                snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
             }
         }
         // The connector in hand: the shape under the pointer shows its connection points as
@@ -646,6 +698,7 @@ impl DiagramView {
                     rotation,
                 );
             }
+            Drag::Rotate { rect, .. } => turned(&rect, self.turn_to(&rect, pointer, free)),
             Drag::Band { from, .. } => {
                 let r = frame.rect(&Rect::from_corners(from, pointer));
                 snapshot.append_color(

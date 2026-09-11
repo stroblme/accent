@@ -553,6 +553,11 @@ impl DiagramTab {
                 self.select(vec![id]);
                 self.edit_label();
             }
+            Edit::Rotate { id, degrees } => {
+                // No turn is no key, as a shape draw.io never turned has none.
+                let value = (degrees != 0.0).then(|| props::number(degrees));
+                self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));
+            }
         }
     }
 

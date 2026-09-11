@@ -138,6 +138,7 @@ pub struct Props {
     rounded: adw::SwitchRow,
     shadow: adw::SwitchRow,
     opacity: adw::SpinRow,
+    rotation: adw::SpinRow,
     font_size: adw::SpinRow,
     font_colour: Rc<ColourRow>,
     bold: gtk::ToggleButton,
@@ -172,7 +173,7 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
 }
 
 /// A number as a style value: `12`, not `12.0`.
-fn number(v: f64) -> String {
+pub(super) fn number(v: f64) -> String {
     match v.fract() == 0.0 {
         true => format!("{}", v as i64),
         false => format!("{v}"),
@@ -203,6 +204,7 @@ impl Props {
         let rounded = adw::SwitchRow::builder().title("Rounded").build();
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
         let opacity = spin("Opacity", (0.0, 100.0, 5.0));
+        let rotation = spin("Rotation", (-180.0, 180.0, 1.0));
         for row in [&fill.row, &stroke.row] {
             shape.add(row);
         }
@@ -211,6 +213,7 @@ impl Props {
         shape.add(&rounded);
         shape.add(&shadow);
         shape.add(&opacity);
+        shape.add(&rotation);
 
         let font_size = spin("Font Size", (6.0, 96.0, 1.0));
         let font_colour = Rc::new(ColourRow::new("Font Colour"));
@@ -286,6 +289,7 @@ impl Props {
             rounded,
             shadow,
             opacity,
+            rotation,
             font_size,
             font_colour,
             bold,
@@ -359,9 +363,10 @@ impl Props {
         switch(&self.shadow, "shadow", None);
 
         // Spin rows step once per arrow press; a burst of them is one change.
-        let spins: [(&adw::SpinRow, &'static str, Option<f64>); 3] = [
+        let spins: [(&adw::SpinRow, &'static str, Option<f64>); 4] = [
             (&self.stroke_width, "strokeWidth", None),
             (&self.opacity, "opacity", Some(100.0)),
+            (&self.rotation, "rotation", Some(0.0)),
             (&self.font_size, "fontSize", None),
         ];
         for (row, key, default) in spins {
@@ -468,6 +473,9 @@ impl Props {
                 self.rounded.set_active(style.flag("rounded", false));
                 self.shadow.set_active(style.flag("shadow", false));
                 self.opacity.set_value(style.num("opacity", 100.0));
+                // draw.io keeps any turn it was given; the row shows it within a half turn.
+                let turn = (style.num("rotation", 0.0) + 180.0).rem_euclid(360.0) - 180.0;
+                self.rotation.set_value(turn);
                 self.font_size.set_value(style.num("fontSize", 12.0));
                 self.font_colour.fill(style.color("fontColor"));
                 let bits = style.num("fontStyle", 0.0) as u32;
