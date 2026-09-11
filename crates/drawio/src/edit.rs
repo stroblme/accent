@@ -30,8 +30,8 @@ pub struct Editor {
     ids: Ids,
 }
 
-/// What an undo or redo step puts back: one page, or the whole page list when pages were added,
-/// removed or moved.
+/// What an undo or redo step puts back: one page, or the whole page list when pages were added
+/// or removed.
 // ponytail: snapshots clone a whole page, fine at a few thousand cells for the hundred steps
 // kept; command objects are the upgrade when memory or diffing matters.
 #[derive(Debug, Clone)]
@@ -120,7 +120,7 @@ impl Editor {
         true
     }
 
-    /// A vertex at `rect` (absolute), inside `parent` or the page's first layer.
+    /// A vertex at `rect` (absolute), inside `parent` or the page's first unlocked layer.
     pub fn add_vertex(
         &mut self,
         page: usize,
@@ -144,8 +144,8 @@ impl Editor {
         })
     }
 
-    /// An edge in the page's first layer. An end without a cell dangles at its point; an end
-    /// with one keeps the point too, as draw.io writes it.
+    /// An edge in the page's first unlocked layer. An end without a cell dangles at its point;
+    /// an end with one keeps the point too, as draw.io writes it.
     pub fn add_edge(
         &mut self,
         page: usize,
@@ -436,17 +436,6 @@ impl Editor {
         Ok(())
     }
 
-    /// Move page `from` so that it becomes page `to`.
-    pub fn move_page(&mut self, from: usize, to: usize) -> Result<(), Error> {
-        self.file.page(from)?;
-        self.file.page(to)?;
-        self.edit_pages(|pages| {
-            let moving = pages.remove(from);
-            pages.insert(to, moving);
-        });
-        Ok(())
-    }
-
     /// Change a copy of page `index` and put it in place if `change` succeeds and changed
     /// something, the page as it was becoming the undo step.
     fn edit<T>(
@@ -516,11 +505,13 @@ fn cell_mut<'a>(page: &'a mut Page, id: &str) -> Result<&'a mut Cell, Error> {
         .ok_or_else(|| Error::NoCell(id.to_string()))
 }
 
-/// The layer new cells go into.
+/// The layer new cells go into ([`Page::default_parent`]), refused when there is none.
 fn default_layer(page: &Page) -> Result<CellId, Error> {
-    page.default_parent()
-        .map(str::to_string)
-        .ok_or(Error::Refused("the page has no layer"))
+    match page.default_parent() {
+        Some(id) => Ok(id.to_string()),
+        None if page.layers().is_empty() => Err(Error::Refused("the page has no layer")),
+        None => Err(Error::Refused("every layer on this page is locked")),
+    }
 }
 
 /// `roots` and every cell under them. A file in draw.io's order, parents before children,
@@ -663,6 +654,31 @@ mod tests {
     }
 
     #[test]
+    fn new_cells_go_into_the_first_unlocked_layer() {
+        let locked = |id| Cell {
+            style: Style::parse("locked=1;"),
+            ..Cell::layer(id, "0")
+        };
+        let mut e = open([Cell::layer("2", "0"), Cell::layer("3", "0")]);
+        e.file.pages[0].cells[1] = locked("1");
+        let v = e.add_vertex(0, None, Rect::default(), "", "").unwrap();
+        let ends = (None, Point::default());
+        let f = e.add_edge(0, ends, ends, "").unwrap();
+        let parent = |id: &str| e.page(0).unwrap().cell(id).unwrap().parent.clone();
+        assert_eq!(parent(&v).as_deref(), Some("2"));
+        assert_eq!(parent(&f).as_deref(), Some("2"));
+
+        let mut e = open(Vec::new());
+        e.file.pages[0].cells[1] = locked("1");
+        let r = e.add_vertex(0, None, Rect::default(), "", "");
+        assert!(matches!(
+            r,
+            Err(Error::Refused("every layer on this page is locked"))
+        ));
+        assert!(!e.can_undo());
+    }
+
+    #[test]
     fn a_vertex_in_a_group_is_stored_relative() {
         let mut e = editor();
         let group = Rect::new(100.0, 50.0, 200.0, 100.0);
@@ -779,11 +795,10 @@ mod tests {
         let before = e.file().pages.clone();
         assert_eq!(e.add_page("Two"), 1);
         e.rename_page(1, "Second").unwrap();
-        e.move_page(1, 0).unwrap();
-        e.set_page_attr(1, "background", Some("#ff0000")).unwrap();
-        assert_eq!(e.page(0).unwrap().name(), "Second");
-        assert_eq!(e.page(1).unwrap().model_attr("background"), Some("#ff0000"));
-        e.delete_page(0).unwrap();
+        e.set_page_attr(0, "background", Some("#ff0000")).unwrap();
+        assert_eq!(e.page(1).unwrap().name(), "Second");
+        assert_eq!(e.page(0).unwrap().model_attr("background"), Some("#ff0000"));
+        e.delete_page(1).unwrap();
         assert_eq!(e.file().pages.len(), 1);
         while e.undo() {}
         assert_eq!(e.file().pages, before);

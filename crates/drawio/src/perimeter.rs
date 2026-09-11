@@ -46,12 +46,17 @@ pub fn rectangle(bounds: Rect, next: Point, orthogonal: bool) -> Point {
     p
 }
 
-/// The same for the ellipse inscribed in `bounds` (`mxPerimeter.EllipsePerimeter`).
+/// The same for the ellipse inscribed in `bounds` (`mxPerimeter.EllipsePerimeter`). A flat
+/// ellipse, of no height or no width, is met at its centre; the JS comes to the centre too, or
+/// to NaN.
 // mxPerimeter.js 161-251
 pub fn ellipse(bounds: Rect, next: Point, orthogonal: bool) -> Point {
     let (x, y) = (bounds.x, bounds.y);
     let (a, b) = (bounds.w / 2.0, bounds.h / 2.0);
     let (cx, cy) = (x + a, y + b);
+    if a == 0.0 || b == 0.0 {
+        return Point::new(cx, cy);
+    }
     let (px, py) = (next.x, next.y);
     // The slope of the line through `next` and the centre, from whole-number offsets as in the JS.
     let dx = parse_int(px - cx);

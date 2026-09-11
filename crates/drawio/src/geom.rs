@@ -107,19 +107,24 @@ pub fn rotate(p: Point, centre: Point, degrees: f64) -> Point {
     )
 }
 
+/// The corners of `r` turned `degrees` about `pivot`, clockwise from the top-left: the outline
+/// of a turned box.
+pub fn corners(r: &Rect, pivot: Point, degrees: f64) -> [Point; 4] {
+    [
+        Point::new(r.x, r.y),
+        Point::new(r.right(), r.y),
+        Point::new(r.right(), r.bottom()),
+        Point::new(r.x, r.bottom()),
+    ]
+    .map(|p| rotate(p, pivot, degrees))
+}
+
 /// The axis-aligned box around `r` turned `degrees` about its centre (`mxUtils.getBoundingBox`).
 pub fn bounding_box(r: &Rect, degrees: f64) -> Rect {
     if degrees == 0.0 {
         return *r;
     }
-    let c = r.centre();
-    let corners = [
-        Point::new(r.x, r.y),
-        Point::new(r.right(), r.y),
-        Point::new(r.right(), r.bottom()),
-        Point::new(r.x, r.bottom()),
-    ];
-    bounds_of(corners.map(|p| rotate(p, c, degrees))).unwrap_or(*r)
+    bounds_of(corners(r, r.centre(), degrees)).unwrap_or(*r)
 }
 
 /// The box around a set of points, or `None` for no points.
@@ -168,6 +173,11 @@ pub fn map_path(path: &mut [PathCmd], f: impl Fn(Point) -> Point) {
             PathCmd::Close => PathCmd::Close,
         };
     }
+}
+
+/// Every point of `path` turned `degrees` about `centre`.
+pub fn rotate_path(path: &mut [PathCmd], centre: Point, degrees: f64) {
+    map_path(path, |p| rotate(p, centre, degrees));
 }
 
 /// Segments a curve is cut into by [`flatten`]. Enough for hit testing and bounds at any zoom

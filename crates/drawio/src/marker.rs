@@ -4,6 +4,9 @@
 use crate::geom::{PathCmd, Point, Rect};
 use crate::shapes;
 
+/// `mxConstants.DEFAULT_MARKERSIZE`: an arrow head's size when the style gives none.
+pub(crate) const DEFAULT_MARKERSIZE: f64 = 6.0;
+
 /// An arrow head's outline, to be stroked like its edge (never dashed) and filled with the
 /// edge's stroke colour when `filled`.
 #[derive(Debug, Clone, PartialEq)]

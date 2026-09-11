@@ -8,24 +8,25 @@
 //! Parts are ported from mxGraph and draw.io (Apache-2.0). Each such file says so in its header;
 //! see `NOTICE`.
 
-pub mod base64;
+mod base64;
 pub mod edit;
 pub mod geom;
-pub mod hit;
+mod hit;
 pub mod label;
-pub mod marker;
+mod marker;
 pub mod model;
-pub mod perimeter;
+mod perimeter;
 pub mod route;
 pub mod scene;
 pub mod shapes;
 pub mod style;
-pub mod xml;
+mod xml;
 
 pub use edit::{Editor, ZOrder};
 pub use geom::{PathCmd, Point, Rect};
 pub use label::{Marks, Run};
-pub use model::{Cell, CellId, File, Geometry, Page, Value};
+pub use model::{Cell, CellId, File, Page};
+pub use route::{Constraint, anchors};
 pub use scene::{Align, Font, ImageSource, Paint, Prim, Scene, Stroke, VAlign, scene};
 pub use style::{Color, Resolved, Style, presets};
 pub use xml::decode_data_uri;
