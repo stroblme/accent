@@ -13,4 +13,4 @@ Actions=new-window;
 
 [Desktop Action new-window]
 Name=New Window
-Exec=accent --new-window
+Exec=GSK_RENDERER=cairo accent --new-window
