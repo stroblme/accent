@@ -686,7 +686,7 @@ impl App {
     /// work with anything else: the PDF engine and an image. That is the file itself on a local
     /// vault and a copy fetched over ssh on a remote one, a transfer of however long the file
     /// takes, so the asking is on a worker; a loose key is already a path here.
-    fn local_copy(
+    pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
         path: &Path,

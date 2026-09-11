@@ -116,16 +116,34 @@ impl App {
                         }
                     }
                     // Re-point the picture at the same file: the texture it holds is of the old
-                    // contents, so redrawing alone would show them again.
+                    // contents, so redrawing alone would show them again. The file is found as
+                    // opening it was, which on a remote vault fetches a fresh copy.
                     Doc::Image(_) => {
-                        if let Some(picture) = picture_of(doc.page()) {
-                            picture.set_file(gio::File::NONE);
-                            picture.set_filename(Some(self.root().join(&rel)));
-                        }
+                        let picture = picture_of(doc.page()).map(|p| p.downgrade());
+                        self.local_copy(&rel, &self.root().join(&rel), move |_, copy| {
+                            match (picture.and_then(|p| p.upgrade()), copy) {
+                                (Some(picture), Ok(copy)) => {
+                                    picture.set_file(gio::File::NONE);
+                                    picture.set_filename(Some(copy));
+                                }
+                                (_, Err(e)) => tracing::debug!("reloading an image: {e}"),
+                                (None, Ok(_)) => {}
+                            }
+                        });
                     }
                     // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
-                    // rather than sending the reader back to page one.
-                    Doc::Pdf(pdf) => pdf.refresh(),
+                    // rather than sending the reader back to page one. On a remote vault the
+                    // reader has a cached copy open, which is fetched again first.
+                    Doc::Pdf(pdf) => {
+                        let pdf = Rc::downgrade(pdf);
+                        self.local_copy(&rel, &self.root().join(&rel), move |_, copy| {
+                            match (pdf.upgrade(), copy) {
+                                (Some(pdf), Ok(_)) => pdf.refresh(),
+                                (_, Err(e)) => tracing::debug!("reloading a PDF: {e}"),
+                                (None, Ok(_)) => {}
+                            }
+                        });
+                    }
                     Doc::Diagram(d) => self.diagram_changed(d),
                     // Neither a diff nor a shell is keyed by a path, so a file changing under one
                     // reaches none of these.
