@@ -216,9 +216,22 @@ impl Editor {
         key: &str,
         value: Option<&str>,
     ) -> Result<(), Error> {
+        self.set_styles(page, ids, &[(key, value)])
+    }
+
+    /// Several style keys at once, as one step: a connector's route is two of them.
+    pub fn set_styles(
+        &mut self,
+        page: usize,
+        ids: &[CellId],
+        pairs: &[(&str, Option<&str>)],
+    ) -> Result<(), Error> {
         self.edit(page, |p, _| {
             for id in ids {
-                cell_mut(p, id)?.style.set(key, value);
+                let style = &mut cell_mut(p, id)?.style;
+                for (key, value) in pairs {
+                    style.set(key, *value);
+                }
             }
             Ok(())
         })

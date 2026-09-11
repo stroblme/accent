@@ -32,8 +32,10 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-rect-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-circle-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/tool-adjust-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-select-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-markdown-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-pdf-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-diagram-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-table-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-image-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-code-symbolic.svg</file>

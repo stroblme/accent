@@ -32,6 +32,8 @@ pub fn stem(rel: &str) -> String {
 pub enum FileType {
     Note,
     Pdf,
+    /// A draw.io diagram.
+    Diagram,
     Table,
     Image,
     Code,
@@ -69,6 +71,9 @@ pub fn file_type(rel: &str) -> FileType {
     if CODE_NAMES.contains(&name.as_str()) {
         return FileType::Code;
     }
+    if is_diagram(&name) {
+        return FileType::Diagram;
+    }
     let Some((_, ext)) = name.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()) else {
         return FileType::Text;
     };
@@ -82,6 +87,15 @@ pub fn file_type(rel: &str) -> FileType {
         _ if TEXT_EXT.contains(&ext) => FileType::Text,
         _ => FileType::Other,
     }
+}
+
+/// Whether `rel` is a draw.io diagram by its name: `.drawio`, `.dio`, or `.drawio.xml`, the three
+/// names draw.io saves under. A plain `.xml` holding a diagram is only known by its bytes.
+pub fn is_diagram(rel: &str) -> bool {
+    let name = basename(rel).to_ascii_lowercase();
+    [".drawio", ".dio", ".drawio.xml"]
+        .iter()
+        .any(|ext| name.len() > ext.len() && name.ends_with(ext))
 }
 
 /// Where a link written inside the note at `dir` points, as a vault-relative path: `../a.md`
@@ -162,6 +176,11 @@ mod tests {
             ("Notes/A.MD", FileType::Note),
             ("a.markdown", FileType::Note),
             ("Attachments/paper.pdf", FileType::Pdf),
+            ("Figures/flow.drawio", FileType::Diagram),
+            ("a.DIO", FileType::Diagram),
+            ("export.drawio.xml", FileType::Diagram),
+            ("plain.xml", FileType::Config),
+            (".drawio", FileType::Text),
             ("data.csv", FileType::Table),
             ("data.tsv", FileType::Table),
             ("shot.PNG", FileType::Image),

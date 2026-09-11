@@ -39,6 +39,14 @@ pub fn companion(
     (view, buffer)
 }
 
+/// An editable note view over `text` that is not a tab: a diagram's label, edited as Markdown
+/// with the note's own styling (`diagram/label.rs`).
+pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
+    let (view, buffer) = build(Flavour::Note, None, text);
+    style_companion(Flavour::Note, &buffer);
+    (view, buffer)
+}
+
 /// The styling a companion's text implies: what [`Tab::analyse`] does for the editor, less the
 /// parts that need a tab.
 pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer) {
