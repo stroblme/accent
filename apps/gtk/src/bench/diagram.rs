@@ -81,6 +81,20 @@ fn shoot_pages(tab: &Rc<crate::diagram::DiagramTab>, dir: &Path) {
     for i in 0..tab.page_count() {
         tab.show_page(i);
         bench_pump();
+        // Formulas are typeset in WebKit's own time; the picture waits for them.
+        let asked = Instant::now();
+        while asked.elapsed() < Duration::from_secs(10) {
+            glib::MainContext::default().iteration(false);
+            if tab.typesetting() {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            // One more frame paints what arrived and asks for what the paint found missing.
+            bench_pump();
+            if !tab.typesetting() {
+                break;
+            }
+        }
         let started = Instant::now();
         let shot = shoot(&tab.key_target(), &dir.join(format!("page-{}.png", i + 1)));
         println!(
@@ -158,6 +172,7 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     let sidebar = app.sidebar.get().expect("a vault window has a sidebar");
     app.show_pane("properties");
     tab.select(vec!["a".to_string()]);
+    tab.edit_label();
     // A picture of the window as it stands, for looking at rather than asserting on.
     if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
         bench_pump();
@@ -166,6 +181,7 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
             shoot(app.window.upcast_ref(), Path::new(&path))
         );
     }
+    tab.finish_label();
     println!(
         "bench diagram properties shown={} showing={} sidebar_floor={}",
         sidebar.has_pane("properties"),

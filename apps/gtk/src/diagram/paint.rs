@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::rc::Rc;
 
 use accent_drawio::{
     Align, Color, Font, ImageSource, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke, VAlign,
@@ -15,6 +16,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::geometry::Frame;
+use super::math::{self, Typesetter};
 use crate::theme;
 
 /// What painting keeps between frames: labels laid out at the scale they were laid out for, and
@@ -28,6 +30,8 @@ pub struct Cache {
     /// By a hash of the data URI, across display lists, so an edit does not decode every
     /// picture on the page again.
     decoded: RefCell<HashMap<u64, Option<gdk::Texture>>>,
+    /// By prim index: a label with a formula as the HTML the typesetter is given, and its key.
+    math: RefCell<HashMap<usize, (u64, String)>>,
 }
 
 impl Cache {
@@ -35,6 +39,7 @@ impl Cache {
     pub fn forget(&self) {
         self.layouts.borrow_mut().clear();
         self.textures.borrow_mut().clear();
+        self.math.borrow_mut().clear();
     }
 
     fn texture(&self, index: usize, uri: &str) -> Option<gdk::Texture> {
@@ -71,7 +76,8 @@ pub fn grect(r: &Rect) -> graphene::Rect {
     graphene::Rect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
 
-/// Paint one prim, `index` being its place in the display list.
+/// Paint one prim, `index` being its place in the display list. A label with a formula goes to
+/// `typesetter` when there is one, and is painted as its source until it has been typeset.
 pub fn prim(
     snapshot: &gtk::Snapshot,
     widget: &gtk::Widget,
@@ -79,6 +85,7 @@ pub fn prim(
     prim: &Prim,
     frame: &Frame,
     cache: &Cache,
+    typesetter: Option<&Rc<Typesetter>>,
 ) {
     match prim {
         Prim::Path {
@@ -111,6 +118,37 @@ pub fn prim(
             opacity,
             ..
         } => {
+            let placed = Placed {
+                rect: frame.rect(rect),
+                anchor: frame.to_content(*anchor),
+                align: *align,
+                valign: *valign,
+                wrap: *wrap,
+            };
+            let has_math = runs.iter().any(|r| matches!(r, Run::Math { .. }));
+            if let Some(typesetter) = typesetter.filter(|_| has_math) {
+                let (key, html) = cache
+                    .math
+                    .borrow_mut()
+                    .entry(index)
+                    .or_insert_with(|| {
+                        let html = math::label_html(runs, font, *align, wrap.then_some(rect.w));
+                        (math::key_of(&html), html)
+                    })
+                    .clone();
+                match typesetter.get(key) {
+                    Some(Some(rendered)) => {
+                        let look = Look {
+                            background: *background,
+                            border: *border,
+                            opacity: *opacity,
+                        };
+                        return typeset(snapshot, &rendered, &placed, *rotation, frame, look);
+                    }
+                    Some(None) => {}
+                    None => typesetter.ask(math::Label { key, html }),
+                }
+            }
             let layout = {
                 let mut layouts = cache.layouts.borrow_mut();
                 match layouts.get(&index) {
@@ -122,13 +160,6 @@ pub fn prim(
                         layout
                     }
                 }
-            };
-            let placed = Placed {
-                rect: frame.rect(rect),
-                anchor: frame.to_content(*anchor),
-                align: *align,
-                valign: *valign,
-                wrap: *wrap,
             };
             label(
                 snapshot,
@@ -316,6 +347,65 @@ fn fitted(w: f64, h: f64, r: &Rect) -> Rect {
     let s = (r.w / w).min(r.h / h);
     let (fw, fh) = (w * s, h * s);
     Rect::new(r.x + (r.w - fw) / 2.0, r.y + (r.h - fh) / 2.0, fw, fh)
+}
+
+/// What a label's box looks like around its text.
+#[derive(Clone, Copy)]
+struct Look {
+    background: Option<Color>,
+    border: Option<Color>,
+    opacity: f64,
+}
+
+/// A label WebKit typeset, painted where Pango would have put the same block.
+fn typeset(
+    snapshot: &gtk::Snapshot,
+    rendered: &math::Rendered,
+    at: &Placed,
+    rotation: f64,
+    frame: &Frame,
+    look: Look,
+) {
+    let (w, h) = (rendered.size.0 * frame.scale, rendered.size.1 * frame.scale);
+    let (x, y) = text_origin(at, (w, h), 0.0);
+    let dest = Rect::new(x, y, w, h);
+    rotated(snapshot, at.anchor, rotation, || {
+        with_opacity(snapshot, look.opacity, || {
+            if let Some(bg) = look.background {
+                snapshot.append_color(&rgba(bg), &grect(&dest));
+            }
+            if let Some(b) = look.border {
+                let c = rgba(b);
+                snapshot.append_border(
+                    &gsk::RoundedRect::from_rect(grect(&dest), 0.0),
+                    &[1.0; 4],
+                    &[c; 4],
+                );
+            }
+            let crop = rendered.crop;
+            if crop.width() <= 0.0 {
+                return;
+            }
+            // The whole picture, scaled so the crop lands on `dest`, clipped to it.
+            let k = w / f64::from(crop.width());
+            let (tw, th) = (
+                f64::from(rendered.texture.width()) * k,
+                f64::from(rendered.texture.height()) * k,
+            );
+            snapshot.push_clip(&grect(&dest));
+            snapshot.append_scaled_texture(
+                &rendered.texture,
+                gsk::ScalingFilter::Trilinear,
+                &graphene::Rect::new(
+                    (x - f64::from(crop.x()) * k) as f32,
+                    (y - f64::from(crop.y()) * k) as f32,
+                    tw as f32,
+                    th as f32,
+                ),
+            );
+            snapshot.pop();
+        })
+    });
 }
 
 /// Where a label goes, in content coordinates.

@@ -8,6 +8,7 @@
 
 mod geometry;
 mod label;
+mod math;
 mod paint;
 mod props;
 mod tools;
@@ -127,6 +128,8 @@ pub fn open(
     )));
 
     let pages = file.pages.len();
+    // A WebKit view is a process; only a diagram that has formulas pays for one.
+    let has_math = file.pages.iter().any(|p| p.model_attr("math") == Some("1"));
     let tab = Rc::new(DiagramTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),
@@ -163,6 +166,9 @@ pub fn open(
         on_image: RefCell::new(None),
         on_banner: RefCell::new(None),
     });
+    if has_math {
+        tab.view.set_typesetter(math::Typesetter::new(&tab.overlay));
+    }
     let zoom = place.zoom.map_or(Zoom::Fit, Zoom::Scale);
     tab.view.restore(zoom, (place.x, place.y));
     tab.refresh();
@@ -671,6 +677,11 @@ impl DiagramTab {
             self.finish_label();
         }
         editing
+    }
+
+    /// Whether formulas are still being typeset.
+    pub fn typesetting(&self) -> bool {
+        self.view.typesetting()
     }
 
     /// A cell's frame on the page: what the selection box is drawn around.

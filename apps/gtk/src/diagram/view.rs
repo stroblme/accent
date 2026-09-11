@@ -239,6 +239,26 @@ impl DiagramView {
         self.set_scroll((x, y));
     }
 
+    /// Typeset labels with formulas here, and paint again whenever it has finished some.
+    pub fn set_typesetter(&self, typesetter: Rc<super::math::Typesetter>) {
+        let weak = self.downgrade();
+        typesetter.connect_ready(move || {
+            if let Some(view) = weak.upgrade() {
+                view.queue_draw();
+            }
+        });
+        *self.imp().typesetter.borrow_mut() = Some(typesetter);
+    }
+
+    /// Whether formulas are still being typeset: the drill waits for them.
+    pub fn typesetting(&self) -> bool {
+        self.imp()
+            .typesetter
+            .borrow()
+            .as_ref()
+            .is_some_and(|t| t.busy())
+    }
+
     pub fn connect_edit(&self, f: impl Fn(Edit) + 'static) {
         *self.imp().on_edit.borrow_mut() = Some(Box::new(f));
     }
@@ -547,7 +567,16 @@ impl DiagramView {
                 snapshot.push_opacity(f64::from(theme::GHOST_ALPHA));
                 for (i, prim) in sheet.scene.prims.iter().enumerate() {
                     if ids.iter().any(|id| sheet.is_within(prim.cell(), id)) {
-                        paint::prim(snapshot, self.upcast_ref(), i, prim, frame, &imp.cache);
+                        let typesetter = imp.typesetter.borrow();
+                        paint::prim(
+                            snapshot,
+                            self.upcast_ref(),
+                            i,
+                            prim,
+                            frame,
+                            &imp.cache,
+                            typesetter.as_ref(),
+                        );
                     }
                 }
                 snapshot.pop();
@@ -636,6 +665,8 @@ mod imp {
         /// Alt held in the drag under way: no snapping to the grid.
         pub free: Cell<bool>,
         pub cache: Cache,
+        /// Where labels with formulas are typeset, for a diagram that has any.
+        pub typesetter: RefCell<Option<Rc<super::super::math::Typesetter>>>,
         pub on_edit: RefCell<Option<OnEdit>>,
         pub on_zoom: RefCell<Option<OnZoom>>,
     }
@@ -662,6 +693,7 @@ mod imp {
                 pointer: Cell::new(Point::default()),
                 free: Cell::new(false),
                 cache: Cache::default(),
+                typesetter: RefCell::new(None),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
             }
@@ -891,7 +923,16 @@ mod imp {
             let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
             for (i, prim) in sheet.scene.prims.iter().enumerate() {
                 if sheet.bounds[i].intersects(&visible) {
-                    paint::prim(snapshot, obj.upcast_ref(), i, prim, &frame, &self.cache);
+                    let typesetter = self.typesetter.borrow();
+                    paint::prim(
+                        snapshot,
+                        obj.upcast_ref(),
+                        i,
+                        prim,
+                        &frame,
+                        &self.cache,
+                        typesetter.as_ref(),
+                    );
                 }
             }
             obj.paint_overlays(snapshot, &sheet, &frame);

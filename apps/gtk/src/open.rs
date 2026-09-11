@@ -517,6 +517,14 @@ impl App {
             Some(Doc::Diagram(d)) => d.history(),
             _ => (false, false),
         };
+        // The same two buttons, named for what they walk.
+        let names = match self.active_diagram() {
+            Some(_) => ["win.diagram-undo", "win.diagram-redo"],
+            None => ["win.pdf-undo", "win.pdf-redo"],
+        };
+        for (button, action) in [(&self.undo_button, names[0]), (&self.redo_button, names[1])] {
+            button.set_tooltip_text(Some(crate::actions::label_of(action)));
+        }
         for (button, walks) in [(&self.undo_button, undo), (&self.redo_button, redo)] {
             button.set_visible(undo || redo);
             button.set_sensitive(walks);
