@@ -669,6 +669,11 @@ impl DiagramTab {
         });
     }
 
+    /// The cell whose label is being edited, if one is.
+    pub fn editing_label(&self) -> Option<CellId> {
+        self.label.borrow().as_ref().map(|e| e.cell.clone())
+    }
+
     /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the
     /// label. `false` when no label is being edited here.
     pub fn commit_label(self: &Rc<Self>) -> bool {
