@@ -916,6 +916,7 @@ fn install_chrome_css() {
              .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
                color: var(--accent-fg-color); }} \
              .accent-ring-hub {{ opacity: 0.75; }} \
+             .accent-ring-dim:not(:hover):not(:focus-visible) {{ opacity: var(--dim-opacity); }} \
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
