@@ -230,6 +230,21 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 println!("bench diagram no_tab");
                 return bench_quit(&app);
             };
+            // The main loop's stalls while the pointer works: a tick every 20 ms that reports a
+            // gap of more than 150, which is a freeze to the reader.
+            let (start, last) = (Instant::now(), Rc::new(Cell::new(Instant::now())));
+            glib::timeout_add_local(Duration::from_millis(20), move || {
+                let now = Instant::now();
+                let gap = now.duration_since(last.replace(now));
+                if gap > Duration::from_millis(150) {
+                    println!(
+                        "bench diagram stall {}ms at {:.1}s",
+                        gap.as_millis(),
+                        (now - start).as_secs_f64()
+                    );
+                }
+                glib::ControlFlow::Continue
+            });
             let canvas = tab.key_target();
             // Screen coordinates, for XTEST: the window sits at 0,0 with no window manager, but
             // its client-side shadow puts the widgets a margin in from the surface's corner.
@@ -256,13 +271,21 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 let _ =
                     WidgetExt::activate_action(&app.window, &format!("win.diagram-{tool}"), None);
             }
+            // The page's origin on the screen, for aiming at any diagram's page points.
+            let o = tab.to_widget(&accent_drawio::Rect::new(0.0, 0.0, 0.0, 0.0));
+            let origin = canvas
+                .compute_point(&app.window, &graphene::Point::new(o.x as f32, o.y as f32))
+                .map(|p| (p.x() + sx as f32, p.y() + sy as f32))
+                .unwrap_or_default();
             println!(
-                "bench diagram at a={:.0},{:.0} b={:.0},{:.0} scale={:.3}",
+                "bench diagram at a={:.0},{:.0} b={:.0},{:.0} scale={:.3} origin={:.1},{:.1}",
                 a.map_or(0.0, |p| p.x()),
                 a.map_or(0.0, |p| p.y()),
                 b.map_or(0.0, |p| p.x()),
                 b.map_or(0.0, |p| p.y()),
-                tab.scale()
+                tab.scale(),
+                origin.0,
+                origin.1
             );
             glib::timeout_add_local_once(Duration::from_secs(10), move || {
                 let canvas = tab.key_target();
@@ -275,9 +298,10 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                     &graphene::Point::new((r.x + r.w / 2.0) as f32, (r.y + r.h / 2.0) as f32),
                 );
                 println!(
-                    "bench diagram a_now={:?} editing={:?}",
+                    "bench diagram a_now={:?} editing={:?} labels={:?}",
                     at.map(|p| (p.x(), p.y())),
-                    tab.editing_label()
+                    tab.editing_label(),
+                    ["a", "b", "e"].map(|id| tab.label_markdown(id))
                 );
                 println!(
                     "bench diagram after a={:?} b={:?} selection={:?} history={:?}",
@@ -301,8 +325,9 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                     .filter(|c| !["0", "1", "a", "b", "e", "m", "k", "t"].contains(&c.id.as_str()))
                 {
                     println!(
-                        "bench diagram new {} style={} source={:?} target={:?} geometry={:?} ends={:?}",
+                        "bench diagram new {} label={:?} style={} source={:?} target={:?} geometry={:?} ends={:?}",
                         if cell.edge { "edge" } else { "vertex" },
+                        cell.label(),
                         cell.style,
                         cell.source,
                         cell.target,
