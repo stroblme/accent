@@ -756,7 +756,8 @@ fn stroke(style: &Resolved) -> Option<Stroke> {
             .get("dashPattern")
             .unwrap_or("3 3")
             .split_whitespace()
-            .filter_map(|v| v.parse::<f64>().ok())
+            .filter_map(crate::style::parse_num)
+            .filter(|v| *v >= 0.0)
             .map(|v| v * scale)
             .collect();
         match pattern.is_empty() {
@@ -981,6 +982,13 @@ mod tests {
             point_along(&line, 0.5, 10.0, Point::new(1.0, 2.0)),
             Point::new(76.0, -8.0)
         );
+    }
+
+    #[test]
+    fn a_dash_pattern_keeps_only_lengths_a_line_can_be_drawn_with() {
+        let style = crate::style::Style::parse("dashed=1;dashPattern=1e999 -2 NaN 3;");
+        let dash = stroke(&style.resolve(false)).unwrap().dash;
+        assert_eq!(dash, Some(vec![3.0]));
     }
 
     #[test]
