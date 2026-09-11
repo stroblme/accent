@@ -1,8 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/lsp", "crates/api", "apps/cli", "apps/gtk"]
+members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli", "apps/gtk"]
 # apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`
-default-members = ["crates/core", "crates/lsp", "crates/api", "apps/cli"]
+default-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ repository = "https://github.com/stroblme/accent"
 accent-core = { path = "crates/core" }
 accent-lsp = { path = "crates/lsp" }
 accent-api = { path = "crates/api" }
+accent-drawio = { path = "crates/drawio" }
 anyhow = "1"
 thiserror = "2"
 # One runtime for the language servers now and the MCP server later; `crates/lsp` owns it.
