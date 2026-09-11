@@ -754,8 +754,11 @@ impl Panel {
             .collect();
 
         let head = statuses.get(selected).and_then(|s| branch_parts(&s.branch));
-        self.counts
-            .set_text(head.as_ref().map_or("", |(_, counts)| counts.as_str()));
+        let counts = head.as_ref().map_or("", |(_, counts)| counts.as_str());
+        self.counts.set_text(counts);
+        // Hidden rather than empty: the box spends its spacing on an empty label too, which made
+        // the Sync button wider than its icon and put the icon off its centre.
+        self.counts.set_visible(!counts.is_empty());
         let branches = match fetched.branches {
             Some(branches) => branches,
             None => self.state.borrow().branches.clone(),

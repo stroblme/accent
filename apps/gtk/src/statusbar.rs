@@ -149,9 +149,12 @@ impl Bar {
     }
 
     /// Whether a sync is running. The branch greys out for the duration, a second click having
-    /// nothing to start; the spinner is the Git pane's, in place of its own Sync button.
+    /// nothing to start, and its tooltip says why; the spinner is the Git pane's, in place of its
+    /// own Sync button.
     pub fn set_syncing(&self, on: bool) {
         self.branch.set_sensitive(!on);
+        self.branch
+            .set_tooltip_text(Some(if on { "Syncing…" } else { "Sync" }));
     }
 
     /// What the file is: "Markdown", "PDF", or "Rust · UTF-8 · LF" for code.
