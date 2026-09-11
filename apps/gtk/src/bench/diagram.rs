@@ -33,8 +33,14 @@ const SAMPLE: &str = r#"<mxfile host="accent">
 
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits the diagram at `rel` (written from a sample first when
 /// there is none) and prints each step; `=shot:<rel>:<dir>` paints every page of it into
-/// `<dir>/page-N.png` and prints how long each took.
+/// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>` prints where the sample's
+/// two shapes are in the window and stays up for ten seconds, for an XTEST pointer to work on,
+/// then prints what the model holds.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
+    if let Some(rest) = arg.strip_prefix("hold:") {
+        let (rel, tool) = rest.split_once(':').unwrap_or((rest, ""));
+        return hold(app, rel, tool);
+    }
     let (rel, shots) = match arg.strip_prefix("shot:") {
         Some(rest) => match rest.split_once(':') {
             Some((rel, dir)) => (rel.to_string(), Some(PathBuf::from(dir))),
@@ -201,5 +207,70 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
                 .0
         );
         bench_quit(&app);
+    });
+}
+
+fn hold(app: &Rc<App>, rel: &str, tool: &str) {
+    let path = app.root().join(rel);
+    let _ = std::fs::write(&path, SAMPLE);
+    let (app, rel, tool) = (app.clone(), rel.to_string(), tool.to_string());
+    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        app.open_path(&rel);
+        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+            let Some(tab) = app.active_diagram() else {
+                println!("bench diagram no_tab");
+                return bench_quit(&app);
+            };
+            let canvas = tab.key_target();
+            let centre = |id: &str| {
+                let r = tab.frame_of(id).map(|r| tab.to_widget(&r))?;
+                canvas.compute_point(
+                    &app.window,
+                    &graphene::Point::new((r.x + r.w / 2.0) as f32, (r.y + r.h / 2.0) as f32),
+                )
+            };
+            let (a, b) = (centre("a"), centre("b"));
+            if !tool.is_empty() {
+                let _ =
+                    WidgetExt::activate_action(&app.window, &format!("win.diagram-{tool}"), None);
+            }
+            println!(
+                "bench diagram at a={:.0},{:.0} b={:.0},{:.0} scale={:.3}",
+                a.map_or(0.0, |p| p.x()),
+                a.map_or(0.0, |p| p.y()),
+                b.map_or(0.0, |p| p.x()),
+                b.map_or(0.0, |p| p.y()),
+                tab.scale()
+            );
+            glib::timeout_add_local_once(Duration::from_secs(10), move || {
+                println!(
+                    "bench diagram after a={:?} b={:?} selection={:?} history={:?}",
+                    tab.frame_of("a"),
+                    tab.frame_of("b"),
+                    tab.selection(),
+                    tab.history()
+                );
+                // What the gesture made, as the file will say it.
+                let xml = tab.text();
+                let file = accent_drawio::File::from_bytes(xml.as_bytes()).expect("our own XML");
+                for cell in file.pages[0]
+                    .cells
+                    .iter()
+                    .filter(|c| !["0", "1", "a", "b", "e", "m"].contains(&c.id.as_str()))
+                {
+                    println!(
+                        "bench diagram new {} style={} source={:?} target={:?} geometry={:?}",
+                        if cell.edge { "edge" } else { "vertex" },
+                        cell.style,
+                        cell.source,
+                        cell.target,
+                        cell.geometry
+                            .as_ref()
+                            .map(|g| (g.x, g.y, g.width, g.height))
+                    );
+                }
+                bench_quit(&app);
+            });
+        });
     });
 }

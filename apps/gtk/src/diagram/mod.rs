@@ -679,6 +679,15 @@ impl DiagramTab {
         editing
     }
 
+    /// A page rectangle in the canvas's own coordinates.
+    pub fn to_widget(&self, r: &accent_drawio::Rect) -> accent_drawio::Rect {
+        self.view.to_widget(r)
+    }
+
+    pub fn scale(&self) -> f64 {
+        self.view.scale()
+    }
+
     /// Whether formulas are still being typeset.
     pub fn typesetting(&self) -> bool {
         self.view.typesetting()
