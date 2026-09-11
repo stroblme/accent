@@ -177,6 +177,17 @@ pub fn to_html(text: &str) -> String {
                     None => evts.push(ev),
                 }
             }
+            // The class GitHub uses, so the preview can draw the checkbox in place of the bullet.
+            // The marker is the first thing in its item, so the nearest item start is its own.
+            Event::TaskListMarker(_) => {
+                if let Some(li) = evts
+                    .iter()
+                    .rposition(|e| matches!(e, Event::Start(Cm::Item)))
+                {
+                    evts[li] = Event::Html("<li class=\"task-list-item\">".into());
+                }
+                evts.push(ev);
+            }
             _ => evts.push(ev),
         }
         evts.extend(marker);
@@ -246,6 +257,23 @@ mod tests {
         let h = bare("$\\nosuchcommand$");
         assert!(h.contains("class=\"math math-inline\""), "{h}");
         assert!(h.contains("\\nosuchcommand"), "{h}");
+    }
+
+    /// A task item carries the class the preview drops the bullet for, so it shows the checkbox
+    /// alone; a plain item beside it, nested or not, keeps its bullet.
+    #[test]
+    fn html_marks_task_items() {
+        let h = bare("- [ ] todo\n- plain\n  - [x] nested\n");
+        assert_eq!(h.matches("<li class=\"task-list-item\">").count(), 2, "{h}");
+        assert!(
+            h.contains("<li class=\"task-list-item\"><input disabled=\"\" type=\"checkbox\"/>"),
+            "{h}"
+        );
+        assert!(h.contains("<li>plain"), "{h}");
+
+        // A loose list puts the checkbox inside a paragraph; the item still takes the class.
+        let h = bare("1. [x] one\n\n2. [ ] two\n");
+        assert_eq!(h.matches("<li class=\"task-list-item\">").count(), 2, "{h}");
     }
 
     /// Both embed forms have to end up as a URL the preview's `accent:` scheme can serve: a
