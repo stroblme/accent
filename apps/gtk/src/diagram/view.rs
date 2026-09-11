@@ -1007,8 +1007,10 @@ mod imp {
                         .scene
                         .hit(p, TOLERANCE / obj.scale())
                         .or_else(|| obj.imp().cache.label_at(&sheet.scene.prims, p));
-                    if let Some(id) = hit {
-                        obj.emit(Edit::Label(id.to_string()));
+                    // After the press is done with: the drag that shares it takes the keyboard for
+                    // the canvas, and would take it from an editor opened here.
+                    if let Some(id) = hit.map(str::to_string) {
+                        glib::idle_add_local_once(move || obj.emit(Edit::Label(id)));
                     }
                 }
             ));

@@ -336,7 +336,14 @@ impl App {
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
             "pdf-export-highlights" => self.export_highlights(),
-            "pdf-draw" => self.set_drawing(!self.drawing.get()),
+            // A diagram's ring is its own, not the window's drawing state.
+            "pdf-draw" => {
+                let out = match self.active_diagram() {
+                    Some(d) => d.ring_shown(),
+                    None => self.drawing.get(),
+                };
+                self.set_drawing(!out);
+            }
             "pdf-pen" => self.pdf_mode(pdfview::Mode::Pen),
             "pdf-highlighter" => self.pdf_mode(pdfview::Mode::Highlighter),
             "pdf-eraser" => self.pdf_mode(pdfview::Mode::Eraser),

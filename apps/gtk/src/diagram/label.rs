@@ -35,8 +35,8 @@ pub fn label_zoom(px: f64, doc_pt: f64) -> f64 {
 }
 
 impl LabelEditor {
-    /// The editor over `at` (widget coordinates) in `overlay`, holding `markdown`. `done` gets
-    /// the new Markdown, or `None` when nothing changed.
+    /// The editor over `at` (widget coordinates) in `overlay`, holding `markdown`, all of it
+    /// selected; [`focus`](Self::focus) gives it the keyboard.
     /// `px` is the label's font size on screen, which the editor's text is made to match.
     pub fn open(
         overlay: &gtk::Overlay,
@@ -92,8 +92,12 @@ impl LabelEditor {
         editor
             .buffer
             .select_range(&editor.buffer.start_iter(), &editor.buffer.end_iter());
-        editor.view.grab_focus();
         editor
+    }
+
+    /// Give the editor the keyboard, once whatever finishes it on leaving is listening.
+    pub fn focus(&self) {
+        self.view.grab_focus();
     }
 
     /// The note font, zoomed to `px` on screen.
