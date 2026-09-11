@@ -3,9 +3,10 @@
 use super::*;
 
 /// Lines of the note the caret is walked to: above the first heading, down through the sections,
-/// back up to the top one and down again, so the tab switch after it has a row far from the top to
-/// come back to. Clamped to the note's length.
-const WALK: [i32; 7] = [0, 6, 60, 120, 400, 12, 190];
+/// back above the first heading from the bottom, which takes the list to its top, then into the
+/// top section and down again, so the tab switch after it has a row far from the top to come back
+/// to. Clamped to the note's length.
+const WALK: [i32; 8] = [0, 6, 60, 120, 400, 0, 12, 190];
 
 /// Open `note` with the Outline pane showing, walk its caret over [`WALK`] and print what the pane
 /// selected each time; then open `other` and come back, then move the caret while the pane is

@@ -79,6 +79,8 @@ pub(super) struct List {
     selection: gtk::SingleSelection,
     /// The row the caret is in, which the selection shows. Shared with the pointer-leave handler.
     followed: Rc<Cell<u32>>,
+    /// The row to bring into view, which is not always the selected one: see [`List::follow`].
+    shown: Rc<Cell<u32>>,
     /// A scroll is waiting for the list's first layout.
     waiting: Rc<Cell<bool>>,
 }
@@ -135,30 +137,33 @@ impl List {
             view,
             selection,
             followed,
+            shown: Rc::new(Cell::new(gtk::INVALID_LIST_POSITION)),
             waiting: Rc::default(),
         }
     }
 
-    /// Select `row`, the one the caret is in, and scroll it into view as little as it takes;
-    /// `None` selects nothing. Neither activates the row nor moves the focus, so the editor
-    /// keeps the keyboard and nothing jumps.
-    pub(super) fn follow(&self, row: Option<usize>) {
-        let row = row.map_or(gtk::INVALID_LIST_POSITION, |row| row as u32);
-        self.followed.set(row);
-        select(&self.selection, row);
+    /// Select `row`, the one the caret is in, and scroll `shown` into view as little as it takes:
+    /// the same row, or the first while the caret is above it, which takes the list to its top.
+    /// `None` selects nothing, or scrolls nowhere. Neither activates a row nor moves the focus, so
+    /// the editor keeps the keyboard and nothing jumps.
+    pub(super) fn follow(&self, row: Option<usize>, shown: Option<usize>) {
+        let position = |row: Option<usize>| row.map_or(gtk::INVALID_LIST_POSITION, |r| r as u32);
+        self.followed.set(position(row));
+        self.shown.set(position(shown));
+        select(&self.selection, self.followed.get());
         if self.view.height() > 0 {
-            reveal(&self.view, row);
+            reveal(&self.view, self.shown.get());
         } else if !self.waiting.replace(true) {
             // Not laid out yet — the list of a tab just switched to — so there is no viewport to
             // scroll against, and GTK would leave the list at the top. The first frame that has
             // one scrolls to wherever the caret is by then.
-            let (followed, waiting) = (self.followed.clone(), self.waiting.clone());
+            let (shown, waiting) = (self.shown.clone(), self.waiting.clone());
             self.view.add_tick_callback(move |view, _| {
                 if view.height() == 0 {
                     return glib::ControlFlow::Continue;
                 }
                 waiting.set(false);
-                reveal(view, followed.get());
+                reveal(view, shown.get());
                 glib::ControlFlow::Break
             });
         }

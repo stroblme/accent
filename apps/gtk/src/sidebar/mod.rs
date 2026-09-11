@@ -360,13 +360,13 @@ impl Sidebar {
         }
     }
 
-    /// Select `row` of the text document `key`'s outline, the one its caret is in, and scroll it
-    /// into view; `None` selects nothing.
-    pub fn follow_outline(&self, key: &str, row: Option<usize>) {
+    /// Select `row` of the text document `key`'s outline, the one its caret is in, and scroll
+    /// `shown` into view; `None` selects nothing, or scrolls nowhere.
+    pub fn follow_outline(&self, key: &str, row: Option<usize>, shown: Option<usize>) {
         if let Some(list) = self.outline_list.borrow().as_ref()
             && list.key == key
         {
-            list.follow(row);
+            list.follow(row, shown);
         }
     }
 

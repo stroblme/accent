@@ -720,7 +720,12 @@ impl App {
             return;
         };
         let line = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())).line;
-        sidebar.follow_outline(&tab.rel(), tab.lang.outline_row(line));
+        let row = tab.lang.outline_row(line);
+        // Above the first heading nothing is selected and the list goes back to its top, rather
+        // than showing a part of the file the caret is not in. A gap between two functions keeps
+        // the list where it is, or it would jump to the top and back as the caret crossed one.
+        let shown = row.or(tab.lang.above_outline(line).then_some(0));
+        sidebar.follow_outline(&tab.rel(), row, shown);
     }
 
     /// The file's own facts in the status bar: what it is, whether it is saved, and its one

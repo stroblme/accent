@@ -107,6 +107,14 @@ impl State {
         row_at(&self.rows.borrow(), line)
     }
 
+    /// Whether a caret on `line` is before every symbol: above a note's first heading.
+    pub fn above_outline(&self, line: u32) -> bool {
+        self.rows
+            .borrow()
+            .first()
+            .is_some_and(|row| line < row.lines.0)
+    }
+
     /// Whether the "no language server" toast still has to be said, marking it said.
     pub fn claim_toast(&self) -> bool {
         !self.toasted.replace(true)
@@ -585,6 +593,19 @@ mod tests {
         assert_eq!(at(&code, 15), Some("Impl"), "after its last method");
         assert_eq!(at(&code, 22), None, "between two items");
         assert_eq!(at(&code, 40), None, "past the last one");
+    }
+
+    /// Above the first symbol is the one place without a row that sends the list to its top: a
+    /// gap between two functions keeps it where it is.
+    #[test]
+    fn only_a_caret_before_every_symbol_is_above_the_outline() {
+        let state = State::default();
+        let mut first = symbol("first", 3, vec![]);
+        first.range.end.line = 5;
+        *state.rows.borrow_mut() = flatten(&[first, symbol("second", 9, vec![])]);
+        assert!(state.above_outline(0));
+        assert!(!state.above_outline(3), "on the first one");
+        assert!(!state.above_outline(7), "between the two");
     }
 
     /// Every kind names a file that is actually in the GResource directory: a missing icon is a
