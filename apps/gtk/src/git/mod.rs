@@ -162,6 +162,8 @@ pub struct Panel {
     branch_shown: RefCell<(git::Branches, Option<usize>)>,
     counts: gtk::Label,
     sync: gtk::Button,
+    /// The Sync button, or the spinner standing in for it while a sync runs.
+    sync_slot: gtk::Stack,
     message: gtk::TextView,
     placeholder: gtk::Label,
     commit: gtk::Button,
@@ -195,7 +197,7 @@ pub struct Panel {
     /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
     /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
-    /// filled: this is the transfer the status bar spins for.
+    /// filled: this is the transfer [`Panel::sync_slot`] spins for.
     sync_busy: Cell<bool>,
     /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
     /// than stacked.
@@ -310,6 +312,17 @@ impl Panel {
             .valign(gtk::Align::Center)
             .build();
         sync.add_css_class("flat");
+        // While a sync runs, a spinner stands where the button was. A stack is as big as its
+        // biggest child, so the spinner keeps the button's footprint and the row does not move.
+        let sync_slot = gtk::Stack::new();
+        sync_slot.add_named(&sync, Some("button"));
+        sync_slot.add_named(
+            &adw::Spinner::builder()
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .build(),
+            Some("spinner"),
+        );
         // The "No Repository" page's own button: `git init` in a vault with no repository writes
         // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
         let check = gtk::Button::builder()
@@ -320,7 +333,7 @@ impl Panel {
 
         let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         branch_row.append(&branch);
-        branch_row.append(&sync);
+        branch_row.append(&sync_slot);
 
         // The message box is a card so it reads as somewhere to type rather than as a label, and
         // it grows with what is in it: one line while the message is a subject, taller as a body
@@ -455,6 +468,7 @@ impl Panel {
             branch_shown: RefCell::new((git::Branches::default(), None)),
             counts,
             sync,
+            sync_slot,
             message,
             placeholder,
             commit,
