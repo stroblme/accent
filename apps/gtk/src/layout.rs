@@ -342,9 +342,9 @@ impl App {
     ///
     /// Only a keystroke into *this* tab's own view counts. A reload writing into a background
     /// buffer is not the user typing, and neither is one arriving in another pane while the
-    /// keyboard is here.
+    /// keyboard is here, nor one replacing the text under the caret (`Tab::is_loading`).
     pub fn on_edit(&self, tab: &Rc<Tab>) {
-        if !tab.view.has_focus() {
+        if !tab.view.has_focus() || tab.is_loading() {
             return;
         }
         // Where the edit is. Consecutive keystrokes in one paragraph coalesce into one entry, so
