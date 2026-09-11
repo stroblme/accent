@@ -167,16 +167,7 @@ impl Prim {
                 anchor,
                 rotation,
                 ..
-            } => {
-                let corners = [
-                    Point::new(rect.x, rect.y),
-                    Point::new(rect.right(), rect.y),
-                    Point::new(rect.right(), rect.bottom()),
-                    Point::new(rect.x, rect.bottom()),
-                ];
-                geom::bounds_of(corners.map(|p| geom::rotate(p, *anchor, *rotation)))
-                    .unwrap_or(*rect)
-            }
+            } => geom::bounds_of(geom::corners(rect, *anchor, *rotation)).unwrap_or(*rect),
             Prim::Image { rect, rotation, .. } => geom::bounding_box(rect, *rotation),
         }
     }
@@ -297,11 +288,6 @@ impl<'a> Builder<'a> {
     fn vertex(&mut self, cell: &Cell, rect: Rect, locked: bool) {
         let style = cell.style.resolve(false);
         let rotation = style.num("rotation", 0.0);
-        let centre = rect.centre();
-        let turn = |mut path: Vec<PathCmd>| {
-            geom::map_path(&mut path, |p| geom::rotate(p, centre, rotation));
-            path
-        };
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shape = style.shape();
         let known = shapes::is_known(shape);
@@ -320,16 +306,17 @@ impl<'a> Builder<'a> {
             true => shapes::vertex(shape, rect, &style),
             false => shapes::vertex("label", rect, &style),
         };
-        for (i, part) in parts.into_iter().enumerate() {
+        for (i, mut part) in parts.into_iter().enumerate() {
             let fill = fill.clone().filter(|_| part.fill);
             let stroke = stroke.clone().filter(|_| part.stroke);
             if fill.is_none() && stroke.is_none() && !hittable {
                 continue;
             }
+            geom::rotate_path(&mut part.path, rect.centre(), rotation);
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
                 locked,
-                path: turn(part.path),
+                path: part.path,
                 fill,
                 stroke,
                 opacity,
@@ -364,22 +351,13 @@ impl<'a> Builder<'a> {
         opacity: f64,
         locked: bool,
     ) {
-        let outline = |rect: Rect| {
-            let mut path = vec![
-                PathCmd::MoveTo(Point::new(rect.x, rect.y)),
-                PathCmd::LineTo(Point::new(rect.right(), rect.y)),
-                PathCmd::LineTo(Point::new(rect.right(), rect.bottom())),
-                PathCmd::LineTo(Point::new(rect.x, rect.bottom())),
-                PathCmd::Close,
-            ];
-            geom::map_path(&mut path, |p| geom::rotate(p, rect.centre(), rotation));
-            path
-        };
+        let mut outline = shapes::rect(rect);
+        geom::rotate_path(&mut outline, rect.centre(), rotation);
         if let Some(bg) = style.color("imageBackground") {
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
                 locked,
-                path: outline(rect),
+                path: outline.clone(),
                 fill: Some(Paint::Solid(bg)),
                 stroke: None,
                 opacity,
@@ -405,7 +383,7 @@ impl<'a> Builder<'a> {
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
                 locked,
-                path: outline(rect),
+                path: outline,
                 fill: None,
                 stroke: Some(Stroke {
                     color: border,

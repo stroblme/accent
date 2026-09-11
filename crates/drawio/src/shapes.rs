@@ -305,7 +305,7 @@ fn rectangle(b: Rect, style: &Resolved) -> Vec<PathCmd> {
 }
 
 /// A rectangle, clockwise from its top-left corner as SVG draws `<rect>`.
-fn rect(b: Rect) -> Vec<PathCmd> {
+pub(crate) fn rect(b: Rect) -> Vec<PathCmd> {
     vec![
         PathCmd::MoveTo(Point::new(b.x, b.y)),
         PathCmd::LineTo(Point::new(b.right(), b.y)),
