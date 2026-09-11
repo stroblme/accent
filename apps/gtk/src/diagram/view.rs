@@ -14,7 +14,7 @@ use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 
 use super::geometry::{
-    self, DEFAULT_SIZE, DRAG_SLOP, Frame, HANDLE, Handle, Sheet, TOLERANCE, Zoom,
+    self, DEFAULT_SIZE, DRAG_SLOP, End, Frame, HANDLE, Handle, Sheet, TOLERANCE, Zoom,
 };
 use super::paint::{self, Cache};
 use super::tools::Tool;
@@ -39,10 +39,11 @@ pub enum Edit {
         tool: Tool,
         rect: Rect,
     },
-    /// A new edge; an end with no cell dangles at its point.
+    /// A new edge; an end with no cell dangles at its point, and one pinned to a connection
+    /// point carries its constraint.
     Connect {
-        source: (Option<CellId>, Point),
-        target: (Option<CellId>, Point),
+        source: End,
+        target: End,
     },
     /// Edit this cell's label.
     Label(CellId),
@@ -481,11 +482,10 @@ impl DiagramView {
                 }
             }
             Drag::Connect { from } if moved => {
-                let (source, target) = sheet.connect_ends(from, p, TOLERANCE / self.scale());
-                self.emit(Edit::Connect {
-                    source: (source, from),
-                    target: (target, p),
-                });
+                let scale = self.scale();
+                let (source, target) =
+                    sheet.connect_ends(from, p, TOLERANCE / scale, HANDLE / scale);
+                self.emit(Edit::Connect { source, target });
             }
             _ => {}
         }
@@ -519,6 +519,11 @@ impl DiagramView {
             _ => Some("crosshair"),
         };
         self.set_cursor_from_name(name);
+        // The connector shows the connection points under the pointer before it is pressed.
+        if imp.tool.get() == Tool::Connector {
+            imp.pointer.set(p);
+            self.queue_draw();
+        }
     }
 
     /// The selection, its handles and whatever a drag is doing, over the page.
@@ -568,6 +573,32 @@ impl DiagramView {
                 let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
                 let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
                 snapshot.append_color(&accent, &paint::grect(&square));
+            }
+        }
+        // The connector in hand: the shape under the pointer shows its connection points as
+        // draw.io's small crosses, and the one an end would pin to is lit.
+        if imp.tool.get() == Tool::Connector {
+            let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
+            let near = sheet.anchor_near(pointer, reach);
+            let shape = match &near {
+                Some((id, ..)) => Some(id.clone()),
+                None => sheet.vertex_at(pointer, tolerance),
+            };
+            let arm = (HANDLE / 2.0 - 1.0) as f32;
+            for (at, _) in shape.as_deref().map_or(&[][..], |id| sheet.anchors_of(id)) {
+                let c = frame.to_content(*at);
+                let (x, y) = (c.x as f32, c.y as f32);
+                let builder = gsk::PathBuilder::new();
+                builder.move_to(x - arm, y - arm);
+                builder.line_to(x + arm, y + arm);
+                builder.move_to(x + arm, y - arm);
+                builder.line_to(x - arm, y + arm);
+                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.5), &accent);
+                if near.as_ref().is_some_and(|n| n.1 == *at) {
+                    let lit = Rect::new(c.x - HANDLE / 2.0, c.y - HANDLE / 2.0, HANDLE, HANDLE);
+                    let tint = theme::at(accent, theme::HIGHLIGHT_ALPHA);
+                    snapshot.append_color(&tint, &paint::grect(&lit));
+                }
             }
         }
         let Some(drag) = drag.filter(|_| imp.moved.get()) else {
@@ -636,7 +667,9 @@ impl DiagramView {
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
             Drag::Connect { from } => {
-                let (a, b) = (frame.to_content(from), frame.to_content(pointer));
+                let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
+                let (s, t) = sheet.connect_ends(from, pointer, tolerance, reach);
+                let (a, b) = (frame.to_content(s.1), frame.to_content(t.1));
                 let builder = gsk::PathBuilder::new();
                 builder.move_to(a.x as f32, a.y as f32);
                 builder.line_to(b.x as f32, b.y as f32);
@@ -907,7 +940,14 @@ mod imp {
                     }
                     let Some(sheet) = obj.sheet() else { return };
                     let p = obj.page_at(x, y);
-                    if let Some(id) = sheet.scene.hit(p, TOLERANCE / obj.scale()) {
+                    // ponytail: a label found by its painted text only when nothing else is
+                    // under the pointer; walking both in one paint order is the upgrade if a
+                    // label over a shape should win.
+                    let hit = sheet
+                        .scene
+                        .hit(p, TOLERANCE / obj.scale())
+                        .or_else(|| obj.imp().cache.label_at(&sheet.scene.prims, p));
+                    if let Some(id) = hit {
                         obj.emit(Edit::Label(id.to_string()));
                     }
                 }

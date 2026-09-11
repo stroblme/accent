@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 
 use accent_drawio::geom::rotate;
-use accent_drawio::{CellId, Page, Point, Rect, Scene};
+use accent_drawio::{CellId, Constraint, Page, PathCmd, Point, Prim, Rect, Scene};
 
 pub const MIN_SCALE: f64 = 0.1;
 pub const MAX_SCALE: f64 = 8.0;
@@ -146,6 +146,34 @@ pub fn corners(r: &Rect, rotation: f64) -> [Point; 4] {
     .map(|p| rotate(p, c, rotation))
 }
 
+/// The point halfway along `path` by length: where draw.io puts an edge's label. A curve is
+/// taken as the line to its end.
+pub fn midpoint(path: &[PathCmd]) -> Option<Point> {
+    let points: Vec<Point> = path
+        .iter()
+        .filter_map(|c| match c {
+            PathCmd::MoveTo(p)
+            | PathCmd::LineTo(p)
+            | PathCmd::QuadTo(_, p)
+            | PathCmd::CurveTo(_, _, p) => Some(*p),
+            PathCmd::Close => None,
+        })
+        .collect();
+    let mut left = points.windows(2).map(|w| w[0].distance(w[1])).sum::<f64>() / 2.0;
+    for w in points.windows(2) {
+        let d = w[0].distance(w[1]);
+        if d > 0.0 && d >= left {
+            let t = left / d;
+            return Some(Point::new(
+                w[0].x + (w[1].x - w[0].x) * t,
+                w[0].y + (w[1].y - w[0].y) * t,
+            ));
+        }
+        left -= d;
+    }
+    points.first().copied()
+}
+
 /// One of the eight handles on a selected shape's box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handle {
@@ -243,6 +271,10 @@ pub fn resize_by(r: &Rect, handle: Handle, delta: Point, grid: Option<f64>) -> R
     Rect::new(l, t, rr - l, b - t)
 }
 
+/// One end of a connector being drawn: the shape it attaches to, if any, where it is, and the
+/// connection point that pins it when it was dropped on one.
+pub type End = (Option<CellId>, Point, Option<Constraint>);
+
 /// What a press landed on: see [`Sheet::pick`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
@@ -269,6 +301,9 @@ pub struct Sheet {
     pinned: HashSet<CellId>,
     /// Each turned vertex's `rotation`, in degrees.
     rotations: HashMap<CellId, f64>,
+    /// Each unlocked, connectable vertex's connection points, with the constraint that pins an
+    /// edge end to each.
+    anchors: HashMap<CellId, Vec<(Point, Constraint)>>,
 }
 
 impl Sheet {
@@ -280,6 +315,14 @@ impl Sheet {
             .iter()
             .fold(Rect::new(0.0, 0.0, w, h), |acc, b| acc.union(b));
         let layers: HashSet<&str> = page.layers().iter().map(|c| c.id.as_str()).collect();
+        // A cell on a locked layer, or under a locked group, paints locked: pinned like one
+        // locked itself.
+        let locked: HashSet<CellId> = scene
+            .prims
+            .iter()
+            .filter(|p| p.locked())
+            .map(|p| p.cell().to_string())
+            .collect();
         let mut sheet = Sheet {
             scene,
             bounds,
@@ -310,8 +353,21 @@ impl Sheet {
             if let Some(deg) = turned.filter(|d| *d != 0.0 && d.is_finite()) {
                 sheet.rotations.insert(cell.id.clone(), deg);
             }
-            if cell.style.get("movable") == Some("0") || cell.style.get("locked") == Some("1") {
+            if cell.style.get("movable") == Some("0")
+                || cell.style.get("locked") == Some("1")
+                || locked.contains(&cell.id)
+            {
                 sheet.pinned.insert(cell.id.clone());
+            }
+            let connectable = !cell
+                .attrs
+                .iter()
+                .any(|(k, v)| k == "connectable" && v == "0");
+            if cell.vertex && connectable && !locked.contains(&cell.id) {
+                let anchors = accent_drawio::anchors(page, &cell.id);
+                if !anchors.is_empty() {
+                    sheet.anchors.insert(cell.id.clone(), anchors);
+                }
             }
         }
         sheet
@@ -395,8 +451,25 @@ impl Sheet {
             .is_some_and(|r| r.contains(rotate(p, r.centre(), -self.rotation(id))))
     }
 
-    /// What a connector drawn from `press` to `release` attaches to at either end. An end takes
-    /// the shape under it only when the other end is outside that shape: a line drawn within a
+    /// The connection points of vertex `id`, none for anything else.
+    pub fn anchors_of(&self, id: &str) -> &[(Point, Constraint)] {
+        self.anchors.get(id).map_or(&[], Vec::as_slice)
+    }
+
+    /// The connection point nearest `p` within `reach`, on any shape that has them.
+    pub fn anchor_near(&self, p: Point, reach: f64) -> Option<(CellId, Point, Constraint)> {
+        self.anchors
+            .iter()
+            .flat_map(|(id, list)| list.iter().map(move |(at, c)| (id, *at, *c)))
+            .map(|(id, at, c)| (at.distance(p), id, at, c))
+            .filter(|(d, ..)| *d <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id, at, c)| (id.clone(), at, c))
+    }
+
+    /// What a connector drawn from `press` to `release` attaches to at either end. An end
+    /// dropped within `reach` of a connection point is pinned there. Otherwise it takes the
+    /// shape under it only when the other end is outside that shape: a line drawn within a
     /// shape — a big text box, a slide's background — is a line on it, and attaching it would
     /// start the arrow on the shape's far border and run it back through where it was drawn.
     pub fn connect_ends(
@@ -404,13 +477,22 @@ impl Sheet {
         press: Point,
         release: Point,
         tolerance: f64,
-    ) -> (Option<CellId>, Option<CellId>) {
-        let source = self
-            .vertex_at(press, tolerance)
-            .filter(|s| !self.contains(s, release));
-        let target = self
-            .vertex_at(release, tolerance)
-            .filter(|t| !self.contains(t, press) && source.as_ref() != Some(t));
+        reach: f64,
+    ) -> (End, End) {
+        let end = |p: Point, other: Point| -> End {
+            match self.anchor_near(p, reach) {
+                Some((id, at, c)) => (Some(id), at, Some(c)),
+                None => {
+                    let under = self.vertex_at(p, tolerance);
+                    (under.filter(|v| !self.contains(v, other)), p, None)
+                }
+            }
+        };
+        let source = end(press, release);
+        let mut target = end(release, press);
+        if target.0.is_some() && target.0 == source.0 {
+            target = (None, release, None);
+        }
         (source, target)
     }
 
@@ -423,12 +505,22 @@ impl Sheet {
             .collect()
     }
 
-    /// Every cell in paint order that sits directly on a layer: what Select All takes.
+    /// Halfway along edge `id` as it is drawn: where its label goes.
+    pub fn edge_middle(&self, id: &str) -> Option<Point> {
+        self.scene.prims.iter().find_map(|p| match p {
+            Prim::Path { cell, path, .. } if cell == id && self.is_edge(id) => midpoint(path),
+            _ => None,
+        })
+    }
+
+    /// Every unlocked cell in paint order that sits directly on a layer: what Select All
+    /// takes, draw.io leaving what is on a locked layer out of a selection.
     pub fn top_level(&self) -> Vec<CellId> {
         let mut seen = HashSet::new();
         self.scene
             .prims
             .iter()
+            .filter(|p| !p.locked())
             .map(|p| p.cell())
             .filter(|id| self.parent(id).is_none() && seen.insert(id.to_string()))
             .map(str::to_string)
@@ -526,11 +618,8 @@ mod tests {
             .push(cell("t", Rect::new(250.0, 200.0, 40.0, 20.0), ""));
         let sheet = Sheet::of(&page);
         let ends = |a: (f64, f64), b: (f64, f64)| {
-            let (s, t) = sheet.connect_ends(Point::new(a.0, a.1), Point::new(b.0, b.1), 1.0);
-            (
-                s.as_deref().map(str::to_string),
-                t.as_deref().map(str::to_string),
-            )
+            let (s, t) = sheet.connect_ends(Point::new(a.0, a.1), Point::new(b.0, b.1), 1.0, 1.0);
+            (s.0, t.0)
         };
         let some = |id: &str| Some(id.to_string());
         // Drawn within the text box: on it, attached to nothing.
@@ -541,6 +630,50 @@ mod tests {
         assert_eq!(ends((70.0, 60.0), (270.0, 210.0)), (some("s"), some("t")));
         // From outside everything onto a shape.
         assert_eq!(ends((500.0, 500.0), (270.0, 210.0)), (None, some("t")));
+    }
+
+    #[test]
+    fn a_locked_layer_pins_its_cells_and_select_all_leaves_them_out() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="L" parent="0" style="locked=1;"/><mxCell id="C" parent="0"/>
+            <mxCell id="a" parent="L" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="b" parent="C" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0]);
+        assert!(sheet.is_pinned("a") && !sheet.is_pinned("b"));
+        assert_eq!(sheet.top_level(), vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn an_edge_s_middle_is_halfway_along_its_bends() {
+        let path = [
+            PathCmd::MoveTo(Point::new(0.0, 0.0)),
+            PathCmd::LineTo(Point::new(100.0, 0.0)),
+            PathCmd::LineTo(Point::new(100.0, 50.0)),
+        ];
+        assert!(near(midpoint(&path).unwrap(), Point::new(75.0, 0.0)));
+        assert_eq!(midpoint(&[]), None);
+    }
+
+    #[test]
+    fn a_connector_end_snaps_to_the_nearest_connection_point() {
+        let mut page = Page::blank("P", "p");
+        let cell = |id: &str, r: Rect| accent_drawio::Cell::new_vertex(id, "1", r, "", "");
+        page.cells
+            .push(cell("s", Rect::new(50.0, 50.0, 40.0, 20.0)));
+        page.cells
+            .push(cell("t", Rect::new(250.0, 200.0, 40.0, 20.0)));
+        let sheet = Sheet::of(&page);
+        let (s, t) = sheet.connect_ends(Point::new(91.0, 61.0), Point::new(249.0, 209.0), 1.0, 3.0);
+        assert_eq!((s.0.as_deref(), s.1), (Some("s"), Point::new(90.0, 60.0)));
+        assert_eq!(s.2.map(|c| c.point), Some(Point::new(1.0, 0.5)));
+        assert_eq!((t.0.as_deref(), t.1), (Some("t"), Point::new(250.0, 210.0)));
+        assert_eq!(t.2.map(|c| c.point), Some(Point::new(0.0, 0.5)));
+        // Away from every point, an end is where it was dropped and pins nothing.
+        let (_, free) =
+            sheet.connect_ends(Point::new(91.0, 61.0), Point::new(400.0, 400.0), 1.0, 3.0);
+        assert_eq!(free, (None, Point::new(400.0, 400.0), None));
     }
 
     #[test]

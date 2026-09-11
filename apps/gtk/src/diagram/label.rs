@@ -65,6 +65,10 @@ impl LabelEditor {
         frame.set_margin_top(y.max(0.0) as i32);
         frame.set_size_request(w as i32, h as i32);
         overlay.add_overlay(&frame);
+        // Placed by its margins over the page: measured, an editor near the far edge would
+        // widen the overlay and with it the canvas under the label being edited.
+        overlay.set_measure_overlay(&frame, false);
+        overlay.set_clip_overlay(&frame, true);
         let editor = Rc::new(LabelEditor {
             cell,
             view,
@@ -123,6 +127,12 @@ impl LabelEditor {
             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
             .to_string();
         (text != self.original).then_some(text)
+    }
+
+    /// Put `text` in place of the selection, as a key typed into the editor would.
+    pub fn type_text(&self, text: &str) {
+        self.buffer.delete_selection(true, true);
+        self.buffer.insert_at_cursor(text);
     }
 
     pub fn has_focus(&self) -> bool {
