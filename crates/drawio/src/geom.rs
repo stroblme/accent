@@ -93,16 +93,17 @@ impl Rect {
     }
 }
 
-/// `p` turned `degrees` clockwise about `centre`.
+/// `p` turned `degrees` clockwise about `centre`, in `mxUtils.getRotatedPoint`'s order of
+/// operations, so a rotated terminal's routes agree with draw.io's to the last bit.
 pub fn rotate(p: Point, centre: Point, degrees: f64) -> Point {
     if degrees == 0.0 {
         return p;
     }
-    let (sin, cos) = degrees.to_radians().sin_cos();
+    let (sin, cos) = (std::f64::consts::PI * degrees / 180.0).sin_cos();
     let (dx, dy) = (p.x - centre.x, p.y - centre.y);
     Point::new(
-        centre.x + dx * cos - dy * sin,
-        centre.y + dx * sin + dy * cos,
+        dx * cos - dy * sin + centre.x,
+        dy * cos + dx * sin + centre.y,
     )
 }
 
