@@ -274,7 +274,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
 }
 
-pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
+pub fn wire_window(app: &Rc<App>) {
     // The bottom bar of an `AdwToolbarView` is a `GtkWindowHandle`, so a secondary press anywhere
     // in it asks the shell for the window menu — Restore / Minimize / Maximize / Close under a
     // footer that is one line of the document's own facts. Claim the press and do nothing with it.
@@ -325,7 +325,7 @@ pub fn wire_window(app: &Rc<App>, modes: &gtk::ToggleButton) {
     ));
     app.statusbar.zoom().add_controller(fit);
 
-    modes.connect_toggled(glib::clone!(
+    app.modes.connect_toggled(glib::clone!(
         #[weak]
         app,
         move |button| {

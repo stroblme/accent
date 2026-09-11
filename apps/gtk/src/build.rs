@@ -286,7 +286,7 @@ pub fn build_window(
         toolbar,
         editor_column,
         header,
-        modes: modes.clone(),
+        modes,
         drawing_button: drawing.clone(),
         undo_button: undo,
         redo_button: redo,
@@ -345,7 +345,7 @@ pub fn build_window(
     wire_pane(&app, &first);
 
     install_actions(&app);
-    wire_window(&app, &modes);
+    wire_window(&app);
     if vault.is_some() {
         wire_tree(&app);
     }
