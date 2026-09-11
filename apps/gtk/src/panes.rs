@@ -189,6 +189,8 @@ pub enum Spot {
     /// A 1-based line and column, as [`crate::editor::Tab::goto_line`] takes them.
     Caret(i32, i32),
     Page(Anchor),
+    /// A diagram's page, by its index.
+    Sheet(usize),
     Whole,
 }
 
@@ -217,6 +219,7 @@ pub fn coalesces(last: &Place, next: &Place, apart: Duration) -> bool {
         }
         // A page is as near as a PDF's places get: the fractions move with every scroll.
         (Spot::Page(a), Spot::Page(b)) => a.page == b.page,
+        (Spot::Sheet(a), Spot::Sheet(b)) => a == b,
         (Spot::Whole, Spot::Whole) => true,
         _ => false,
     }

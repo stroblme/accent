@@ -59,6 +59,7 @@ impl App {
     pub fn refresh_zoom(&self) {
         let label = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
+            Some(Doc::Diagram(d)) => Some(d.zoom_label()),
             Some(Doc::Terminal(term)) => term.zoom_label(),
             Some(Doc::Text(_)) | Some(Doc::Diff(_)) => {
                 let zoom = self.zoom.get();

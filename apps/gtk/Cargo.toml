@@ -13,6 +13,7 @@ path = "src/main.rs"
 # does not make libpdfium a build requirement (see accent_core::pdf::available).
 accent-core = { workspace = true, features = ["pdf"] }
 accent-api.workspace = true
+accent-drawio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

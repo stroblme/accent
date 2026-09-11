@@ -294,7 +294,11 @@ fn upsert(
     // ever compared against an earlier hash of the same file taken the same way.
     let read = match f.kind {
         FileKind::Markdown => crate::fs::read_text(&f.canonical).ok(),
-        FileKind::Other if f.size <= MAX_INDEXED_BODY => crate::fs::read_text(&f.canonical).ok(),
+        // A diagram's body is XML whose every style key would come back as a search hit, so it
+        // keeps a stat row only; searching its labels is a job for the diagram crate.
+        FileKind::Other if f.size <= MAX_INDEXED_BODY && !crate::path::is_diagram(&f.rel_path) => {
+            crate::fs::read_text(&f.canonical).ok()
+        }
         _ => None,
     };
     let (hash, text) = match read {
@@ -859,6 +863,11 @@ mod tests {
         .unwrap();
         fs::write(vault.path().join("big.txt"), "zorblat\n".repeat(300_000)).unwrap();
         fs::write(vault.path().join("bin.dat"), b"\0zorblat\n").unwrap();
+        fs::write(
+            vault.path().join("flow.drawio"),
+            r#"<mxfile><diagram><mxGraphModel><root><mxCell id="0" value="zorblat"/></root></mxGraphModel></diagram></mxfile>"#,
+        )
+        .unwrap();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
@@ -892,6 +901,11 @@ mod tests {
         assert_eq!(body_count("tool.py"), 1);
         assert_eq!(body_count("big.txt"), 0, "over MAX_INDEXED_BODY");
         assert_eq!(body_count("bin.dat"), 0, "a NUL byte is not text");
+        assert_eq!(
+            body_count("flow.drawio"),
+            0,
+            "a diagram's XML is not searched"
+        );
         assert!(
             ix.get_file("big.txt").unwrap().is_some(),
             "still a file row"

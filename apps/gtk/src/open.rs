@@ -60,6 +60,7 @@ impl App {
             Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
+            Kind::Diagram => self.open_diagram(&key, &path, how),
             Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
         }
     }
@@ -68,7 +69,7 @@ impl App {
     ///
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
-    fn mark_opened(&self, page: &adw::TabPage, how: Opened) {
+    pub(crate) fn mark_opened(&self, page: &adw::TabPage, how: Opened) {
         if how != Opened::Preview {
             return;
         }
@@ -166,6 +167,12 @@ impl App {
                 return self.cannot_open(key, e);
             }
         };
+        // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
+        if doc::file_name(key).to_ascii_lowercase().ends_with(".xml") && diagram::sniff(&text.text)
+        {
+            self.awaiting.borrow_mut().remove(key);
+            return self.open_diagram_text(key, text, how);
+        }
         let prefs = self.prefs();
         let tab = editor::open(
             &self.root(),
@@ -409,6 +416,13 @@ impl App {
     /// The window's state rather than the tab's: the button is in the header, and moving between
     /// two PDFs with the tools out should not put them away.
     pub fn set_drawing(self: &Rc<Self>, showing: bool) {
+        // A diagram keeps its own: its ring is out by default, and one diagram's choice must not
+        // arm a PDF's pen.
+        if let Some(d) = self.active_diagram() {
+            d.show_ring(showing, self.ring_at.get());
+            self.drawing_button.set_active(showing);
+            return self.sync_status();
+        }
         let Some(pdf) = self.active_pdf() else { return };
         if showing && !self.pdf_is_writable(&pdf) {
             self.drawing_button.set_active(false);
@@ -472,10 +486,21 @@ impl App {
                 false => pdfview::Mode::Select,
             });
         }
+        let diagram = self.active_diagram();
+        if let Some(d) = &diagram {
+            if let Some(at) = d.ring_at() {
+                self.ring_at.set(Some(at));
+            }
+            d.show_ring(d.ring_shown(), self.ring_at.get());
+        }
         self.sync_export();
-        // Only a PDF can be drawn on, so the button goes with the tab.
-        self.drawing_button.set_visible(self.active_pdf().is_some());
-        self.drawing_button.set_active(self.drawing.get());
+        // Only a PDF or a diagram can be drawn on, so the button goes with the tab.
+        self.drawing_button
+            .set_visible(self.active_pdf().is_some() || diagram.is_some());
+        self.drawing_button.set_active(match &diagram {
+            Some(d) => d.ring_shown(),
+            None => self.drawing.get(),
+        });
         self.sync_history();
     }
 
@@ -483,11 +508,15 @@ impl App {
     /// condition `Ctrl+Z` answers under — and either has something to walk. They come and go as a
     /// pair, the one with nothing insensitive: hidden one at a time, Redo appearing beside the
     /// Drawing toggle pushed Undo out from under the pointer.
+    ///
+    /// Over a diagram every edit is a step, so there the pair shows whenever either side has
+    /// something to walk, tool in hand or not.
     pub fn sync_history(&self) {
-        let (undo, redo) = self
-            .active_pdf()
-            .filter(|pdf| pdf.mode() != pdfview::Mode::Select)
-            .map_or((false, false), |pdf| pdf.history());
+        let (undo, redo) = match self.active_doc() {
+            Some(Doc::Pdf(pdf)) if pdf.mode() != pdfview::Mode::Select => pdf.history(),
+            Some(Doc::Diagram(d)) => d.history(),
+            _ => (false, false),
+        };
         for (button, walks) in [(&self.undo_button, undo), (&self.redo_button, redo)] {
             button.set_visible(undo || redo);
             button.set_sensitive(walks);
@@ -680,7 +709,7 @@ impl App {
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
     /// sentence and at most one button).
-    fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
+    pub(crate) fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
         self.awaiting.borrow_mut().remove(key);
         let key = key.to_string();
         let status = adw::StatusPage::builder()
@@ -946,7 +975,7 @@ impl App {
 
     /// A file that would not open. One that is not there reads the same whoever found out: the
     /// session naming a note deleted since, or a link to one never written.
-    fn cannot_open(&self, key: &str, e: std::io::Error) {
+    pub(crate) fn cannot_open(&self, key: &str, e: std::io::Error) {
         match e.kind() {
             std::io::ErrorKind::NotFound => {
                 self.cannot(&format!("open {key}"), "not in this vault")
@@ -988,7 +1017,7 @@ impl App {
 
     /// A tab on a file from outside this window's vault says so on its own tab, so saving it is
     /// never a surprise and it is obvious why it has no backlinks.
-    fn mark_loose(&self, page: &adw::TabPage, key: &str) {
+    pub(crate) fn mark_loose(&self, page: &adw::TabPage, key: &str) {
         if self.vault.is_some() && doc::is_loose_key(key) {
             page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
             page.set_indicator_tooltip("Outside this vault");
@@ -1120,7 +1149,7 @@ impl App {
     /// that pane is still open, and otherwise the active one. A restore is the one open that
     /// knows its pane before the tab exists, and a text tab only exists once the worker's read
     /// lands, so the pane is looked up here rather than the tab moved there afterwards.
-    fn tabs_for(&self, key: &str) -> adw::TabView {
+    pub(crate) fn tabs_for(&self, key: &str) -> adw::TabView {
         let placed = self.placing.borrow_mut().remove(key);
         match placed
             .and_then(|pane| pane.upgrade())

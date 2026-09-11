@@ -254,6 +254,18 @@ pub struct PdfPlace {
     pub zoom: PdfZoom,
 }
 
+/// Where a diagram was last being looked at.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DiagramPlace {
+    pub page: usize,
+    /// `None` while the page is fitted to the window, which is how a diagram opens.
+    pub zoom: Option<f64>,
+    /// The scroll position, in pixels of the zoomed canvas.
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
@@ -280,6 +292,8 @@ pub struct Session {
     /// ponytail: never pruned, so a state file grows by an entry per PDF ever opened. Drop the
     /// ones the index no longer has the day that is measurable.
     pub pdf: BTreeMap<String, PdfPlace>,
+    /// Where each diagram was left, the same way (and with the same ceiling) as `pdf`.
+    pub diagram: BTreeMap<String, DiagramPlace>,
 }
 
 impl Default for Session {
@@ -295,6 +309,7 @@ impl Default for Session {
             recent_notes: Vec::new(),
             recent_commands: Vec::new(),
             pdf: BTreeMap::new(),
+            diagram: BTreeMap::new(),
         }
     }
 }
@@ -1101,6 +1116,15 @@ daily_dir = "Daily"
                     zoom: PdfZoom::Scale(1.5),
                 },
             )]),
+            diagram: BTreeMap::from([(
+                "Figures/flow.drawio".to_string(),
+                DiagramPlace {
+                    page: 2,
+                    zoom: Some(0.75),
+                    x: 10.0,
+                    y: 20.0,
+                },
+            )]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1114,6 +1138,7 @@ daily_dir = "Daily"
             assert_eq!(back.active, s.active);
             assert_eq!(back.layout, s.layout);
             assert_eq!(back.pdf, s.pdf);
+            assert_eq!(back.diagram, s.diagram);
             assert!(!back.sidebar);
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.view, "preview");
