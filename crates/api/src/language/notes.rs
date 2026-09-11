@@ -290,6 +290,9 @@ impl Notes {
 
     /// One hint per link in `rel` the index cannot resolve: a wikilink by its name, a markdown
     /// link by the vault path it names from the note's folder. Anchors are not checked.
+    ///
+    /// Then one warning per formula the preview cannot render. A warning and not an error: the
+    /// converter rejects some valid LaTeX it does not support.
     fn diagnose(&self, rel: &str, text: &str) -> Result<Vec<Diagnostic>> {
         let a = markdown::analyze(text);
         let (links, targets): (Vec<&markdown::Link>, Vec<String>) = a
@@ -297,21 +300,33 @@ impl Notes {
             .iter()
             .filter_map(|l| Some((l, checked_target(rel, l)?)))
             .unzip();
-        if links.is_empty() {
-            return Ok(Vec::new());
+        let mut items = Vec::new();
+        if !links.is_empty() {
+            let resolved = locked(&self.index).resolve_targets(&targets)?;
+            items.extend(
+                links
+                    .iter()
+                    .zip(resolved)
+                    .filter(|(_, found)| found.is_none())
+                    .map(|(l, _)| Diagnostic {
+                        range: range_of(text, &l.range),
+                        severity: Severity::Hint,
+                        message: format!("No note named {}", l.target),
+                        source: Some("accent".to_string()),
+                    }),
+            );
         }
-        let resolved = locked(&self.index).resolve_targets(&targets)?;
-        Ok(links
-            .iter()
-            .zip(resolved)
-            .filter(|(_, found)| found.is_none())
-            .map(|(l, _)| Diagnostic {
-                range: range_of(text, &l.range),
-                severity: Severity::Hint,
-                message: format!("No note named {}", l.target),
-                source: Some("accent".to_string()),
-            })
-            .collect())
+        items.extend(
+            markdown::math_errors(text)
+                .into_iter()
+                .map(|(range, why)| Diagnostic {
+                    range: range_of(text, &range),
+                    severity: Severity::Warning,
+                    message: format!("Cannot render this formula: {why}"),
+                    source: Some("accent".to_string()),
+                }),
+        );
+        Ok(items)
     }
 
     fn completion(&self, rel: &str, pos: Pos) -> Result<Completions> {

@@ -65,6 +65,28 @@ impl Mode {
     }
 }
 
+impl crate::ring::Tool for Mode {
+    /// The tools, in the order they sit on the ring: pen at the top, then clockwise. Each one's
+    /// action and label are [`Mode::action`]'s, so a button says what the palette says.
+    const TOOLS: &'static [(Mode, &'static str)] = &[
+        (Mode::Pen, "tool-pen-symbolic"),
+        (Mode::Highlighter, "tool-highlighter-symbolic"),
+        (Mode::Eraser, "tool-eraser-symbolic"),
+        (Mode::Line, "tool-line-symbolic"),
+        (Mode::Rect, "tool-rect-symbolic"),
+        (Mode::Circle, "tool-circle-symbolic"),
+        (Mode::Adjust, "tool-adjust-symbolic"),
+    ];
+
+    fn action(self) -> Option<&'static str> {
+        Mode::action(self)
+    }
+
+    fn none() -> Mode {
+        Mode::Select
+    }
+}
+
 /// How close to an axis, in degrees, a line has to be to snap onto it.
 const SNAP_DEG: f32 = 7.0;
 /// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.

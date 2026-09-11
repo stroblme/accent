@@ -9,10 +9,10 @@ const ZOOM_STEP: f64 = 0.1;
 impl App {
     /// Step an image's zoom, or, with `None`, put it back to fitting the window.
     ///
-    /// Reset is the fit, which is how the tab opened, and is what a PDF's Fit Width is. The step
-    /// is taken from the tab's own zoom rather than from the size it asked the picture for: a
-    /// pixel width is a whole number, and a zoom read back out of one lands short of the tenth it
-    /// was, which is enough for the next step to be the zoom the image is already at.
+    /// Reset is the fit, which is how the tab opened. The step is taken from the tab's own zoom
+    /// rather than from the size it asked the picture for: a pixel width is a whole number, and a
+    /// zoom read back out of one lands short of the tenth it was, which is enough for the next
+    /// step to be the zoom the image is already at.
     pub fn zoom_image(self: &Rc<Self>, image: &doc::Viewer, out: Option<bool>) {
         let Some(picture) = picture_of(&image.page) else {
             return;

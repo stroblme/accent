@@ -313,7 +313,7 @@ pub fn wire_window(app: &Rc<App>) {
             // A popover parented by hand stays parented until it is unparented by hand — but not
             // while it is closing. `closed` is emitted from inside the item's own `clicked`, and
             // an unparented widget has no path to the window's action muxer, so unparenting there
-            // dropped the action the click had just asked for: the menu appeared, Fit Page did
+            // dropped the action the click had just asked for: the menu appeared, Fit Height did
             // nothing, and the page stayed fitted to the width. The idle runs once the click is
             // over.
             popover.connect_closed(|p| {
@@ -451,8 +451,14 @@ pub fn wire_window(app: &Rc<App>) {
         move |_, x, y| {
             if last.replace(Some((x, y))) != Some((x, y)) {
                 app.show_chrome();
+                app.hover_status(Some((x, y)));
             }
         }
+    ));
+    motion.connect_leave(glib::clone!(
+        #[weak]
+        app,
+        move |_| app.hover_status(None)
     ));
     app.window.add_controller(motion);
     // A wheel or touchpad scroll is the reader looking around the document rather than writing

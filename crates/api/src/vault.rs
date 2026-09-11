@@ -639,6 +639,34 @@ mod tests {
         assert_eq!(items.len(), 1, "{items:?}");
         assert_eq!(items[0].message, "No note named sub/Gone Away.md");
 
+        // A formula the preview cannot render is a warning over the whole of it, `$` and all.
+        rt.block_on(
+            f.vault
+                .change_document("a.md", "[[Nope]]\nok $x^2$, not $\\left( x$\n".to_string()),
+        )
+        .unwrap();
+        let Some(Event::Diagnostics { items, .. }) =
+            f.wait(|e| matches!(e, Event::Diagnostics { .. }))
+        else {
+            panic!("a change has to say what is wrong with the note");
+        };
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[1].severity, Severity::Warning);
+        assert!(
+            items[1]
+                .message
+                .starts_with("Cannot render this formula: unbalanced group"),
+            "{items:?}"
+        );
+        let at = |character| Pos { line: 1, character };
+        assert_eq!(
+            items[1].range,
+            Range {
+                start: at(14),
+                end: at(24)
+            }
+        );
+
         rt.block_on(async {
             // The provider answers about the text the editor has, not about the file on disk.
             f.vault

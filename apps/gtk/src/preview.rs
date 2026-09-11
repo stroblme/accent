@@ -800,6 +800,10 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, family: &str, pt: f64) 
          h5, h6 {{ font-size: 1rem; }}\n\
          p {{ margin: 0.8em 0; }}\n\
          ul, ol {{ padding-left: 1.4em; }}\n\
+         /* A task item's checkbox is its bullet: it takes the marker's place in the gutter, so\n\
+            its text lines up with a plain item's beside it. */\n\
+         li.task-list-item {{ list-style: none; }}\n\
+         li.task-list-item input {{ margin: 0 0 0 -1.4em; }}\n\
          a {{ color: {accent}; text-decoration: underline; }}\n\
          img {{ max-width: 100%; height: auto; }}\n\
          /* A display formula's box is its ink: unlike a line of prose it carries none of the\n\

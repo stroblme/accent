@@ -6,9 +6,9 @@
 //! between them — the history, the search and the outline that make it more than a viewer.
 
 use super::protocol::Request;
+use super::ring;
 use super::selection::pages_of;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Reply, Span, render};
-use crate::ring;
 use accent_api::PdfLink;
 use accent_core::pdf;
 use adw::prelude::*;
@@ -49,7 +49,7 @@ pub struct PdfTab {
     /// and `PdfView` has one.
     pub(super) host: gtk::Box,
     /// The drawing tools, floating over the page while the window says they are wanted.
-    pub(super) ring: Rc<ring::Ring>,
+    pub(super) ring: Rc<ring::PdfRing>,
     /// The strip the thumbnails live in, built once. Handing the Outline pane a fresh
     /// `GtkScrolledWindow` around the same widget every time would re-parent a widget that
     /// already has a parent, which GTK refuses with a critical.
@@ -142,7 +142,7 @@ pub fn open(
         .build();
     // The tools float over the page rather than sitting in the chrome, so the scroller goes in
     // an overlay and the ring is its one child.
-    let ring = ring::Ring::new();
+    let ring = ring::PdfRing::new();
     let overlay = gtk::Overlay::builder().child(&scroller).build();
     overlay.add_overlay(ring.widget());
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -983,7 +983,7 @@ impl PdfTab {
         // while it is closing. `closed` is emitted from inside the item's own `clicked`, and an
         // unparented widget has no path to the action group on the host, so unparenting there
         // would drop the Copy the click had just asked for, exactly as it dropped the status
-        // bar's Fit Page. The idle runs once the click is over.
+        // bar's Fit Height. The idle runs once the click is over.
         popover.connect_closed(|p| {
             let p = p.clone();
             glib::idle_add_local_once(move || p.unparent());

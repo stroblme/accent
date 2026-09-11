@@ -672,7 +672,7 @@ impl PdfView {
     }
 
     /// The layout as one line: what `ACCENT_BENCH_PDF` prints, and its only reader. Whether the
-    /// page being read is wholly on screen is what Fit Page has to mean, so that is the last
+    /// page being read is wholly on screen is what Fit Height has to mean, so that is the last
     /// field rather than something the numbers have to be read for.
     pub fn geometry(&self) -> String {
         let layout = self.imp().layout.borrow();
