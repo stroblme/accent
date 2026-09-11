@@ -1,0 +1,15 @@
+[package]
+name = "accent-drawio"
+version.workspace = true
+edition.workspace = true
+# GPL-3.0-or-later like the rest of the workspace. The files headed "Derived from" port Apache-2.0
+# code from mxGraph/draw.io; Apache-2.0 flows into GPLv3, and its terms are met by LICENSE-APACHE,
+# NOTICE and those headers.
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Reading only: the writer is a string builder of our own over `quick_xml::escape`.
+quick-xml = "0.41"
+# Raw inflate for the compressed `<diagram>` form; we never write it.
+miniz_oxide = "0.8"

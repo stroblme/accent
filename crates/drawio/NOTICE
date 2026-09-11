@@ -1,0 +1,12 @@
+accent-drawio
+Copyright (C) 2026 the accent contributors. Licensed GPL-3.0-or-later.
+
+This crate contains code derived from mxGraph and draw.io:
+
+    Copyright (c) 2006-2026, JGraph Holdings Ltd
+    Copyright (c) 2006-2026, draw.io AG
+    https://github.com/jgraph/drawio
+    Licensed under the Apache License, Version 2.0 (see LICENSE-APACHE).
+
+The derived code was ported from JavaScript to Rust and modified for accent. Each derived source
+file names, in its header, the draw.io file it was ported from.
