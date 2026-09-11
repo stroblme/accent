@@ -19,6 +19,7 @@ use super::geometry::{
 use super::paint::{self, Cache};
 use super::tools::Tool;
 use crate::theme;
+use accent_drawio::geom::rotate;
 
 /// What a gesture on the canvas asks of the diagram.
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +64,8 @@ enum Drag {
         id: CellId,
         handle: Handle,
         rect: Rect,
+        /// The shape's turn, in degrees: its handles are in its own frame.
+        rotation: f64,
     },
     Band {
         from: Point,
@@ -73,7 +76,6 @@ enum Drag {
         from: Point,
     },
     Connect {
-        source: Option<CellId>,
         from: Point,
     },
     /// Dragging the page itself, from this scroll position.
@@ -344,13 +346,16 @@ impl DiagramView {
                 if let [id] = selection.as_slice()
                     && let Some(rect) = sheet.rect(id).filter(|_| !sheet.is_pinned(id))
                 {
-                    let content = frame.to_content(p);
-                    if let Some(handle) = geometry::handle_at(&frame.rect(&rect), content, HANDLE) {
+                    // A turned shape's handles are found in its own frame.
+                    let rotation = sheet.rotation(id);
+                    let local = frame.to_content(rotate(p, rect.centre(), -rotation));
+                    if let Some(handle) = geometry::handle_at(&frame.rect(&rect), local, HANDLE) {
                         return Some(Drag::Resize {
                             from: p,
                             id: id.clone(),
                             handle,
                             rect,
+                            rotation,
                         });
                     }
                 }
@@ -396,10 +401,8 @@ impl DiagramView {
                 })
             }
             tool if tool.draws_box() => Some(Drag::Draw { tool, from: p }),
-            Tool::Connector => Some(Drag::Connect {
-                source: sheet.vertex_at(p, tolerance),
-                from: p,
-            }),
+            // Which shapes the ends attach to is decided on release, once both are known.
+            Tool::Connector => Some(Drag::Connect { from: p }),
             _ => None,
         }
     }
@@ -444,9 +447,11 @@ impl DiagramView {
                 id,
                 handle,
                 rect,
+                rotation,
             } if moved => {
                 let delta = Point::new(p.x - from.x, p.y - from.y);
-                let rect = geometry::resize_by(&rect, handle, delta, self.grid(free));
+                let grid = self.grid(free);
+                let rect = geometry::resize_rotated(&rect, rotation, handle, delta, grid);
                 self.emit(Edit::Resize { id, rect });
             }
             Drag::Band { from, add } if moved => {
@@ -475,11 +480,8 @@ impl DiagramView {
                     self.emit(Edit::Add { tool, rect });
                 }
             }
-            Drag::Connect { source, from } if moved => {
-                let tolerance = TOLERANCE / self.scale();
-                let target = sheet
-                    .vertex_at(p, tolerance)
-                    .filter(|t| source.as_ref() != Some(t));
+            Drag::Connect { from } if moved => {
+                let (source, target) = sheet.connect_ends(from, p, TOLERANCE / self.scale());
                 self.emit(Edit::Connect {
                     source: (source, from),
                     target: (target, p),
@@ -503,7 +505,8 @@ impl DiagramView {
                 let selection = self.selection();
                 let handle = match selection.as_slice() {
                     [id] if !sheet.is_pinned(id) => sheet.rect(id).and_then(|r| {
-                        geometry::handle_at(&frame.rect(&r), frame.to_content(p), HANDLE)
+                        let local = rotate(p, r.centre(), -sheet.rotation(id));
+                        geometry::handle_at(&frame.rect(&r), frame.to_content(local), HANDLE)
                     }),
                     _ => None,
                 };
@@ -534,9 +537,25 @@ impl DiagramView {
         let free = imp.free.get();
         let selection = imp.selection.borrow().clone();
         let moving = matches!(drag, Some(Drag::Move { .. })) && imp.moved.get();
+        // A page rectangle turned `rotation` degrees, outlined on screen.
+        let turned = |r: &Rect, rotation: f64| {
+            if rotation == 0.0 {
+                return outline(&frame.rect(r));
+            }
+            let builder = gsk::PathBuilder::new();
+            for (i, corner) in geometry::corners(r, rotation).into_iter().enumerate() {
+                let c = frame.to_content(corner);
+                match i {
+                    0 => builder.move_to(c.x as f32, c.y as f32),
+                    _ => builder.line_to(c.x as f32, c.y as f32),
+                }
+            }
+            builder.close();
+            snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
+        };
         for id in &selection {
             if let Some(r) = sheet.frame_of(id) {
-                outline(&frame.rect(&r));
+                turned(&r, sheet.rotation(id));
             }
         }
         if let [id] = selection.as_slice()
@@ -544,9 +563,9 @@ impl DiagramView {
             && !sheet.is_pinned(id)
             && !moving
         {
-            let r = frame.rect(&r);
+            let rotation = sheet.rotation(id);
             for h in Handle::ALL {
-                let at = h.at(&r);
+                let at = frame.to_content(rotate(h.at(&r), r.centre(), rotation));
                 let square = Rect::new(at.x - HANDLE / 2.0, at.y - HANDLE / 2.0, HANDLE, HANDLE);
                 snapshot.append_color(&accent, &paint::grect(&square));
             }
@@ -583,10 +602,18 @@ impl DiagramView {
                 snapshot.restore();
             }
             Drag::Resize {
-                from, handle, rect, ..
+                from,
+                handle,
+                rect,
+                rotation,
+                ..
             } => {
                 let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
-                outline(&frame.rect(&geometry::resize_by(&rect, handle, delta, self.grid(free))));
+                let grid = self.grid(free);
+                turned(
+                    &geometry::resize_rotated(&rect, rotation, handle, delta, grid),
+                    rotation,
+                );
             }
             Drag::Band { from, .. } => {
                 let r = frame.rect(&Rect::from_corners(from, pointer));
@@ -608,7 +635,7 @@ impl DiagramView {
                 }
                 snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
-            Drag::Connect { from, .. } => {
+            Drag::Connect { from } => {
                 let (a, b) = (frame.to_content(from), frame.to_content(pointer));
                 let builder = gsk::PathBuilder::new();
                 builder.move_to(a.x as f32, a.y as f32);
@@ -832,7 +859,7 @@ mod imp {
                     obj.queue_draw();
                 }
             ));
-            obj.add_controller(drag);
+            obj.add_controller(drag.clone());
 
             // The middle button pans, as it does in draw.io.
             let pan = gtk::GestureDrag::builder().button(2).build();
@@ -868,7 +895,8 @@ mod imp {
             obj.add_controller(pan);
 
             // A double click edits the label of what is under it, innermost first: a shape in a
-            // group, not the group.
+            // group, not the group. Grouped with the drag, which claims every press: a gesture
+            // in a group of its own would have each press denied and never count to two.
             let click = gtk::GestureClick::new();
             click.connect_pressed(glib::clone!(
                 #[weak]
@@ -884,7 +912,8 @@ mod imp {
                     }
                 }
             ));
-            obj.add_controller(click);
+            obj.add_controller(click.clone());
+            click.group_with(&drag);
         }
     }
 

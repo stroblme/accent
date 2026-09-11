@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use accent_drawio::geom::rotate;
 use accent_drawio::{CellId, Page, Point, Rect, Scene};
 
 pub const MIN_SCALE: f64 = 0.1;
@@ -103,6 +104,46 @@ pub fn snap_move(origin: Point, delta: Point, grid: f64) -> Point {
         snap(origin.x + delta.x, grid) - origin.x,
         snap(origin.y + delta.y, grid) - origin.y,
     )
+}
+
+/// [`resize_by`] for a shape turned `rotation` degrees: the pointer's move is taken into the
+/// shape's own frame, the box resized there, and the result placed so that the side the handle
+/// does not hold stays where it was on the page — draw.io's rule. No grid for a turned shape,
+/// whose edges do not run along it.
+pub fn resize_rotated(
+    r: &Rect,
+    rotation: f64,
+    handle: Handle,
+    delta: Point,
+    grid: Option<f64>,
+) -> Rect {
+    if rotation == 0.0 {
+        return resize_by(r, handle, delta, grid);
+    }
+    let origin = Point::default();
+    let local = resize_by(r, handle, rotate(delta, origin, -rotation), None);
+    let (old, new) = (r.centre(), local.centre());
+    let shift = rotate(Point::new(new.x - old.x, new.y - old.y), origin, rotation);
+    let centre = Point::new(old.x + shift.x, old.y + shift.y);
+    Rect::new(
+        centre.x - local.w / 2.0,
+        centre.y - local.h / 2.0,
+        local.w,
+        local.h,
+    )
+}
+
+/// The four corners of `r` turned `rotation` degrees about its centre, clockwise from the top
+/// left: a turned shape's outline.
+pub fn corners(r: &Rect, rotation: f64) -> [Point; 4] {
+    let c = r.centre();
+    [
+        Point::new(r.x, r.y),
+        Point::new(r.right(), r.y),
+        Point::new(r.right(), r.bottom()),
+        Point::new(r.x, r.bottom()),
+    ]
+    .map(|p| rotate(p, c, rotation))
 }
 
 /// One of the eight handles on a selected shape's box.
@@ -226,6 +267,8 @@ pub struct Sheet {
     edges: HashSet<CellId>,
     /// Cells draw.io would not let be moved (`movable=0`, `locked=1`).
     pinned: HashSet<CellId>,
+    /// Each turned vertex's `rotation`, in degrees.
+    rotations: HashMap<CellId, f64>,
 }
 
 impl Sheet {
@@ -260,6 +303,13 @@ impl Sheet {
             if let Some(r) = page.absolute_rect(&cell.id) {
                 sheet.rects.insert(cell.id.clone(), r);
             }
+            let turned = cell
+                .style
+                .get("rotation")
+                .and_then(|r| r.trim().parse::<f64>().ok());
+            if let Some(deg) = turned.filter(|d| *d != 0.0 && d.is_finite()) {
+                sheet.rotations.insert(cell.id.clone(), deg);
+            }
             if cell.style.get("movable") == Some("0") || cell.style.get("locked") == Some("1") {
                 sheet.pinned.insert(cell.id.clone());
             }
@@ -289,6 +339,11 @@ impl Sheet {
 
     pub fn is_pinned(&self, id: &str) -> bool {
         self.pinned.contains(id)
+    }
+
+    /// How far a vertex is turned, in degrees.
+    pub fn rotation(&self, id: &str) -> f64 {
+        self.rotations.get(id).copied().unwrap_or(0.0)
     }
 
     /// A vertex's rectangle; `None` for an edge.
@@ -332,6 +387,31 @@ impl Sheet {
             .hit(p, tolerance)
             .filter(|id| !self.is_edge(id) && self.rects.contains_key(*id))
             .map(str::to_string)
+    }
+
+    /// Whether `p` is inside vertex `id`, turned as it is drawn.
+    pub fn contains(&self, id: &str, p: Point) -> bool {
+        self.rect(id)
+            .is_some_and(|r| r.contains(rotate(p, r.centre(), -self.rotation(id))))
+    }
+
+    /// What a connector drawn from `press` to `release` attaches to at either end. An end takes
+    /// the shape under it only when the other end is outside that shape: a line drawn within a
+    /// shape — a big text box, a slide's background — is a line on it, and attaching it would
+    /// start the arrow on the shape's far border and run it back through where it was drawn.
+    pub fn connect_ends(
+        &self,
+        press: Point,
+        release: Point,
+        tolerance: f64,
+    ) -> (Option<CellId>, Option<CellId>) {
+        let source = self
+            .vertex_at(press, tolerance)
+            .filter(|s| !self.contains(s, release));
+        let target = self
+            .vertex_at(release, tolerance)
+            .filter(|t| !self.contains(t, press) && source.as_ref() != Some(t));
+        (source, target)
     }
 
     /// The cells a band drawn over the page takes: every whole top-level cell inside it.
@@ -410,6 +490,57 @@ mod tests {
             Some(Handle::South)
         );
         assert_eq!(handle_at(&r, Point::new(50.0, 25.0), 6.0), None);
+    }
+
+    #[test]
+    fn a_turned_shape_resizes_in_its_own_frame_keeping_its_far_side() {
+        // A quarter turn: the east handle sits at the bottom on the page.
+        let r = Rect::new(0.0, 0.0, 100.0, 20.0);
+        let before = corners(&r, 90.0);
+        let after = resize_rotated(&r, 90.0, Handle::East, Point::new(0.0, 10.0), Some(10.0));
+        assert!(
+            (after.w - 110.0).abs() < 1e-9 && (after.h - 20.0).abs() < 1e-9,
+            "{after:?}"
+        );
+        let moved = corners(&after, 90.0);
+        // The west side (the top edge on the page) is where it was.
+        for (a, b) in [(before[0], moved[0]), (before[3], moved[3])] {
+            assert!(a.distance(b) < 1e-9, "{a:?} vs {b:?}");
+        }
+        assert_eq!(
+            resize_rotated(&r, 0.0, Handle::East, Point::new(4.0, 0.0), Some(10.0)).w,
+            100.0
+        );
+    }
+
+    #[test]
+    fn a_connector_attaches_only_to_a_shape_its_other_end_is_outside() {
+        let mut page = Page::blank("P", "p");
+        let cell =
+            |id: &str, r: Rect, style: &str| accent_drawio::Cell::new_vertex(id, "1", r, style, "");
+        page.cells
+            .push(cell("box", Rect::new(0.0, 0.0, 400.0, 300.0), "text;"));
+        page.cells
+            .push(cell("s", Rect::new(50.0, 50.0, 40.0, 20.0), ""));
+        page.cells
+            .push(cell("t", Rect::new(250.0, 200.0, 40.0, 20.0), ""));
+        let sheet = Sheet::of(&page);
+        let ends = |a: (f64, f64), b: (f64, f64)| {
+            let (s, t) = sheet.connect_ends(Point::new(a.0, a.1), Point::new(b.0, b.1), 1.0);
+            (
+                s.as_deref().map(str::to_string),
+                t.as_deref().map(str::to_string),
+            )
+        };
+        let some = |id: &str| Some(id.to_string());
+        // Drawn within the text box: on it, attached to nothing.
+        assert_eq!(ends((150.0, 150.0), (350.0, 250.0)), (None, None));
+        // From a shape out into the box: attached at the shape only.
+        assert_eq!(ends((70.0, 60.0), (350.0, 100.0)), (some("s"), None));
+        // Shape to shape, both inside the box: both attached.
+        assert_eq!(ends((70.0, 60.0), (270.0, 210.0)), (some("s"), some("t")));
+        // From outside everything onto a shape.
+        assert_eq!(ends((500.0, 500.0), (270.0, 210.0)), (None, some("t")));
     }
 
     #[test]

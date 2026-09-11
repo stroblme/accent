@@ -3,7 +3,8 @@
 
 use super::*;
 
-/// A two-page diagram with a shape, an ellipse, an edge between them and a formula.
+/// A two-page diagram with a shape, an ellipse, an edge between them, a formula, and a bracket
+/// and a text turned a quarter each way.
 const SAMPLE: &str = r#"<mxfile host="accent">
   <diagram name="One" id="bench-one">
     <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="500" math="1">
@@ -22,6 +23,12 @@ const SAMPLE: &str = r#"<mxfile host="accent">
         <mxCell id="m" value="\(x^2\)" style="text;html=1;" parent="1" vertex="1">
           <mxGeometry x="100" y="300" width="80" height="30" as="geometry" />
         </mxCell>
+        <mxCell id="k" style="shape=curlyBracket;whiteSpace=wrap;html=1;rounded=1;rotation=90;" parent="1" vertex="1">
+          <mxGeometry x="350" y="260" width="20" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="t" value="Turned" style="text;html=1;align=center;verticalAlign=middle;rotation=-90;" parent="1" vertex="1">
+          <mxGeometry x="560" y="330" width="120" height="30" as="geometry" />
+        </mxCell>
       </root>
     </mxGraphModel>
   </diagram>
@@ -33,9 +40,9 @@ const SAMPLE: &str = r#"<mxfile host="accent">
 
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits the diagram at `rel` (written from a sample first when
 /// there is none) and prints each step; `=shot:<rel>:<dir>` paints every page of it into
-/// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>` prints where the sample's
-/// two shapes are in the window and stays up for ten seconds, for an XTEST pointer to work on,
-/// then prints what the model holds.
+/// `<dir>/page-N.png` and prints how long each took; `=hold:<rel>[:<tool>]` prints where the
+/// sample's shapes are on the screen and stays up for ten seconds, for an XTEST pointer to work
+/// on (`build-aux/xtest.py`), then prints what the model holds.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some(rest) = arg.strip_prefix("hold:") {
         let (rel, tool) = rest.split_once(':').unwrap_or((rest, ""));
@@ -212,7 +219,9 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
 
 fn hold(app: &Rc<App>, rel: &str, tool: &str) {
     let path = app.root().join(rel);
-    let _ = std::fs::write(&path, SAMPLE);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
     let (app, rel, tool) = (app.clone(), rel.to_string(), tool.to_string());
     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
         app.open_path(&rel);
@@ -222,14 +231,27 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 return bench_quit(&app);
             };
             let canvas = tab.key_target();
+            // Screen coordinates, for XTEST: the window sits at 0,0 with no window manager, but
+            // its client-side shadow puts the widgets a margin in from the surface's corner.
+            let (sx, sy) = app.window.surface_transform();
             let centre = |id: &str| {
                 let r = tab.frame_of(id).map(|r| tab.to_widget(&r))?;
-                canvas.compute_point(
-                    &app.window,
-                    &graphene::Point::new((r.x + r.w / 2.0) as f32, (r.y + r.h / 2.0) as f32),
-                )
+                canvas
+                    .compute_point(
+                        &app.window,
+                        &graphene::Point::new((r.x + r.w / 2.0) as f32, (r.y + r.h / 2.0) as f32),
+                    )
+                    .map(|p| graphene::Point::new(p.x() + sx as f32, p.y() + sy as f32))
             };
             let (a, b) = (centre("a"), centre("b"));
+            let (k, t) = (centre("k"), centre("t"));
+            println!(
+                "bench diagram turned k={:.0},{:.0} t={:.0},{:.0}",
+                k.map_or(0.0, |p| p.x()),
+                k.map_or(0.0, |p| p.y()),
+                t.map_or(0.0, |p| p.x()),
+                t.map_or(0.0, |p| p.y())
+            );
             if !tool.is_empty() {
                 let _ =
                     WidgetExt::activate_action(&app.window, &format!("win.diagram-{tool}"), None);
@@ -243,6 +265,20 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                 tab.scale()
             );
             glib::timeout_add_local_once(Duration::from_secs(10), move || {
+                let canvas = tab.key_target();
+                let r = tab
+                    .frame_of("a")
+                    .map(|r| tab.to_widget(&r))
+                    .unwrap_or_default();
+                let at = canvas.compute_point(
+                    &app.window,
+                    &graphene::Point::new((r.x + r.w / 2.0) as f32, (r.y + r.h / 2.0) as f32),
+                );
+                println!(
+                    "bench diagram a_now={:?} editing={:?}",
+                    at.map(|p| (p.x(), p.y())),
+                    tab.editing_label()
+                );
                 println!(
                     "bench diagram after a={:?} b={:?} selection={:?} history={:?}",
                     tab.frame_of("a"),
@@ -250,23 +286,32 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                     tab.selection(),
                     tab.history()
                 );
+                if let Ok(path) = std::env::var("ACCENT_BENCH_SHOT") {
+                    println!(
+                        "bench diagram shot {}",
+                        shoot(app.window.upcast_ref(), Path::new(&path))
+                    );
+                }
                 // What the gesture made, as the file will say it.
                 let xml = tab.text();
                 let file = accent_drawio::File::from_bytes(xml.as_bytes()).expect("our own XML");
                 for cell in file.pages[0]
                     .cells
                     .iter()
-                    .filter(|c| !["0", "1", "a", "b", "e", "m"].contains(&c.id.as_str()))
+                    .filter(|c| !["0", "1", "a", "b", "e", "m", "k", "t"].contains(&c.id.as_str()))
                 {
                     println!(
-                        "bench diagram new {} style={} source={:?} target={:?} geometry={:?}",
+                        "bench diagram new {} style={} source={:?} target={:?} geometry={:?} ends={:?}",
                         if cell.edge { "edge" } else { "vertex" },
                         cell.style,
                         cell.source,
                         cell.target,
                         cell.geometry
                             .as_ref()
-                            .map(|g| (g.x, g.y, g.width, g.height))
+                            .map(|g| (g.x, g.y, g.width, g.height)),
+                        cell.geometry
+                            .as_ref()
+                            .map(|g| (g.source_point, g.target_point))
                     );
                 }
                 bench_quit(&app);
