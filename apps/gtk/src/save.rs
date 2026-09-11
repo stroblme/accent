@@ -462,11 +462,14 @@ impl App {
             }
         }
         // A diagram closing was asked about already (`wire.rs`), so a failure here is the
-        // answer "discard" having been given, or the file gone.
-        if let Some(Doc::Diagram(d)) = self.doc_for_page(page)
-            && let Err(e) = self.flush_diagram(&d)
-        {
-            tracing::debug!("a closing diagram was not written: {e}");
+        // answer "discard" having been given, or the file gone. A label still being typed goes
+        // into its cell first: it is an edit like any other, and its editor holds a display-wide
+        // font that only closing the editor lets go of.
+        if let Some(Doc::Diagram(d)) = self.doc_for_page(page) {
+            d.finish_label();
+            if let Err(e) = self.flush_diagram(&d) {
+                tracing::debug!("a closing diagram was not written: {e}");
+            }
         }
         if let Some((pane, doc)) = self.pane_of(page).zip(self.doc_for_page(page)) {
             pane.nav.borrow_mut().forget(&doc.key());
