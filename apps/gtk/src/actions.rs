@@ -304,15 +304,11 @@ impl App {
             // A preference, not this window's state: written, then put into effect in every
             // window the way a switch in Preferences is, which also moves each window's check mark.
             "show-hidden-files" => {
-                let config = {
+                {
                     let mut config = self.config.borrow_mut();
                     config.show_hidden = !config.show_hidden;
-                    config.clone()
-                };
-                settings::save(&config);
-                if let Some(shell) = self.shell.upgrade() {
-                    shell.apply_config(&config);
                 }
+                self.config_changed();
             }
             "copy-relative-path" => {
                 if let (Some(rel), Some(ops)) =
