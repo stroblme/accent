@@ -10,7 +10,7 @@ mod html;
 mod links;
 mod spans;
 
-pub use html::to_html;
+pub use html::{math_errors, to_html};
 pub use links::{
     heading_for, is_image, link_key, path_keys, pdf_anchor, percent_decode, percent_encode,
     rewrite_links, rewrite_targets, slugs, strip_ext,
