@@ -137,8 +137,10 @@ pub fn fit_scale(sizes: &[(f32, f32)], zoom: PdfZoom, vw: f32, vh: f32) -> f32 {
     let width = ((vw - GAP * 2.0).max(1.0)) / widest;
     match zoom {
         PdfZoom::FitWidth => width,
-        // The smaller of the two, so the whole page really is on screen.
-        PdfZoom::FitPage => width.min(((vh - GAP * 2.0).max(1.0)) / tallest),
+        // The smaller of the two, so the whole page really is on screen. No gap above or below:
+        // the page lands at the viewport's top (see `resume_at`), so a margin kept here all ends
+        // up below it, with the top of the next page in it.
+        PdfZoom::FitPage => width.min(vh.max(1.0) / tallest),
         PdfZoom::Scale(z) => z as f32 * PT_TO_PX,
     }
 }
@@ -244,7 +246,7 @@ mod tests {
         let sizes = letter(2);
         // Wide and short: height is what binds.
         let scale = fit_scale(&sizes, PdfZoom::FitPage, 2000.0, 400.0);
-        assert!((scale - (400.0 - GAP * 2.0) / 792.0).abs() < 1e-6);
+        assert!((scale - 400.0 / 792.0).abs() < 1e-6);
         let width = fit_scale(&sizes, PdfZoom::FitWidth, 2000.0, 400.0);
         assert!(width > scale);
     }
@@ -266,6 +268,15 @@ mod tests {
         };
         let (_, top) = offset_of(&fitted, resume_at(PdfZoom::FitPage, was)).expect("page two");
         assert!(whole(top), "page two is not wholly on screen from {top}");
+        // And it is the whole screen: its top at the viewport's top, its bottom at the bottom,
+        // and none of the gap or of page three below it.
+        assert_eq!(top, f64::from(page.y));
+        assert!(
+            (page.h - vh).abs() < 1e-3,
+            "page two is {} tall in {vh}",
+            page.h
+        );
+        assert!(f64::from(fitted.pages[2].y) >= top + f64::from(vh) + f64::from(GAP) - 1e-3);
         // Resuming where the reader was, which is what every other zoom does, leaves half of it
         // above the viewport and half of page three below: that is what Fit Page looked like.
         let (_, kept) = offset_of(&fitted, was).expect("page two");
