@@ -185,7 +185,18 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
     ) -> Result<T, RpcError> {
-        self.call_tracked(method, params, &Asked::default())
+        self.call_within(method, params, crate::rpc::DEADLINE)
+    }
+
+    /// The same, waiting up to `deadline` for the answer: for a method the host itself may take
+    /// longer over than [`crate::rpc::DEADLINE`].
+    pub fn call_within<T: serde::de::DeserializeOwned>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        deadline: std::time::Duration,
+    ) -> Result<T, RpcError> {
+        self.call_tracked(method, params, &Asked::default(), deadline)
     }
 
     /// The same, leaving the request id in `asked` for [`cancel`](Self::cancel).
@@ -194,11 +205,12 @@ impl Remote {
         method: &str,
         params: serde_json::Value,
         asked: &Asked,
+        deadline: std::time::Duration,
     ) -> Result<T, RpcError> {
         self.remember(method, &params);
         let client = self.wait_for_client()?;
         let asked_at = std::time::Instant::now();
-        let answer = client.call_tracked(method, params, asked);
+        let answer = client.call_tracked(method, params, asked, deadline);
         // Every window shares the one GTK main thread, so a round trip made there stalls them
         // all. `RUST_LOG=accent_api::remote=debug` names each one that cost a frame.
         let took = asked_at.elapsed();
