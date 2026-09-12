@@ -20,12 +20,16 @@ use crate::Event;
 use crate::paths::{conflict_original_rel, conflict_pairs};
 
 /// Start the worker for a vault, and hand back the handle its `Drop` joins.
+///
+/// `watch` is false on Android, where inotify over emulated storage drops events and the app
+/// asks for a [`Msg::Rescan`] when it comes back to the foreground instead.
 pub(crate) fn spawn(
     root: PathBuf,
     index: Index,
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
     events: Sender<Event>,
+    watch: bool,
 ) -> Result<JoinHandle<()>> {
     let worker = Worker {
         root,
@@ -33,6 +37,7 @@ pub(crate) fn spawn(
         rx,
         tx,
         events,
+        watch,
         watcher: None,
         seen_conflicts: BTreeSet::new(),
         reported: BTreeSet::new(),
@@ -70,6 +75,8 @@ struct Worker {
     rx: Receiver<Msg>,
     tx: Sender<Msg>,
     events: Sender<Event>,
+    /// Whether this vault is watched at all. See [`spawn`].
+    watch: bool,
     watcher: Option<Watcher>,
     /// Conflict copies the UI has already been offered, so a rescan never repeats one.
     seen_conflicts: BTreeSet<String>,
@@ -286,6 +293,9 @@ impl Worker {
     }
 
     fn rebuild_watcher(&mut self) {
+        if !self.watch {
+            return;
+        }
         // Drop the old watch set first: two registrations on one tree would double every event.
         self.watcher = None;
         match watch(&self.index, &self.root, &self.git_dirs, &self.tx) {
@@ -799,6 +809,7 @@ mod tests {
             rx,
             tx.clone(),
             events,
+            true,
         )
         .unwrap();
 
