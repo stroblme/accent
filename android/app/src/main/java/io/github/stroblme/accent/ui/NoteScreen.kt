@@ -73,7 +73,7 @@ private fun NoteBar(open: Open, editing: Boolean, onMenu: () -> Unit, onToggle: 
     ) {
         TextButton(onClick = onMenu) { Text("Files") }
         Text(
-            File(open.rel).nameWithoutExtension,
+            File(open.rel).name.removeSuffix(".md"),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -147,6 +147,7 @@ private fun Rendered(model: VaultModel, open: Open, onPull: () -> Unit) {
                         view: WebView,
                         request: WebResourceRequest,
                     ): WebResourceResponse? {
+                        if (request.isForMainFrame) return null
                         val url = request.url.toString()
                         if (!url.startsWith("accent://file/")) return blocked()
                         val rel = decode(url.removePrefix("accent://file/"))
@@ -161,7 +162,7 @@ private fun Rendered(model: VaultModel, open: Open, onPull: () -> Unit) {
         },
         update = { web ->
             web.loadDataWithBaseURL(
-                "accent://file/",
+                baseUri(open.rel),
                 page(toHtml(open.text), colors.onSurface, colors.surface, colors.primary),
                 "text/html",
                 "utf-8",
@@ -172,6 +173,12 @@ private fun Rendered(model: VaultModel, open: Open, onPull: () -> Unit) {
 }
 
 private fun blocked() = WebResourceResponse(null, null, null)
+
+/** What a relative link inside the note resolves against: the directory the note is in. */
+private fun baseUri(rel: String): String {
+    val dir = rel.substringBeforeLast('/', "")
+    return if (dir.isEmpty()) "accent://file/" else "accent://file/$dir/"
+}
 
 private fun decode(s: String): String = runCatching { URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)
 

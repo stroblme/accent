@@ -3,6 +3,8 @@ package io.github.stroblme.accent.ui
 import android.net.Uri
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -294,8 +296,12 @@ private fun PdfToolbar(
         tonalElevation = 0.dp,
         shadowElevation = 6.dp,
     ) {
+        // The pill is as wide as it needs to be, up to the screen less its gutters, and scrolls
+        // rather than clipping: eight labels do not fit a phone in portrait.
         Row(
-            Modifier.padding(horizontal = 8.dp),
+            Modifier
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             TextButton(onClick = onLeft) { Text(leftLabel) }

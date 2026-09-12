@@ -1,5 +1,6 @@
 package io.github.stroblme.accent.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -32,6 +33,14 @@ fun HomeScreen(model: VaultModel) {
     val scope = rememberCoroutineScope()
     var switcher by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
+
+    // Back undoes the last thing that opened, in the order it opened: the switcher, the drawer,
+    // then whatever is being read. Only with nothing left does it leave the app.
+    BackHandler(enabled = switcher) { switcher = false }
+    BackHandler(enabled = !switcher && drawer.isOpen) { scope.launch { drawer.close() } }
+    BackHandler(enabled = !switcher && !drawer.isOpen && (state.open != null || state.pdf != null)) {
+        model.close()
+    }
 
     state.message?.let { message ->
         LaunchedEffect(message) {
