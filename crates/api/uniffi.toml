@@ -1,0 +1,8 @@
+# How the Kotlin bindings for `src/ffi/` are generated. Read by `uniffi-bindgen`, which
+# `android/ffi` runs; a desktop build never looks at this file.
+[bindings.kotlin]
+package_name = "io.github.stroblme.accent.ffi"
+# The cdylib that carries the scaffolding: `android/ffi`.
+cdylib_name = "accent_android"
+# Android's own Cleaner where the platform has one, which is every version we target.
+android = true
