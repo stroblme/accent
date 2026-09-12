@@ -1,0 +1,26 @@
+# One place for every version the app pins.
+[versions]
+agp = "9.4.0"
+kotlin = "2.4.20"
+# The state-based text field and its styled `OutputTransformation`, which is how a note is
+# highlighted from the core's own spans: `TextFieldBuffer.addStyle` exists only from 1.13, and
+# the value/onValueChange field it replaces has been deprecated since 1.12.
+compose = "1.13.0-alpha03"
+material3 = "1.4.0"
+activity = "1.12.0"
+lifecycle = "2.10.0"
+# uniffi's Kotlin bindings call the library through JNA.
+jna = "5.17.0"
+
+[libraries]
+compose-foundation = { group = "androidx.compose.foundation", name = "foundation", version.ref = "compose" }
+compose-ui = { group = "androidx.compose.ui", name = "ui", version.ref = "compose" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity" }
+lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

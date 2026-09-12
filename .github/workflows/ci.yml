@@ -61,3 +61,29 @@ jobs:
       # and the scratch XDG dirs. It reuses the vault above, which is newer than its generator.
       - name: Headless smoke run
         run: make smoke
+
+  android:
+    name: android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-linux-android, x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      # The runner ships a JDK and an SDK; the NDK it ships is r27+, which links 16 KB pages by
+      # default. `.cargo/config.toml` asks for them anyway, so the check below holds either way.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - run: cargo install cargo-ndk --locked
+      # fmt, clippy and the ffi tests on the host, then both cross builds, then the 16 KB
+      # alignment check over every library the APK will carry.
+      - run: make android-check
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
+      - run: make pdfium-android
+      - run: make apk

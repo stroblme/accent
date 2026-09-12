@@ -47,7 +47,7 @@ impl PdfSession {
     fn of(doc: PdfDoc, path: Option<PathBuf>) -> Answer<Self> {
         if doc.page_count() == 0 {
             return Err(AccentError::Failed {
-                message: "this file has no pages".to_string(),
+                reason: "this file has no pages".to_string(),
             });
         }
         let etag = path.as_deref().and_then(|p| Etag::of(p).ok());
@@ -69,7 +69,7 @@ impl PdfSession {
     pub fn open(path: String) -> Answer<Self> {
         if !pdf::available() {
             return Err(AccentError::Failed {
-                message: "libpdfium was not found".to_string(),
+                reason: "libpdfium was not found".to_string(),
             });
         }
         let path = PathBuf::from(path);
@@ -84,7 +84,7 @@ impl PdfSession {
     pub fn open_bytes(bytes: Vec<u8>) -> Answer<Self> {
         if !pdf::available() {
             return Err(AccentError::Failed {
-                message: "libpdfium was not found".to_string(),
+                reason: "libpdfium was not found".to_string(),
             });
         }
         PdfSession::of(PdfDoc::from_bytes(bytes)?, None)
@@ -171,7 +171,7 @@ impl PdfSession {
                 .try_into()
             else {
                 return Err(AccentError::Failed {
-                    message: "a selection is four numbers".to_string(),
+                    reason: "a selection is four numbers".to_string(),
                 });
             };
             let glyphs = s.page_glyphs(page as usize)?;
@@ -311,7 +311,7 @@ impl PdfSession {
             }
             let Some(path) = s.path.clone() else {
                 return Err(AccentError::Failed {
-                    message: "this document was opened from bytes and has no file to save into"
+                    reason: "this document was opened from bytes and has no file to save into"
                         .to_string(),
                 });
             };

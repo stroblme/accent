@@ -12,14 +12,14 @@ pub enum AccentError {
     /// now: the caller either reloads from it or saves again against it.
     #[error("the file changed on disk")]
     ChangedOnDisk { current: Etag },
-    #[error("{message}")]
-    Failed { message: String },
+    #[error("{reason}")]
+    Failed { reason: String },
 }
 
 impl From<std::io::Error> for AccentError {
     fn from(e: std::io::Error) -> Self {
         AccentError::Failed {
-            message: e.to_string(),
+            reason: e.to_string(),
         }
     }
 }
@@ -27,7 +27,7 @@ impl From<std::io::Error> for AccentError {
 impl From<anyhow::Error> for AccentError {
     fn from(e: anyhow::Error) -> Self {
         AccentError::Failed {
-            message: format!("{e:#}"),
+            reason: format!("{e:#}"),
         }
     }
 }
@@ -37,7 +37,7 @@ impl From<SaveError> for AccentError {
         match e {
             SaveError::ChangedOnDisk { current } => AccentError::ChangedOnDisk { current },
             other => AccentError::Failed {
-                message: other.to_string(),
+                reason: other.to_string(),
             },
         }
     }
