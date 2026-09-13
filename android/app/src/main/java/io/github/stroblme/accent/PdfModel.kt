@@ -2,6 +2,7 @@ package io.github.stroblme.accent
 
 import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
@@ -38,6 +39,13 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
 
     var dirty by mutableStateOf(false)
         private set
+
+    /**
+     * How many changes this document has seen. Autosave waits on it rather than on [dirty], so a
+     * second stroke restarts the wait instead of letting the first one's save land mid-drawing.
+     */
+    var revision by mutableIntStateOf(0)
+        private set
     var canUndo by mutableStateOf(false)
         private set
     var canRedo by mutableStateOf(false)
@@ -68,14 +76,19 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
      * there is nothing more under the line — and tells it after the first that the rest belong
      * to the same gesture, which is what makes one drag one Undo.
      */
-    suspend fun erase(page: Int, from: Point, to: Point, radius: Float, partial: Boolean) = on {
+    suspend fun erase(page: Int, points: List<Point>, radius: Float, partial: Boolean) = on {
         var joined = false
-        while (true) {
-            val hit = runCatching {
-                session.eraseAt(page.toUInt(), from, to, radius, partial, joined)
-            }.getOrNull() ?: break
-            joined = true
-            if (hit == null) break
+        for ((from, to) in points.zipWithNext()) {
+            // Each segment may cross several strokes; the core answers one at a time and `null`
+            // when the line is clear. `joined` from the first hit onwards, so the whole drag is
+            // one step of the history however many strokes it took.
+            while (true) {
+                val hit = runCatching {
+                    session.eraseAt(page.toUInt(), from, to, radius, partial, joined)
+                }
+                if (hit.isFailure || hit.getOrThrow() == null) break
+                joined = true
+            }
         }
         if (joined) readHistory()
     }
@@ -96,6 +109,7 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         canUndo = history.undo
         canRedo = history.redo
         dirty = session.dirty()
+        revision++
     }
 
     private suspend fun <T> on(block: () -> T): T = withContext(dispatcher) { block() }

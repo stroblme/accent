@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.Open
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.FileKind
+import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.FileRow
 import kotlinx.coroutines.launch
 import java.io.File
@@ -66,11 +67,7 @@ fun HomeScreen(model: VaultModel) {
         ) { padding ->
             Box(Modifier.fillMaxSize().padding(padding)) {
                 when {
-                    state.pdf != null -> PdfScreen(
-                        path = state.pdf!!,
-                        onClose = { model.close() },
-                        onMenu = { scope.launch { drawer.open() } },
-                    )
+                    state.pdf != null -> PdfScreen(path = state.pdf!!)
                     state.open != null -> NoteScreen(
                         model = model,
                         open = state.open!!,
@@ -79,6 +76,8 @@ fun HomeScreen(model: VaultModel) {
                     )
                     else -> Empty(
                         indexing = state.indexing,
+                        scanned = state.scanned,
+                        listing = state.phase == Phase.SCAN,
                         onBrowse = { scope.launch { drawer.open() } },
                     )
                 }
@@ -92,7 +91,7 @@ fun HomeScreen(model: VaultModel) {
 }
 
 @Composable
-private fun Empty(indexing: Boolean, onBrowse: () -> Unit) {
+private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean, onBrowse: () -> Unit) {
     Column(
         Modifier.fillMaxSize().padding(Gutter),
         verticalArrangement = Arrangement.Center,
@@ -104,7 +103,16 @@ private fun Empty(indexing: Boolean, onBrowse: () -> Unit) {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "Pick a note, or pull down anywhere to search.",
+            when {
+                // A first walk of a large vault takes minutes over shared storage, so it says how
+                // far it has got. Nothing can be opened while it is still finding the files;
+                // once it starts reading them, what it has read is already there to open.
+                listing && scanned > 0 -> "Found %,d files so far.".format(scanned)
+                listing -> "Looking through your files."
+                indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
+                indexing -> "Reading what it found."
+                else -> "Pick a note, or pull down anywhere to search."
+            },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

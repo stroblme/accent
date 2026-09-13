@@ -29,10 +29,12 @@ fun SwitcherSheet(model: VaultModel, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
     var rows by remember { mutableStateOf<List<String>>(emptyList()) }
 
-    val corpus = if (commands) Commands.map { it.label } else model.corpus
     val kind = if (commands) Recents.Kind.Commands else Recents.Kind.Notes
 
-    LaunchedEffect(query, commands, corpus.size) {
+    LaunchedEffect(query, commands) {
+        // The note corpus is fetched on demand rather than kept in step with the index, so the
+        // first query in a session waits for it once.
+        val corpus = if (commands) Commands.map { it.label } else model.corpus()
         rows = withContext(Dispatchers.Default) {
             if (query.isBlank() && !commands) {
                 model.recents.list(Recents.Kind.Notes).filter { it in corpus }.take(50)

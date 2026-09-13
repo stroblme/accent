@@ -3,10 +3,12 @@ package io.github.stroblme.accent.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.unit.Dp
@@ -21,6 +23,28 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 
 /** The gutter every screen keeps at its sides. */
 val Gutter: Dp = 16.dp
+
+/**
+ * A two-finger pinch, and nothing else.
+ *
+ * It watches the initial pass, so it sees the event before the list under it does, but consumes
+ * only while two fingers are down — one finger still scrolls the pages and still draws.
+ */
+fun Modifier.pinch(onZoom: (Float) -> Unit): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        do {
+            val event = awaitPointerEvent(PointerEventPass.Initial)
+            if (event.changes.count { it.pressed } >= 2) {
+                val zoom = event.calculateZoom()
+                if (zoom != 1f) {
+                    onZoom(zoom)
+                    event.changes.forEach { it.consume() }
+                }
+            }
+        } while (event.changes.any { it.pressed })
+    }
+}
 
 /**
  * A downward drag that starts at the top of the content, which is what opens the switcher.

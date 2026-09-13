@@ -8,6 +8,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.delay
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -25,6 +26,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.ffi.InkStyle
@@ -32,12 +34,17 @@ import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Theme
 import kotlinx.coroutines.launch
 
-/** What the pen is doing. A finger never draws: it moves the page. */
+/**
+ * What the pen is doing. A finger never draws: it moves the page.
+ *
+ * [Read] is not on the toolbar — it is what the toolbar looks like with nothing chosen, and
+ * tapping the tool in hand is what puts it down.
+ */
 enum class Tool { Read, Pen, Highlighter, Eraser }
 
 /** A PDF inside a vault: strokes are written back into the file it came from. */
 @Composable
-fun PdfScreen(path: String, onClose: () -> Unit, onMenu: () -> Unit) {
+fun PdfScreen(path: String) {
     var doc by remember(path) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(path) { mutableStateOf<String?>(null) }
     LaunchedEffect(path) {
@@ -46,12 +53,12 @@ fun PdfScreen(path: String, onClose: () -> Unit, onMenu: () -> Unit) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
-    Reader(doc, failed, onLeft = onMenu, leftLabel = "Files", onSave = { it.save() })
+    Reader(doc, failed) { it.save() }
 }
 
 /** A PDF opened from somewhere else: there is no vault, so it is written back where it came from. */
 @Composable
-fun LoosePdfScreen(uri: Uri, onClose: () -> Unit) {
+fun LoosePdfScreen(uri: Uri) {
     val context = LocalContext.current
     var doc by remember(uri) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(uri) { mutableStateOf<String?>(null) }
@@ -63,21 +70,19 @@ fun LoosePdfScreen(uri: Uri, onClose: () -> Unit) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
-    Reader(doc, failed, onLeft = onClose, leftLabel = "Close", onSave = { model ->
+    Reader(doc, failed) { model ->
         // No path on this side: the bytes go back through whatever handed them over.
         val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
         runCatching {
             context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
         }
-    })
+    }
 }
 
 @Composable
 private fun Reader(
     doc: PdfModel?,
     failed: String?,
-    onLeft: () -> Unit,
-    leftLabel: String,
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
@@ -101,42 +106,49 @@ private fun Reader(
         return
     }
 
+    // Strokes are written back a second after the last one, the way the desktop does it and the
+    // way an edited note does: there is no Save to forget.
+    LaunchedEffect(doc.revision) {
+        if (!doc.dirty) return@LaunchedEffect
+        delay(INK_SAVE_MS)
+        onSave(doc).onFailure {
+            snackbar.showSnackbar(it.message ?: "This file could not be saved.")
+        }
+    }
+
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             Pages(doc, tool)
             PdfToolbar(
                 tool = tool,
-                onTool = { tool = it },
+                // Tapping the tool in hand puts it down, which is the only way back to reading.
+                onTool = { tool = if (it == tool) Tool.Read else it },
                 canUndo = doc.canUndo,
                 canRedo = doc.canRedo,
-                dirty = doc.dirty,
-                leftLabel = leftLabel,
-                onLeft = onLeft,
                 onUndo = { scope.launch { doc.undo() } },
                 onRedo = { scope.launch { doc.redo() } },
-                onSave = {
-                    scope.launch {
-                        onSave(doc).onFailure {
-                            snackbar.showSnackbar(it.message ?: "This file could not be saved.")
-                        }
-                    }
-                },
                 modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
             )
         }
     }
 }
 
+/** How long after the last stroke the document is written back. */
+private const val INK_SAVE_MS = 1000L
+
 /**
- * The document as a column of pages.
+ * The document as a column of pages, pinched to zoom.
  *
- * Each page paints one bitmap the core rendered at the width it is shown at. Tiles are what the
- * desktop does at high zoom; at a phone's width a page is already about one tile, so a page is
- * the unit here and the ceiling is the memory a long document's visible pages take.
+ * Each page paints one bitmap the core rendered at the width it is shown at. A pinch changes that
+ * width, and the page stretches the bitmap it already has until the sharper one arrives — the
+ * same stand-in the desktop paints while its tiles are still being drawn. Above fit width the
+ * column scrolls sideways as well as down.
  */
 @Composable
 private fun Pages(doc: PdfModel, tool: Tool) {
+    val density = LocalDensity.current
     val list = rememberLazyListState()
+    val sideways = rememberScrollState()
     val colors = MaterialTheme.colorScheme
     val theme = remember(colors) {
         // The same recolouring the desktop applies in a dark theme: the document's paper lands on
@@ -147,21 +159,55 @@ private fun Pages(doc: PdfModel, tool: Tool) {
             Theme.Plain
         }
     }
-    var width by remember { mutableStateOf(0) }
+    var viewport by remember { mutableStateOf(0) }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    // What the bitmaps were last drawn at. It follows the pinch once the fingers stop, so a
+    // gesture costs one re-render rather than one per frame.
+    var drawn by remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(zoom) {
+        delay(RESHARPEN_MS)
+        drawn = zoom
+    }
 
-    LazyColumn(
-        state = list,
-        modifier = Modifier.fillMaxSize().onSizeChanged { width = it.width },
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onSizeChanged { viewport = it.width }
+            .pinch { step -> zoom = (zoom * step).coerceIn(MIN_ZOOM, MAX_ZOOM) },
     ) {
-        items(doc.pageCount) { index ->
-            val size = doc.sizes.getOrNull(index)
-            if (size != null && width > 0) {
-                Page(doc, index, size.width, size.height, width, theme, tool)
+        Box(Modifier.horizontalScroll(sideways)) {
+            LazyColumn(
+                state = list,
+                modifier = Modifier
+                    .width(with(density) { (viewport * zoom).toDp() })
+                    .fillMaxHeight(),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                items(doc.pageCount) { index ->
+                    val size = doc.sizes.getOrNull(index)
+                    if (size != null && viewport > 0) {
+                        Page(
+                            doc = doc,
+                            index = index,
+                            pageWidth = size.width,
+                            pageHeight = size.height,
+                            shownPx = (viewport * zoom).toInt(),
+                            renderPx = (viewport * drawn).toInt(),
+                            theme = theme,
+                            tool = tool,
+                        )
+                    }
+                }
             }
         }
     }
 }
+
+private const val MIN_ZOOM = 1f
+private const val MAX_ZOOM = 6f
+
+/** How long the fingers rest before the page is drawn again at the zoom they left it at. */
+private const val RESHARPEN_MS = 180L
 
 @Composable
 private fun Page(
@@ -169,20 +215,23 @@ private fun Page(
     index: Int,
     pageWidth: Float,
     pageHeight: Float,
-    widthPx: Int,
+    /** The width the page is laid out at, which a pinch changes every frame. */
+    shownPx: Int,
+    /** The width its bitmap was drawn at, which follows the pinch once it settles. */
+    renderPx: Int,
     theme: Theme,
     tool: Tool,
 ) {
     val density = LocalDensity.current
-    val scale = widthPx / pageWidth
+    val scale = shownPx / pageWidth
     val heightPx = (pageHeight * scale).toInt()
-    var bitmap by remember(index, widthPx, theme) { mutableStateOf<ImageBitmap?>(null) }
+    var bitmap by remember(index, theme) { mutableStateOf<ImageBitmap?>(null) }
     var generation by remember(index) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
 
-    LaunchedEffect(index, widthPx, theme, generation) {
-        bitmap = doc.page(index, scale, theme)
+    LaunchedEffect(index, renderPx, theme, generation) {
+        bitmap = doc.page(index, renderPx / pageWidth, theme)
     }
 
     // What is being drawn right now, in view pixels, before the core has it.
@@ -212,11 +261,7 @@ private fun Page(
                         if (points.size < 2) return@detectDragGestures
                         scope.launch {
                             when (tool) {
-                                Tool.Eraser -> {
-                                    points.zipWithNext { a, b ->
-                                        doc.erase(index, a, b, ERASER_RADIUS, partial = false)
-                                    }
-                                }
+                                Tool.Eraser -> doc.erase(index, points, ERASER_RADIUS, partial = false)
                                 else -> doc.stroke(index, points, tool.style(colors.primary))
                             }
                             generation++
@@ -227,7 +272,13 @@ private fun Page(
     ) {
         bitmap?.let { image ->
             Canvas(Modifier.fillMaxSize()) {
-                drawImage(image)
+                // Stretched to the size it is shown at rather than drawn 1:1, so a pinch moves
+                // the page with the fingers and the sharper render catches up afterwards.
+                drawImage(
+                    image = image,
+                    srcSize = IntSize(image.width, image.height),
+                    dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+                )
                 if (wet.size > 1) {
                     val path = Path().apply {
                         moveTo(wet[0].x, wet[0].y)
@@ -281,12 +332,8 @@ private fun PdfToolbar(
     onTool: (Tool) -> Unit,
     canUndo: Boolean,
     canRedo: Boolean,
-    dirty: Boolean,
-    leftLabel: String,
-    onLeft: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
-    onSave: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -296,16 +343,11 @@ private fun PdfToolbar(
         tonalElevation = 0.dp,
         shadowElevation = 6.dp,
     ) {
-        // The pill is as wide as it needs to be, up to the screen less its gutters, and scrolls
-        // rather than clipping: eight labels do not fit a phone in portrait.
         Row(
-            Modifier
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp),
+            Modifier.padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TextButton(onClick = onLeft) { Text(leftLabel) }
-            for (each in Tool.entries) {
+            for (each in Tool.entries.filter { it != Tool.Read }) {
                 TextButton(onClick = { onTool(each) }) {
                     Text(
                         each.name,
@@ -316,7 +358,6 @@ private fun PdfToolbar(
             }
             TextButton(onClick = onUndo, enabled = canUndo) { Text("Undo") }
             TextButton(onClick = onRedo, enabled = canRedo) { Text("Redo") }
-            TextButton(onClick = onSave, enabled = dirty) { Text("Save") }
         }
     }
 }

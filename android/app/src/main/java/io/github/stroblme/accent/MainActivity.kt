@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
                 val state by model.state.collectAsState()
                 val pdf = loose
                 when {
-                    pdf != null -> LoosePdfScreen(uri = pdf, onClose = { finish() })
+                    pdf != null -> LoosePdfScreen(uri = pdf)
                     state.root == null -> VaultPickerScreen(model)
                     else -> HomeScreen(model)
                 }

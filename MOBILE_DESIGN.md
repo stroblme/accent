@@ -32,7 +32,7 @@ build with. This says what to build.
 | Files drawer | `ModalNavigationDrawer` from the left edge. A search field on top; below it the results when there is a query and the tree when there is not. The desktop's eight sidebar panes collapse into this one |
 | Note, reading | The rendered note in a WebView, full bleed, 16 dp side gutters, one thin bar above it |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
-| PDF | A column of pages, one floating toolbar at the bottom end |
+| PDF | A column of pages, one floating toolbar at the bottom end holding the tools and nothing else. Leaving the document is Back; the drawer is an edge swipe; strokes are written back a second after the last one, so there is no Save |
 | Switcher | `ModalBottomSheet` with a Notes / Commands chip pair, a query field, and rows |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
@@ -54,7 +54,7 @@ of them must also exist as a visible control.
 |---|---|---|
 | Drag down from the top of the content | Opens the switcher | The ⋯ on the toolbar |
 | Swipe from the left edge | Opens the files drawer | The Files button |
-| Pinch on a page | Zooms a PDF | — |
+| Pinch on a page | Zooms a PDF, 1× to 6× | — |
 | Long press | The context sheet for the thing under it | — |
 
 The pull-down is deliberately not pull-to-refresh. That gesture means "fetch again" in every other
@@ -67,6 +67,14 @@ The desktop fades its chrome while the reader types. A phone has almost none to 
 becomes: the bar above a note goes when the content scrolls down and comes back when it scrolls up
 or is tapped, and the keyboard appearing hides it outright. Never hide the content, a message or
 anything holding a decision.
+
+## The launcher icon
+
+The desktop logo (`data/icons/logo.svg`) as an adaptive icon: the shapes are *strokes*, not
+fills, so the vector drawable carries `strokeColor` and `strokeWidth` rather than painting the
+paths in. Its white paper is the background layer. The art's furthest point from centre is a
+parallelogram corner plus half its stroke, about 162 of the 256-unit viewport, and a mask can be
+a circle of radius 78, so the group scales to half size to sit inside one whole.
 
 ## Colour
 

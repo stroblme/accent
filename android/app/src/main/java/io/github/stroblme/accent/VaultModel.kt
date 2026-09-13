@@ -8,6 +8,8 @@ import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.Phase
+import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.Vault
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +35,14 @@ data class Open(
 data class VaultState(
     val root: String? = null,
     val indexing: Boolean = false,
+    /** Files the walk has been through so far, for as long as one is running. */
+    val scanned: Long = 0,
+    /**
+     * Which half of the work is running. Nothing is in the index during [Phase.SCAN] — the walk
+     * is still finding the files — so that is the one phase where the tree really has nothing to
+     * show and the app has to say so rather than invite a reader in.
+     */
+    val phase: Phase? = null,
     /** The directories whose children have been listed, so the tree redraws in place. */
     val children: Map<String, List<FileRow>> = emptyMap(),
     val expanded: Set<String> = setOf(""),
@@ -57,9 +67,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private var vault: Vault? = null
 
-    /** Every file in the vault, for the switcher. Filled once the first walk lands. */
-    var corpus: List<String> = emptyList()
-        private set
+    /** Every file in the vault, for the switcher. See [corpus]. */
+    private var corpus: List<String> = emptyList()
+
+    /** How far the batch being applied said the walk had got, and when the tree last caught up. */
+    private var seen: Progress? = null
+    private var lastRelist = 0L
 
     fun open(root: String) {
         viewModelScope.launch {
@@ -102,22 +115,51 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             }
             is Event.Conflict -> onConflict(event.original)
             is Event.Error -> _state.update { it.copy(message = event.message) }
-            is Event.Progress -> Unit
+            is Event.Progress -> seen = event.progress
         }
         if (reindexed) {
-            _state.update { it.copy(indexing = false) }
-            refresh()
+            _state.update { it.copy(indexing = false, scanned = 0, phase = null) }
+            corpus = emptyList()
+            relist(_state.value.expanded)
         } else if (touched.isNotEmpty()) {
             relist(touched.intersect(_state.value.children.keys))
+        } else {
+            seen?.let { walking(it) }
         }
+        seen = null
     }
 
-    /** List every directory the tree has open again, and refill the switcher's corpus. */
-    fun refresh() = viewModelScope.launch(Dispatchers.IO) {
-        val v = vault ?: return@launch
+    /**
+     * Say how far the walk has got, and let the tree catch up with it.
+     *
+     * The index fills as the walk goes, in batches, so the directories already in it can be
+     * listed while the rest are still being found. On a vault of any size that is the difference
+     * between a tree that appears when the walk ends and one that is usable from the start.
+     */
+    private suspend fun walking(p: Progress) {
+        _state.update { it.copy(indexing = true, scanned = p.done.toLong(), phase = p.phase) }
+        // Nothing has been written yet while the walk is still finding files.
+        if (p.phase == Phase.SCAN) return
+        val now = System.currentTimeMillis()
+        if (now - lastRelist < RELIST_EVERY_MS) return
+        lastRelist = now
         relist(_state.value.expanded)
-        corpus = runCatching { v.filePaths(false) }.getOrDefault(emptyList())
     }
+
+    /** The switcher's corpus: every file in the vault, fetched the first time it is asked for. */
+    suspend fun corpus(): List<String> {
+        corpus.takeIf { it.isNotEmpty() }?.let { return it }
+        val v = vault ?: return emptyList()
+        // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
+        // the only thing that wants them, rather than after every reconcile.
+        corpus = withContext(Dispatchers.IO) {
+            runCatching { v.filePaths(false) }.getOrDefault(emptyList())
+        }
+        return corpus
+    }
+
+    /** List every directory the tree has open again. */
+    fun refresh() = viewModelScope.launch { relist(_state.value.expanded) }
 
     private suspend fun relist(dirs: Set<String>) = withContext(Dispatchers.IO) {
         val v = vault ?: return@withContext
@@ -304,6 +346,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** How often the tree catches up with a running walk. Often enough to watch it fill. */
+        private const val RELIST_EVERY_MS = 700L
+
         fun parentOf(rel: String): String = rel.substringBeforeLast('/', "")
 
         fun isDir(row: FileRow): Boolean = row.kind == FileKind.DIR
