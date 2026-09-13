@@ -894,7 +894,9 @@ impl App {
     }
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
-    /// No name is the note on screen, as `[[#Heading]]` writes it.
+    /// No name is the note on screen, as `[[#Heading]]` writes it. A name nothing in the vault
+    /// answers to offers New File with that very path typed in, which is how a note gets written
+    /// by being linked to first.
     pub fn open_target(self: &Rc<Self>, target: &str) {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
@@ -921,7 +923,14 @@ impl App {
             let Some(app) = weak.upgrade() else { return };
             match resolved {
                 Ok(Ok(Some(rel))) => app.land_on(&rel, &anchor),
-                Ok(Ok(None)) => app.toast(&format!("No note called {target}")),
+                // Nothing answers to the name: offer to write it, prefilled with what the link
+                // says. Cancelling says nothing — the reader followed a link and changed
+                // their mind about creating the note behind it.
+                Ok(Ok(None)) => {
+                    if let Some(ops) = app.ops() {
+                        fileops::new_linked_note(ops, &target);
+                    }
+                }
                 Ok(Err(e)) => app.cannot(&format!("resolve {target}"), e),
                 Err(_) => tracing::warn!("the link worker panicked on {target}"),
             }

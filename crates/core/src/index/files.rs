@@ -89,7 +89,9 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every markdown note's rel_path, for the file switcher's fuzzy match.
+    /// Every markdown note's rel_path, for the file switcher's fuzzy match. What `[[` completes
+    /// against is [`note_and_pdf_paths`](Self::note_and_pdf_paths), a wikilink naming a PDF as
+    /// readily as a note.
     pub fn note_paths(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
             "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
@@ -98,12 +100,32 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every note's and PDF's rel_path, notes first and then the PDFs by path: what `[[` offers.
+    ///
+    /// A wikilink points at something to read, which is a note or a PDF; anything else is reached
+    /// with `![[embed]]` or a markdown link, and those take [`file_paths`](Self::file_paths).
+    /// Git-ignored PDFs are left out the way `file_paths` leaves them out, so a build directory's
+    /// output is offered by neither, and a note is listed whatever git says about it.
+    pub fn note_and_pdf_paths(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files
+              WHERE kind IN (?1, ?2) AND (git_ignored = 0 OR kind = ?1)
+              ORDER BY kind <> ?1, rel_path COLLATE NOCASE",
+        )?;
+        let rows = st.query_map(
+            params![FileKind::Markdown.as_i64(), FileKind::Pdf.as_i64()],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Every openable file's rel_path, notes first and then the rest by path.
     ///
     /// The switcher opens more than markdown, and an `![[embed]]` or a markdown link's destination
-    /// can name any file, so they need this rather than [`note_paths`](Self::note_paths), which
-    /// stays markdown-only because `[[` completion offers notes alone. Directories are not files
-    /// to open and conflict copies are reached through the resolve UI, so neither is listed.
+    /// can name any file at all, so they need this rather than
+    /// [`note_and_pdf_paths`](Self::note_and_pdf_paths), which offers only what a wikilink may
+    /// name. Directories are not files to open and conflict copies are reached through the
+    /// resolve UI, so neither is listed.
     ///
     /// Git-ignored files are left out unless `include_ignored`, but **a note is never left out**:
     /// a vault that gitignores its own markdown is the ordinary case, not the exception. The file
@@ -300,6 +322,20 @@ mod tests {
         assert_eq!(ix.note_paths().unwrap(), vec!["a.md", "sub/Beta.md"]);
         assert_eq!(ix.recent_notes(50).unwrap().len(), 2);
         assert_eq!(ix.recent_notes(1).unwrap().len(), 1, "limit is honoured");
+    }
+
+    /// `[[` completes against notes and PDFs; a source file is `![[`'s and a markdown link's.
+    #[test]
+    fn note_and_pdf_paths_lists_notes_first_then_pdfs() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join("tool.py"), "print('hi')\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        assert_eq!(
+            ix.note_and_pdf_paths().unwrap(),
+            vec!["a.md", "sub/Beta.md", "c.pdf"]
+        );
     }
 
     #[test]
