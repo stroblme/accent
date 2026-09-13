@@ -10,6 +10,14 @@ use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
+/// The uniffi bindings Android calls this crate through. See `ffi::`.
+///
+/// The scaffolding is declared here rather than in the module because uniffi's macros look for
+/// the tag it defines in the crate root.
+#[cfg(feature = "android")]
+pub mod ffi;
+#[cfg(feature = "android")]
+uniffi::setup_scaffolding!();
 pub mod language;
 mod local;
 mod paths;

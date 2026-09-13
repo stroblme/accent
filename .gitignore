@@ -10,3 +10,10 @@
 /build-aux/build
 /.flatpak-builder
 /.claude/worktrees
+
+# Android: the cross-built libraries, the generated bindings and Gradle's own state.
+/android/app/src/main/jniLibs/
+/android/app/build/
+/android/.gradle/
+/android/build/
+/android/local.properties

@@ -34,6 +34,15 @@ cargo build -p accent  # GTK app
 cargo run --release -p accent -- testvault
 ```
 
+The Android app lives in `android/` and shares the same Rust core through uniffi bindings. It
+needs a JDK, the Android SDK and NDK, and `make android-tools` for the rest:
+
+```
+make android-tools     # rust targets + cargo-ndk
+make pdfium-android    # libpdfium for each ABI
+make apk               # cross-builds the core, generates the bindings, packs the APK
+```
+
 ## Roadmap
 
 - [ ] Debugger (DAP client)

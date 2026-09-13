@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The window the Compose tree is painted into, and nothing more: every colour the app draws
+      comes from the system's own palette at runtime (see ui/Theme.kt), the way the desktop takes
+      GNOME's accent rather than shipping one.
+    -->
+    <style name="Theme.Accent" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

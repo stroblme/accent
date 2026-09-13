@@ -32,6 +32,18 @@ impl PdfDoc {
         Ok(PdfDoc { doc: Some(doc) })
     }
 
+    /// A document read from bytes rather than a path: what Android gets from a `content://`
+    /// URI, where there is no file to open. pdfium takes ownership of the buffer and reads it
+    /// for as long as the document lives.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<PdfDoc> {
+        let pdfium = pdfium()?;
+        let _guard = lock();
+        let doc = pdfium
+            .load_pdf_from_byte_vec(bytes, None)
+            .context("open pdf from bytes")?;
+        Ok(PdfDoc { doc: Some(doc) })
+    }
+
     pub fn page_count(&self) -> usize {
         let _guard = lock();
         self.doc().pages().len() as usize

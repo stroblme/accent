@@ -1,0 +1,66 @@
+package io.github.stroblme.accent.ui
+
+import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+
+/**
+ * One accent, taken from the system, and one flat surface under everything.
+ *
+ * Material You answers the same question GNOME's accent does — what colour is this device — so
+ * the app asks it and writes no palette of its own. What it does override is Material's tonal
+ * elevation: every container tone is flattened onto the background, because a note wants a page
+ * to sit on, not a stack of cards. See MOBILE_DESIGN.md.
+ */
+@Composable
+fun AccentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
+    val context = LocalContext.current
+    val scheme = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        dark -> darkColorScheme()
+        else -> lightColorScheme()
+    }
+    MaterialTheme(colorScheme = scheme.flattened(), typography = AccentTypography, content = content)
+}
+
+/** Every container tone collapsed onto the surface: one background, no cards, no elevation. */
+private fun ColorScheme.flattened(): ColorScheme = copy(
+    surfaceContainerLowest = surface,
+    surfaceContainerLow = surface,
+    surfaceContainer = surface,
+    surfaceContainerHigh = surface,
+    surfaceContainerHighest = surface,
+    surfaceVariant = surface,
+    surfaceBright = surface,
+    surfaceDim = surface,
+    background = surface,
+)
+
+/**
+ * Hierarchy by size and weight, not by colour or rule. The body is the system's own size, which
+ * is what the reader set; the rest is measured against it.
+ */
+private val AccentTypography = Typography().let { base ->
+    base.copy(
+        headlineSmall = base.headlineSmall.copy(fontWeight = FontWeight.SemiBold, fontSize = 24.sp),
+        titleMedium = base.titleMedium.copy(fontWeight = FontWeight.Medium),
+        bodyLarge = base.bodyLarge.copy(fontSize = 16.sp, lineHeight = 26.sp),
+        labelMedium = base.labelMedium.copy(fontWeight = FontWeight.Normal),
+    )
+}
+
+/** What a fenced block and inline code are set in. */
+val MonoStyle = TextStyle(fontFamily = FontFamily.Monospace)

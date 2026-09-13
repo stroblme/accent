@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The themed-icon silhouette: the same three shapes with the colour taken out, since the launcher
+  tints this one itself. Only the outline carries the shape, so the strokes stay and the fills go.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="256"
+    android:viewportHeight="256"
+    android:tint="#000000">
+  <group
+      android:pivotX="128"
+      android:pivotY="128"
+      android:scaleX="0.5"
+      android:scaleY="0.5">
+    <path
+        android:pathData="M 239.12444,29.581929 71.118901,71.351273 29.349558,239.35685 197.3551,197.58751 Z"
+        android:strokeColor="#000000"
+        android:strokeWidth="25.9898"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"/>
+    <path
+        android:pathData="M 226.13002,16.587504 58.124476,58.356848 16.355134,226.36243 184.36067,184.59309 Z"
+        android:fillColor="#000000"
+        android:strokeColor="#000000"
+        android:strokeWidth="25.9898"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"/>
+  </group>
+</vector>

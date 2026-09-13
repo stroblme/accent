@@ -18,11 +18,33 @@ LIBDIR    ?= $(PREFIX)/lib
 DATADIR   ?= $(PREFIX)/share
 
 # libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
-# bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and PDFIUM_SHA256 together.
+# bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and every checksum below it together; the release
+# publishes one per asset.
 PDFIUM_BUILD  := 8035
-PDFIUM_URL    := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)/pdfium-linux-x64.tgz
-PDFIUM_SHA256 := 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+PDFIUM_RELEASE := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)
+# The desktop build follows the machine rather than assuming x86-64.
+PDFIUM_ARCH   := $(if $(filter aarch64,$(shell uname -m)),arm64,x64)
+PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-linux-$(PDFIUM_ARCH).tgz
+PDFIUM_SHA256_x64   := 2e6db042dd2cff2d5247023dbec6c7ebb800042ce83c835d6468d45229669bd4
+PDFIUM_SHA256_arm64 :=
+PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_ARCH))
 PDFIUM_LIB    := vendor/pdfium/libpdfium.so
+
+# Android. The two ABIs the APK ships: the phone, and the emulator this machine can run.
+# `jniLibs/<abi>` is where Gradle packs a bare `.so` into the APK, and where Android's linker
+# then finds it by name — which is how `Pdfium::bind_to_system_library` gets hold of it.
+ANDROID_ABIS  := arm64-v8a x86_64
+JNI_LIBS      := android/app/src/main/jniLibs
+PDFIUM_SHA256_android_arm64-v8a := 22280f42b38dc86919c93988d5cef8e39e0ab6d880a7b953531ed9775724bcdf
+PDFIUM_SHA256_android_x86_64    := 67a1865b961e9c58d1ada607e8b40c685685cc34de29aa6242c0ba588f4691ff
+# `jniLibs` is named by ABI, the pdfium release by architecture.
+PDFIUM_ASSET_arm64-v8a := arm64
+PDFIUM_ASSET_x86_64    := x64
+ANDROID_TARGETS := aarch64-linux-android x86_64-linux-android
+# The NDK's own readelf, for the 16 KB page-size check; the host's would do, but the NDK is what
+# a machine building for Android is guaranteed to have.
+ANDROID_NDK_HOME ?= $(firstword $(wildcard $(HOME)/Android/Sdk/ndk/*))
+READELF ?= $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf
 
 # The remote server is this same CLI, built static so it starts on a host older than this one.
 # Its name on the remote is its own blake3, so a rebuild re-provisions exactly once.
@@ -50,7 +72,8 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help
+        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help \
+        android android-check android-tools apk pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -84,6 +107,72 @@ $(PDFIUM_LIB):
 	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) --strip-components=1 lib/libpdfium.so
 	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) LICENSE VERSION
 	rm -f $(PDFIUM_LIB).tgz
+
+# --------------------------------------------------------------------------------------- Android
+#
+# The APK carries two shared libraries per ABI: `libaccent_android.so`, which is the Rust core
+# and its uniffi scaffolding, and `libpdfium.so`. Both land in `jniLibs/<abi>/`, which Gradle
+# packs into the APK and Android's linker reads by name.
+
+## android-tools: install what a cross build needs (rust targets, cargo-ndk)
+android-tools:
+	rustup target add $(ANDROID_TARGETS)
+	@command -v cargo-ndk >/dev/null || $(CARGO) install cargo-ndk --locked
+
+## android: cross-build the Rust core for every Android ABI into the APK's jniLibs
+android:
+	@command -v cargo-ndk >/dev/null || { echo "cargo-ndk is missing: run 'make android-tools'"; exit 1; }
+	$(CARGO) ndk $(foreach abi,$(ANDROID_ABIS),-t $(abi)) -o $(JNI_LIBS) \
+		build $(CARGO_PROFILE_FLAG) -p accent-android
+	@# cargo-ndk copies every shared object the build produced. `pdfium-render` emits one of its
+	@# own that nothing links or loads — we reach libpdfium through dlopen — so it would be half a
+	@# megabyte of APK for nothing.
+	rm -f $(JNI_LIBS)/*/libpdfium_render-*.so
+
+## bindings: regenerate the Kotlin bindings from the built library
+bindings:
+	$(CARGO) run -q -p accent-android --features cli --bin uniffi-bindgen -- \
+		generate --library $(JNI_LIBS)/arm64-v8a/libaccent_android.so \
+		--language kotlin --out-dir android/app/build/generated/uniffi
+
+## pdfium-android: fetch libpdfium for every Android ABI into the APK's jniLibs
+pdfium-android: $(foreach abi,$(ANDROID_ABIS),$(JNI_LIBS)/$(abi)/libpdfium.so)
+
+# One rule per ABI: the checksum and the asset name both depend on which one it is, and a static
+# pattern rule cannot reach either.
+define pdfium-android-rule
+$(JNI_LIBS)/$(1)/libpdfium.so:
+	@test -n "$(PDFIUM_SHA256_android_$(1))" || \
+		{ echo "no sha256 for pdfium-android-$(PDFIUM_ASSET_$(1)): refusing to install it unverified"; exit 1; }
+	@mkdir -p $(JNI_LIBS)/$(1)
+	curl -fL --retry 3 -o $(JNI_LIBS)/$(1)/pdfium.tgz \
+		"$(PDFIUM_RELEASE)/pdfium-android-$(PDFIUM_ASSET_$(1)).tgz"
+	echo "$(PDFIUM_SHA256_android_$(1))  $(JNI_LIBS)/$(1)/pdfium.tgz" | sha256sum -c -
+	tar -xzf $(JNI_LIBS)/$(1)/pdfium.tgz -C $(JNI_LIBS)/$(1) --strip-components=1 lib/libpdfium.so
+	rm -f $(JNI_LIBS)/$(1)/pdfium.tgz
+endef
+$(foreach abi,$(ANDROID_ABIS),$(eval $(call pdfium-android-rule,$(abi))))
+
+## apk: build the debug APK (Gradle runs the cross build and the bindings itself)
+apk: pdfium-android
+	cd android && ./gradlew assembleDebug
+
+## android-check: the Android gate — lint the bindings on the host, then cross-build them
+android-check:
+	$(CARGO) fmt --all --check
+	$(CARGO) clippy -p accent-api --features android --all-targets --locked -- -D warnings
+	$(CARGO) test -p accent-api --features android --locked
+	$(MAKE) android
+	@# Android 15 runs some devices with 16 KB pages, and a library laid out for 4 KB will not
+	@# load there at all. Every LOAD segment must be aligned to 0x4000.
+	@for abi in $(ANDROID_ABIS); do \
+		for so in $(JNI_LIBS)/$$abi/*.so; do \
+			test -f "$$so" || continue; \
+			$(READELF) -lW "$$so" | awk -v f="$$so" '/LOAD/ { if ($$NF != "0x4000") { print f " is not 16 KB aligned: " $$NF; bad=1 } } END { exit bad }' \
+				|| exit 1; \
+			echo "$$so: 16 KB aligned"; \
+		done; \
+	done
 
 ## fmt: format the whole workspace
 fmt:

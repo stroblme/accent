@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli", "apps/gtk"]
-# apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`
+members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
+# apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`.
+# android/ffi is cross-compiled for the phone by `make android`, never by a desktop build.
 default-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli"]
 
 [workspace.package]

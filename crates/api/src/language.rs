@@ -448,6 +448,12 @@ impl Languages {
             .filter_map(|cell| cell.get().cloned())
             .map(|p| accent_lsp::runtime().spawn(async move { p.shutdown().await }))
             .collect();
+        // No provider ever started, so there is nothing to wait for — and asking for the runtime
+        // here would start one just to close a vault. That is what a phone would pay on every
+        // vault it opens and closes, having no language servers at all.
+        if stopping.is_empty() {
+            return;
+        }
         accent_lsp::runtime().block_on(async {
             for handle in stopping {
                 let _ = handle.await;

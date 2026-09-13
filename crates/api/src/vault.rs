@@ -63,6 +63,16 @@ impl Vault {
         Ok((Vault::of(Backend::Local(local)), events))
     }
 
+    /// [`open`](Self::open) with no filesystem watcher: Android, where inotify over emulated
+    /// storage drops events. Nothing arrives on its own there, so the app calls
+    /// [`rescan`](Self::rescan) when it comes back to the foreground; its own writes still
+    /// reach the index, since every one of them posts an update to the worker.
+    pub fn open_unwatched(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
+        let db = accent_core::index::default_db_path(root);
+        let (local, events) = Local::open_with(root, &db, cfg, false)?;
+        Ok((Vault::of(Backend::Local(local)), events))
+    }
+
     /// Open a vault on another machine, addressed as `ssh://[user@]host[:port]/path`.
     ///
     /// Returns before the connection exists. The window opens on the spot and the connection
@@ -542,6 +552,7 @@ impl Vault {
 mod tests {
     use crate::tests::*;
     use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig};
+    use std::time::Duration;
 
     #[test]
     fn vault_is_send_and_sync() {
@@ -952,6 +963,46 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("sub/Nested.md")).unwrap(),
             "fine\n"
+        );
+    }
+    /// Android opens vaults this way: nothing arrives on its own, and `rescan` is what the app
+    /// calls when it comes back to the foreground.
+    #[test]
+    fn an_unwatched_vault_hears_nothing_until_it_is_asked_to_rescan() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Note.md"), "one\n").unwrap();
+        let (vault, events) = Vault::open_unwatched(root.path(), VaultConfig::default()).unwrap();
+        assert!(
+            crate::tests::wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET)
+                .is_some(),
+            "the initial reconcile never finished"
+        );
+
+        // Well past the watcher's 300 ms debounce: a watched vault would have reported this.
+        std::fs::write(root.path().join("Other.md"), "two\n").unwrap();
+        assert!(
+            crate::tests::wait_for(
+                &events,
+                |e| matches!(e, Event::FileChanged(_) | Event::DirsChanged(_)),
+                Duration::from_millis(800)
+            )
+            .is_none(),
+            "an unwatched vault reported a change nobody asked about"
+        );
+
+        vault.rescan().unwrap();
+        assert!(
+            crate::tests::wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET)
+                .is_some(),
+            "the rescan never finished"
+        );
+        assert!(
+            vault
+                .list_dir("")
+                .unwrap()
+                .iter()
+                .any(|r| r.rel_path == "Other.md"),
+            "the rescan did not pick the new note up"
         );
     }
 }
