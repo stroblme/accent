@@ -308,6 +308,12 @@ pub(crate) trait Language: Send + Sync {
     fn settle(&self, _rel: &str) -> Result<()> {
         Ok(())
     }
+    /// Say again what is wrong with the document, the text being what it was. For a provider
+    /// whose answer depends on more than the document — the index, which the note a link names
+    /// may have just appeared in — where a language server publishes on its own and ignores this.
+    fn rediagnose(&self, _rel: &str) -> Result<()> {
+        Ok(())
+    }
     fn close(&self, rel: &str);
     fn completion(&self, rel: &str, pos: Pos, trigger: Option<char>) -> Fut<'_, Completions>;
     /// The rest of the line, from a model or an index of the vault: ghost text, painted where
@@ -336,6 +342,22 @@ pub(crate) trait Language: Send + Sync {
 /// A session that may still be starting: concurrent openers await the same cell.
 pub(crate) type Session = Arc<tokio::sync::OnceCell<Arc<dyn Language>>>;
 
+/// What a session is keyed by: the server's name and the root it was started in.
+pub(crate) type Key = (String, PathBuf);
+
+/// The open documents: each one's provider, and the session it came from.
+pub(crate) type Open = HashMap<String, (Option<Key>, Arc<dyn Language>)>;
+
+/// What opening a document settled on: the provider that answers for it, if anything does, the
+/// protocol's name for its language, a server that should have been installed and was not, and
+/// the session to count the document against.
+type Opened = (
+    Option<Arc<dyn Language>>,
+    String,
+    Option<String>,
+    Option<Key>,
+);
+
 /// The providers a vault has started, and which document each one holds.
 ///
 /// Filled in by the notes and external providers; the registry itself is the shape of the
@@ -345,9 +367,11 @@ pub(crate) struct Languages {
     pub(crate) db: PathBuf,
     pub(crate) events: Sender<Event>,
     /// One session per (server, root): the cell makes concurrent openers await one start.
-    pub(crate) sessions: Mutex<HashMap<(String, PathBuf), Session>>,
-    /// Open document → the provider holding it.
-    pub(crate) docs: Mutex<HashMap<String, Arc<dyn Language>>>,
+    pub(crate) sessions: Mutex<HashMap<Key, Session>>,
+    /// Open document → the provider holding it, and the session it came from: the last document
+    /// to close takes that session down with it. The key is `None` for a document no session
+    /// answers for, which is a prose file with its words and nothing else.
+    pub(crate) docs: Mutex<Open>,
     /// Whether a prose document gets a ghost-text session; the preference behind it is global,
     /// so a vault reads it once and every document opened after that follows.
     pub(crate) ghost: AtomicBool,
@@ -378,7 +402,7 @@ impl Languages {
     /// next document to open tries again.
     pub(crate) async fn session(
         self: &Arc<Self>,
-        key: (String, PathBuf),
+        key: Key,
         start: impl Future<Output = Result<Arc<dyn Language>>>,
     ) -> Result<Arc<dyn Language>> {
         let cell = {
@@ -429,7 +453,7 @@ impl Languages {
     pub(crate) fn provider(&self, rel: &str) -> Result<Arc<dyn Language>> {
         locked(&self.docs)
             .get(rel)
-            .cloned()
+            .map(|(_, provider)| provider.clone())
             .ok_or_else(|| anyhow::anyhow!("{rel} is not open"))
     }
 
@@ -473,11 +497,7 @@ impl Languages {
         Task::spawn(async move {
             // What speaks the file's structure, if anything does: the index for a note, a
             // language server for code, nothing for a `.txt`.
-            let (primary, language_id, missing): (
-                Option<Arc<dyn Language>>,
-                String,
-                Option<String>,
-            ) = match which {
+            let (primary, language_id, missing, key): Opened = match which {
                 Some(Server::Notes) => {
                     // One notes provider per vault, whatever the note: they share the index.
                     let key = ("accent".to_string(), me.root.clone());
@@ -485,9 +505,10 @@ impl Languages {
                     let start =
                         async move { Ok(Arc::new(Notes::open_at(root, &db, events)?) as _) };
                     (
-                        Some(me.session(key, start).await?),
+                        Some(me.session(key.clone(), start).await?),
                         "markdown".to_string(),
                         None,
+                        Some(key),
                     )
                 }
                 Some(Server::External { language_id, argv }) => {
@@ -497,13 +518,18 @@ impl Languages {
                     let session_root = session_root(&root, &Local::join(&root, &rel)?);
                     let key = (argv[0].clone(), session_root.clone());
                     let start = external::start(argv, session_root, root, events, None);
-                    (Some(me.session(key, start).await?), language_id, None)
+                    (
+                        Some(me.session(key.clone(), start).await?),
+                        language_id,
+                        None,
+                        Some(key),
+                    )
                 }
                 Some(Server::Missing(name)) => {
                     tracing::debug!("no language server for {language}: {name} is not installed");
-                    (None, language.clone(), Some(name))
+                    (None, language.clone(), Some(name), None)
                 }
-                None => (None, language.clone(), None),
+                None => (None, language.clone(), None, None),
             };
             let prose = words::PROSE.contains(&language.as_str());
             // Ghost text rides beside the primary for prose: one merl for the whole vault,
@@ -528,16 +554,36 @@ impl Languages {
             };
             let mut support = provider.open(&rel, &language_id, text)?;
             support.missing = support.missing.or(missing);
-            locked(&me.docs).insert(rel, provider);
+            locked(&me.docs).insert(rel, (key, provider));
             Ok(support)
         })
     }
 
+    /// The user closed the tab: the provider is told, and a session left with no open document
+    /// is shut down rather than kept for the life of the vault.
+    ///
+    /// ponytail: the last close is the rule, not a wall clock. Reopening the file then pays a
+    /// cold start, which is the price of not holding a rust-analyzer for a file nobody is
+    /// reading. The ghost session is not counted here — it is one process for the whole vault
+    /// and its start is measured in seconds; it still ends with the vault.
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
-        let provider = locked(&self.docs).remove(&rel);
+        let (key, provider) = match locked(&self.docs).remove(&rel) {
+            Some((key, provider)) => (key, Some(provider)),
+            None => (None, None),
+        };
+        let idle = key.filter(|key| {
+            !locked(&self.docs)
+                .values()
+                .any(|(open, _)| open.as_ref() == Some(key))
+        });
+        let session = idle.and_then(|key| locked(&self.sessions).remove(&key));
         Task::spawn(async move {
             if let Some(provider) = provider {
                 provider.close(&rel);
+            }
+            // After the close, so the server hears `didClose` before it is asked to exit.
+            if let Some(session) = session.as_ref().and_then(|cell| cell.get()) {
+                let _ = session.shutdown().await;
             }
             Ok(())
         })
@@ -816,6 +862,9 @@ notifications! {
     /// The user left the document. Cheap for every provider but the ghost one, which re-reads
     /// the vault here rather than on every autosave.
     settle => settle_document / settle();
+    /// The index moved under the document: its hints are worked out again and published. What a
+    /// note's dangling link needs, the note it names having just been created.
+    rediagnose => rediagnose_document / rediagnose();
 }
 
 /// One remote request as a task.
@@ -1010,6 +1059,78 @@ mod tests {
             session_root(root, &root.join("loose.rs")),
             root,
             "a file beside the checkout is not inside it"
+        );
+    }
+
+    /// The notes provider is the session every checkout has — no binary to install — so it is
+    /// what proves the rule: a session lives exactly as long as a document it holds is open.
+    #[test]
+    fn the_last_document_to_close_takes_its_session_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.md"), "# A\n").unwrap();
+        std::fs::write(root.path().join("b.md"), "# B\n").unwrap();
+        let (vault, _events) = Local::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        // The ghost session is the vault's, not a document's, and it is not counted here.
+        vault.set_ghost(false);
+
+        accent_lsp::runtime().block_on(async {
+            for rel in ["a.md", "b.md"] {
+                vault
+                    .open_document(rel, "markdown", "# note\n".to_string())
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(locked(&vault.lang.sessions).len(), 1, "one notes provider");
+
+            vault.close_document("a.md").await.unwrap();
+            assert_eq!(
+                locked(&vault.lang.sessions).len(),
+                1,
+                "b.md still has the session open"
+            );
+            vault.close_document("b.md").await.unwrap();
+            assert!(
+                locked(&vault.lang.sessions).is_empty(),
+                "nothing is open, so nothing is kept"
+            );
+        });
+    }
+
+    /// A note created after a link to it was flagged: the hint goes when the walk that found it
+    /// reports, not at the next keystroke.
+    #[test]
+    fn an_indexed_note_clears_the_link_that_was_waiting_for_it() {
+        let indexed = |e: &Event| matches!(e, Event::DirsChanged(_) | Event::Reconciled(_));
+        let f = crate::tests::Fixture::open(crate::VaultConfig::default());
+        f.write("a.md", "[[Beta]]\n");
+        // Drained here, so that the wait for Beta's walk below cannot match this one's.
+        assert!(f.wait(indexed).is_some(), "a.md reaches the index");
+        let rt = accent_lsp::runtime();
+        rt.block_on(async {
+            f.vault
+                .open_document("a.md", "markdown", "[[Beta]]\n".to_string())
+                .await
+                .unwrap();
+        });
+        assert!(
+            f.wait(|e| matches!(e, Event::Diagnostics { rel, items } if rel == "a.md" && items.len() == 1))
+                .is_some(),
+            "the link is dangling while Beta does not exist"
+        );
+
+        f.write("Beta.md", "# Beta\n");
+        assert!(f.wait(indexed).is_some(), "the new note reaches the index");
+        rt.block_on(async { f.vault.rediagnose("a.md").await.unwrap() });
+        assert!(
+            f.wait(|e| matches!(e, Event::Diagnostics { rel, items } if rel == "a.md" && items.is_empty()))
+                .is_some(),
+            "the link resolves now, so the hint goes"
         );
     }
 
