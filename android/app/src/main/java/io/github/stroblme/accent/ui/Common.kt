@@ -3,14 +3,20 @@ package io.github.stroblme.accent.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -25,24 +31,41 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 val Gutter: Dp = 16.dp
 
 /**
- * A two-finger pinch, and nothing else.
+ * Panning and pinching as one gesture, with the throw that follows it.
  *
- * It watches the initial pass, so it sees the event before the list under it does, but consumes
- * only while two fingers are down — one finger still scrolls the pages and still draws.
+ * One handler for both axes, because two — one per direction — is what makes a diagonal drag
+ * pick a side and stick to it. [onGesture] is called with where the fingers are between them,
+ * how far they moved and how much further apart they got, all at once; [onFling] with the
+ * velocity they left behind.
+ *
+ * A gesture whose events something nearer the finger has already taken — the pen drawing on the
+ * page — is dropped rather than fought over.
  */
-fun Modifier.pinch(onZoom: (Float) -> Unit): Modifier = pointerInput(Unit) {
+suspend fun PointerInputScope.panZoom(
+    onGesture: (centroid: Offset, pan: Offset, zoom: Float) -> Unit,
+    onFling: (Velocity) -> Unit,
+) {
     awaitEachGesture {
-        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val speed = VelocityTracker()
+        var moving = false
+        awaitFirstDown(requireUnconsumed = false)
         do {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            if (event.changes.count { it.pressed } >= 2) {
-                val zoom = event.calculateZoom()
-                if (zoom != 1f) {
-                    onZoom(zoom)
-                    event.changes.forEach { it.consume() }
-                }
+            val event = awaitPointerEvent()
+            if (event.changes.any { it.isConsumed }) return@awaitEachGesture
+            val zoom = event.calculateZoom()
+            val pan = event.calculatePan()
+            if (!moving && (zoom != 1f || pan.getDistance() > viewConfiguration.touchSlop)) {
+                moving = true
+            }
+            if (moving) {
+                val centroid = event.calculateCentroid(useCurrent = true)
+                if (centroid != Offset.Unspecified) onGesture(centroid, pan, zoom)
+                event.changes.forEach { if (it.positionChanged()) it.consume() }
+                event.changes.firstOrNull { it.pressed }
+                    ?.let { speed.addPosition(it.uptimeMillis, it.position) }
             }
         } while (event.changes.any { it.pressed })
+        if (moving) onFling(speed.calculateVelocity())
     }
 }
 
