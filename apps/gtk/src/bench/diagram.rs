@@ -303,6 +303,14 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
                     tab.editing_label(),
                     ["a", "b", "e"].map(|id| tab.label_markdown(id))
                 );
+                let label = tab.label_at();
+                println!(
+                    "bench diagram label at={:?} px={:?} focus={:?} scale={:.3}",
+                    label.map(|(x, y, ..)| (x.round(), y.round())),
+                    label.map(|(.., px, _)| (px * 10.0).round() / 10.0),
+                    label.map(|(.., focus)| focus),
+                    tab.scale()
+                );
                 println!(
                     "bench diagram after a={:?} b={:?} selection={:?} history={:?}",
                     tab.frame_of("a"),

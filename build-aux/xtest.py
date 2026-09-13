@@ -3,12 +3,13 @@ press and drag (`ACCENT_BENCH_DIAGRAM=hold:…` prints where to aim).
 
 Usage: build-aux/xtest.py :99 "drag 400 300 550 340; sleep 0.5; move 10 10; down; up"
 
-Steps are `;`-separated: `move x y`, `down`, `up`, `drag x0 y0 x1 y1` (a press, twenty steps of
-motion and a release), `sleep s`, `focus` (give the keyboard to the window under the pointer,
-which no window manager does under Xvfb), `key <chord>` (keysym names joined by `+`, e.g.
-`ctrl+Return`) and `type <text>` (letters, digits and spaces). Coordinates are the screen's; with
-no window manager under Xvfb a window sits at 0,0, so they are the window's too. Needs only libX11
-and libXtst.
+Steps are `;`-separated: `move x y`, `down [button]`, `up [button]`, `drag x0 y0 x1 y1` (a press,
+twenty steps of motion and a release), `sleep s`, `focus` (give the keyboard to the window under
+the pointer, which no window manager does under Xvfb), `key <chord>` (keysym names joined by
+`+`, e.g. `ctrl+Return`), `type <text>` (letters, digits and spaces), `keydown <name>`/`keyup <name>` (one
+key held across the steps between them) and `scroll <n>` (n wheel clicks, up when positive).
+Coordinates are the screen's; with no window manager under Xvfb a window sits at 0,0, so they are
+the window's too. Needs only libX11 and libXtst.
 """
 import ctypes, sys, time
 x11 = ctypes.cdll.LoadLibrary("libX11.so.6"); xt = ctypes.cdll.LoadLibrary("libXtst.so.6")
@@ -45,11 +46,17 @@ for line in sys.argv[2].split(";"):
     w = line.split()
     if not w: continue
     if w[0] == "move": move(float(w[1]), float(w[2]))
-    elif w[0] == "down": button(True)
-    elif w[0] == "up": button(False)
+    elif w[0] == "down": button(True, int(w[1]) if len(w) > 1 else 1)
+    elif w[0] == "up": button(False, int(w[1]) if len(w) > 1 else 1)
     elif w[0] == "sleep": time.sleep(float(w[1]))
     elif w[0] == "focus": focus()
     elif w[0] == "key": key(w[1])
+    elif w[0] == "keydown": xt.XTestFakeKeyEvent(ctypes.c_void_p(dpy), keycode(w[1]), 1, 0); x11.XFlush(ctypes.c_void_p(dpy))
+    elif w[0] == "keyup": xt.XTestFakeKeyEvent(ctypes.c_void_p(dpy), keycode(w[1]), 0, 0); x11.XFlush(ctypes.c_void_p(dpy))
+    elif w[0] == "scroll":
+        n = int(w[1])
+        for _ in range(abs(n)):
+            button(True, 4 if n > 0 else 5); button(False, 4 if n > 0 else 5); time.sleep(0.05)
     elif w[0] == "type":
         for ch in line.split(None, 1)[1]:
             key(f"shift+{ch}" if ch.isupper() else ch)

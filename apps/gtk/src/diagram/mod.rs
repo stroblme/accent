@@ -178,18 +178,18 @@ pub fn open(
         #[weak]
         tab,
         move || {
-            tab.finish_label();
+            tab.place_label();
             tab.emit(&tab.on_zoom)
         }
     ));
-    // The label editor sits at a place on screen; a scroll would leave it over another cell.
-    // ponytail: finishing on a scroll is the simple answer; moving the editor with the page is
-    // the upgrade if it gets in the way.
+    // The label editor sits at a place on screen: the page moving under it takes it along, and
+    // the overlay clips it where the label leaves the canvas, so neither a scroll nor a zoom
+    // finishes the edit or leaves the editor over another cell.
     for adjustment in [scroller.hadjustment(), scroller.vadjustment()] {
         adjustment.connect_value_changed(glib::clone!(
             #[weak]
             tab,
-            move |_| tab.finish_label()
+            move |_| tab.place_label()
         ));
     }
     tab.props.connect_change(glib::clone!(
@@ -647,35 +647,39 @@ impl DiagramTab {
             place = r;
         }
         self.view.reveal(&place);
-        let at = self.view.to_widget(&place);
         let editor = label::LabelEditor::open(
             &self.overlay,
             id,
             &markdown,
-            at,
-            size * self.view.scale(),
+            place,
+            size,
             self.font.borrow().as_deref(),
             self.spellcheck.get(),
         );
+        *self.label.borrow_mut() = Some(editor.clone());
+        self.place_label();
         // A click outside finishes the label, from an idle rather than the handler: leaving is
         // GTK moving the focus, and taking the editor off the canvas meanwhile left GTK walking
         // up from a widget that was gone, over and over (the freeze). Only the editor that left:
         // another may have opened by the time the idle runs.
-        let focus = gtk::EventControllerFocus::new();
-        let left = Rc::downgrade(&editor);
-        focus.connect_leave(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |_| {
+        let later = {
+            let (tab, left) = (Rc::downgrade(self), Rc::downgrade(&editor));
+            move || {
                 let (tab, left) = (tab.clone(), left.clone());
                 glib::idle_add_local_once(move || {
+                    let Some(tab) = tab.upgrade() else { return };
                     let open = tab.label.borrow().as_ref().map(Rc::downgrade);
                     if open.is_some_and(|open| open.ptr_eq(&left)) {
                         tab.finish_label();
                     }
                 });
             }
-        ));
+        };
+        let focus = gtk::EventControllerFocus::new();
+        focus.connect_leave({
+            let later = later.clone();
+            move |_| later()
+        });
         editor.view().add_controller(focus);
         label::wire_keys(
             &editor,
@@ -685,10 +689,24 @@ impl DiagramTab {
                 move || tab.finish_label()
             ),
         );
-        *self.label.borrow_mut() = Some(editor.clone());
+        // Space that takes no keyboard moves no focus, so the press on it is heard on the window
+        // instead. Wired now that the editor is in place, and taken off again when it closes.
+        label::wire_press(&editor, later);
         // Only now: a focus controller hears the focus leave only if it saw it come in, so a
         // click outside finishes the label only when the grab comes after the wiring.
         editor.focus();
+    }
+
+    /// Put the label editor back over its cell: where it opens, and again whenever the canvas
+    /// scrolls or zooms under it. Nothing when no label is being edited.
+    fn place_label(&self) {
+        let Some(editor) = self.label.borrow().clone() else {
+            return;
+        };
+        editor.place_at(
+            self.view.to_widget(&editor.place),
+            editor.font_size * self.view.scale(),
+        );
     }
 
     /// Put the label editor away, writing what was typed into the cell. Safe to call twice:
@@ -738,6 +756,14 @@ impl DiagramTab {
     /// The cell whose label is being edited, if one is.
     pub fn editing_label(&self) -> Option<CellId> {
         self.label.borrow().as_ref().map(|e| e.cell.clone())
+    }
+
+    /// Where the label editor sits on the canvas, how big its text is there and whether it holds
+    /// the keyboard, for the drills that move the page under it.
+    pub fn label_at(&self) -> Option<(f64, f64, f64, bool)> {
+        let editor = self.label.borrow().clone()?;
+        let (x, y, px) = editor.at();
+        Some((x, y, px, editor.has_focus()))
     }
 
     /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the
