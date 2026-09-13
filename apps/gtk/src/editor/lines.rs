@@ -403,6 +403,52 @@ pub(crate) fn line_clipboard(view: &sourceview5::View) {
         view.clipboard().set_text(&whole_lines(view));
         delete_line(view);
     });
+    menu_items(view);
+}
+
+/// Put GTK's own Cut and Copy back on the context menu when nothing is selected, so the menu
+/// reaches the whole-line idiom the chords have.
+///
+/// Both items activate by emitting the two signals above, so the path is already the right one;
+/// what stopped them is that `gtk_text_view_do_popup` calls
+/// `gtk_text_view_update_clipboard_actions` on its way to the menu, and that leaves the two
+/// actions disabled while the buffer has no selection (GTK 4.22). Enabling them has to happen
+/// *after* the popup that disabled them, which is what the idle is for; a menu item follows its
+/// action's enabled state while it is on screen, so it is sensitive before the popover has
+/// finished coming up.
+fn menu_items(view: &sourceview5::View) {
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    click.connect_pressed(|click, _, _, _| {
+        if let Some(view) = click.widget().and_downcast::<sourceview5::View>() {
+            arm_menu_items(&view);
+        }
+    });
+    view.add_controller(click);
+    // The keyboard's own way to the same menu, which no gesture sees.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(|keys, key, _, state| {
+        let opens_menu = key == gdk::Key::Menu
+            || (key == gdk::Key::F10 && state.contains(gdk::ModifierType::SHIFT_MASK));
+        if opens_menu && let Some(view) = keys.widget().and_downcast::<sourceview5::View>() {
+            arm_menu_items(&view);
+        }
+        glib::Propagation::Proceed
+    });
+    view.add_controller(keys);
+}
+
+/// Enable the two items once the menu this press or key is opening is up. A cut on a read-only
+/// view is left out, as GTK leaves it out: there is nothing there to take away.
+fn arm_menu_items(view: &sourceview5::View) {
+    let view = view.clone();
+    glib::idle_add_local_once(move || {
+        view.action_set_enabled("clipboard.copy", true);
+        view.action_set_enabled("clipboard.cut", view.is_editable());
+    });
 }
 
 /// Middle-click paste, as plain text like every other way in. GTK's own reads the primary
