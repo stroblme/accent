@@ -328,6 +328,44 @@ mod tests {
         );
     }
 
+    /// The bump to schema 9 as a user meets it: an index the previous version wrote is dropped
+    /// whole and built again, and the query the new schema exists for answers on what came back.
+    /// A vault of 41.7k files pays this once, so the failure that matters is a half-migration —
+    /// the new table missing while `user_version` says it is there.
+    #[test]
+    fn an_index_from_the_previous_schema_is_rebuilt_whole() {
+        let (vault, db) = fixture();
+        let path = db.path().join("i.db");
+        {
+            let mut ix = Index::open(&path).unwrap();
+            ix.reconcile(vault.path(), |_| {}).unwrap();
+        }
+        // What a schema-8 database is: everything this one holds, minus the table version 9 added.
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(
+                "DROP TRIGGER notes_ai; DROP TRIGGER notes_ad; DROP TRIGGER notes_au;
+                 DROP TABLE notes_tri;",
+            )
+            .unwrap();
+            c.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+                .unwrap();
+        }
+
+        let mut ix = Index::open(&path).unwrap();
+        assert_eq!(
+            ix.stats().unwrap().files,
+            0,
+            "the old cache must be dropped"
+        );
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(
+            ix.search("erris", 10, false).unwrap()[0].rel_path,
+            "sub/Beta.md",
+            "the rebuilt index answers mid-word"
+        );
+    }
+
     #[test]
     fn schema_mismatch_drops_and_rebuilds() {
         let (vault, db) = fixture();
