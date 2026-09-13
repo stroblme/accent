@@ -19,7 +19,7 @@ use gtk::glib;
 use gtk::{gdk, gio, pango};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
@@ -96,9 +96,6 @@ pub struct Sources {
     /// deletes nothing, which is why the row's button asks nothing first.
     pub on_forget: Box<dyn Fn(&str)>,
 }
-
-/// Something [`cache`] fills in at most once and hands out by handle for the life of the dialog.
-type Cached<T> = Rc<RefCell<Option<Rc<T>>>>;
 
 /// Bind `action` to `accels`, or to its default when they are `None`; yields what is in force.
 pub type Rebind = dyn Fn(&str, Option<Vec<String>>) -> Vec<String>;
@@ -217,19 +214,6 @@ fn rank(
         .take(MAX_RESULTS)
         .map(|(i, _, _)| i)
         .collect()
-}
-
-/// What `load` computes, computed at most once.
-///
-/// `load` must never run while `slot` is borrowed, so this borrows, clones the handle and drops
-/// before calling.
-fn cache<T>(slot: &Cached<T>, load: &dyn Fn() -> T) -> Rc<T> {
-    let cached = slot.borrow().clone();
-    cached.unwrap_or_else(|| {
-        let loaded = Rc::new(load());
-        *slot.borrow_mut() = Some(loaded.clone());
-        loaded
-    })
 }
 
 /// Where each of `corpus` sits in `mru`, for [`rank`]'s recency tiebreak. A map rather than a
@@ -558,7 +542,7 @@ pub fn present(
     // Where each file sits in the window's most-recent list. Cached with the corpus it indexes:
     // it is one pass over every path in the vault, and the corpus does not change while the
     // dialog is up.
-    let note_recent: Cached<Vec<Option<usize>>> = Rc::new(RefCell::new(None));
+    let note_recent: Rc<OnceCell<Vec<Option<usize>>>> = Rc::new(OnceCell::new());
     let matcher = Rc::new(RefCell::new(Matcher::new(Config::DEFAULT)));
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -647,10 +631,10 @@ pub fn present(
                         .map(|rel| Rc::new(Item::File(rel.clone())))
                         .collect(),
                     Mode::Files => {
-                        let used = cache(&note_recent, &|| places(&files, &mru));
+                        let used = note_recent.get_or_init(|| places(&files, &mru));
                         let mut m = matcher.borrow_mut();
                         m.config = Config::DEFAULT.match_paths();
-                        rank(&files, &used, query, &mut m)
+                        rank(&files, used, query, &mut m)
                             .into_iter()
                             .map(|i| Rc::new(Item::File(files[i].clone())))
                             .collect()
