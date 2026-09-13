@@ -1,5 +1,6 @@
 package io.github.stroblme.accent.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -52,7 +53,8 @@ fun SwitcherScreen(model: VaultModel, onDone: () -> Unit) {
 
     LaunchedEffect(Unit) { focus.requestFocus() }
 
-    Column(Modifier.fillMaxSize()) {
+    // A ground of its own: this lies over whatever is being read, which stays composed.
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
         ScreenBar("Launch", onDone)
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), reverseLayout = true) {
             items(rows, key = { it }) { row ->
