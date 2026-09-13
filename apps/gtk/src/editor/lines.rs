@@ -84,6 +84,20 @@ fn covered(column: &multicaret::View) -> Vec<(i32, i32)> {
     runs(ranges)
 }
 
+/// The lines one caret's selection covers, first and last, by [`last_copied`]'s rule: what the
+/// line commands take with no column of carets up. With nothing selected that is the caret's own
+/// line.
+fn selected_lines(buffer: &gtk::TextBuffer) -> (i32, i32) {
+    let (from, end) = buffer.selection_bounds().unwrap_or_else(|| {
+        let at = caret(buffer);
+        (at, at)
+    });
+    (
+        from.line(),
+        last_copied(from.line(), end.line(), end.line_offset()),
+    )
+}
+
 /// Whether any caret of `column` has something selected, which decides whether a cut or copy
 /// there takes the selections or whole lines.
 fn any_selected(column: &multicaret::View) -> bool {
@@ -164,6 +178,9 @@ fn open_below(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
 /// themselves, and the caret and the selection move down onto the copy, in the same columns. At a
 /// column, every run of lines the carets cover ([`covered`]), each onto its copy.
 pub(crate) fn duplicate_line(view: &sourceview5::View) {
+    if !view.is_editable() {
+        return;
+    }
     if let Some(column) = column(view) {
         return column.each_block(&covered(column), |buffer, first, last| {
             copy_down(buffer, first, last);
@@ -171,19 +188,20 @@ pub(crate) fn duplicate_line(view: &sourceview5::View) {
         });
     }
     let buffer = view.buffer();
-    let (from, end) = buffer.selection_bounds().unwrap_or_else(|| {
-        let at = caret(&buffer);
-        (at, at)
-    });
-    let last = last_copied(from.line(), end.line(), end.line_offset());
+    let (first, last) = selected_lines(&buffer);
     buffer.begin_user_action();
-    copy_down(&buffer, from.line(), last);
+    copy_down(&buffer, first, last);
     buffer.end_user_action();
     view.scroll_mark_onscreen(&buffer.get_insert());
 }
 
-/// Delete the caret's line, or at a column every line the carets cover, each once.
+/// Delete every line the selection covers ([`selected_lines`]), or at a column every line the
+/// carets cover, each once. VS Code's rule, and Duplicate Line's: the selected lines in both
+/// cases, the caret's own where there is no selection.
 pub(crate) fn delete_line(view: &sourceview5::View) {
+    if !view.is_editable() {
+        return;
+    }
     if let Some(column) = column(view) {
         return column.each_block(&covered(column), |buffer, first, last| {
             delete_lines(buffer, first, last);
@@ -191,9 +209,9 @@ pub(crate) fn delete_line(view: &sourceview5::View) {
         });
     }
     let buffer = view.buffer();
-    let line = caret(&buffer).line();
+    let (first, last) = selected_lines(&buffer);
     buffer.begin_user_action();
-    delete_lines(&buffer, line, line);
+    delete_lines(&buffer, first, last);
     buffer.end_user_action();
 }
 
@@ -203,6 +221,9 @@ pub(crate) fn delete_line(view: &sourceview5::View) {
 /// one's, because this is also how a line is opened *out* of a list. At a column, a line under
 /// each run of lines the carets cover, with every caret of the run moved onto it.
 pub(crate) fn newline_below(view: &sourceview5::View) {
+    if !view.is_editable() {
+        return;
+    }
     if let Some(column) = column(view) {
         return column.each_block(&covered(column), |buffer, _, last| {
             Some(open_below(buffer, last))
@@ -215,6 +236,111 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
     buffer.end_user_action();
     buffer.place_cursor(&at);
     view.scroll_mark_onscreen(&buffer.get_insert());
+}
+
+/// `text` with the language's comment markers put on or taken off, or `None` where the language
+/// names none. GtkSourceView carries the markers in its metadata but does no toggling of its own,
+/// so the text goes out to [`crate::comment`] and comes back as one replacement.
+fn toggled(text: &str, language: &sourceview5::Language) -> Option<String> {
+    if let Some(marker) = language.metadata("line-comment-start") {
+        return Some(comment::toggle_lines(text, &marker));
+    }
+    let (open, close) = (
+        language.metadata("block-comment-start")?,
+        language.metadata("block-comment-end")?,
+    );
+    Some(comment::toggle_block(text, &open, &close))
+}
+
+/// Comment or uncomment lines `first` to `last` whole — a marker goes in front of a line, never
+/// in front of a word — replacing only the characters that actually change, so a caret in those
+/// lines keeps its column instead of riding to the end of a wholesale replacement.
+fn toggle_run(buffer: &gtk::TextBuffer, first: i32, last: i32, language: &sourceview5::Language) {
+    let Some(start) = buffer.iter_at_line(first) else {
+        return;
+    };
+    let end = line_end(buffer, last);
+    let text = buffer.text(&start, &end, true);
+    let Some(toggled) = toggled(&text, language) else {
+        return;
+    };
+    if toggled != text {
+        splice(buffer, start, end, &text, &toggled);
+    }
+}
+
+/// How many characters `old` and `new` share at the front and at the back without the two runs
+/// overlapping. What is left between them is all a replacement has to touch.
+fn shared(old: &str, new: &str) -> (usize, usize) {
+    let head = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let rest = |text: &str| text.chars().count() - head;
+    let tail = old
+        .chars()
+        .rev()
+        .zip(new.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .count()
+        .min(rest(old))
+        .min(rest(new));
+    (head, tail)
+}
+
+/// Replace `old`, which is what stands between `start` and `end`, with `new`, touching only the
+/// run of characters where the two differ ([`shared`]): the head and tail they share are left
+/// where they are, and so is every mark inside them.
+fn splice(
+    buffer: &gtk::TextBuffer,
+    mut start: gtk::TextIter,
+    mut end: gtk::TextIter,
+    old: &str,
+    new: &str,
+) {
+    let (head, tail) = shared(old, new);
+    let middle: String = new
+        .chars()
+        .skip(head)
+        .take(new.chars().count() - head - tail)
+        .collect();
+    start.forward_chars(head as i32);
+    end.backward_chars(tail as i32);
+    buffer.delete(&mut start, &mut end);
+    buffer.insert(&mut start, &middle);
+}
+
+/// Comment or uncomment the lines the selection covers with the language's own markers, inside a
+/// single user action so one Ctrl+Z undoes the whole thing. At a column, every run of lines the
+/// carets cover ([`covered`]), each run deciding for itself, and the column stays up.
+pub(crate) fn toggle_comment(view: &sourceview5::View) {
+    if !view.is_editable() {
+        return;
+    }
+    let buffer = view.buffer();
+    let Some(language) = buffer
+        .downcast_ref::<sourceview5::Buffer>()
+        .and_then(|buffer| buffer.language())
+    else {
+        return;
+    };
+    if let Some(column) = column(view) {
+        return column.each_block(&covered(column), |buffer, first, last| {
+            toggle_run(buffer, first, last, &language);
+            None
+        });
+    }
+    let had_selection = buffer.has_selection();
+    let (first, last) = selected_lines(&buffer);
+    buffer.begin_user_action();
+    toggle_run(&buffer, first, last, &language);
+    buffer.end_user_action();
+    // The marker is not part of what was selected, so the lines are selected afresh rather than
+    // left to the marks: toggling never adds or removes a line, so they are still these two.
+    if had_selection && let Some(start) = buffer.iter_at_line(first) {
+        buffer.select_range(&start, &line_end(&buffer, last));
+    }
 }
 
 /// Cut and copy, always as plain text, and VS Code's whole-line cut and copy: with nothing
@@ -402,50 +528,6 @@ fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
 }
 
 impl Tab {
-    /// Comment or uncomment the selected lines with the language's own markers.
-    ///
-    /// GtkSourceView carries the markers in the language's metadata but does no toggling of its
-    /// own, so the text goes out to [`crate::comment`] and comes back as one replacement, inside
-    /// a single user action so one Ctrl+Z undoes the whole thing.
-    pub fn toggle_comment(&self) {
-        let Some(language) = self.buffer.language() else {
-            return;
-        };
-        let had_selection = self.buffer.has_selection();
-        let (mut start, mut end) = match self.buffer.selection_bounds() {
-            Some(bounds) => bounds,
-            None => {
-                let at = caret(&self.buffer);
-                (at, at)
-            }
-        };
-        // Whole lines: a marker goes in front of a line, never in front of a word.
-        start.set_line_offset(0);
-        end = line_end(&self.buffer, end.line());
-        let text = self.buffer.text(&start, &end, true);
-        let toggled = match language.metadata("line-comment-start") {
-            Some(marker) => comment::toggle_lines(&text, &marker),
-            None => {
-                let (Some(open), Some(close)) = (
-                    language.metadata("block-comment-start"),
-                    language.metadata("block-comment-end"),
-                ) else {
-                    return;
-                };
-                comment::toggle_block(&text, &open, &close)
-            }
-        };
-        let anchor = start.offset();
-        self.buffer.begin_user_action();
-        self.buffer.delete(&mut start, &mut end);
-        self.buffer.insert(&mut start, &toggled);
-        self.buffer.end_user_action();
-        if had_selection {
-            self.buffer
-                .select_range(&self.buffer.iter_at_offset(anchor), &start);
-        }
-    }
-
     /// Wrap long lines, or stop. Every tab starts wrapped and can be told otherwise for as long
     /// as it is open, which is the escape hatch for a file whose columns are the point.
     pub fn toggle_wrap(&self) {
@@ -470,6 +552,11 @@ impl Tab {
     /// [`delete_line`] in this tab.
     pub fn delete_line(&self) {
         delete_line(&self.view);
+    }
+
+    /// [`toggle_comment`] in this tab.
+    pub fn toggle_comment(&self) {
+        toggle_comment(&self.view);
     }
 
     /// Put the caret on a template's first `{{cursor}}` and make the rest Tab stops.
@@ -560,6 +647,17 @@ mod tests {
         assert_eq!(runs(vec![(2, 2), (0, 0), (1, 1)]), [(0, 0), (1, 1), (2, 2)]);
         assert_eq!(runs(vec![(0, 3), (2, 5), (5, 5)]), [(0, 5)]);
         assert_eq!(runs(vec![(4, 4), (4, 4)]), [(4, 4)]);
+    }
+
+    /// A comment marker going on or coming off changes one run of a line, and the head and tail
+    /// around it are what a caret in the line hangs on to.
+    #[test]
+    fn a_toggled_line_is_replaced_only_where_it_differs() {
+        assert_eq!(shared("    a();", "    // a();"), (4, 4));
+        assert_eq!(shared("    // a();", "    a();"), (4, 4));
+        assert_eq!(shared("x", "x"), (1, 0), "nothing to replace");
+        assert_eq!(shared("", "// "), (0, 0));
+        assert_eq!(shared("aa", "aaa"), (2, 0), "the two runs never overlap");
     }
 
     #[test]
