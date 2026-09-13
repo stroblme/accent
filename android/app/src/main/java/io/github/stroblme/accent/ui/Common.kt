@@ -5,7 +5,13 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animate
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -13,25 +19,30 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /** A row the whole width of the screen is tappable. */
 fun Modifier.row(onClick: () -> Unit): Modifier = clickable(onClick = onClick)
@@ -184,15 +195,96 @@ fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
     }
 }
 
-/** A screen's name, and the way out of it that Back also is. */
+/** A screen's name. The way out is Back, or a pull down; see [PullDownPanel]. */
 @Composable
-fun ScreenBar(title: String, onClose: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp, top = 8.dp, bottom = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+fun ScreenBar(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.headlineSmall,
+        modifier = Modifier.fillMaxWidth().padding(start = Gutter, end = Gutter, bottom = 8.dp),
+    )
+}
+
+/** How far a panel has to be pulled before letting go closes it rather than putting it back. */
+private val PullToClose: Dp = 96.dp
+
+/**
+ * A panel over the document that goes when it is pulled down.
+ *
+ * What is inside it scrolls first: only a drag the list cannot use — one with nothing left above
+ * it — moves the panel, which is what makes this a pull rather than a gesture that fights the
+ * content. Letting go past [PullToClose] closes it and anything less springs back. The handle at
+ * the top says so, and can be dragged itself; Back still works, which is why there is no button.
+ */
+@Composable
+fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    var pulled by remember { mutableFloatStateOf(0f) }
+    val scope = rememberCoroutineScope()
+    val close by rememberUpdatedState(onClose)
+    val threshold = with(LocalDensity.current) { PullToClose.toPx() }
+
+    fun release() {
+        if (pulled >= threshold) close() else scope.launch { animate(pulled, 0f) { v, _ -> pulled = v } }
+    }
+
+    val nested = remember(threshold) {
+        object : NestedScrollConnection {
+            /** Pulling back up puts the panel back before the list gets to move. */
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y >= 0f || pulled <= 0f) return Offset.Zero
+                val used = max(available.y, -pulled)
+                pulled += used
+                return Offset(0f, used)
+            }
+
+            /** What the list could not use, because it is already at its top. */
+            override fun onPostScroll(
+                consumed: Offset,
+                available: Offset,
+                source: NestedScrollSource,
+            ): Offset {
+                if (available.y <= 0f) return Offset.Zero
+                pulled += available.y
+                return Offset(0f, available.y)
+            }
+
+            /** The fingers are up. Swallow the throw the list would otherwise take. */
+            override suspend fun onPreFling(available: Velocity): Velocity {
+                if (pulled <= 0f) return Velocity.Zero
+                release()
+                return available
+            }
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .offset { IntOffset(0, pulled.roundToInt()) }
+            // A ground of its own: this lies over whatever is being read, which stays composed.
+            .background(MaterialTheme.colorScheme.surface)
+            .nestedScroll(nested),
     ) {
-        Text(title, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-        TextButton(onClick = onClose) { Text("Close") }
+        Handle(
+            Modifier.draggable(
+                state = rememberDraggableState { pulled = (pulled + it).coerceAtLeast(0f) },
+                orientation = Orientation.Vertical,
+                onDragStopped = { release() },
+            ),
+        )
+        content()
+    }
+}
+
+/** The bar that says a panel can be pulled down. */
+@Composable
+private fun Handle(modifier: Modifier = Modifier) {
+    Box(modifier.fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(width = 32.dp, height = 4.dp)
+                .background(MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f), CircleShape),
+        )
     }
 }
 

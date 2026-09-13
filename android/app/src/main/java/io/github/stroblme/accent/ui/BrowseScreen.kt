@@ -1,6 +1,5 @@
 package io.github.stroblme.accent.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -34,9 +33,8 @@ fun BrowseScreen(
     onClose: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
-    // A ground of its own: this lies over whatever is being read, which stays composed.
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
-        ScreenBar("Browse", onClose)
+    PullDownPanel(onClose) {
+        ScreenBar("Browse")
         LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
             if (query.isBlank()) {
                 rows(children, expanded, "", 0, model, onOpen)

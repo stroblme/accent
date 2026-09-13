@@ -29,11 +29,12 @@ build with. This says what to build.
 | Surface | What it is |
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
-| Browse | A screen of its own, over what is being read. The tree, or the results when there is a query, with the search field at the *foot* of the screen. The desktop's eight sidebar panes collapse into this one |
+| Browse | A panel over what is being read. The tree, or the results when there is a query, with the search field at the *foot* of the screen. The desktop's eight sidebar panes collapse into this one |
 | Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
 | Launch | The switcher, the same shape: rows from the bottom up so the best match is nearest the thumb, then the Notes / Commands chips, then the query field at the foot. The keyboard is up when it opens |
+| Both panels | A handle at the top, and a pull down anywhere in them closes them. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
 ## Spacing and type
@@ -56,11 +57,18 @@ of them must also exist as a visible control.
 
 | Gesture | What it does | Its visible twin |
 |---|---|---|
+| Pull a panel down | Closes Browse or Launch | The handle at its top |
 | Tap the content | Puts the chrome up or takes it down | — |
 | Scroll on | Takes the chrome down; scrolling back brings it up | — |
 | Pinch on a page | Zooms a PDF, 1× to 6×, around the point between the fingers | — |
 | Drag on a zoomed page | Pans it, both axes at once | — |
 | Long press | The context sheet for the thing under it | — |
+
+A panel is closed by pulling it down, which is the one gesture here that reads as itself: the
+handle at the top says a panel can be moved, and moving it down is where a panel goes. What is
+inside scrolls first, so only a drag the list cannot use — one with nothing left above it — pulls
+the panel, and letting go short of the threshold springs it back. Nothing about it has to be
+discovered, because Back does the same thing.
 
 Browse and Launch are buttons, not gestures. They were an edge swipe and a pull from the top, and
 neither had the visible twin this table asks for — a gesture nothing announces is a gesture nobody
