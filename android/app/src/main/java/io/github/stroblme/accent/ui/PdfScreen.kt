@@ -40,6 +40,7 @@ import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Theme
+import java.io.File
 import kotlinx.coroutines.launch
 
 /**
@@ -61,7 +62,7 @@ fun PdfScreen(path: String, chrome: Chrome) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
-    Reader(doc, failed, chrome) { it.save() }
+    Reader(doc, failed, File(path).name.removeSuffix(".pdf"), chrome) { it.save() }
 }
 
 /** A PDF opened from somewhere else: there is no vault, so it is written back where it came from. */
@@ -82,11 +83,16 @@ fun LoosePdfScreen(uri: Uri) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
-    Reader(doc, failed, chrome) { model ->
-        // No path on this side: the bytes go back through whatever handed them over.
-        val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
-        runCatching {
-            context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
+    val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".pdf").orEmpty()
+    // Opened straight from another app, so there is no vault screen around this one to keep it
+    // clear of the status bar and the gesture strip.
+    Box(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
+        Reader(doc, failed, name, chrome) { model ->
+            // No path on this side: the bytes go back through whatever handed them over.
+            val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
+            runCatching {
+                context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
+            }
         }
     }
 }
@@ -95,6 +101,7 @@ fun LoosePdfScreen(uri: Uri) {
 private fun Reader(
     doc: PdfModel?,
     failed: String?,
+    title: String,
     chrome: Chrome,
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
@@ -129,20 +136,34 @@ private fun Reader(
         }
     }
 
-    Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding)) {
-            Pages(doc, tool, chrome)
-            if (ANNOTATIONS) {
-                PdfToolbar(
-                    tool = tool,
-                    // Tapping the tool in hand puts it down, the only way back to reading.
-                    onTool = { tool = if (it == tool) Tool.Read else it },
-                    canUndo = doc.canUndo,
-                    canRedo = doc.canRedo,
-                    onUndo = { scope.launch { doc.undo() } },
-                    onRedo = { scope.launch { doc.redo() } },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
-                )
+    // No insets of its own: inside a vault the screen around it has already kept clear of the
+    // status bar, and applying them twice is what put this bar lower than a note's.
+    // [LoosePdfScreen], which has no such screen around it, keeps them itself.
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { padding ->
+        // The same shape a note has: one bar that fades, then the document under it in the same
+        // rectangle, so that moving between the two does not move what is being read.
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            FadingBar(visible = chrome.shown) {
+                // Nothing to edit until the annotation toolbar comes back; the button says so.
+                DocumentBar(title = title, action = "Edit", enabled = ANNOTATIONS, onAction = {})
+            }
+            Box(Modifier.weight(1f).padding(vertical = DocumentGap)) {
+                Pages(doc, tool, chrome)
+                if (ANNOTATIONS) {
+                    PdfToolbar(
+                        tool = tool,
+                        // Tapping the tool in hand puts it down, the only way back to reading.
+                        onTool = { tool = if (it == tool) Tool.Read else it },
+                        canUndo = doc.canUndo,
+                        canRedo = doc.canRedo,
+                        onUndo = { scope.launch { doc.undo() } },
+                        onRedo = { scope.launch { doc.redo() } },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
+                    )
+                }
             }
         }
     }

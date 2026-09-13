@@ -124,7 +124,7 @@ private fun Buttons(
         exit = fadeOut(),
         modifier = modifier.padding(bottom = 24.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Pill("Browse", onBrowse)
             Pill("Launch", onLaunch)
         }

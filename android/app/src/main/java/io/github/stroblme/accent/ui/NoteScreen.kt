@@ -5,11 +5,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldBuffer
@@ -19,7 +14,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -29,7 +23,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.viewinterop.AndroidView
@@ -57,12 +50,12 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
     Column(Modifier.fillMaxSize()) {
         // The bar goes with the rest of the chrome while reading, and never while writing: Done
         // is the only way out of the editor, so it has to stay where it can be reached.
-        AnimatedVisibility(
-            visible = editing || chrome.shown,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
-        ) {
-            NoteBar(open, editing, onToggle = { editing = !editing })
+        FadingBar(visible = editing || chrome.shown) {
+            DocumentBar(
+                title = File(open.rel).name.removeSuffix(".md"),
+                action = if (editing) "Done" else "Edit",
+                onAction = { editing = !editing },
+            )
         }
         open.conflicts.firstOrNull()?.let { conflict ->
             ConflictBanner(
@@ -72,26 +65,9 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
             )
         }
         if (open.changedOnDisk) ChangedBanner(onReload = { model.reload() })
-        Box(Modifier.weight(1f)) {
+        Box(Modifier.weight(1f).padding(vertical = DocumentGap)) {
             if (editing) Editor(model, open) else Rendered(model, open, root, chrome)
         }
-    }
-}
-
-@Composable
-private fun NoteBar(open: Open, editing: Boolean, onToggle: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            File(open.rel).name.removeSuffix(".md"),
-            style = MaterialTheme.typography.titleMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(onClick = onToggle) { Text(if (editing) "Done" else "Edit") }
     }
 }
 
