@@ -6,7 +6,6 @@ import androidx.lifecycle.viewModelScope
 import io.github.stroblme.accent.ffi.AccentException
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
-import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
@@ -350,7 +349,5 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         private const val RELIST_EVERY_MS = 700L
 
         fun parentOf(rel: String): String = rel.substringBeforeLast('/', "")
-
-        fun isDir(row: FileRow): Boolean = row.kind == FileKind.DIR
     }
 }
