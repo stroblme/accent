@@ -19,7 +19,8 @@ pub use paths::move_dest;
 pub use transfer::{download, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
+    already_exists, is_markdown, levels, linked_path, renamed_part, renamed_path, split_typed,
+    typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
@@ -103,15 +104,28 @@ pub struct Ops {
 /// A name carrying `/` is a path relative to `dir`, exactly as it is in Rename, and the folders it
 /// names are created with it. The line under the entry says where the file will really land.
 pub fn new_file(ops: &Rc<Ops>, dir: &str) {
-    let dir = dir.to_string();
+    new_file_named(ops, dir, "");
+}
+
+/// Following a link to a note that is not there: [`new_file`] with the name already typed in.
+///
+/// The path is the link's own, from the vault root — `[[Notes/Foo]]` is `Notes/Foo.md` — and the
+/// dialog's path field is how the reader puts it somewhere else instead.
+pub fn new_linked_note(ops: &Rc<Ops>, target: &str) {
+    new_file_named(ops, "", &linked_path(target));
+}
+
+/// [`new_file`] with `name` already in the entry, which is the one thing the two differ in.
+fn new_file_named(ops: &Rc<Ops>, dir: &str, name: &str) {
+    let (dir, name) = (dir.to_string(), name.to_string());
     with_templates(ops, false, move |ops, templates| {
-        new_file_with(ops, &dir, templates)
+        new_file_with(ops, &dir, &name, templates)
     });
 }
 
 /// [`new_file`] once the templates are in.
-fn new_file_with(ops: &Rc<Ops>, dir: &str, templates: Vec<String>) {
-    let entry = name_entry("File name", "");
+fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
+    let entry = name_entry("File name", name);
     let form = form();
     form.append(&vault_path_field(&entry, &ops.vault, dir));
 
@@ -123,7 +137,8 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, templates: Vec<String>) {
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
         let row = labelled("Template", picker);
-        row.set_visible(false);
+        // A prefilled name may already say the file will be markdown, and nothing has changed yet.
+        row.set_visible(is_markdown(name.trim()));
         entry.connect_changed({
             let row = row.clone();
             move |e| row.set_visible(is_markdown(e.text().trim()))

@@ -101,6 +101,37 @@ pub(crate) fn heading_names(headings: &[markdown::Heading]) -> Vec<&str> {
     out
 }
 
+/// `[[paper.pdf#page=N]]` for each of a PDF's bookmarks, labelled by the bookmark's title.
+///
+/// `outline` is the document's, flattened depth-first, as `(title, page index)`. A bookmark with
+/// no title has nothing to be named by and one that names no page has nowhere to go, so neither
+/// is offered — the way a heading with no text is left out. The page in the anchor counts from 1,
+/// which is what [`markdown::pdf_anchor`] reads back.
+pub(crate) fn page_links(
+    outline: &[(String, Option<usize>)],
+    note: &str,
+    replace: Range,
+) -> Vec<Completion> {
+    outline
+        .iter()
+        .filter_map(|(title, page)| {
+            let title = title.trim();
+            let page = page.filter(|_| !title.is_empty())?;
+            let anchor = format!("#page={}", page + 1);
+            Some(Completion {
+                label: title.to_string(),
+                // What goes in is not what the row reads, so the anchor is shown as well.
+                detail: Some(anchor.clone()),
+                // Narrowed by the title, which is what the popup is showing.
+                filter: Some(format!("[[{note}#{title}")),
+                insert: format!("[[{note}{anchor}]]"),
+                replace,
+                ..empty_item()
+            })
+        })
+        .collect()
+}
+
 /// What the index knows a link in the note `rel` by. A markdown link names its file from the
 /// note's own folder, so it becomes a vault path first, as it did when the index stored it.
 fn target_of(rel: &str, link: &markdown::Link) -> String {
@@ -369,7 +400,7 @@ impl Notes {
 
                 let index = locked(&self.index);
                 let paths = match trigger {
-                    Trigger::Wiki => index.note_paths()?,
+                    Trigger::Wiki => index.note_and_pdf_paths()?,
                     _ => index.file_paths(false)?,
                 };
                 let (hits, more) = path_candidates(&paths, prefix);
@@ -488,16 +519,27 @@ impl Notes {
     }
 
     /// `[[note#Heading]]` for each heading of the note `note` names, or of this one when it names
-    /// none. The link keeps the note as it was typed; one the index cannot find offers nothing,
-    /// and neither does a file that is not a note.
+    /// none, and `[[paper.pdf#page=N]]` for each bookmark when what it names is a PDF. The link
+    /// keeps the target as it was typed; one the index cannot find offers nothing, and so does a
+    /// file that is neither.
     fn heading_links(&self, rel: &str, note: &str, replace: Range) -> Result<Completions> {
         let target = match note {
             "" => rel.to_string(),
             _ => match locked(&self.index).resolve_target(note)? {
-                Some(target) if target.ends_with(".md") => target,
-                _ => return Ok(Completions::default()),
+                Some(target) => target,
+                None => return Ok(Completions::default()),
             },
         };
+        if target.ends_with(".pdf") {
+            let outline = pdf_outline(&Local::join(&self.root, &target)?)?;
+            return Ok(Completions {
+                items: page_links(&outline, note, replace),
+                incomplete: false,
+            });
+        }
+        if !target.ends_with(".md") {
+            return Ok(Completions::default());
+        }
         let text = self.text_of(&target)?;
         let items = heading_names(&markdown::analyze(&text).headings)
             .into_iter()
@@ -727,6 +769,25 @@ fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     })
 }
 
+/// A PDF's bookmarks as `(title, page index)`, flattened depth-first.
+///
+/// One open of one file, on the thread the keystroke came in on and behind pdfium's global lock,
+/// so it happens only once the prefix already resolves to a `.pdf`.
+#[cfg(feature = "pdf")]
+fn pdf_outline(path: &Path) -> Result<Vec<(String, Option<usize>)>> {
+    Ok(accent_core::pdf::PdfDoc::open(path)?
+        .outline()?
+        .into_iter()
+        .map(|entry| (entry.title, entry.page))
+        .collect())
+}
+
+/// Without the `pdf` feature there is no pdfium binding to ask, so a PDF offers no pages.
+#[cfg(not(feature = "pdf"))]
+fn pdf_outline(_path: &Path) -> Result<Vec<(String, Option<usize>)>> {
+    Ok(Vec::new())
+}
+
 /// The fields a note's completion never fills, so the interesting ones stay together above.
 fn empty_item() -> Completion {
     Completion {
@@ -844,6 +905,103 @@ mod tests {
     fn heading_names_keep_their_order_once_each() {
         let a = markdown::analyze("# B\n## A\n#\n### B\n");
         assert_eq!(heading_names(&a.headings), ["B", "A"]);
+    }
+
+    /// `[[paper.pdf#` completes to the document's bookmarks, and what it inserts has to be an
+    /// anchor `open_target` can land on.
+    #[test]
+    fn page_links_name_a_bookmarks_page_from_one() {
+        let outline = [
+            ("Intro".to_string(), Some(0)),
+            ("  Method  ".to_string(), Some(4)),
+            ("".to_string(), Some(7)),
+            ("Nowhere".to_string(), None),
+        ];
+        let items = page_links(&outline, "paper.pdf", Range::default());
+
+        assert_eq!(
+            items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
+            ["Intro", "Method"],
+            "a bookmark with no title or no page names nothing to go to"
+        );
+        assert_eq!(items[1].insert, "[[paper.pdf#page=5]]");
+        assert_eq!(items[1].filter.as_deref(), Some("[[paper.pdf#Method"));
+        // The anchor is the one the reader lands by: page 5 as written is index 4.
+        assert_eq!(markdown::pdf_anchor("page=5"), Some((4, None)));
+    }
+
+    /// The whole `[[paper.pdf#` path: the index resolves the name, pdfium reads the outline, and
+    /// what goes in is an anchor the reader can land by. Skipped where there is no libpdfium.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_wiki_anchor_into_a_pdf_offers_its_bookmarks() {
+        if !accent_core::pdf::available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("paper.pdf"), bookmarked_pdf()).unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[paper.pdf#\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let items = notes
+            .completion(
+                "a.md",
+                Pos {
+                    line: 0,
+                    character: 12,
+                },
+            )
+            .unwrap()
+            .items;
+
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert_eq!(items[0].label, "Second");
+        assert_eq!(items[0].insert, "[[paper.pdf#page=2]]");
+    }
+
+    /// Two blank pages and one bookmark on the second, written by hand so the test needs no
+    /// fixture file. `crates/core/src/pdf/tests.rs` builds a fuller document the same way.
+    #[cfg(feature = "pdf")]
+    fn bookmarked_pdf() -> Vec<u8> {
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>",
+            "<</Type/Pages/Kids[3 0 R 5 0 R]/Count 2>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>",
+            "<</Type/Outlines/First 6 0 R/Last 6 0 R/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>",
+            "<</Title(Second)/Parent 4 0 R/Dest[5 0 R /XYZ 0 80 0]>>",
+        ];
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+        }
+        let xref = out.len();
+        out.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objs.len() + 1
+        ));
+        for off in &offsets {
+            out.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        ));
+        out.into_bytes()
     }
 
     #[test]
