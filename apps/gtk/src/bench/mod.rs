@@ -16,11 +16,11 @@ mod pdf;
 mod style;
 
 use chrome::bench_chrome;
-use compare::bench_compare;
+use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_init, bench_git_press};
-use keys::{bench_keys, bench_shell_keys};
+use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
@@ -37,7 +37,10 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
-/// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
+/// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
+/// note and prints the ones whose marker or indent did not come out as `typing` says it should,
+/// plus the width one indent is worth there.
+/// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
@@ -46,7 +49,9 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// or a drop out of a styled or folded line brings its tags along.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
-/// what the panes hold and whether their rows line up.
+/// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
+/// long paragraphs in a repository it makes itself and types at the start of the two lines whose
+/// padding tag does not begin at the newline before them.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
@@ -57,7 +62,8 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
 /// eye first, and its title and indicator are printed either side of that.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
-/// held, and prints what the Ctrl+hover underline covers.
+/// held, and prints what the Ctrl+hover underline covers; then it follows a link nothing answers
+/// to and prints the dialog that offers to create it, with the name it arrives prefilled with.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
@@ -80,10 +86,16 @@ use style::{bench_follow, bench_occurrences, bench_style};
 ///
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
-/// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
-/// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
+/// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
+/// `a`'s pane and puts a terminal in front of it first, a shell being no file and so not
+/// restored, which leaves that pane naming none. Every printout says
+/// which tab is in front of the active pane, which tab the session would write as the active one,
+/// and how many places each pane's Back and Forward hold. `=1` prints the tree a restore built
+/// once its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
 /// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
-/// `=focus:<rel>` gives it the keyboard instead. On a remote vault they wait for the host to
+/// `=focus:<rel>` gives it the keyboard instead, and `=open:<rel>` opens a note the session does
+/// not hold before any tab has landed, as a reader would into the still-empty active pane. On a
+/// remote vault they wait for the host to
 /// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
 /// way Ctrl+Q does.
 pub fn install_bench_hooks(app: &Rc<App>) {
@@ -91,7 +103,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").ok();
-    let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
+    let keys = std::env::var("ACCENT_BENCH_KEYS").ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
@@ -120,7 +132,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && outline.is_none()
         && layout.is_none()
         && git.is_none()
-        && !keys
+        && keys.is_none()
         && chrome.is_none()
         && !templates
         && !paths
@@ -144,7 +156,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_layout(&app, &arg);
         }
         if let Some(rel) = compare {
-            return bench_compare(&app, &rel);
+            return match rel.strip_prefix("pads:") {
+                Some(rel) => bench_compare_pads(&app, rel),
+                None => bench_compare(&app, &rel),
+            };
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
@@ -182,8 +197,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(notes) = chrome {
             return bench_chrome(&app, &notes);
         }
-        if keys {
-            return bench_keys(&app);
+        if let Some(arg) = keys {
+            return match arg.as_str() {
+                "1" => bench_keys(&app),
+                rel => bench_list(&app, rel),
+            };
         }
         if let Some(arg) = git {
             return match (arg.strip_prefix("press:"), arg.as_str()) {

@@ -78,6 +78,11 @@ pub(super) fn install(tab: &Rc<Tab>) {
     ));
 }
 
+/// One press, driven from a drill rather than from the keyboard: what the controller above calls.
+pub(crate) fn press(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+    dispatch(tab, key, state)
+}
+
 /// One key press, offered to each step of the chain in turn.
 fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
     if tab.popup_shown.get() {

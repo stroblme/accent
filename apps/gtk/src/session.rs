@@ -199,10 +199,7 @@ impl App {
                 .filter(|d| !d.is_transient())
                 .map(|d| d.key())
                 .collect(),
-            active: self
-                .active_doc()
-                .filter(|d| !d.is_transient())
-                .map(|d| d.key()),
+            active: self.restorable_active(),
             layout: self.layout(),
             // Presentation is not a session state, so the sidebar it hid is saved as it was.
             sidebar: match self.presenting.get() {
@@ -246,6 +243,21 @@ impl App {
         if let Err(e) = vault.save_session(&session) {
             tracing::warn!("saving the session: {e:#}");
         }
+    }
+
+    /// The tab a restore comes back on. The one in front, unless that is a shell or a comparison:
+    /// neither is a file, so neither is restored, and a pane naming none would leave the restore
+    /// making whichever pane landed last the active one. The pane the reader was in names its
+    /// most recently used tab that *is* restored instead, so the window comes back in that pane.
+    pub(crate) fn restorable_active(&self) -> Option<String> {
+        if let Some(doc) = self.active_doc().filter(|d| !d.is_transient()) {
+            return Some(doc.key());
+        }
+        self.pane().recent().iter().find_map(|page| {
+            self.doc_for_page(page)
+                .filter(|doc| !doc.is_transient())
+                .map(|doc| doc.key())
+        })
     }
 
     /// The panes as the session records them, read off the widget tree, which is the layout.
@@ -324,11 +336,6 @@ impl App {
         self.set_zoom(session.zoom);
         if let Some(layout) = session.panes() {
             self.restore_panes(layout, session.active.clone());
-        }
-        // Restoring tabs selects each in turn, and none of that is somewhere the reader went, so
-        // the pane starts with an empty history rather than with the order the restore happened in.
-        for pane in self.panes.borrow().iter() {
-            pane.nav.replace(panes::Nav::default());
         }
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
@@ -429,7 +436,7 @@ impl App {
             };
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
             // it is put back.
-            self.with_tab(key, Opened::Restored, move |app, _| {
+            self.with_tab(key, Opened::Restored, "restore", move |app, _| {
                 asked.landed.set(true);
                 app.put_back(&asked.restore)
             });
@@ -549,16 +556,26 @@ impl App {
         restore.selecting.set(false);
     }
 
+    /// Whether what is happening now is the restore putting its tabs back rather than the reader
+    /// moving about. A restore drives the same code a reader does — it selects pages, and the
+    /// selection notify cannot tell whose selection it was — so everything downstream that means
+    /// "the reader went here" asks this: [`App::reader_in`] and the pane's back/forward history.
+    pub(crate) fn restoring(&self) -> bool {
+        self.restore
+            .borrow()
+            .upgrade()
+            .is_some_and(|restore| restore.selecting.get())
+    }
+
     /// The reader picked a tab in `pane`, or moved the keyboard to it. While a restore is landing
-    /// that makes the pane theirs, which [`App::put_back`] leaves alone; its own selections fire
-    /// the same notify, and are told apart by being made while it has `selecting` set.
+    /// that makes the pane theirs, which [`App::put_back`] leaves alone.
     pub(crate) fn reader_in(&self, pane: &Rc<Pane>) {
+        if self.restoring() {
+            return;
+        }
         let Some(restore) = self.restore.borrow().upgrade() else {
             return;
         };
-        if restore.selecting.get() {
-            return;
-        }
         let pane = Rc::downgrade(pane);
         let mut taken = restore.taken.borrow_mut();
         // Last is where the reader is now.

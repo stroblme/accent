@@ -92,7 +92,7 @@ test:
 
 ## test-pdf: run the PDF tests too (needs libpdfium, see vendor/pdfium or ACCENT_PDFIUM_DIR)
 test-pdf: pdfium
-	$(CARGO) test -p accent-core --features pdf --locked
+	$(CARGO) test -p accent-core -p accent-api --features pdf --locked
 
 ## pdfium: fetch libpdfium into vendor/pdfium (does nothing if it is already there)
 pdfium: | $(PDFIUM_LIB)

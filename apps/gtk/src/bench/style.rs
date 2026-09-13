@@ -191,8 +191,9 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// The buffer is filled with text of its own first: the ranges are the point, and they have to be
 /// the bench's rather than whatever the vault generator wrote. Nothing is saved — the run quits
 /// well inside the one-second autosave.
-/// What a Ctrl+hover underlines. The link half only: a plain word is a question for a language
-/// server, and the vault a drill runs against holds notes rather than code.
+/// What a Ctrl+hover underlines, and what following the same link does when nothing answers to
+/// it. The underline's link half only: a plain word is a question for a language server, and the
+/// vault a drill runs against holds notes rather than code.
 pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -224,9 +225,37 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             probe("wikilink_again", "Other", true);
             // Ctrl up over the same link takes it off again.
             probe("ctrl_released", "Other", false);
-            bench_quit(&app);
+            glib::spawn_future_local(bench_dangling(app));
         });
     });
+}
+
+/// Follow a link nothing in the vault answers to: New File comes up with the path the link spells
+/// already typed in. Both the resolve and the vault's templates arrive from a worker, so the
+/// dialog is waited for rather than assumed. Cancelling it is [`bench_close`]'s drill.
+async fn bench_dangling(app: Rc<App>) {
+    app.open_target("Nowhere/Other Note");
+    for _ in 0..40 {
+        if app.window.visible_dialog().is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    let dialog = app
+        .window
+        .visible_dialog()
+        .and_then(|d| d.downcast::<adw::AlertDialog>().ok());
+    let typed = dialog
+        .as_ref()
+        .and_then(|d| d.extra_child())
+        .and_then(|form| find_widget(&form, &|w| w.is::<gtk::Entry>()))
+        .and_downcast::<gtk::Entry>()
+        .map(|entry| entry.text());
+    println!(
+        "bench follow dangling heading={:?} typed={typed:?}",
+        dialog.and_then(|d| d.heading())
+    );
+    bench_quit(&app);
 }
 
 pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {

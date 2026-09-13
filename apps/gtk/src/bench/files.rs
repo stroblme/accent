@@ -27,7 +27,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
             let Ok(Some((rel, stops))) = vault.note_from_template(&template) else {
                 continue;
             };
-            app.with_tab(&rel, Opened::Kept, move |_, tab| tab.place_stops(&stops));
+            app.with_tab(&rel, Opened::Kept, "open", move |_, tab| {
+                tab.place_stops(&stops)
+            });
             glib::timeout_future(Duration::from_secs(1)).await;
             let Some(tab) = app.tab_for(&rel) else {
                 continue;

@@ -6,9 +6,12 @@ license.workspace = true
 
 [features]
 default = []
+# Reading a PDF's outline, which is what `[[paper.pdf#` completes against. Off by default so a
+# build with no pdfium binding is still a build; without it that one completion offers nothing.
+pdf = ["accent-core/pdf"]
 # The uniffi bindings Android calls this crate through. Off for every desktop build, so
 # `cargo build` never compiles uniffi and the façade stays what it was.
-android = ["dep:uniffi", "dep:nucleo-matcher", "dep:thiserror", "accent-core/pdf"]
+android = ["pdf", "dep:uniffi", "dep:nucleo-matcher", "dep:thiserror"]
 
 [dependencies]
 accent-core.workspace = true

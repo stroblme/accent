@@ -539,26 +539,42 @@ fn is_pad(tag: &gtk::TextTag) -> bool {
         .is_some_and(|name| name.starts_with(PAD_ABOVE) || name.starts_with(PAD_BELOW))
 }
 
-/// Put text typed at the very start of the buffer back under the first paragraph's padding.
+/// The lines a change can have pushed a padding tag out of: the one the caret is in, which is
+/// where typing lands, and the first, which has no newline before it whoever wrote into it.
+fn reclaim(buffer: &sourceview5::Buffer) {
+    reclaim_line(buffer, &buffer.start_iter());
+    reclaim_line(buffer, &buffer.iter_at_mark(&buffer.get_insert()));
+}
+
+/// Put text typed at the start of `line` back under the paragraph's padding.
 ///
-/// That paragraph has no newline before it for [`pad`] to start its tags from, so a character
-/// typed ahead of it went in outside them: GTK laid the line out bare for a frame, and the
-/// relayout, finding no padding on its first character, measured it at the height it had last
-/// been laid out at, padding and all. Stretched back over what was typed, the tags cover the
-/// first character again and say what GTK last laid the line out with. The first pad tag that
-/// begins inside the line is the one the typing moved: the next paragraph's begins at the
-/// line's own newline. A first line that was empty is left alone, for that reason: its tags sit
-/// on that newline beside the next paragraph's.
-fn reclaim_start(buffer: &sourceview5::Buffer) {
-    let start = buffer.start_iter();
+/// [`pad`] starts a paragraph's tags at the newline before it, so text typed at its start lands
+/// inside them. Two paragraphs cannot both own that newline, though: the first line of all has
+/// none, and a padded blank line's own padding sits on the newline the paragraph under it would
+/// start from, which [`pad`] takes back for the blank line. There the tags begin at the
+/// paragraph's own first character and a character typed ahead of them goes in outside: GTK lays
+/// the line out bare for a frame, and the relayout, finding no padding on its first character,
+/// measures it at the height it had last been laid out at, padding and all. Stretched back over
+/// what was typed, the tags cover the first character again and say what GTK last used.
+///
+/// The line's own tags are the ones that end with it: the next paragraph's begins at this line's
+/// newline as well, and runs on past it.
+fn reclaim_line(buffer: &sourceview5::Buffer, line: &gtk::TextIter) {
+    let mut start = *line;
+    start.set_line_offset(0);
     if start.tags().iter().any(is_pad) {
         return;
     }
-    let mut end = start;
-    end.forward_to_line_end();
+    // The start of the next line, which is where a tag of this one's ends at the latest.
+    let mut to = start;
+    to.forward_line();
     let mut at = start;
-    while at.forward_to_tag_toggle(None::<&gtk::TextTag>) && at < end {
-        let moved: Vec<gtk::TextTag> = at.toggled_tags(true).into_iter().filter(is_pad).collect();
+    while at.forward_to_tag_toggle(None::<&gtk::TextTag>) && at < to {
+        let moved: Vec<gtk::TextTag> = at
+            .toggled_tags(true)
+            .into_iter()
+            .filter(|tag| is_pad(tag) && ends_by(&at, tag, &to))
+            .collect();
         if !moved.is_empty() {
             for tag in &moved {
                 buffer.apply_tag(tag, &start, &at);
@@ -566,6 +582,13 @@ fn reclaim_start(buffer: &sourceview5::Buffer) {
             return;
         }
     }
+}
+
+/// Whether `tag`, which begins at `at`, is over by `to`.
+fn ends_by(at: &gtk::TextIter, tag: &gtk::TextTag, to: &gtk::TextIter) -> bool {
+    let mut end = *at;
+    end.forward_to_tag_toggle(Some(tag));
+    end <= *to
 }
 
 /// The tag named `prefix` plus `px`, which sets that many pixels above or below a paragraph.
@@ -770,12 +793,12 @@ impl Compare {
             }
         });
         connect(style.upcast(), id);
-        // Text typed ahead of the first line's padding goes back under it on the keystroke itself:
-        // above 16 KB the editor refreshes the comparison only on its debounce, and the line
-        // would be laid out bare until then.
+        // Text typed ahead of a line's padding goes back under it on the keystroke itself: above
+        // 16 KB the editor refreshes the comparison only on its debounce, and the line would be
+        // laid out bare until then.
         if let Some(mine) = editable {
             let buffer = this.pane(mine).buffer.clone();
-            let id = buffer.connect_changed(reclaim_start);
+            let id = buffer.connect_changed(reclaim);
             connect(buffer.upcast(), id);
         }
 
@@ -1086,7 +1109,7 @@ impl Compare {
         // Before anything is measured: a keystroke's refresh gets here ahead of the buffer's own
         // `changed` handler.
         if let Some(mine) = self.editable {
-            reclaim_start(&self.pane(mine).buffer);
+            reclaim(&self.pane(mine).buffer);
         }
         // The companion takes the editor's page margins, so the first row of each starts level.
         if let Some(mine) = self.editable {

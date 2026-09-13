@@ -36,6 +36,7 @@ pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, overlay_view, restyle_companion, style_companion};
 use follow::Follow;
+pub(crate) use keys::press;
 use lines::primary_paste;
 pub(crate) use lines::{
     delete_line, duplicate_line, line_clipboard, newline_below, paste_primary, toggle_comment,
@@ -207,6 +208,7 @@ pub struct Prefs {
     pub font: Option<String>,
     pub zoom: f64,
     pub column_width: u32,
+    pub indent_width: u32,
     pub minimap: bool,
     pub line_numbers: bool,
 }
@@ -603,6 +605,7 @@ pub fn open(
     tab.set_spellcheck(prefs.spellcheck);
     tab.set_minimap(prefs.minimap);
     tab.set_line_numbers(prefs.line_numbers);
+    tab.set_indent_width(prefs.indent_width);
     if text.lossy {
         tab.show_alert(Alert::ReadOnly);
     }
@@ -1148,6 +1151,14 @@ impl Tab {
     }
 
     // --- preferences ---------------------------------------------------------------------
+
+    /// How wide one indent is, from preferences. Prose is left with GtkSourceView's own: Tab in a
+    /// note writes a literal tab or a list item's own indent, and neither is measured in columns.
+    pub fn set_indent_width(&self, columns: u32) {
+        if !self.flavour.is_note() {
+            self.view.set_tab_width(columns);
+        }
+    }
 
     pub fn set_spellcheck(&self, on: bool) {
         // Prose only. A checker over identifiers and keywords is a wall of red squiggles.

@@ -24,6 +24,7 @@ line_numbers = false
 git_tree = true
 show_hidden = false
 column_width = 50
+indent_width = 4
 theme = "solarized"
 focus_mode = "high"
 
@@ -108,6 +109,10 @@ pub struct Config {
     /// the fixed 800 px cap came to on a maximised window; the editor floors it so a narrow
     /// window keeps a readable line.
     pub column_width: u32,
+    /// How many columns one indent is worth in a code tab: the width of a tab character and of
+    /// the run of spaces Tab writes in its place. Prose is not measured in columns and keeps
+    /// GtkSourceView's own.
+    pub indent_width: u32,
     pub theme: Theme,
     pub focus_mode: FocusMode,
     /// Accelerator overrides, keyed by full action name ("win.save"). Only what the user changed
@@ -191,6 +196,7 @@ impl Default for Config {
             git_tree: true,
             show_hidden: true,
             column_width: 50,
+            indent_width: 4,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
             shortcuts: BTreeMap::new(),
@@ -852,6 +858,7 @@ daily_template = "DailyNote.md"
         assert!(c.git_tree);
         assert!(!c.show_hidden);
         assert_eq!(c.column_width, 50);
+        assert_eq!(c.indent_width, 4);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.focus_mode, FocusMode::High);
         assert_eq!(c.editor_font, None);
