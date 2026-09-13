@@ -5,6 +5,11 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldBuffer
@@ -14,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -34,6 +40,7 @@ import io.github.stroblme.accent.ffi.Style
 import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import java.io.File
 import java.net.URLDecoder
 
@@ -46,10 +53,18 @@ import java.net.URLDecoder
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, root: String, onMenu: () -> Unit) {
+fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        NoteBar(open, editing, onMenu, onToggle = { editing = !editing })
+        // The bar goes with the rest of the chrome while reading, and never while writing: Done
+        // is the only way out of the editor, so it has to stay where it can be reached.
+        AnimatedVisibility(
+            visible = editing || chrome.shown,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            NoteBar(open, editing, onToggle = { editing = !editing })
+        }
         open.conflicts.firstOrNull()?.let { conflict ->
             ConflictBanner(
                 conflict = conflict,
@@ -59,24 +74,23 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, onMenu: () -> Unit) 
         }
         if (open.changedOnDisk) ChangedBanner(onReload = { model.reload() })
         Box(Modifier.weight(1f)) {
-            if (editing) Editor(model, open) else Rendered(model, open, root)
+            if (editing) Editor(model, open) else Rendered(model, open, root, chrome)
         }
     }
 }
 
 @Composable
-private fun NoteBar(open: Open, editing: Boolean, onMenu: () -> Unit, onToggle: () -> Unit) {
+private fun NoteBar(open: Open, editing: Boolean, onToggle: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        TextButton(onClick = onMenu) { Text("Files") }
         Text(
             File(open.rel).name.removeSuffix(".md"),
             style = MaterialTheme.typography.titleMedium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onToggle) { Text(if (editing) "Done" else "Edit") }
     }
@@ -116,7 +130,7 @@ private fun ChangedBanner(onReload: () -> Unit) {
  * enforces with a content blocker.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, root: String) {
+private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
     val colors = MaterialTheme.colorScheme
     // The whole page, rebuilt only when the note or the palette changes. Everything else that
     // recomposes this screen — indexing progress, a snackbar, a search — must not reload the
@@ -126,7 +140,7 @@ private fun Rendered(model: VaultModel, open: Open, root: String) {
     }
 
     AndroidView(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier.fillMaxSize().onTap(chrome),
         factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = false
@@ -159,6 +173,7 @@ private fun Rendered(model: VaultModel, open: Open, root: String) {
                         }.getOrElse { blocked() }
                     }
                 }
+                setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
             }
         },
         update = { web ->
@@ -231,11 +246,22 @@ private fun Editor(model: VaultModel, open: Open) {
     val colors = MaterialTheme.colorScheme
     val styling = remember(colors) { Styling(colors.onSurface, colors.primary, colors.onSurfaceVariant) }
 
+    // A pause in the typing, not a queue of them: `collectLatest` drops the wait the moment the
+    // next keystroke lands. What the text is compared against is read now rather than captured
+    // when the effect started, so typing a word and taking it back again still saves.
     LaunchedEffect(open.rel) {
-        snapshotFlow { field.text.toString() }.collect { text ->
-            if (text == open.text) return@collect
-            delay(1000)
+        snapshotFlow { field.text.toString() }.collectLatest { text ->
+            if (text == model.state.value.open?.text) return@collectLatest
+            delay(SAVE_AFTER_MS)
             model.save(text)
+        }
+    }
+
+    // Leaving the editor inside that second would otherwise drop what it was waiting on.
+    DisposableEffect(open.rel) {
+        onDispose {
+            val text = field.text.toString()
+            if (text != model.state.value.open?.text) model.save(text)
         }
     }
 
@@ -247,6 +273,9 @@ private fun Editor(model: VaultModel, open: Open) {
         outputTransformation = styling,
     )
 }
+
+/** How long a pause in the typing is worth a write. The same second the desktop waits. */
+private const val SAVE_AFTER_MS = 1000L
 
 /** Applies the core's spans to the field's output; nothing it does reaches the saved text. */
 private class Styling(

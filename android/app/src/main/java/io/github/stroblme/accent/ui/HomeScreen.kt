@@ -1,45 +1,48 @@
 package io.github.stroblme.accent.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import io.github.stroblme.accent.Open
 import io.github.stroblme.accent.VaultModel
-import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.Phase
-import io.github.stroblme.accent.ffi.FileRow
-import kotlinx.coroutines.launch
-import java.io.File
 
 /**
- * The vault: a drawer of files with a search field on top, and whatever is open beside it.
+ * Which of the three the screen is showing.
  *
- * One pane, not a split — a phone has room for the note or for the way to another note, never
- * both. The drawer is the desktop's sidebar with its panes collapsed into one: the field
- * searches, and what it is not searching for is the tree.
+ * No stack and no navigation graph: a phone holds one thing at a time, Browse and Launch are both
+ * one step from what is being read, and Back is the way out of either.
+ */
+private enum class Screen { Home, Browse, Launch }
+
+/**
+ * The vault: whatever is open, and the two buttons that reach everything else.
+ *
+ * Browse is the file tree, Launch the switcher. Both are screens rather than a drawer and a sheet,
+ * because an edge swipe and a pull are gestures nothing announces, and every gesture here has to
+ * have a visible twin (MOBILE_DESIGN.md).
  */
 @Composable
 fun HomeScreen(model: VaultModel) {
     val state by model.state.collectAsState()
-    val drawer = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-    var switcher by remember { mutableStateOf(false) }
+    var screen by remember { mutableStateOf(Screen.Home) }
+    val chrome = remember { Chrome() }
     val snackbar = remember { SnackbarHostState() }
 
-    // Back undoes the last thing that opened, in the order it opened: the switcher, the drawer,
-    // then whatever is being read. Only with nothing left does it leave the app.
-    BackHandler(enabled = switcher) { switcher = false }
-    BackHandler(enabled = !switcher && drawer.isOpen) { scope.launch { drawer.close() } }
-    BackHandler(enabled = !switcher && !drawer.isOpen && (state.open != null || state.pdf != null)) {
+    // Whatever opens arrives with its chrome up, however the last thing read was left.
+    LaunchedEffect(state.open?.rel, state.pdf) { chrome.show() }
+
+    // Back undoes the last thing that opened, in the order it opened: the screen over the note,
+    // then the note. Only with nothing left does it leave the app.
+    BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
+    BackHandler(enabled = screen == Screen.Home && (state.open != null || state.pdf != null)) {
         model.close()
     }
 
@@ -50,48 +53,83 @@ fun HomeScreen(model: VaultModel) {
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawer,
-        drawerContent = {
-            ModalDrawerSheet(drawerContainerColor = MaterialTheme.colorScheme.surface) {
-                FilesDrawer(model, state.children, state.expanded, state.results) { rel ->
-                    model.openFile(rel)
-                    scope.launch { drawer.close() }
-                }
-            }
-        },
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbar) },
-            contentWindowInsets = WindowInsets.safeDrawing,
-        ) { padding ->
-            Box(Modifier.fillMaxSize().padding(padding)) {
-                when {
-                    state.pdf != null -> PdfScreen(path = state.pdf!!)
-                    state.open != null -> NoteScreen(
-                        model = model,
-                        open = state.open!!,
-                        root = state.root.orEmpty(),
-                        onMenu = { scope.launch { drawer.open() } },
-                    )
-                    else -> Empty(
-                        indexing = state.indexing,
-                        scanned = state.scanned,
-                        listing = state.phase == Phase.SCAN,
-                        onBrowse = { scope.launch { drawer.open() } },
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
+        contentWindowInsets = WindowInsets.safeDrawing,
+    ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
+            when (screen) {
+                Screen.Browse -> BrowseScreen(
+                    model = model,
+                    children = state.children,
+                    expanded = state.expanded,
+                    results = state.results,
+                    onOpen = { rel ->
+                        model.openFile(rel)
+                        screen = Screen.Home
+                    },
+                    onClose = { screen = Screen.Home },
+                )
+                Screen.Launch -> SwitcherScreen(model) { screen = Screen.Home }
+                Screen.Home -> {
+                    val pdf = state.pdf
+                    val open = state.open
+                    when {
+                        pdf != null -> PdfScreen(path = pdf, chrome = chrome)
+                        open != null -> NoteScreen(
+                            model = model,
+                            open = open,
+                            root = state.root.orEmpty(),
+                            chrome = chrome,
+                        )
+                        else -> Empty(
+                            indexing = state.indexing,
+                            scanned = state.scanned,
+                            listing = state.phase == Phase.SCAN,
+                        )
+                    }
+                    Buttons(
+                        chrome = chrome,
+                        onBrowse = { screen = Screen.Browse },
+                        onLaunch = { screen = Screen.Launch },
+                        modifier = Modifier.align(Alignment.BottomCenter),
                     )
                 }
             }
         }
     }
+}
 
-    if (switcher) {
-        SwitcherSheet(model) { switcher = false }
+/**
+ * Browse and Launch, floating over whatever is being read.
+ *
+ * They fade with the rest of the chrome, and they go outright while the keyboard is up: there is
+ * no room for them there, and a keyboard means the reader is writing rather than looking for
+ * something else to read.
+ */
+@Composable
+private fun Buttons(
+    chrome: Chrome,
+    onBrowse: () -> Unit,
+    onLaunch: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val typing = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+    AnimatedVisibility(
+        visible = chrome.shown && !typing,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier.padding(bottom = 24.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Pill("Browse", onBrowse)
+            Pill("Launch", onLaunch)
+        }
     }
 }
 
 @Composable
-private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean, onBrowse: () -> Unit) {
+private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean) {
     Column(
         Modifier.fillMaxSize().padding(Gutter),
         verticalArrangement = Arrangement.Center,
@@ -111,101 +149,10 @@ private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean, onBrowse: 
                 listing -> "Looking through your files."
                 indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
                 indexing -> "Reading what it found."
-                else -> "Pick a note, or pull down anywhere to search."
+                else -> "Browse your files, or Launch straight to a note."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Spacer(Modifier.height(24.dp))
-        FilledTonalButton(onClick = onBrowse) { Text("Browse files") }
-    }
-}
-
-/** The search field, and under it either its results or the tree. */
-@Composable
-private fun FilesDrawer(
-    model: VaultModel,
-    children: Map<String, List<FileRow>>,
-    expanded: Set<String>,
-    results: List<io.github.stroblme.accent.ffi.SearchHit>,
-    onOpen: (String) -> Unit,
-) {
-    var query by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize()) {
-        OutlinedTextField(
-            value = query,
-            onValueChange = {
-                query = it
-                model.search(it)
-            },
-            placeholder = { Text("Search notes") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth().padding(Gutter),
-        )
-        if (query.isBlank()) {
-            LazyColumn(Modifier.fillMaxSize()) {
-                rows(children, expanded, "", 0, model, onOpen)
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                items(results, key = { it.relPath }) { hit ->
-                    ListItem(
-                        headlineContent = { Text(hit.title ?: File(hit.relPath).name) },
-                        supportingContent = {
-                            Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        },
-                        colors = flatRow(),
-                        modifier = Modifier.row { onOpen(hit.relPath) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** One directory's children, and recursively those of any that are open. */
-private fun androidx.compose.foundation.lazy.LazyListScope.rows(
-    children: Map<String, List<FileRow>>,
-    expanded: Set<String>,
-    dir: String,
-    depth: Int,
-    model: VaultModel,
-    onOpen: (String) -> Unit,
-) {
-    val here = children[dir].orEmpty()
-    for (row in here) {
-        item(key = row.relPath) {
-            val open = row.relPath in expanded
-            ListItem(
-                headlineContent = {
-                    Text(
-                        File(row.relPath).name,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        fontWeight = if (row.kind == FileKind.DIR) FontWeight.Medium else null,
-                    )
-                },
-                leadingContent = {
-                    Text(
-                        when {
-                            row.kind == FileKind.DIR && open -> "▾"
-                            row.kind == FileKind.DIR -> "▸"
-                            row.kind == FileKind.PDF -> "◆"
-                            else -> "·"
-                        },
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                },
-                colors = flatRow(),
-                modifier = Modifier
-                    .padding(start = (depth * 12).dp)
-                    .row {
-                        if (row.kind == FileKind.DIR) model.toggle(row.relPath) else onOpen(row.relPath)
-                    },
-            )
-        }
-        if (row.kind == FileKind.DIR && row.relPath in expanded) {
-            rows(children, expanded, row.relPath, depth + 1, model, onOpen)
-        }
     }
 }

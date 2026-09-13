@@ -50,7 +50,7 @@ enum class Tool { Read, Pen, Highlighter, Eraser }
 
 /** A PDF inside a vault: strokes are written back into the file it came from. */
 @Composable
-fun PdfScreen(path: String) {
+fun PdfScreen(path: String, chrome: Chrome) {
     var doc by remember(path) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(path) { mutableStateOf<String?>(null) }
     LaunchedEffect(path) {
@@ -59,13 +59,17 @@ fun PdfScreen(path: String) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
-    Reader(doc, failed) { it.save() }
+    Reader(doc, failed, chrome) { it.save() }
 }
 
 /** A PDF opened from somewhere else: there is no vault, so it is written back where it came from. */
 @Composable
 fun LoosePdfScreen(uri: Uri) {
     val context = LocalContext.current
+    // Nothing to browse and nothing to launch without a vault, so this chrome moves nothing; the
+    // reader still takes one, because the gesture that hides a toolbar is the gesture that hides
+    // the toolbar this document will have again.
+    val chrome = remember { Chrome() }
     var doc by remember(uri) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(uri) { mutableStateOf<String?>(null) }
     LaunchedEffect(uri) {
@@ -76,7 +80,7 @@ fun LoosePdfScreen(uri: Uri) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
-    Reader(doc, failed) { model ->
+    Reader(doc, failed, chrome) { model ->
         // No path on this side: the bytes go back through whatever handed them over.
         val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
         runCatching {
@@ -89,6 +93,7 @@ fun LoosePdfScreen(uri: Uri) {
 private fun Reader(
     doc: PdfModel?,
     failed: String?,
+    chrome: Chrome,
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
@@ -124,7 +129,7 @@ private fun Reader(
 
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            Pages(doc, tool)
+            Pages(doc, tool, chrome)
             if (ANNOTATIONS) {
                 PdfToolbar(
                     tool = tool,
@@ -168,7 +173,7 @@ private const val INK_SAVE_MS = 1000L
  * zoom the fingers leave it at.
  */
 @Composable
-private fun Pages(doc: PdfModel, tool: Tool) {
+private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
     val density = LocalDensity.current
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -207,6 +212,7 @@ private fun Pages(doc: PdfModel, tool: Tool) {
             .fillMaxSize()
             .clipToBounds()
             .onSizeChanged { viewport = it }
+            .onTap(chrome)
             .pointerInput(doc, viewport) {
                 val decay = exponentialDecay<Float>()
                 panZoom(
@@ -215,6 +221,7 @@ private fun Pages(doc: PdfModel, tool: Tool) {
                             // One finger: the column scrolls and the pages slide, both at once.
                             list.dispatchRawDelta(-pan.y)
                             panX = holdXAt(panX + pan.x, viewport.width, zoom)
+                            chrome.scrolled(-pan.y)
                         } else {
                             // Two: the layer below carries all of it until they are lifted.
                             if (live == 1f) pivot = centroid
