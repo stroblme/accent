@@ -37,12 +37,16 @@ val Gutter: Dp = 16.dp
  * how far they moved and how much further apart they got, all at once; [onFling] with the
  * velocity they left behind.
  *
+ * [onEnd] is called when the fingers come up, with the velocity they left behind: a drag ends in a
+ * throw and a pinch in the one layout the gesture is worth, and only the caller knows which it
+ * was.
+ *
  * A gesture whose events something nearer the finger has already taken — the pen drawing on the
  * page — is dropped rather than fought over.
  */
 suspend fun PointerInputScope.panZoom(
     onGesture: (centroid: Offset, pan: Offset, zoom: Float) -> Unit,
-    onFling: (Velocity) -> Unit,
+    onEnd: (Velocity) -> Unit,
 ) {
     awaitEachGesture {
         val speed = VelocityTracker()
@@ -64,6 +68,6 @@ suspend fun PointerInputScope.panZoom(
                     ?.let { speed.addPosition(it.uptimeMillis, it.position) }
             }
         } while (event.changes.any { it.pressed })
-        if (moving) onFling(speed.calculateVelocity())
+        if (moving) onEnd(speed.calculateVelocity())
     }
 }

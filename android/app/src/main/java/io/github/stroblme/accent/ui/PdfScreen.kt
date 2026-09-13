@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -124,19 +125,31 @@ private fun Reader(
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             Pages(doc, tool)
-            PdfToolbar(
-                tool = tool,
-                // Tapping the tool in hand puts it down, which is the only way back to reading.
-                onTool = { tool = if (it == tool) Tool.Read else it },
-                canUndo = doc.canUndo,
-                canRedo = doc.canRedo,
-                onUndo = { scope.launch { doc.undo() } },
-                onRedo = { scope.launch { doc.redo() } },
-                modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
-            )
+            if (ANNOTATIONS) {
+                PdfToolbar(
+                    tool = tool,
+                    // Tapping the tool in hand puts it down, the only way back to reading.
+                    onTool = { tool = if (it == tool) Tool.Read else it },
+                    canUndo = doc.canUndo,
+                    canRedo = doc.canRedo,
+                    onUndo = { scope.launch { doc.undo() } },
+                    onRedo = { scope.launch { doc.redo() } },
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
+                )
+            }
         }
     }
 }
+
+/**
+ * Whether a PDF may be drawn on at all.
+ *
+ * Off until the mobile design settles — the toolbar is five words where the desktop has a ring of
+ * icons, and where it belongs on a phone is the same question the floating buttons answer. With
+ * no way to pick a tool, [Tool.Read] is the only state there is and a finger only ever moves the
+ * page. Not `const`, so the toolbar below is compiled rather than folded away.
+ */
+private val ANNOTATIONS = false
 
 /** How long after the last stroke the document is written back. */
 private const val INK_SAVE_MS = 1000L
@@ -145,11 +158,14 @@ private const val INK_SAVE_MS = 1000L
  * The document as a column of pages, panned and pinched as one surface.
  *
  * The column does the laying out and the recycling; the gesture does everything else. Both axes
- * move from the same handler, so a diagonal drag goes diagonally instead of picking a side, and a
- * pinch grows the page away from the point between the fingers rather than from its top-left
- * corner. The page stretches the bitmap it already has while the fingers are down and is drawn
- * again at the zoom they leave it at — the same stand-in the desktop paints while its tiles are
- * still coming.
+ * move from the same handler, so a diagonal drag goes diagonally instead of picking a side.
+ *
+ * A pinch never lays the column out again. It scales one layer under the fingers and commits
+ * once, on release — what every other reader on the platform does, and the only way the
+ * arithmetic can be right: asking the list where it is and telling it where to go in the same
+ * frame reads back the position from before the answer, so the page crept away from the fingers a
+ * little more every frame. The page stretches the bitmap it already has and is drawn again at the
+ * zoom the fingers leave it at.
  */
 @Composable
 private fun Pages(doc: PdfModel, tool: Tool) {
@@ -173,6 +189,11 @@ private fun Pages(doc: PdfModel, tool: Tool) {
     var panX by remember { mutableFloatStateOf(0f) }
     /** The zoom the bitmaps were drawn at. It follows the fingers once they stop. */
     var drawn by remember { mutableFloatStateOf(1f) }
+    /** How much further apart the fingers have got since the pinch began; 1 while none is on. */
+    var live by remember { mutableFloatStateOf(1f) }
+    /** Where they were between them when it began, and how far they have moved since. */
+    var pivot by remember { mutableStateOf(Offset.Zero) }
+    var shift by remember { mutableStateOf(Offset.Zero) }
     LaunchedEffect(zoom) {
         delay(RESHARPEN_MS)
         drawn = zoom
@@ -190,25 +211,33 @@ private fun Pages(doc: PdfModel, tool: Tool) {
                 val decay = exponentialDecay<Float>()
                 panZoom(
                     onGesture = { centroid, pan, step ->
-                        val was = zoom
-                        val now = (was * step).coerceIn(MIN_ZOOM, MAX_ZOOM)
-                        val by = now / was
-                        // Everything grows away from the point between the fingers, so whatever
-                        // was under them stays under them; then the whole thing follows the drag.
-                        val down = anchor(pages.above(list, viewport.width, was), centroid.y, by, pan.y)
-                        val across = anchor(-panX, centroid.x, by, pan.x)
-                        panX = holdXAt(-across, viewport.width, now)
-                        zoom = now
-                        // A drag alone is a scroll; a pinch has to put the reader somewhere exact,
-                        // because every page just changed height underneath them.
-                        if (by == 1f) {
+                        if (live == 1f && step == 1f) {
+                            // One finger: the column scrolls and the pages slide, both at once.
                             list.dispatchRawDelta(-pan.y)
+                            panX = holdXAt(panX + pan.x, viewport.width, zoom)
                         } else {
-                            val (page, into) = pages.at(down, viewport.width, now)
-                            list.requestScrollToItem(page, into)
+                            // Two: the layer below carries all of it until they are lifted.
+                            if (live == 1f) pivot = centroid
+                            live = (live * step).coerceIn(MIN_ZOOM / zoom, MAX_ZOOM / zoom)
+                            shift += pan
                         }
                     },
-                    onFling = { velocity ->
+                    onEnd = { velocity ->
+                        if (live != 1f) {
+                            // The one place the column is laid out again, on a list that has not
+                            // moved since the pinch began: where the reader was, plus what the
+                            // fingers did to it, is where they have to be put back.
+                            val above = pages.above(list, viewport.width, zoom)
+                            val down = anchor(above, pivot.y, live, shift.y)
+                            val across = anchor(-panX, pivot.x, live, shift.x)
+                            zoom = (zoom * live).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                            panX = holdXAt(-across, viewport.width, zoom)
+                            val (page, into) = pages.at(down, viewport.width, zoom)
+                            list.requestScrollToItem(page, into)
+                            live = 1f
+                            shift = Offset.Zero
+                            return@panZoom
+                        }
                         scope.launch {
                             var last = 0f
                             AnimationState(0f, -velocity.y).animateDecay(decay) {
@@ -232,9 +261,20 @@ private fun Pages(doc: PdfModel, tool: Tool) {
             // Every drag goes through the gesture above, which is what lets one follow both axes.
             userScrollEnabled = false,
             modifier = Modifier
-                .width(with(density) { (viewport.width * zoom).toDp() })
-                .fillMaxHeight()
-                .graphicsLayer { translationX = panX },
+                // Required, not plain: the box would otherwise hold the column to the width of
+                // the screen while the pages grew taller, which is a page squeezed sideways.
+                .requiredWidth(with(density) { (viewport.width * zoom).toDp() })
+                // A pinch that shrinks the layer shows more of the column than the screen holds,
+                // so the column is made that much taller for as long as it lasts and the rows to
+                // fill it are composed.
+                .requiredHeight(with(density) { (viewport.height / live.coerceAtMost(1f)).toDp() })
+                .graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    scaleX = live
+                    scaleY = live
+                    translationX = liveShift(pivot.x, live, panX, shift.x)
+                    translationY = liveShift(pivot.y, live, 0f, shift.y)
+                },
             verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
         ) {
             items(doc.pageCount) { index ->
@@ -258,6 +298,16 @@ private fun Pages(doc: PdfModel, tool: Tool) {
 
 /** Sideways travel is bounded by how much wider than the screen the pages have become. */
 private fun holdXAt(p: Float, width: Int, zoom: Float) = p.coerceIn(-width * (zoom - 1f), 0f)
+
+/**
+ * Where a layer scaled about its own corner has to be moved to, for the point the fingers began
+ * between to stay between them.
+ *
+ * [pivot] is that point, [live] how much further apart they have got, [base] the translation the
+ * layer already had along this axis and [shift] how far the hand has moved since.
+ */
+internal fun liveShift(pivot: Float, live: Float, base: Float, shift: Float): Float =
+    pivot * (1f - live) + base * live + shift
 
 /**
  * Where the content has to sit along one axis after a gesture, so that whatever was under the
