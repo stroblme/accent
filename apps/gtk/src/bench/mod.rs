@@ -16,7 +16,7 @@ mod pdf;
 mod style;
 
 use chrome::bench_chrome;
-use compare::bench_compare;
+use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_init, bench_git_press};
@@ -46,7 +46,9 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// or a drop out of a styled or folded line brings its tags along.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
-/// what the panes hold and whether their rows line up.
+/// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
+/// long paragraphs in a repository it makes itself and types at the start of the two lines whose
+/// padding tag does not begin at the newline before them.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
@@ -150,7 +152,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_layout(&app, &arg);
         }
         if let Some(rel) = compare {
-            return bench_compare(&app, &rel);
+            return match rel.strip_prefix("pads:") {
+                Some(rel) => bench_compare_pads(&app, rel),
+                None => bench_compare(&app, &rel),
+            };
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);

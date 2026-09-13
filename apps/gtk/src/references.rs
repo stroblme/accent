@@ -129,7 +129,7 @@ impl App {
             self.open_as(&key, how);
             return self.show_pdf_anchor(&key, anchor);
         }
-        self.with_tab(&key, how, move |_, tab| tab.goto_pos(at));
+        self.with_tab(&key, how, "go to", move |_, tab| tab.goto_pos(at));
     }
 }
 

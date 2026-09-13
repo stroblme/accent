@@ -436,7 +436,7 @@ impl App {
             };
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
             // it is put back.
-            self.with_tab(key, Opened::Restored, move |app, _| {
+            self.with_tab(key, Opened::Restored, "restore", move |app, _| {
                 asked.landed.set(true);
                 app.put_back(&asked.restore)
             });

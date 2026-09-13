@@ -237,8 +237,9 @@ pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
                     continue;
                 };
                 let (how, rel, done) = (how.clone(), rel.clone(), done.clone());
-                let pick: Waiting = Box::new(move |app, tab| {
-                    restore(app, tab);
+                let Waiting { what, run } = restore;
+                let pick: Work = Box::new(move |app, tab| {
+                    run(app, tab);
                     let landing = app.awaiting.borrow().len();
                     let Some(tab) = app.tab_for(&rel).filter(|_| !done.get() && landing > 0) else {
                         return;
@@ -257,7 +258,9 @@ pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
                     done.set(true);
                     println!("bench layout_{how} {rel} with {landing} still landing");
                 });
-                app.awaiting.borrow_mut().insert(key, pick);
+                app.awaiting
+                    .borrow_mut()
+                    .insert(key, Waiting { what, run: pick });
             }
         }
         if !app.restored.get() || !app.awaiting.borrow().is_empty() {
