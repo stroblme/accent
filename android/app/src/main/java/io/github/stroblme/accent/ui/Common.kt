@@ -13,7 +13,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.unit.Velocity
@@ -68,29 +67,3 @@ suspend fun PointerInputScope.panZoom(
         if (moving) onFling(speed.calculateVelocity())
     }
 }
-
-/**
- * A downward drag that starts at the top of the content, which is what opens the switcher.
- *
- * Not a pull-to-refresh: that gesture means "fetch again" everywhere else, and here the answer
- * to a pull is a list of notes. [atTop] says whether the content under the finger has anywhere
- * left to scroll; when it has not, a drag past [threshold] pixels calls [onPull].
- */
-fun Modifier.pullDown(atTop: () -> Boolean, threshold: Float = 180f, onPull: () -> Unit): Modifier =
-    pointerInput(Unit) {
-        awaitEachGesture {
-            awaitFirstDown(requireUnconsumed = false)
-            if (!atTop()) return@awaitEachGesture
-            var travelled = 0f
-            var fired = false
-            do {
-                val event = awaitPointerEvent()
-                val change = event.changes.firstOrNull() ?: break
-                travelled += change.positionChange().y
-                if (!fired && travelled > threshold && atTop()) {
-                    fired = true
-                    onPull()
-                }
-            } while (event.changes.any { it.pressed })
-        }
-    }

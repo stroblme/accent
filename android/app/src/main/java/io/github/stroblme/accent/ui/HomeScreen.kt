@@ -71,8 +71,8 @@ fun HomeScreen(model: VaultModel) {
                     state.open != null -> NoteScreen(
                         model = model,
                         open = state.open!!,
+                        root = state.root.orEmpty(),
                         onMenu = { scope.launch { drawer.open() } },
-                        onPull = { switcher = true },
                     )
                     else -> Empty(
                         indexing = state.indexing,

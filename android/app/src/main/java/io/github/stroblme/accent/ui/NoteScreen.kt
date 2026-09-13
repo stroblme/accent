@@ -18,7 +18,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -47,7 +46,7 @@ import java.net.URLDecoder
  * to the field's output rather than to a buffer of tags.
  */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, onMenu: () -> Unit, onPull: () -> Unit) {
+fun NoteScreen(model: VaultModel, open: Open, root: String, onMenu: () -> Unit) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
         NoteBar(open, editing, onMenu, onToggle = { editing = !editing })
@@ -60,7 +59,7 @@ fun NoteScreen(model: VaultModel, open: Open, onMenu: () -> Unit, onPull: () -> 
         }
         if (open.changedOnDisk) ChangedBanner(onReload = { model.reload() })
         Box(Modifier.weight(1f)) {
-            if (editing) Editor(model, open) else Rendered(model, open, onPull)
+            if (editing) Editor(model, open) else Rendered(model, open, root)
         }
     }
 }
@@ -117,14 +116,17 @@ private fun ChangedBanner(onReload: () -> Unit) {
  * enforces with a content blocker.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, onPull: () -> Unit) {
-    val context = LocalContext.current
+private fun Rendered(model: VaultModel, open: Open, root: String) {
     val colors = MaterialTheme.colorScheme
-    val root = model.state.collectAsState().value.root.orEmpty()
-    var atTop by remember { mutableStateOf(true) }
+    // The whole page, rebuilt only when the note or the palette changes. Everything else that
+    // recomposes this screen — indexing progress, a snackbar, a search — must not reload the
+    // WebView: a reload is a scroll back to the top and a fling cut off mid-throw.
+    val html = remember(open.text, colors) {
+        page(toHtml(open.text), colors.onSurface, colors.surface, colors.primary)
+    }
 
     AndroidView(
-        modifier = Modifier.fillMaxSize().pullDown(atTop = { atTop }, onPull = onPull),
+        modifier = Modifier.fillMaxSize(),
         factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = false
@@ -157,17 +159,15 @@ private fun Rendered(model: VaultModel, open: Open, onPull: () -> Unit) {
                         }.getOrElse { blocked() }
                     }
                 }
-                setOnScrollChangeListener { _, _, y, _, _ -> atTop = y <= 0 }
             }
         },
         update = { web ->
-            web.loadDataWithBaseURL(
-                baseUri(open.rel),
-                page(toHtml(open.text), colors.onSurface, colors.surface, colors.primary),
-                "text/html",
-                "utf-8",
-                null,
-            )
+            // The view's own tag is what it last loaded: `update` runs on every recomposition and
+            // only a different page is worth a load.
+            if (web.tag != html) {
+                web.tag = html
+                web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
+            }
         },
     )
 }
