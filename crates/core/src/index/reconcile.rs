@@ -353,10 +353,18 @@ fn upsert(
         .and_then(|a| a.title.clone())
         .or_else(|| Some(path::stem(&f.rel_path)));
 
+    // `git_ignored` is the parent directory's, and only on an insert: an existing row keeps
+    // whatever [`Index::set_excluded`] last said about it, and a new one under a directory that
+    // is already excluded has to be excluded too. Git reports a wholly ignored directory as a
+    // single entry, so a file created inside one leaves the exclusion set unchanged and no
+    // second `set_excluded` is ever written to mark it — it would otherwise stay in search until
+    // something unrelated moved the set. A full walk answers the same way: `walk::scan` orders
+    // its files shallowest first, so a directory is always upserted before its children.
     let id: i64 = tx
         .prepare_cached(
-            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash, git_ignored)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
+                    COALESCE((SELECT git_ignored FROM files WHERE rel_path = ?2), 0))
              ON CONFLICT(rel_path) DO UPDATE SET
                 parent_dir=excluded.parent_dir,
                 canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
