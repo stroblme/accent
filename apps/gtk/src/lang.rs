@@ -230,6 +230,21 @@ pub fn settle(tab: &Rc<Tab>) {
     });
 }
 
+/// The index moved: ask for this document's hints again. A note flags a `[[link]]` it cannot
+/// resolve, and creating the note it names is not an edit of *this* one, so without this the
+/// hint stays until the next keystroke.
+pub fn rediagnose(tab: &Rc<Tab>) {
+    let Some(vault) = tab.lang.vault() else {
+        return;
+    };
+    let rel = tab.rel();
+    glib::spawn_future_local(async move {
+        if let Err(e) = vault.rediagnose(&rel).await {
+            tracing::debug!("re-diagnosing {rel}: {e:#}");
+        }
+    });
+}
+
 /// Turn ghost text on or off under an open tab.
 ///
 /// Off is immediate. On has to reopen the document when the tab was opened without a ghost

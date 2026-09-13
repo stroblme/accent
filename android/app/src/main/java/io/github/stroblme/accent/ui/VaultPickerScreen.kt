@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import io.github.stroblme.accent.Recents
 import io.github.stroblme.accent.VaultModel
 import java.io.File
@@ -62,7 +63,6 @@ fun VaultPickerScreen(model: VaultModel) {
                 Spacer(Modifier.height(12.dp))
                 FilledTonalButton(onClick = {
                     context.startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
-                    granted = hasAllFiles()
                 }) { Text("Allow access") }
                 Spacer(Modifier.height(24.dp))
             }
@@ -88,7 +88,11 @@ fun VaultPickerScreen(model: VaultModel) {
             }
         }
     }
-    LaunchedEffect(Unit) { granted = hasAllFiles() }
+    // Answered in Settings, in another activity: this screen only learns of it on the way back.
+    LifecycleResumeEffect(Unit) {
+        granted = hasAllFiles()
+        onPauseOrDispose {}
+    }
 }
 
 private fun hasAllFiles(): Boolean =

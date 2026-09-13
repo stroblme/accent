@@ -37,7 +37,9 @@ use compare::Comparing;
 pub use compare::{companion, overlay_view, restyle_companion, style_companion};
 use follow::Follow;
 use lines::primary_paste;
-pub(crate) use lines::{delete_line, duplicate_line, line_clipboard, newline_below, paste_primary};
+pub(crate) use lines::{
+    delete_line, duplicate_line, line_clipboard, newline_below, paste_primary, toggle_comment,
+};
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};

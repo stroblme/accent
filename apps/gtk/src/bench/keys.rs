@@ -105,6 +105,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         glib::spawn_future_local(async move {
             bench_column(&view).await;
             bench_selections(&view).await;
+            bench_lines(&view).await;
             window.close();
             bench_quit(&app);
         });
@@ -213,6 +214,21 @@ async fn bench_column(view: &multicaret::View) {
     println!("bench column_copy {copied:?} carets={}", view.has_carets());
     view.emit_cut_clipboard();
     show("cut");
+
+    // Two edits that each changed the text at one caret only — the caret above sits at the start
+    // of the buffer, where Backspace does nothing — are a single action in GTK's history, which it
+    // joins onto the one before it the way it joins typing. One Undo takes both back, and the
+    // carets come back with the text rather than a step behind it.
+    view.clear_carets();
+    buffer.set_text("ab\ncd");
+    buffer.place_cursor(&buffer.iter_at_offset(3));
+    view.add_caret(false);
+    view.press(gdk::Key::BackSpace, none);
+    view.press(gdk::Key::BackSpace, none);
+    show("joined");
+    undo();
+    show("joined_undo");
+    view.clear_carets();
 
     // Page Down moves every caret by the lines on screen, the column's shape kept.
     let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
@@ -374,6 +390,97 @@ async fn bench_selections(view: &multicaret::View) {
         println!("bench selection_colour {id} {}", view.selection_colour());
     }
     view.clear_carets();
+}
+
+/// The line commands where a caret and a column answer differently: Delete Line over a selection,
+/// Toggle Comment at a column, `Shift+Delete` left to GTK's Cut binding, and a read-only view
+/// refusing the lot. Prints the buffer and every caret after each step.
+async fn bench_lines(view: &multicaret::View) {
+    use sourceview5::prelude::BufferExt as _;
+    let buffer = view.buffer();
+    let show = |step: &str| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        println!("bench lines_{step} {text:?} {:?}", view.caret_positions());
+    };
+    let none = gdk::ModifierType::empty();
+    let shift = gdk::ModifierType::SHIFT_MASK;
+
+    // Delete Line with one caret takes every line the selection covers, as Duplicate Line does,
+    // and a selection ending at a line's start leaves that line out.
+    view.clear_carets();
+    for (step, to) in [("delete_selected", 6), ("delete_to_line_start", 3)] {
+        buffer.set_text("ab\ncd\nef\ngh");
+        buffer.select_range(&buffer.iter_at_offset(1), &buffer.iter_at_offset(to));
+        editor::delete_line(view.upcast_ref());
+        show(step);
+    }
+
+    // Toggle Comment: the lines the caret covers, its column kept across the marker, and at a
+    // column every caret's line, the column still up afterwards.
+    let language = sourceview5::LanguageManager::default().language("rust");
+    println!("bench lines_language {}", language.is_some());
+    if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+        source.set_language(language.as_ref());
+    }
+    let code = "    a();\n    b();\n    c();";
+    buffer.set_text(code);
+    buffer.place_cursor(&buffer.iter_at_offset(6));
+    for step in ["comment", "uncomment"] {
+        editor::toggle_comment(view.upcast_ref());
+        show(step);
+    }
+    // A selection over the lines is put back over them whole, markers and all, rather than left
+    // to the marks, which the marker would have pushed off the front of the first line.
+    buffer.set_text(code);
+    buffer.select_range(&buffer.iter_at_offset(4), &buffer.iter_at_offset(13));
+    editor::toggle_comment(view.upcast_ref());
+    let selection = buffer
+        .selection_bounds()
+        .map(|(start, end)| (start.offset(), end.offset()));
+    show("comment_selection");
+    println!("bench lines_comment_selection {selection:?}");
+
+    column(view, code);
+    for step in ["comment_column", "uncomment_column"] {
+        editor::toggle_comment(view.upcast_ref());
+        println!("bench lines_{step}_carets {}", view.has_carets());
+        show(step);
+    }
+
+    // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
+    // a character at every caret, and answers the signal it emits with its own whole-line cut.
+    column(view, "ab\ncd\nef");
+    let passed = view.press(gdk::Key::Delete, shift) == glib::Propagation::Proceed;
+    println!("bench lines_shift_delete passed={passed}");
+    show("shift_delete");
+    view.emit_cut_clipboard();
+    show("shift_delete_cut");
+
+    // A read-only view refuses every one of them, as GTK's own keys and the whole-line cut do: a
+    // tab holding a file that is not valid UTF-8 is one. The carets still move.
+    view.set_editable(false);
+    column(view, "ab\ncd\nef");
+    view.press(gdk::Key::X, shift);
+    view.press(gdk::Key::BackSpace, none);
+    view.clipboard().set_text("zz");
+    view.emit_paste_clipboard();
+    glib::timeout_future(Duration::from_millis(100)).await;
+    for command in [
+        editor::duplicate_line as fn(&sourceview5::View),
+        editor::delete_line,
+        editor::newline_below,
+        editor::toggle_comment,
+    ] {
+        command(view.upcast_ref());
+    }
+    show("read_only");
+    view.press(gdk::Key::Right, none);
+    show("read_only_moved");
+    view.set_editable(true);
+    view.clear_carets();
+    if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+        source.set_language(None);
+    }
 }
 
 /// A shell focused in a window that does not have the keyboard must not narrow the application's

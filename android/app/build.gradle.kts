@@ -71,4 +71,5 @@ dependencies {
     implementation(libs.lifecycle.runtime.compose)
     // uniffi's generated bindings call the library through JNA's direct mapping.
     implementation(variantOf(libs.jna) { artifactType("aar") })
+    testImplementation(libs.junit)
 }

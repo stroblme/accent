@@ -22,10 +22,6 @@ class Recents(context: Context) {
         prefs.edit().putString(of.key, kept.joinToString("\n")).apply()
     }
 
-    fun forget(of: Kind, value: String) {
-        prefs.edit().putString(of.key, list(of).filter { it != value }.joinToString("\n")).apply()
-    }
-
     /** How recently each of [haystacks] was used, for the switcher's ranking. */
     fun ranks(of: Kind, haystacks: List<String>): List<UInt?> {
         val order = list(of).withIndex().associate { (i, v) -> v to i.toUInt() }

@@ -80,9 +80,11 @@ impl App {
             return self.needs_vault("go to a definition");
         };
         // Said once per tab: a file whose server is not installed would otherwise toast on every
-        // Ctrl+click, and the answer does not change while the tab is open.
+        // Ctrl+click, and the answer does not change while the tab is open. And not said at all
+        // while the Outline pane is on screen saying it — the claim is left unspent there, so
+        // the same chord with the sidebar hidden still explains itself.
         if let Some(server) = tab.lang.support().and_then(|s| s.missing.clone()) {
-            if tab.lang.claim_toast() {
+            if !self.outline_says_missing(&tab) && tab.lang.claim_toast() {
                 let language = tab.language().unwrap_or_else(|| "this file".to_string());
                 self.toast(&format!(
                     "No language server for {language} ({server} not found)"

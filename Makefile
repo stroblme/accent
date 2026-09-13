@@ -73,7 +73,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help \
-        android android-check android-tools apk pdfium-android bindings
+        android android-check android-test android-tools apk pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -152,6 +152,10 @@ $(JNI_LIBS)/$(1)/libpdfium.so:
 	rm -f $(JNI_LIBS)/$(1)/pdfium.tgz
 endef
 $(foreach abi,$(ANDROID_ABIS),$(eval $(call pdfium-android-rule,$(abi))))
+
+## android-test: run the app's own unit tests (needs a JDK and the SDK)
+android-test:
+	cd android && ./gradlew testDebugUnitTest
 
 ## apk: build the debug APK (Gradle runs the cross build and the bindings itself)
 apk: pdfium-android

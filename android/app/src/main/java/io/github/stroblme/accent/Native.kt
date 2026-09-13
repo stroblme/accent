@@ -16,10 +16,6 @@ import java.io.File
 object Native {
     private const val TAG = "accent"
 
-    /** Whether libpdfium loaded. Without it the app still reads notes; PDFs show a message. */
-    var pdfium: Boolean = false
-        private set
-
     fun setUp(context: Context) {
         val files = context.filesDir
         // The index is a disposable cache, but `cacheDir` is what Android empties under pressure
@@ -34,9 +30,8 @@ object Native {
         // Loaded here rather than on the first page, so a missing library is one clear line in
         // the log at start-up instead of a failure inside a render. The core reaches it through
         // `dlopen` afterwards, which finds what the app has already loaded.
-        pdfium = runCatching { System.loadLibrary("pdfium") }
+        runCatching { System.loadLibrary("pdfium") }
             .onFailure { Log.e(TAG, "libpdfium did not load; PDFs will not open", it) }
-            .isSuccess
     }
 
     private fun setEnv(name: String, dir: File) {

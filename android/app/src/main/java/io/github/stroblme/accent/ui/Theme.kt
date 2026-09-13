@@ -11,8 +11,6 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
@@ -61,6 +59,3 @@ private val AccentTypography = Typography().let { base ->
         labelMedium = base.labelMedium.copy(fontWeight = FontWeight.Normal),
     )
 }
-
-/** What a fenced block and inline code are set in. */
-val MonoStyle = TextStyle(fontFamily = FontFamily.Monospace)

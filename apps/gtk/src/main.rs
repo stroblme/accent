@@ -706,6 +706,17 @@ impl App {
         self.follow_outline();
     }
 
+    /// Whether the Outline pane is on screen with its "No Language Server" page up for `tab`.
+    /// The caller is the Go to Definition toast, which says the same thing: the reader is told
+    /// once. Kept beside [`App::sync_outline`], which is what decides that page is shown — an
+    /// empty outline on a tab whose server is missing.
+    fn outline_says_missing(&self, tab: &Rc<Tab>) -> bool {
+        self.sidebar_column.is_visible()
+            && self.sidebar.get().is_some_and(|s| s.is_showing("outline"))
+            && self.is_active(tab)
+            && tab.lang.outline().is_empty()
+    }
+
     /// Select the Outline row of the heading or symbol the caret is in and scroll it into view,
     /// as VS Code's Follow Cursor does. Nothing while the pane is out of sight: showing it calls
     /// this again, and it catches up then.

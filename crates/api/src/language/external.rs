@@ -8,7 +8,7 @@
 //! The mapping functions are pure and sit above the provider, so what a server's answer becomes
 //! is testable without a server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -473,6 +473,9 @@ async fn forward_notifications(
     busy_as: Option<&'static str>,
     events: Sender<Event>,
 ) {
+    // What this server has marks on screen for, so a crash can take exactly those away again.
+    // A session that publishes nothing — the ghost one — therefore clears nothing.
+    let mut painted: HashSet<String> = HashSet::new();
     while let Some(n) = notifications.recv().await {
         match n.method.as_str() {
             "textDocument/publishDiagnostics" => {
@@ -487,6 +490,10 @@ async fn forward_notifications(
                     continue;
                 };
                 let items = diagnostics_of(params.diagnostics, &text, encoding);
+                match items.is_empty() {
+                    true => painted.remove(&rel),
+                    false => painted.insert(rel.clone()),
+                };
                 if events.send(Event::Diagnostics { rel, items }).is_err() {
                     break;
                 }
@@ -515,6 +522,15 @@ async fn forward_notifications(
         let _ = events.send(Event::Busy {
             what: what.to_string(),
             busy: false,
+        });
+    }
+    // And nothing will ever correct what it painted: a crash leaves errors frozen in the gutter
+    // of every document it had marked, which read as current until the tab is reopened. An empty
+    // list is what clears one.
+    for rel in painted {
+        let _ = events.send(Event::Diagnostics {
+            rel,
+            items: Vec::new(),
         });
     }
 }
@@ -1096,6 +1112,54 @@ mod tests {
         assert_eq!(rel_of("https://example.org", root), None);
     }
 
+    /// A server that exits — a crash, an OOM kill — leaves its marks in the gutter with nothing
+    /// left to correct them. The notification stream ending is that moment, and no process is
+    /// needed to reach it: dropping the sender is what a dead server's reader does.
+    #[test]
+    fn a_server_that_exits_clears_what_it_painted() {
+        let (server, notifications) = tokio::sync::mpsc::unbounded_channel();
+        let (events, seen) = std::sync::mpsc::channel();
+        let text = "int main(void) { return addd(3); }\n";
+        let docs: Docs = Arc::new(Mutex::new(HashMap::from([(
+            "a.c".to_string(),
+            Doc {
+                version: 1,
+                text: text.to_string(),
+            },
+        )])));
+        server
+            .send(accent_lsp::Notification {
+                method: "textDocument/publishDiagnostics".to_string(),
+                params: json!({
+                    "uri": "file:///vault/a.c",
+                    "diagnostics": [{
+                        "range": {"start": {"line": 0, "character": 24},
+                                  "end": {"line": 0, "character": 28}},
+                        "severity": 1,
+                        "message": "addd is not declared",
+                    }],
+                }),
+            })
+            .unwrap();
+        drop(server);
+
+        accent_lsp::runtime().block_on(forward_notifications(
+            notifications,
+            docs,
+            PathBuf::from("/vault"),
+            Encoding::Utf16,
+            None,
+            events,
+        ));
+
+        let painted = seen.recv().expect("the diagnostic the server published");
+        assert!(matches!(painted, Event::Diagnostics { ref rel, ref items }
+            if rel == "a.c" && items.len() == 1));
+        let cleared = seen.recv().expect("the server's exit clears its marks");
+        assert!(matches!(cleared, Event::Diagnostics { ref rel, ref items }
+            if rel == "a.c" && items.is_empty()));
+    }
+
     // ------------------------------------------------------------ with a real server
 
     /// A definition to jump to, a call that resolves, and a call that does not.
@@ -1182,17 +1246,42 @@ mod tests {
         assert_eq!(error.range.start.line, 1);
         assert!(error.message.contains("addd"), "{}", error.message);
 
+        // The last document to close takes the session with it: a server started for one file
+        // must not sit on a vault nobody is reading code in any more.
+        rt.block_on(async { vault.close_document("main.c").await.unwrap() });
+        assert!(
+            clangd_left(&before).is_empty(),
+            "clangd outlived the only document it was started for"
+        );
+        // And reopening starts a fresh one, rather than asking the one that has exited.
+        rt.block_on(async {
+            let support = vault
+                .open_document("main.c", "c", C_FILE.to_string())
+                .await
+                .unwrap();
+            assert!(support.completion_triggers.contains(&'.'), "a new session");
+        });
+
         // Dropping the vault stops the server: nothing of ours may outlive the window.
         drop(vault);
+        assert!(
+            clangd_left(&before).is_empty(),
+            "clangd still running after the vault closed"
+        );
+    }
+
+    /// The clangd processes this test started that are still running, given a little while to
+    /// exit: a server is asked to stop and stops on its own thread.
+    fn clangd_left(before: &std::collections::BTreeSet<String>) -> Vec<String> {
         let mut left = Vec::new();
         for _ in 0..30 {
-            left = clangd_pids().difference(&before).cloned().collect();
+            left = clangd_pids().difference(before).cloned().collect();
             if left.is_empty() {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(left.is_empty(), "clangd still running: {left:?}");
+        left
     }
 
     /// pylsp is the fallback of the Python row; pyright is tried first where it is installed.

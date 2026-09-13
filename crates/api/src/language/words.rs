@@ -290,6 +290,11 @@ impl Language for Layered {
         }
     }
 
+    /// The primary's to answer: neither the words nor the ghost session diagnoses anything.
+    fn rediagnose(&self, rel: &str) -> Result<()> {
+        self.primary.as_ref().map_or(Ok(()), |p| p.rediagnose(rel))
+    }
+
     fn close(&self, rel: &str) {
         self.words.close(rel);
         if let Some(g) = &self.ghost {
