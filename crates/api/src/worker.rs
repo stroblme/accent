@@ -151,8 +151,8 @@ impl Worker {
             }
         }
         // Before the rescan test below, which returns early: a caller is waiting for this answer
-        // and would otherwise be told the worker had gone. A walk in the same batch can only
-        // clear the flag on rows it adds, and those are files git had not seen when it listed.
+        // and would otherwise be told the worker had gone. A walk in the same batch costs the
+        // order nothing: the rows it adds take their parent directory's flag (`upsert`).
         for msg in &batch {
             if let Msg::SetExcluded(entries, reply) = msg {
                 let _ = reply.send(self.index.set_excluded(entries));
@@ -260,8 +260,9 @@ impl Worker {
                 let _ = events.send(Event::GitChanged);
             }
         });
-        // A set written mid-walk marked the rows that were there; the rest of the walk added its
-        // rows unmarked.
+        // A set written mid-walk marked the rows that were there, and what the walk added after
+        // it inherited its parent's flag — but a directory the set itself names, added after it,
+        // had no marked parent to inherit from, so the set is applied once more.
         if let Some(entries) = excluded
             && let Err(e) = self.index.set_excluded(&entries)
         {
