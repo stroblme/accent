@@ -90,6 +90,7 @@ impl App {
             font: config.editor_font.clone(),
             zoom: self.zoom.get(),
             column_width: config.column_width,
+            indent_width: config.indent_width,
             minimap: config.minimap,
             line_numbers: config.line_numbers,
         }

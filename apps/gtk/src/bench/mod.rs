@@ -20,7 +20,7 @@ use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_init, bench_git_press};
-use keys::{bench_keys, bench_shell_keys};
+use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
@@ -37,7 +37,10 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
-/// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
+/// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
+/// note and prints the ones whose marker or indent did not come out as `typing` says it should,
+/// plus the width one indent is worth there.
+/// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
@@ -100,7 +103,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();
     let style = std::env::var("ACCENT_BENCH_STYLE").ok();
     let git = std::env::var("ACCENT_BENCH_GIT").ok();
-    let keys = std::env::var("ACCENT_BENCH_KEYS").is_ok();
+    let keys = std::env::var("ACCENT_BENCH_KEYS").ok();
     let chrome = std::env::var("ACCENT_BENCH_CHROME").ok();
     let templates = std::env::var("ACCENT_BENCH_TEMPLATE").is_ok();
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
@@ -129,7 +132,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && outline.is_none()
         && layout.is_none()
         && git.is_none()
-        && !keys
+        && keys.is_none()
         && chrome.is_none()
         && !templates
         && !paths
@@ -194,8 +197,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(notes) = chrome {
             return bench_chrome(&app, &notes);
         }
-        if keys {
-            return bench_keys(&app);
+        if let Some(arg) = keys {
+            return match arg.as_str() {
+                "1" => bench_keys(&app),
+                rel => bench_list(&app, rel),
+            };
         }
         if let Some(arg) = git {
             return match (arg.strip_prefix("press:"), arg.as_str()) {
