@@ -22,7 +22,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -228,8 +227,6 @@ private fun page(body: String, fg: Color, bg: Color, accent: Color): String = ""
 """
 
 private fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
-
-private fun Color.dark(): Boolean = luminance() < 0.5f
 
 // ------------------------------------------------------------------------------------ writing
 

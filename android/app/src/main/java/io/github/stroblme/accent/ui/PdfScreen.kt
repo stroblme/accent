@@ -23,8 +23,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
@@ -480,9 +478,6 @@ private fun Tool.wetColour(accent: Color): Color =
 /** Whether this device has a stylus at all; if it has none, a finger is allowed to draw. */
 private val hasStylus: Boolean = false
 
-private fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
-
-private fun Color.dark(): Boolean = luminance() < 0.5f
 
 @Composable
 private fun PdfToolbar(

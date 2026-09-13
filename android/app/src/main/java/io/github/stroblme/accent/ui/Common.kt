@@ -15,6 +15,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
@@ -33,6 +36,12 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 
 /** The gutter every screen keeps at its sides. */
 val Gutter: Dp = 16.dp
+
+/** A colour as `0xRRGGBB`, which is how both the core and a stylesheet want one. */
+fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
+
+/** Whether this is a colour to read light text off. */
+fun Color.dark(): Boolean = luminance() < 0.5f
 
 /**
  * Whether the chrome is up: the bar over a note, and the two buttons at the foot of the screen.
