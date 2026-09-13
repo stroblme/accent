@@ -5,7 +5,7 @@
 //! The widgets live in `find.rs`, one bar per window. What is here is what belongs to one buffer.
 
 use super::{Tab, caret, line_end};
-use crate::{fold, lang};
+use crate::{fold, lang, multicaret};
 use accent_api::Pos;
 use accent_api::language::pos_of;
 use accent_core::markdown;
@@ -74,10 +74,14 @@ impl Tab {
             .filter(|s| s.chars().count() >= 2 && !s.contains('\n'))
     }
 
-    /// Point the muted highlight at what is selected now: every other occurrence of it in this
+    /// Point the muted highlight at what is selected now: every *other* occurrence of it in this
     /// note, matched the way the find bar matches — without regard to case — and capped at
-    /// [`OCCURRENCE_CAP`]. The selected range is tagged too, and never seen: the view paints the
-    /// selection over it.
+    /// [`OCCURRENCE_CAP`].
+    ///
+    /// The selected ranges themselves are left untagged. Tagging them was invisible only in
+    /// theory: a selection is painted *under* the tag backgrounds, so the muted colour showed
+    /// through, and the primary's selection and the other carets' — painted by two different
+    /// mechanisms — took it differently, so a column read as three shades of one selection.
     ///
     /// Nothing is re-tagged when the selection says what it said last time, which is what makes
     /// this cheap enough to run on every caret move.
@@ -93,14 +97,32 @@ impl Tab {
             &self.buffer.end_iter(),
         );
         let Some(query) = query else { return };
+        let selected = self.selected_ranges();
         let mut at = self.buffer.start_iter();
         for _ in 0..OCCURRENCE_CAP {
             let found = at.forward_search(&query, gtk::TextSearchFlags::CASE_INSENSITIVE, None);
             let Some((from, to)) = found else {
                 break;
             };
-            self.buffer.apply_tag(&self.occurrence_tag, &from, &to);
+            if !selected.contains(&(from.offset(), to.offset())) {
+                self.buffer.apply_tag(&self.occurrence_tag, &from, &to);
+            }
             at = to;
+        }
+    }
+
+    /// What is selected right now, as character offsets: every caret's range where the tab holds
+    /// a column of them, the primary's alone otherwise.
+    fn selected_ranges(&self) -> Vec<(i32, i32)> {
+        let offsets = |(start, end): (gtk::TextIter, gtk::TextIter)| (start.offset(), end.offset());
+        match self.view.downcast_ref::<multicaret::View>() {
+            Some(column) => column.selections().into_iter().map(offsets).collect(),
+            None => self
+                .buffer
+                .selection_bounds()
+                .map(offsets)
+                .into_iter()
+                .collect(),
         }
     }
 

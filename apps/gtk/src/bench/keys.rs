@@ -379,6 +379,17 @@ async fn bench_selections(view: &multicaret::View) {
         view.has_carets()
     );
 
+    // Focus mode's line fade spans every caret *and* every anchor, so a selection made upwards
+    // at a column keeps the lines it was started from out of the veil.
+    view.clear_carets();
+    buffer.set_text("ab\ncd\nef\ngh\nij");
+    buffer.place_cursor(&buffer.iter_at_offset(4));
+    view.add_caret(true);
+    view.add_caret(true);
+    select(gdk::Key::Up, 1);
+    show("fade_up");
+    println!("bench selection_fade_span {:?}", crate::fade::span(view));
+
     // The colour the other selections are painted in: the scheme's own where it names one.
     use sourceview5::prelude::BufferExt as _;
     let source = buffer.downcast_ref::<sourceview5::Buffer>();
