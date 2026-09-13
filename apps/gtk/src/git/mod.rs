@@ -142,11 +142,9 @@ struct State {
 pub struct Panel {
     hooks: Hooks,
     root: gtk::Widget,
-    /// "empty" (no repository) or "repo".
-    stack: gtk::Stack,
     /// Over the pane while the selected repository is part way through a merge.
     banner: adw::Banner,
-    /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
+    /// The pane's own box, and the only widget here a popover may hang off: GTK re-presents a
     /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
     /// (`fileops::context_menu` documents the symptom).
     column: gtk::Box,
@@ -263,14 +261,6 @@ impl Panel {
             placeholder,
         } = build_message_box();
 
-        // The "No Repository" page's own button: `git init` in a vault with no repository writes
-        // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
-        let check = gtk::Button::builder()
-            .label("Check Again")
-            .halign(gtk::Align::Center)
-            .build();
-        check.add_css_class("pill");
-
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
         let changes_view = gtk::ListView::new(
             Some(gtk::NoSelection::new(Some(changes.clone()))),
@@ -306,6 +296,7 @@ impl Panel {
 
         let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
+            .vexpand(true)
             .spacing(12)
             .margin_start(6)
             .margin_end(6)
@@ -317,11 +308,6 @@ impl Panel {
         column.append(&commit_box);
         column.append(&divider);
 
-        let stack = gtk::Stack::builder().vexpand(true).build();
-        stack.add_named(&empty_page(&check), Some("empty"));
-        stack.add_named(&column, Some("repo"));
-        stack.set_visible_child_name("empty");
-
         // A banner and not a toast (DESIGN.md, States): a merge that stopped is a state that
         // lasts until it is committed or aborted, and Abort is the one decision it can offer.
         let banner = adw::Banner::builder()
@@ -330,7 +316,7 @@ impl Panel {
             .build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&banner);
-        root.append(&stack);
+        root.append(&column);
 
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
@@ -338,7 +324,6 @@ impl Panel {
             pressed: Cell::new(false),
             hooks,
             root: root.upcast(),
-            stack,
             banner,
             column,
             names,
@@ -377,7 +362,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check, &create, &merge);
+        panel.wire_header(&create, &merge);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -466,14 +451,8 @@ impl Panel {
         self.schedule_refresh(Depth::Discover);
     }
 
-    fn wire_header(
-        self: &Rc<Self>,
-        check: &gtk::Button,
-        create: &gtk::Button,
-        merge: &gtk::Button,
-    ) {
+    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
-        on_click(self, check, |panel| panel.refresh(Depth::Discover));
         on_click(self, create, |panel| panel.create_branch());
         on_click(self, merge, |panel| panel.merge_branch());
         let weak = Rc::downgrade(self);
@@ -544,7 +523,7 @@ impl Panel {
     /// up. From an idle: the chord shows the pane in the same frame, and a widget that is not on
     /// screen yet cannot take focus.
     pub fn focus_commit(&self) {
-        if self.stack.visible_child_name().as_deref() != Some("repo") {
+        if !self.has_repos() {
             return;
         }
         let message = self.message.clone();
@@ -607,10 +586,6 @@ impl Panel {
             self.syncing.set(false);
         }
         self.chooser.set_visible(repos.len() > 1);
-        self.stack.set_visible_child_name(match repos.is_empty() {
-            true => "empty",
-            false => "repo",
-        });
 
         let selected = clamp(self.state.borrow().selected, repos.len());
         let status_kept = fetched.statuses.get(selected).is_some_and(Option::is_none);
@@ -1209,22 +1184,6 @@ fn build_message_box() -> MessageBox {
         message,
         placeholder,
     }
-}
-
-/// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
-/// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
-/// monitor is watching yet, so nothing would ever tell the pane to look again.
-fn empty_page(check: &gtk::Button) -> adw::StatusPage {
-    let page = adw::StatusPage::builder()
-        .icon_name(SYNC_ICON)
-        .title("No Repository")
-        .description("Run git init in the terminal to start one.")
-        .child(check)
-        .vexpand(true)
-        .build();
-    // Without this the icon alone takes 128 px of a 200 px column (DESIGN.md, States).
-    page.add_css_class("compact");
-    page
 }
 
 /// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
