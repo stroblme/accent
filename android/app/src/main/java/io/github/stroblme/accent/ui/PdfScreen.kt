@@ -1,12 +1,14 @@
 package io.github.stroblme.accent.ui
 
 import android.net.Uri
+import androidx.compose.animation.core.AnimationState
+import androidx.compose.animation.core.animateDecay
+import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import kotlinx.coroutines.delay
 import androidx.compose.material3.*
@@ -17,16 +19,19 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.ffi.InkStyle
@@ -137,18 +142,20 @@ private fun Reader(
 private const val INK_SAVE_MS = 1000L
 
 /**
- * The document as a column of pages, pinched to zoom.
+ * The document as a column of pages, panned and pinched as one surface.
  *
- * Each page paints one bitmap the core rendered at the width it is shown at. A pinch changes that
- * width, and the page stretches the bitmap it already has until the sharper one arrives — the
- * same stand-in the desktop paints while its tiles are still being drawn. Above fit width the
- * column scrolls sideways as well as down.
+ * The column does the laying out and the recycling; the gesture does everything else. Both axes
+ * move from the same handler, so a diagonal drag goes diagonally instead of picking a side, and a
+ * pinch grows the page away from the point between the fingers rather than from its top-left
+ * corner. The page stretches the bitmap it already has while the fingers are down and is drawn
+ * again at the zoom they leave it at — the same stand-in the desktop paints while its tiles are
+ * still coming.
  */
 @Composable
 private fun Pages(doc: PdfModel, tool: Tool) {
     val density = LocalDensity.current
     val list = rememberLazyListState()
-    val sideways = rememberScrollState()
+    val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
     val theme = remember(colors) {
         // The same recolouring the desktop applies in a dark theme: the document's paper lands on
@@ -159,50 +166,144 @@ private fun Pages(doc: PdfModel, tool: Tool) {
             Theme.Plain
         }
     }
-    var viewport by remember { mutableStateOf(0) }
+
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
     var zoom by remember { mutableFloatStateOf(1f) }
-    // What the bitmaps were last drawn at. It follows the pinch once the fingers stop, so a
-    // gesture costs one re-render rather than one per frame.
+    /** How far the pages are pushed sideways: 0 at fit width, negative once they are wider. */
+    var panX by remember { mutableFloatStateOf(0f) }
+    /** The zoom the bitmaps were drawn at. It follows the fingers once they stop. */
     var drawn by remember { mutableFloatStateOf(1f) }
     LaunchedEffect(zoom) {
         delay(RESHARPEN_MS)
         drawn = zoom
     }
 
+    val gap = with(density) { PAGE_GAP.toPx() }
+    val pages = remember(doc) { Pagination(doc, gap) }
+
     Box(
         Modifier
             .fillMaxSize()
-            .onSizeChanged { viewport = it.width }
-            .pinch { step -> zoom = (zoom * step).coerceIn(MIN_ZOOM, MAX_ZOOM) },
+            .clipToBounds()
+            .onSizeChanged { viewport = it }
+            .pointerInput(doc, viewport) {
+                val decay = exponentialDecay<Float>()
+                panZoom(
+                    onGesture = { centroid, pan, step ->
+                        val was = zoom
+                        val now = (was * step).coerceIn(MIN_ZOOM, MAX_ZOOM)
+                        val by = now / was
+                        // Everything grows away from the point between the fingers, so whatever
+                        // was under them stays under them; then the whole thing follows the drag.
+                        val down = anchor(pages.above(list, viewport.width, was), centroid.y, by, pan.y)
+                        val across = anchor(-panX, centroid.x, by, pan.x)
+                        panX = holdXAt(-across, viewport.width, now)
+                        zoom = now
+                        // A drag alone is a scroll; a pinch has to put the reader somewhere exact,
+                        // because every page just changed height underneath them.
+                        if (by == 1f) {
+                            list.dispatchRawDelta(-pan.y)
+                        } else {
+                            val (page, into) = pages.at(down, viewport.width, now)
+                            list.requestScrollToItem(page, into)
+                        }
+                    },
+                    onFling = { velocity ->
+                        scope.launch {
+                            var last = 0f
+                            AnimationState(0f, -velocity.y).animateDecay(decay) {
+                                list.dispatchRawDelta(value - last)
+                                last = value
+                            }
+                        }
+                        scope.launch {
+                            var last = 0f
+                            AnimationState(0f, velocity.x).animateDecay(decay) {
+                                panX = holdXAt(panX + (value - last), viewport.width, zoom)
+                                last = value
+                            }
+                        }
+                    },
+                )
+            },
     ) {
-        Box(Modifier.horizontalScroll(sideways)) {
-            LazyColumn(
-                state = list,
-                modifier = Modifier
-                    .width(with(density) { (viewport * zoom).toDp() })
-                    .fillMaxHeight(),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(doc.pageCount) { index ->
-                    val size = doc.sizes.getOrNull(index)
-                    if (size != null && viewport > 0) {
-                        Page(
-                            doc = doc,
-                            index = index,
-                            pageWidth = size.width,
-                            pageHeight = size.height,
-                            shownPx = (viewport * zoom).toInt(),
-                            renderPx = (viewport * drawn).toInt(),
-                            theme = theme,
-                            tool = tool,
-                        )
-                    }
+        LazyColumn(
+            state = list,
+            // Every drag goes through the gesture above, which is what lets one follow both axes.
+            userScrollEnabled = false,
+            modifier = Modifier
+                .width(with(density) { (viewport.width * zoom).toDp() })
+                .fillMaxHeight()
+                .graphicsLayer { translationX = panX },
+            verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+        ) {
+            items(doc.pageCount) { index ->
+                val size = doc.sizes.getOrNull(index)
+                if (size != null && viewport.width > 0) {
+                    Page(
+                        doc = doc,
+                        index = index,
+                        pageWidth = size.width,
+                        pageHeight = size.height,
+                        shownPx = (viewport.width * zoom).toInt(),
+                        renderPx = (viewport.width * drawn).toInt(),
+                        theme = theme,
+                        tool = tool,
+                    )
                 }
             }
         }
     }
 }
 
+/** Sideways travel is bounded by how much wider than the screen the pages have become. */
+private fun holdXAt(p: Float, width: Int, zoom: Float) = p.coerceIn(-width * (zoom - 1f), 0f)
+
+/**
+ * Where the content has to sit along one axis after a gesture, so that whatever was under the
+ * fingers is still under them.
+ *
+ * [scrolled] is how much of the document is already past the near edge, [centroid] where the
+ * fingers are between them, [by] how much further apart they got and [pan] how far they moved.
+ * Everything grows away from the centroid, which is why the answer is not simply `scrolled * by`
+ * — that grows away from the corner, and the page slides out from under the hand.
+ */
+internal fun anchor(scrolled: Float, centroid: Float, by: Float, pan: Float): Float =
+    (scrolled + centroid) * by - centroid - pan
+
+/**
+ * Where the pages sit in the column, so a zoom can put the reader back where they were.
+ *
+ * The list only says which page is at the top and how far into it, both in whatever pixels the
+ * current zoom makes; turning that into a distance from the start of the document, and back
+ * again at another zoom, is all this does.
+ */
+private class Pagination(private val doc: PdfModel, private val gap: Float) {
+    private fun height(index: Int, width: Int, zoom: Float): Float {
+        val size = doc.sizes.getOrNull(index) ?: return gap
+        return size.height * (width * zoom / size.width) + gap
+    }
+
+    /** How much of the document is above the top of the screen, in pixels at [zoom]. */
+    fun above(list: LazyListState, width: Int, zoom: Float): Float {
+        var y = 0f
+        for (i in 0 until list.firstVisibleItemIndex) y += height(i, width, zoom)
+        return y + list.firstVisibleItemScrollOffset
+    }
+
+    /** The page, and the offset into it, that [y] pixels from the start lands on at [zoom]. */
+    fun at(y: Float, width: Int, zoom: Float): Pair<Int, Int> {
+        var left = y.coerceAtLeast(0f)
+        for (i in 0 until doc.pageCount) {
+            val h = height(i, width, zoom)
+            if (left < h) return i to left.roundToInt()
+            left -= h
+        }
+        return maxOf(doc.pageCount - 1, 0) to 0
+    }
+}
+
+private val PAGE_GAP = 8.dp
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 6f
 

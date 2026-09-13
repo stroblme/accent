@@ -87,3 +87,4 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_ROOT }}
       - run: make pdfium-android
       - run: make apk
+      - run: make android-test

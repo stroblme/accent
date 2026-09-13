@@ -54,8 +54,15 @@ of them must also exist as a visible control.
 |---|---|---|
 | Drag down from the top of the content | Opens the switcher | The ⋯ on the toolbar |
 | Swipe from the left edge | Opens the files drawer | The Files button |
-| Pinch on a page | Zooms a PDF, 1× to 6× | — |
+| Pinch on a page | Zooms a PDF, 1× to 6×, around the point between the fingers | — |
+| Drag on a zoomed page | Pans it, both axes at once | — |
 | Long press | The context sheet for the thing under it | — |
+
+A document is one surface, not a vertical scroller with a horizontal one wrapped around it. Two
+scroll containers each own an axis and each claims a drag the moment it looks like theirs, which
+is what makes a diagonal drag pick a side; one gesture handler feeding both axes is what makes it
+follow the hand. The same handler is what lets a pinch grow the page away from the fingers rather
+than from its top-left corner.
 
 The pull-down is deliberately not pull-to-refresh. That gesture means "fetch again" in every other
 app, and here the answer to a pull is a list of notes. Refreshing happens on its own: the vault is
