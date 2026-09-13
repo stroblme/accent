@@ -106,12 +106,19 @@ fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
     }
 }
 
-/** A floating button: what a phone has where the desktop has a header bar. */
+/**
+ * A floating button: what a phone has where the desktop has a header bar.
+ *
+ * Inverted against the page — dark on a light theme, light on a dark one — because it is the one
+ * thing on the screen that is not the document, and a pale pill on a pale page is a pill nobody
+ * sees. The one place the app spends contrast rather than colour.
+ */
 @Composable
 fun Pill(label: String, onClick: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.extraLarge,
-        color = MaterialTheme.colorScheme.surface,
+        color = MaterialTheme.colorScheme.inverseSurface,
+        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
         shadowElevation = 6.dp,
     ) {
         Text(
@@ -152,6 +159,7 @@ fun Field(
         onValueChange = onValue,
         placeholder = { Text(placeholder) },
         singleLine = true,
+        shape = MaterialTheme.shapes.large,
         modifier = modifier.fillMaxWidth().padding(Gutter),
     )
 }

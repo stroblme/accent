@@ -44,6 +44,10 @@ build with. This says what to build.
   against it — `headlineSmall` for a screen's title, `titleMedium` for a note's, `labelMedium` in
   the muted colour for anything secondary.
 - Dividers are hairlines or absent. A list needs neither a box nor a rule to read as a list.
+- One radius scale, on the theme (`ui/Theme.kt`), stepping 8 / 12 / 16 / 20 / 28 dp; nothing rounds
+  itself. Material's own starts at 4 dp, which on a flat page reads as a rectangle somebody failed
+  to round. A query field is the 20 dp step, a floating button the 28 dp one — past half its height,
+  which is what makes a pill a pill.
 
 ## Gestures
 
@@ -70,7 +74,10 @@ follow the hand. The same handler is what lets a pinch grow the page away from t
 than from its top-left corner.
 
 A pinch never lays the column out again. It scales one layer under the fingers and commits once,
-on release. Asking the list where it is and telling it where to go in the same frame reads back
+on release. The column that layer holds is placed by its top-left corner and not by any of the
+`required*` modifiers, which report the parent a size coerced back into the incoming constraints
+and then centre what overflows: half of everything a zoom adds comes off the left, which is a page
+that jumps sideways on every pinch and a band of background down its right. Asking the list where it is and telling it where to go in the same frame reads back
 the position from before the answer, which walks the page out from under the hand a little more
 every frame; and a column held to the width of the screen grows taller without growing wider,
 which is a page squeezed sideways. Refreshing happens on its own: the vault is walked again every
@@ -100,6 +107,11 @@ Material You is the same answer GNOME's accent is: ask the device what colour it
 the one accent and it is used for exactly what the desktop uses it for — links, the caret, a
 selected tool, an ink stroke's default. Everything else is `surface`, `onSurface` and
 `onSurfaceVariant`. The app ships one colour of its own, the launcher icon's background.
+
+The Browse and Launch buttons are the exception: `inverseSurface`, so they are dark on a light
+theme and light on a dark one. They are the one thing on the screen that is not the document, and
+a pale pill on a pale page is a pill nobody sees. Contrast rather than colour, so the accent still
+means only one thing.
 
 A PDF is recoloured in a dark theme the way the desktop does it: the document's paper lands on the
 app's surface and its ink on the app's text, each pixel keeping its own chroma, so a coloured
