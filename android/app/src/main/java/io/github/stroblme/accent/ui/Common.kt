@@ -215,6 +215,10 @@ private val PullToClose: Dp = 96.dp
  * it — moves the panel, which is what makes this a pull rather than a gesture that fights the
  * content. Letting go past [PullToClose] closes it and anything less springs back. The handle at
  * the top says so, and can be dragged itself; Back still works, which is why there is no button.
+ *
+ * A drag that began by scrolling the list stops where the list does. Reaching the top of the files
+ * is something a reader does on the way to the first of them, and it must not also be the thing
+ * that takes the files away: closing is a second pull, from a standstill.
  */
 @Composable
 fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
@@ -229,6 +233,9 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
 
     val nested = remember(threshold) {
         object : NestedScrollConnection {
+            /** Whether the list has taken any of the drag in hand. Reset when the fingers lift. */
+            private var scrolled = false
+
             /** Pulling back up puts the panel back before the list gets to move. */
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 if (available.y >= 0f || pulled <= 0f) return Offset.Zero
@@ -243,13 +250,17 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
                 available: Offset,
                 source: NestedScrollSource,
             ): Offset {
+                if (consumed.y != 0f) scrolled = true
                 if (available.y <= 0f) return Offset.Zero
+                // Not the tail of a scroll, and not a fling running on past the end.
+                if (scrolled || source != NestedScrollSource.UserInput) return Offset.Zero
                 pulled += available.y
                 return Offset(0f, available.y)
             }
 
-            /** The fingers are up. Swallow the throw the list would otherwise take. */
+            /** The fingers are up: this drag is over, whatever it turned out to be. */
             override suspend fun onPreFling(available: Velocity): Velocity {
+                scrolled = false
                 if (pulled <= 0f) return Velocity.Zero
                 release()
                 return available

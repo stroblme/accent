@@ -70,6 +70,11 @@ inside scrolls first, so only a drag the list cannot use — one with nothing le
 the panel, and letting go short of the threshold springs it back. Nothing about it has to be
 discovered, because Back does the same thing.
 
+A drag that began by scrolling the list stops where the list does. Reaching the top of the files is
+something a reader does on the way to the first of them, and it must not also be the thing that
+takes the files away — so closing is a second pull, from a standstill. The rule is the one every
+sheet on the platform follows, and the reason it is felt rather than noticed.
+
 Browse and Launch are buttons, not gestures. They were an edge swipe and a pull from the top, and
 neither had the visible twin this table asks for — a gesture nothing announces is a gesture nobody
 finds. They float at the foot of whatever is being read, go with the rest of the chrome, and go
