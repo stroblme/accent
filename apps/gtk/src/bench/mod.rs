@@ -39,7 +39,11 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
-/// plus the width one indent is worth there.
+/// plus the width one indent is worth there, then Tab on lines that already have text on them.
+/// It opens with the completion popup: whether the cached "a popup is up" flag reads true against
+/// a real one and false against a forged one, and that Return still continues a list after the
+/// forgery. The popup wants the X input focus, which under Xvfb is
+/// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
 /// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`

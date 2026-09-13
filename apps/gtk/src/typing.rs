@@ -11,7 +11,7 @@
 //! Which presses reach [`on_key`] at all is `editor::keys`'s decision: a completion popup and a
 //! column of carets both own Return, and neither wants a list marker inserted underneath them.
 
-use crate::editor::{caret, line_prefix};
+use crate::editor::{caret, line_end, line_prefix};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
@@ -112,11 +112,12 @@ pub fn wrap_column(line: &str) -> usize {
 }
 
 /// Whether `line` holds nothing but its indent and a list, task or quote marker: what Return on a
-/// list item leaves behind, and the one place Tab means "indent this item".
+/// list item leaves behind, and the one line a suggestion is never painted on, because there is
+/// nothing there yet to suggest the rest of.
 ///
 /// Read through [`continuation`], which already decides what "a marker and nothing after it"
 /// means — that is what it ends a list on — so the two cannot drift apart. A line of bare indent
-/// counts too: there is nothing on it either, and Tab is its indent.
+/// counts too: there is nothing on it either.
 pub fn marker_only(line: &str) -> bool {
     match continuation(line) {
         Some(Continue::Unlist) => true,
@@ -125,13 +126,14 @@ pub fn marker_only(line: &str) -> bool {
     }
 }
 
-/// What Tab inserts in front of such a line: the marker's own width in spaces, or one tab where
-/// the line is already indented with them. `None` where there is no marker to step past, which
-/// leaves the key to the view.
+/// What Tab inserts at the head of `line` to indent the item on it: the marker's own width in
+/// spaces, or one tab where the line is already indented with them. `None` where there is no
+/// marker to step past — prose, or a blank line — which leaves the key to the view.
+///
+/// What is written after the marker makes no difference; Obsidian and VS Code both indent an item
+/// from anywhere on its line. The step is [`wrap_column`]'s width, so the nested item starts where
+/// its parent's text does and where `highlight::hang` already wraps to.
 pub fn list_indent(line: &str) -> Option<String> {
-    if !marker_only(line) {
-        return None;
-    }
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
     let width = wrap_column(line) - indent;
     match (width > 0, line[..indent].contains('\t')) {
@@ -266,21 +268,25 @@ pub fn on_key(
     }
 }
 
-/// Tab on a line that is nothing but its indent and a marker indents the item by the width of
-/// that marker, so a nested item starts where its parent's text does — the column
-/// [`continuation`] writes the marker at, and the one `highlight::hang` wraps to. Anywhere else
-/// the key is the view's.
+/// Tab on a line that opens a list, a task, an enumeration or a quote indents that item by the
+/// width of its marker, so it starts where its parent's text does — the column [`continuation`]
+/// writes the marker at, and the one `highlight::hang` wraps to. Anywhere else the key is the
+/// view's.
+///
+/// The whole line is read, not the part in front of the caret: the item is indented from anywhere
+/// on it. The indent goes in at the head of the line, so the caret keeps its place in the text.
 fn on_tab(view: &sourceview5::View) -> glib::Propagation {
     let buffer = view.buffer();
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
     }
     let at = caret(&buffer);
-    let Some(indent) = list_indent(&line_prefix(&buffer, &at)) else {
-        return glib::Propagation::Proceed;
-    };
     let mut start = at;
     start.set_line_offset(0);
+    let line = buffer.text(&start, &line_end(&buffer, at.line()), true);
+    let Some(indent) = list_indent(&line) else {
+        return glib::Propagation::Proceed;
+    };
     buffer.begin_user_action();
     buffer.insert(&mut start, &indent);
     buffer.end_user_action();
@@ -497,10 +503,9 @@ mod tests {
         }
     }
 
-    /// What Return on a list item leaves behind, and where Tab therefore means "indent this".
-    /// A line with any text of its own is not it: there Tab is the view's own key.
+    /// What Return on a list item leaves behind, and so the line ghost text stays off.
     #[test]
-    fn a_marker_only_line_is_where_tab_indents() {
+    fn a_marker_only_line_is_what_return_leaves_behind() {
         for line in ["- ", "  - ", "1. ", "- [ ] ", "> ", "    "] {
             assert!(marker_only(line), "{line:?}");
         }
@@ -523,8 +528,24 @@ mod tests {
             "the box is content"
         );
         assert_eq!(list_indent("\t- ").as_deref(), Some("\t"), "tabs stay tabs");
-        assert_eq!(list_indent("    "), None, "no marker to step past");
-        assert_eq!(list_indent("- item"), None, "not on a line with text");
+    }
+
+    /// An item is indented from anywhere on its line, whatever is written after the marker;
+    /// prose is still the view's own key.
+    #[test]
+    fn a_line_with_text_on_it_indents_all_the_same() {
+        assert_eq!(list_indent("- item").as_deref(), Some("  "));
+        assert_eq!(list_indent("1. first").as_deref(), Some("   "));
+        assert_eq!(list_indent("- [x] done").as_deref(), Some("  "));
+        assert_eq!(list_indent("> quoted").as_deref(), Some("  "));
+        assert_eq!(
+            list_indent("  - nested").as_deref(),
+            Some("  "),
+            "its parent's width, not its own indent"
+        );
+        for line in ["", "    ", "plain text", "-no space", "# Head"] {
+            assert_eq!(list_indent(line), None, "{line:?}");
+        }
     }
 
     #[test]

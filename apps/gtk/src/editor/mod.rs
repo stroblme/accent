@@ -304,9 +304,10 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
-    /// Whether the completion popup is up. Read by every step of [`keys`]'s chain: while the
-    /// popup is showing it owns the keyboard, and nothing else in the view may answer a key.
-    pub(crate) popup_shown: Cell<bool>,
+    /// Whether the completion popup is up, as its `show` and `hide` said last. Read through
+    /// [`Tab::popup_shown`], never straight: while the popup is showing it owns the keyboard and
+    /// nothing else in the view may answer a key, so a stale `true` would silence the lot.
+    popup: Cell<bool>,
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
@@ -586,7 +587,7 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
-        popup_shown: Cell::new(false),
+        popup: Cell::new(false),
         snippet: RefCell::new(None),
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
@@ -1204,6 +1205,16 @@ impl Tab {
     pub(crate) fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter) {
         self.view.push_snippet(snippet, Some(at));
         *self.snippet.borrow_mut() = Some(snippet.clone());
+    }
+
+    /// Whether the completion popup is on screen. The cell it is remembered in mirrors two
+    /// signals, and a `hide` that never arrives would leave every key to the view for the rest of
+    /// this tab's life — so a `true` is checked against the widgets before it is believed, and a
+    /// stale one is dropped here. The check only runs while the cell says a popup is up.
+    pub(crate) fn popup_shown(&self) -> bool {
+        let up = self.popup.get() && keys::popup_visible(&self.view);
+        self.popup.set(up);
+        up
     }
 
     /// Whether a template's stops are still being walked. A snippet lets its buffer go when it

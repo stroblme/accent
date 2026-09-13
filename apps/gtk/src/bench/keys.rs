@@ -498,7 +498,11 @@ async fn bench_lines(view: &multicaret::View) {
 /// enumeration, then Tab on the line it leaves behind — both through the chain a real press goes
 /// through (`editor::keys`), against what [`typing::continuation`] and [`typing::list_indent`] say
 /// that line should carry on with. Prints a line per item that came out wrong and a count, so a
-/// note where the marker is not carried over names the lines rather than the symptom.
+/// note where the marker is not carried over names the lines rather than the symptom. Then Tab on
+/// lines that already have text on them.
+///
+/// [`bench_popup`] goes first, while the tab is still untouched: a press marks it dirty and an
+/// autosave a second later would write the drill's own text into the note.
 pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -506,39 +510,154 @@ pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
         let Some(tab) = app.open_tabs().into_iter().next() else {
             return bench_quit(&app);
         };
-        // What Tab is worth here: the preference in a code tab, GtkSourceView's own in prose.
-        println!("bench list_indent_width {}", tab.view.tab_width());
-        let original = tab.text();
-        let lines: Vec<String> = original.lines().map(str::to_string).collect();
-        let (mut asked, mut wrong) = (0, 0);
-        for (n, line) in lines.iter().enumerate() {
-            let Some(typing::Continue::Insert(want)) = typing::continuation(line) else {
-                continue;
-            };
-            asked += 1;
-            // From the note as it is every time: each press is about the document the reader has,
-            // not about what the press before it left.
-            tab.set_text(&original);
-            tab.buffer
-                .place_cursor(&editor::line_end(&tab.buffer, n as i32));
-            let none = gdk::ModifierType::empty();
-            editor::press(&tab, gdk::Key::Return, none);
-            let carried = caret_prefix(&tab);
-            editor::press(&tab, gdk::Key::Tab, none);
-            let indented = caret_prefix(&tab);
-            let wanted_indent = typing::list_indent(&want).map(|step| format!("{step}{want}"));
-            if carried != want || Some(&indented) != wanted_indent.as_ref() {
-                wrong += 1;
-                println!(
-                    "bench list_line {} want={want:?} carried={carried:?} indent={indented:?}",
-                    n + 1
-                );
-            }
-        }
-        println!("bench list_wrong {wrong} of {asked}");
-        tab.set_text(&original);
-        bench_quit(&app);
+        bench_popup(&app, &tab, tab.text());
     });
+}
+
+/// Return and Tab down every list line of the note, and then Tab on lines with text on them.
+fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
+    // What Tab is worth here: the preference in a code tab, GtkSourceView's own in prose.
+    println!("bench list_indent_width {}", tab.view.tab_width());
+    let lines: Vec<String> = original.lines().map(str::to_string).collect();
+    let (mut asked, mut wrong) = (0, 0);
+    for (n, line) in lines.iter().enumerate() {
+        let Some(typing::Continue::Insert(want)) = typing::continuation(line) else {
+            continue;
+        };
+        asked += 1;
+        // From the note as it is every time: each press is about the document the reader has,
+        // not about what the press before it left.
+        tab.set_text(&original);
+        tab.buffer
+            .place_cursor(&editor::line_end(&tab.buffer, n as i32));
+        let none = gdk::ModifierType::empty();
+        editor::press(tab, gdk::Key::Return, none);
+        let carried = caret_prefix(tab);
+        editor::press(tab, gdk::Key::Tab, none);
+        let indented = caret_prefix(tab);
+        let wanted_indent = typing::list_indent(&want).map(|step| format!("{step}{want}"));
+        if carried != want || Some(&indented) != wanted_indent.as_ref() {
+            wrong += 1;
+            println!(
+                "bench list_line {} want={want:?} carried={carried:?} indent={indented:?}",
+                n + 1
+            );
+        }
+    }
+    println!("bench list_wrong {wrong} of {asked}");
+
+    // Tab from anywhere on a list line, and the lines where it is still the view's own key. The
+    // line the caret ends on and the column it ends in: the indent goes in at the head of the
+    // line, so the caret keeps its place in the text.
+    for (what, text, at) in [
+        ("text", "- item", 4),
+        ("head", "- item", 0),
+        ("nested", "  - nested", 8),
+        ("task", "- [x] done", 9),
+        ("quote", "> quoted", 5),
+        ("enumerated", "12. twelfth", 6),
+        ("prose", "plain text", 5),
+        ("blank", "", 0),
+    ] {
+        tab.set_text(text);
+        tab.buffer.place_cursor(&tab.buffer.iter_at_offset(at));
+        let answer = editor::press(tab, gdk::Key::Tab, gdk::ModifierType::empty());
+        let caret = editor::caret(&tab.buffer);
+        println!(
+            "bench list_tab_{what} {:?} column={} {answer:?}",
+            caret_line(tab),
+            caret.line_offset()
+        );
+    }
+
+    // The note back as it was: the presses above marked the tab dirty, and closing it saves.
+    tab.set_text(&original);
+    bench_quit(app);
+}
+
+/// The cached "the completion popup is up" flag against the popup itself: a `true` that no `hide`
+/// ever took back used to leave every key to the view for the rest of a tab's life.
+///
+/// A words provider gives the tab a popup of its own to raise, so what is read is a real
+/// `GtkSourceCompletion` popup and not a stand-in. Prints the view's children either side of it —
+/// the widget the check reads — then forges the stale flag with the completion's own `show`
+/// signal, which is what a missed `hide` leaves behind, and presses Return on a list line.
+///
+/// `GtkSourceCompletion` refuses to show while the view has no input focus, and under Xvfb no
+/// window manager hands it out: run `build-aux/xtest.py :<display> "move 700 500; focus"` in a
+/// loop beside the drill to get `focus=true`, and with it the popup. Without it the run still
+/// prints the stale-flag half, `up=false focus=false` naming why the other half is empty.
+fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
+    use sourceview5::prelude::CompletionWordsExt as _;
+
+    let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
+    let words = sourceview5::CompletionWords::new(None);
+    words.register(&tab.buffer);
+    completion.add_provider(&words);
+    // `set_text` is not an edit, so nothing here arms the autosave that would write it out.
+    tab.set_text("completion\n- item\ncomp");
+
+    let (app, tab) = (app.clone(), tab.clone());
+    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+        tab.view.grab_focus();
+        tab.buffer.place_cursor(&tab.buffer.end_iter());
+        completion.show();
+        // The proposals arrive from an idle, and the popup with them.
+        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+            let none = gdk::ModifierType::empty();
+            println!(
+                "bench popup_up {} focus={} {:?}",
+                tab.popup_shown(),
+                tab.view.has_focus(),
+                children(&tab)
+            );
+            let answer = editor::press(&tab, gdk::Key::Return, none);
+            println!("bench popup_return {answer:?} {:?}", caret_prefix(&tab));
+
+            // The popup gone, and then the flag left behind as if its `hide` had never arrived.
+            completion.hide();
+            completion.remove_provider(&words);
+            words.unregister(&tab.buffer);
+            println!(
+                "bench popup_down {} {:?}",
+                tab.popup_shown(),
+                children(&tab)
+            );
+            completion.emit_show();
+            println!("bench popup_stale {}", tab.popup_shown());
+            tab.buffer.place_cursor(&editor::line_end(&tab.buffer, 1));
+            editor::press(&tab, gdk::Key::Return, none);
+            println!("bench popup_stale_return {:?}", caret_prefix(&tab));
+
+            bench_lines_of(&app, &tab, original);
+        });
+    });
+}
+
+/// The view's own children and whether each is on screen: where the completion popup is, the
+/// hover assistant and the signature popover beside it.
+fn children(tab: &Rc<Tab>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut child = tab.view.first_child();
+    while let Some(widget) = child {
+        out.push(format!(
+            "{}={}",
+            widget.type_().name(),
+            widget.get_visible()
+        ));
+        child = widget.next_sibling();
+    }
+    out
+}
+
+/// The whole line the caret is on.
+fn caret_line(tab: &Rc<Tab>) -> String {
+    let caret = editor::caret(&tab.buffer);
+    let mut start = caret;
+    start.set_line_offset(0);
+    tab.buffer
+        .text(&start, &editor::line_end(&tab.buffer, caret.line()), true)
+        .to_string()
 }
 
 /// The caret's line up to it: the marker a press left in front of what would be typed next.
