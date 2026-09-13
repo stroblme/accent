@@ -9,9 +9,10 @@
 //! Two rules keep it out of the way of everything else:
 //!
 //! * **The popup wins.** While the completion popup is up nothing is asked for and nothing is
-//!   painted, so Tab always means one thing: the selected row if the popup is open, the
-//!   suggestion if it is not. Which of the two key controllers GTK reaches first is not
-//!   something `typing.rs` relies on either, and for the same reason.
+//!   painted, so Tab always means one thing: the selected row while the popup is open, the
+//!   suggestion while one is painted, and a list item's indent when neither is. Which of the two
+//!   key controllers GTK reaches first is not something `typing.rs` relies on either, and for the
+//!   same reason.
 //! * **Only at the end of a line**, with no selection and no secondary carets. A suggestion
 //!   painted mid-line would sit on top of the text after the caret, and moving that text out of
 //!   the way is a widget of its own.
@@ -46,7 +47,7 @@ pub struct State {
 impl State {
     /// Whether a suggestion may be asked for at all, before looking at where the caret is.
     fn armed(&self, tab: &Tab) -> bool {
-        self.on.get() && !tab.popup_shown.get() && tab.lang.support().is_some_and(|s| s.inline)
+        self.on.get() && !tab.popup_shown() && tab.lang.support().is_some_and(|s| s.inline)
     }
 }
 
@@ -64,7 +65,7 @@ pub fn install(tab: &Rc<Tab>) {
             let showing = tab
                 .ghost_view()
                 .and_then(|v| v.ghost())
-                .filter(|_| !tab.popup_shown.get() && !tab.is_loading())
+                .filter(|_| !tab.popup_shown() && !tab.is_loading())
                 .filter(|_| at.offset() == caret(&tab.buffer).offset());
             *tab.lang.ghost.typed.borrow_mut() = showing.and_then(|ghost| {
                 let rest = remainder(&ghost, text)?.to_string();
@@ -88,15 +89,9 @@ pub fn install(tab: &Rc<Tab>) {
     ));
 }
 
-/// What a painted suggestion does with a key, or `None` for a key it does not want. `indenting`
-/// is the one case where Tab is not the suggestion's: a line holding only a list marker, where
-/// the key belongs to the item's indent.
-pub fn on_key(
-    tab: &Rc<Tab>,
-    key: gdk::Key,
-    state: gdk::ModifierType,
-    indenting: bool,
-) -> Option<glib::Propagation> {
+/// What a painted suggestion does with a key, or `None` for a key it does not want — which is
+/// every key while nothing is painted, so Tab then falls through to the list item's own indent.
+pub fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> Option<glib::Propagation> {
     let text = tab.ghost_view().and_then(|v| v.ghost())?;
     Some(match key {
         // Ctrl+Right writes one word of the suggestion; the rest stays painted, because the
@@ -113,7 +108,7 @@ pub fn on_key(
         _ if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) => {
             return None;
         }
-        gdk::Key::Tab | gdk::Key::KP_Tab if !indenting => {
+        gdk::Key::Tab | gdk::Key::KP_Tab => {
             accept(tab, &text);
             glib::Propagation::Stop
         }
