@@ -21,7 +21,6 @@ tracing-subscriber.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
 sourceview5 = { version = "0.11", features = ["v5_18"] }
-nucleo-matcher = "0.3"
 webkit6 = "0.6"
 # v0_76 for the context menu model and `check_match_at`; v0_78 deprecates `current_directory_uri`
 # and would fail the clippy gate. The build floor is therefore libvte 0.76.
