@@ -180,8 +180,18 @@ fn main() -> glib::ExitCode {
 
 // ----------------------------------------------------------------------------------- app state
 
+/// The work itself, once there is a tab to run it on.
+type Work = Box<dyn FnOnce(&Rc<App>, &Rc<Tab>)>;
+
 /// Something to do with a tab once it is open: see [`App::with_tab`].
-type Waiting = Box<dyn FnOnce(&Rc<App>, &Rc<Tab>)>;
+struct Waiting {
+    /// What was asked for, as [`App::cannot`] says it, for when the file turns out never to
+    /// become a tab and the work is dropped. `None` for a session restore, which asks after every
+    /// tab it remembered, PDFs and images included, and notices a drop by itself
+    /// (`session::Asked`).
+    what: Option<String>,
+    run: Work,
+}
 
 struct App {
     /// The vault this window is on, or `None` for a window opened on a file instead of a folder:

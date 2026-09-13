@@ -713,7 +713,8 @@ impl App {
         theirs_etag: Etag,
     ) {
         let theirs_title = written_at(&conflict, &theirs_etag);
-        self.with_tab(&original.clone(), Opened::Kept, move |app, tab| {
+        let key = original.clone();
+        self.with_tab(&key, Opened::Kept, "compare", move |app, tab| {
             let mine_title = match tab.save.etag.get() {
                 Some(etag) => written_at(&original, &etag),
                 None => original.clone(),

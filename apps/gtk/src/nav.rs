@@ -98,7 +98,9 @@ impl App {
     }
 
     pub fn record(&self, pane: &Pane, place: Place) {
-        if self.navigating.get() {
+        // A restore brings each pane's stored tab to the front as its tabs land; none of that is
+        // somewhere the reader went, so a restored window comes up with an empty history.
+        if self.navigating.get() || self.restoring() {
             return;
         }
         pane.nav.borrow_mut().record(place, Instant::now());

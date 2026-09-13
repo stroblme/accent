@@ -565,7 +565,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             };
             let (title, text) = (title.to_string(), text.to_string());
             // The file's own tab, as a preview like any other single click in the sidebar.
-            app.with_tab(key, Opened::Preview, move |_, tab| {
+            app.with_tab(key, Opened::Preview, "compare", move |_, tab| {
                 let name = doc::file_name(&tab.rel()).to_string();
                 let compare = tab.compare(
                     &format!("{name} (Working Tree)"),
@@ -710,7 +710,9 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
             let stops = stops.to_vec();
-            app.with_tab(rel, Opened::Kept, move |_, tab| tab.place_stops(&stops));
+            app.with_tab(rel, Opened::Kept, "open", move |_, tab| {
+                tab.place_stops(&stops)
+            });
         }),
         reconciled: Box::new(move || reconciled.upgrade().is_some_and(|app| app.reconciled.get())),
         flush: Box::new(move |rels| {

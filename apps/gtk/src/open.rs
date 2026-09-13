@@ -48,13 +48,13 @@ impl App {
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
-            self.awaiting.borrow_mut().remove(&key);
+            self.drop_awaiting(&key, "not a text file");
             return self.reveal_page(doc.page());
         }
         let kind = doc::kind_of(&key);
         // Only text becomes a `Tab`, so anything else has nothing for a waiting closure to run on.
         if !matches!(kind, Kind::Note | Kind::Text) {
-            self.awaiting.borrow_mut().remove(&key);
+            self.drop_awaiting(&key, "not a text file");
         }
         match kind {
             Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
@@ -170,7 +170,7 @@ impl App {
         // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
         if doc::file_name(key).to_ascii_lowercase().ends_with(".xml") && diagram::sniff(&text.text)
         {
-            self.awaiting.borrow_mut().remove(key);
+            self.drop_awaiting(key, "a diagram, not a text file");
             return self.open_diagram_text(key, text, how);
         }
         let prefs = self.prefs();
@@ -718,7 +718,7 @@ impl App {
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
     /// sentence and at most one button).
     pub(crate) fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
-        self.awaiting.borrow_mut().remove(key);
+        self.drop_awaiting(key, &title.to_lowercase());
         let key = key.to_string();
         let status = adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
@@ -835,7 +835,7 @@ impl App {
     /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
     /// followed link.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
-        self.with_tab(rel, Opened::Preview, move |_, tab| {
+        self.with_tab(rel, Opened::Preview, "open", move |_, tab| {
             if let Some(chars) = char_range(&tab.text(), at) {
                 tab.goto_range(chars);
             }
@@ -938,7 +938,7 @@ impl App {
             None if anchor.is_empty() => self.open_preview(rel),
             None => {
                 let anchor = anchor.to_string();
-                self.with_tab(rel, Opened::Preview, move |_, tab| {
+                self.with_tab(rel, Opened::Preview, "open", move |_, tab| {
                     tab.goto_heading(&anchor)
                 });
             }
@@ -1152,7 +1152,7 @@ impl App {
         // restore's `put_back` asks what else is still waiting.
         let waiting = self.awaiting.borrow_mut().remove(&tab.rel());
         if let Some(waiting) = waiting {
-            waiting(self, &tab);
+            (waiting.run)(self, &tab);
         }
     }
 
@@ -1182,7 +1182,15 @@ impl App {
             return;
         };
         match pane.tabs.selected_page().as_ref() == Some(page) {
-            true => self.sync_active(),
+            true => {
+                // Selected by being the first page added, before it had a document, so the notify
+                // could not tell whose it was: anything but a restored tab is the reader opening
+                // a note into an empty pane, which makes that pane theirs (`App::put_back`).
+                if how != Opened::Restored {
+                    self.reader_in(&pane);
+                }
+                self.sync_active();
+            }
             false if how == Opened::Restored => {}
             false => pane.tabs.set_selected_page(page),
         }
@@ -1191,21 +1199,35 @@ impl App {
     /// Run `f` on the tab holding `key`, opening the file first when it has none. An open is a
     /// worker read, so `f` may run later, from [`App::adopt`]; a file that turns out not to be
     /// text never gets there, and its `f` is dropped where that is decided, so it cannot run on
-    /// a later open of the same key.
+    /// a later open of the same key. `what` is what the reader asked for — "compare", "go to" —
+    /// which is what such a drop is said with, so the ask does not simply vanish.
     pub fn with_tab(
         self: &Rc<Self>,
         key: &str,
         how: Opened,
+        what: &str,
         f: impl FnOnce(&Rc<App>, &Rc<Tab>) + 'static,
     ) {
         if let Some(tab) = self.tab_for(key) {
             self.reveal_page(&tab.page);
             return f(self, &tab);
         }
-        self.awaiting
-            .borrow_mut()
-            .insert(key.to_string(), Box::new(f));
+        let waiting = Waiting {
+            what: (how != Opened::Restored).then(|| format!("{what} {key}")),
+            run: Box::new(f),
+        };
+        self.awaiting.borrow_mut().insert(key.to_string(), waiting);
         self.open_as(key, how);
+    }
+
+    /// Drop the work waiting on `key`, saying what it was: the file has turned out to be
+    /// something no `Tab` is made for, so a comparison or a jump asked for on it would otherwise
+    /// go no further than the tab that did open.
+    fn drop_awaiting(&self, key: &str, why: &str) {
+        let waiting = self.awaiting.borrow_mut().remove(key);
+        if let Some(what) = waiting.and_then(|waiting| waiting.what) {
+            self.cannot(&what, why);
+        }
     }
 }
 
