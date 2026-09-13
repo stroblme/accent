@@ -206,7 +206,9 @@ fn spread(text: &str, carets: usize) -> Vec<&str> {
 /// The edit `key` with `state` held stands for, or `None` for a key this widget does not mirror.
 ///
 /// Ctrl has a table of its own — the four chords a column of carets is worth moving as one — and
-/// Alt has none, so every other combination is left to GTK.
+/// Alt has none, so every other combination is left to GTK. `Shift+Delete` is left to GTK too: it
+/// is its Cut binding, which a single caret and VS Code both answer with, and the column's own cut
+/// (`editor::lines`) is what the signal then reaches.
 fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     if state.contains(gdk::ModifierType::ALT_MASK) {
         return None;
@@ -226,7 +228,7 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
         gdk::Key::Return | gdk::Key::KP_Enter => Some(Edit::Insert("\n".to_string())),
         gdk::Key::Tab | gdk::Key::KP_Tab => Some(Edit::Tab),
         gdk::Key::BackSpace => Some(Edit::Backspace),
-        gdk::Key::Delete | gdk::Key::KP_Delete => Some(Edit::Delete),
+        gdk::Key::Delete | gdk::Key::KP_Delete if !extend => Some(Edit::Delete),
         gdk::Key::Left | gdk::Key::KP_Left => motion(Motion::Left),
         gdk::Key::Right | gdk::Key::KP_Right => motion(Motion::Right),
         gdk::Key::Up | gdk::Key::KP_Up => motion(Motion::Up),
@@ -405,10 +407,12 @@ mod imp {
     }
 
     /// Every caret's selection, the primary's first, either side of one undo step the column
-    /// made.
+    /// made, and the buffer's character count on either side of it, which is what says which of
+    /// GTK's own steps the text has come back to.
     pub struct Step {
         pub before: Vec<Span>,
         pub after: Vec<Span>,
+        pub lengths: (i32, i32),
     }
 
     #[derive(Default)]
@@ -977,6 +981,11 @@ impl View {
 
     /// Apply `edit` at every caret as one undoable step.
     fn replay(&self, edit: &Edit) {
+        // A read-only view still moves its carets, as GTK's own one does, but nothing writes to
+        // it: these edits go in through the buffer, which has no view to ask about that itself.
+        if !matches!(edit, Edit::Move(..)) && !self.is_editable() {
+            return;
+        }
         let buffer = self.buffer();
         let insert = buffer.get_insert();
         let imp = self.imp();
@@ -1164,9 +1173,11 @@ impl View {
         // of the text moved.
         if buffer.char_count() != length {
             let after = self.spans();
-            imp.undo
-                .borrow_mut()
-                .push(Some(imp::Step { before, after }));
+            imp.undo.borrow_mut().push(Some(imp::Step {
+                before,
+                after,
+                lengths: (length, buffer.char_count()),
+            }));
             imp.redo.take();
         }
         self.settle();
@@ -1227,8 +1238,11 @@ impl View {
     }
 
     /// Put `pieces` at the carets top to bottom, each in place of its caret's selection, as one
-    /// undo step.
+    /// undo step. Refused on a read-only view, as [`Self::replay`] is.
     fn replace_selections(&self, pieces: &[&str]) {
+        if !self.is_editable() {
+            return;
+        }
         let buffer = self.buffer();
         let mut pairs = self.pairs();
         pairs.sort_by_key(|(mark, _)| buffer.iter_at_mark(mark).offset());
@@ -1262,17 +1276,45 @@ impl View {
             false => buffer.redo(),
         }
         imp.busy.set(false);
+        if let Some(spans) = self.take_step(back) {
+            self.put_carets(&spans);
+        }
+        self.collapse();
+        self.settle();
+    }
+
+    /// The carets of the step the text has just come back to, its record moved onto the other
+    /// stack along with any record GTK took back with it.
+    ///
+    /// GTK can put back more than one of the column's steps at once: an edit that changed the text
+    /// at a single caret — `Ctrl+Delete` with another caret at the end of the buffer, Backspace
+    /// with one at the start — is a plain action in its history rather than a group, and it joins
+    /// a plain action onto the one before it the way it joins typing. The column keeps a record
+    /// per edit either way, so records are taken off until one of them describes the text that
+    /// came back, by the length [`Self::end_step`] recorded it at. Every record taken off moves to
+    /// the other stack, so the way forward takes the same ones back.
+    fn take_step(&self, back: bool) -> Option<Vec<Span>> {
+        let length = self.buffer().char_count();
+        let imp = self.imp();
         let (from, to) = match back {
             true => (&imp.undo, &imp.redo),
             false => (&imp.redo, &imp.undo),
         };
-        let step = from.borrow_mut().pop().flatten();
-        if let Some(step) = &step {
-            self.put_carets(if back { &step.before } else { &step.after });
+        loop {
+            // A step from before the column, or none of the column's left: nothing to put back.
+            let Some(step) = from.borrow_mut().pop().flatten() else {
+                to.borrow_mut().push(None);
+                return None;
+            };
+            let landed = match back {
+                true => (step.lengths.0 == length).then(|| step.before.clone()),
+                false => (step.lengths.1 == length).then(|| step.after.clone()),
+            };
+            to.borrow_mut().push(Some(step));
+            if landed.is_some() {
+                return landed;
+            }
         }
-        to.borrow_mut().push(step);
-        self.collapse();
-        self.settle();
     }
 
     /// Put the column back as `spans` has it, the primary first. Made afresh, since carets that
@@ -1434,8 +1476,8 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Motion, Span, blink_alpha, departure, ends_column, merge, spaces_ahead, spaces_behind,
-        spread, tab_insert, undo_or_redo, vertical_step, visual_column,
+        Edit, Motion, Span, blink_alpha, departure, edit_for, ends_column, merge, spaces_ahead,
+        spaces_behind, spread, tab_insert, undo_or_redo, vertical_step, visual_column,
     };
     use gtk::gdk::{Key, ModifierType as Mod};
 
@@ -1513,6 +1555,22 @@ mod tests {
         assert!(ends_column(Key::dead_acute, Mod::empty()));
         assert!(ends_column(Key::Multi_key, Mod::empty()));
         assert!(ends_column(Key::U, Mod::CONTROL_MASK | Mod::SHIFT_MASK));
+    }
+
+    /// `Shift+Delete` is GTK's Cut binding, which a single caret and VS Code both answer with, so
+    /// the column leaves the press to it; a plain Delete is the column's own.
+    #[test]
+    fn shift_delete_is_left_to_gtks_cut() {
+        assert!(matches!(
+            edit_for(Key::Delete, Mod::empty()),
+            Some(Edit::Delete)
+        ));
+        assert!(edit_for(Key::Delete, Mod::SHIFT_MASK).is_none());
+        assert!(edit_for(Key::KP_Delete, Mod::SHIFT_MASK).is_none());
+        assert!(matches!(
+            edit_for(Key::Delete, Mod::CONTROL_MASK | Mod::SHIFT_MASK),
+            Some(Edit::DeleteWord(true)),
+        ));
     }
 
     #[test]
