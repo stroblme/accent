@@ -30,9 +30,9 @@ build with. This says what to build.
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
 | Browse | A screen of its own, over what is being read. The tree, or the results when there is a query, with the search field at the *foot* of the screen. The desktop's eight sidebar panes collapse into this one |
-| Note, reading | The rendered note in a WebView, full bleed, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
+| Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
-| PDF | A column of pages. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked and a finger only ever moves the page |
+| PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
 | Launch | The switcher, the same shape: rows from the bottom up so the best match is nearest the thumb, then the Notes / Commands chips, then the query field at the foot. The keyboard is up when it opens |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
@@ -82,6 +82,21 @@ the position from before the answer, which walks the page out from under the han
 every frame; and a column held to the width of the screen grows taller without growing wider,
 which is a page squeezed sideways. Refreshing happens on its own: the vault is walked again every
 time the app comes to the foreground.
+
+## The document
+
+A note and a PDF are one surface with two kinds of content in it, so they are built that way: the
+same `DocumentBar` — the file's name, and the one thing that can be done to it — over the same
+`DocumentGap` of clear space, with the content in the rectangle that leaves (`ui/Common.kt`).
+Moving between a note and a PDF should not move what is being read.
+
+The bar's button is a note's Edit and Done. A PDF's is the same button, disabled, for as long as
+there is nothing to edit: a gap where a control belongs is worse than a control that says it is not
+available yet.
+
+Only one screen may keep window insets. A PDF inside a vault is already inside a screen that holds
+itself clear of the status bar, so its own scaffold takes none; opened from another app there is no
+such screen, and it keeps them itself. Applying them twice is a bar that sits lower than a note's.
 
 ## Chrome
 

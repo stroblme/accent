@@ -1,5 +1,10 @@
 package io.github.stroblme.accent.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -22,6 +27,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.Dp
@@ -36,6 +42,14 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 
 /** The gutter every screen keeps at its sides. */
 val Gutter: Dp = 16.dp
+
+/**
+ * The gap a document keeps from the bar above it and from the foot of the screen.
+ *
+ * The same on a note and on a PDF, which is the whole point of it: what is being read sits in the
+ * same rectangle whichever of the two it is.
+ */
+val DocumentGap: Dp = 8.dp
 
 /** A colour as `0xRRGGBB`, which is how both the core and a stylesheet want one. */
 fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
@@ -124,8 +138,49 @@ fun Pill(label: String, onClick: () -> Unit) {
         Text(
             label,
             style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 24.dp, vertical = 14.dp),
+            modifier = Modifier.clickable(onClick = onClick).padding(horizontal = 32.dp, vertical = 18.dp),
         )
+    }
+}
+
+/**
+ * The bar over a document: what it is called, and the one thing that can be done to it.
+ *
+ * The same bar over a note and over a PDF, so that the viewport under it begins in the same place
+ * in both. [enabled] is what a PDF has instead of a second bar of its own — the button is there,
+ * and says so, until there is something for it to do.
+ */
+@Composable
+fun DocumentBar(title: String, action: String, enabled: Boolean = true, onAction: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            title,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onAction, enabled = enabled) { Text(action) }
+    }
+}
+
+/**
+ * Chrome that goes and comes back without the content jumping.
+ *
+ * It takes its height with it rather than only its colour, so what is below slides up into the
+ * space instead of being covered by nothing.
+ */
+@Composable
+fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn() + expandVertically(),
+        exit = fadeOut() + shrinkVertically(),
+    ) {
+        content()
     }
 }
 
