@@ -1134,6 +1134,7 @@ impl App {
             tab.set_minimap(config.minimap);
             tab.set_line_numbers(config.line_numbers);
             tab.set_column_width(config.column_width);
+            tab.set_indent_width(config.indent_width);
         }
         if changed.font {
             for diff in self.diffs() {

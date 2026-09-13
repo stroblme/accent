@@ -494,6 +494,58 @@ async fn bench_lines(view: &multicaret::View) {
     }
 }
 
+/// Return at the end of every line of the note at `rel` that opens a list, a quote or an
+/// enumeration, then Tab on the line it leaves behind — both through the chain a real press goes
+/// through (`editor::keys`), against what [`typing::continuation`] and [`typing::list_indent`] say
+/// that line should carry on with. Prints a line per item that came out wrong and a count, so a
+/// note where the marker is not carried over names the lines rather than the symptom.
+pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(400), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        // What Tab is worth here: the preference in a code tab, GtkSourceView's own in prose.
+        println!("bench list_indent_width {}", tab.view.tab_width());
+        let original = tab.text();
+        let lines: Vec<String> = original.lines().map(str::to_string).collect();
+        let (mut asked, mut wrong) = (0, 0);
+        for (n, line) in lines.iter().enumerate() {
+            let Some(typing::Continue::Insert(want)) = typing::continuation(line) else {
+                continue;
+            };
+            asked += 1;
+            // From the note as it is every time: each press is about the document the reader has,
+            // not about what the press before it left.
+            tab.set_text(&original);
+            tab.buffer
+                .place_cursor(&editor::line_end(&tab.buffer, n as i32));
+            let none = gdk::ModifierType::empty();
+            editor::press(&tab, gdk::Key::Return, none);
+            let carried = caret_prefix(&tab);
+            editor::press(&tab, gdk::Key::Tab, none);
+            let indented = caret_prefix(&tab);
+            let wanted_indent = typing::list_indent(&want).map(|step| format!("{step}{want}"));
+            if carried != want || Some(&indented) != wanted_indent.as_ref() {
+                wrong += 1;
+                println!(
+                    "bench list_line {} want={want:?} carried={carried:?} indent={indented:?}",
+                    n + 1
+                );
+            }
+        }
+        println!("bench list_wrong {wrong} of {asked}");
+        tab.set_text(&original);
+        bench_quit(&app);
+    });
+}
+
+/// The caret's line up to it: the marker a press left in front of what would be typed next.
+fn caret_prefix(tab: &Rc<Tab>) -> String {
+    editor::line_prefix(&tab.buffer, &editor::caret(&tab.buffer)).to_string()
+}
+
 /// A shell focused in a window that does not have the keyboard must not narrow the application's
 /// accelerator table, and one in the window that does must. Under Xvfb no window is ever
 /// activated, so the active one is the last added: a second window is opened first and the shell
