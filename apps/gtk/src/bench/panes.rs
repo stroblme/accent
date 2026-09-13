@@ -95,7 +95,13 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
         });
         return;
     }
-    let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    let mut rels: Vec<String> = arg.split(',').map(str::to_string).collect();
+    // A shell in front of the pane the reader was in at the close: not a file, so nothing of it
+    // is restored, which is what makes "what is saved as active" a question.
+    let shell = rels.last().is_some_and(|last| last == "shell");
+    if shell {
+        rels.pop();
+    }
     let [a, b, c, d] = &rels[..] else {
         return bench_quit(app);
     };
@@ -135,6 +141,13 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
             };
             outer.set_position(outer.width() * 3 / 10);
             inner.set_position(inner.height() * 6 / 10);
+            if shell {
+                // In the left pane, which is not the one whose first tab lands last: a pane with
+                // a shell in front names no file, so what the session writes as the active tab is
+                // the whole of what brings the restore back to the pane the reader was in.
+                app.reveal_page(&a);
+                app.open_terminal();
+            }
             glib::timeout_add_local_once(Duration::from_millis(300), move || {
                 bench_layout_print(&app);
                 if let Some(gtk_app) = app.window.application() {
@@ -207,6 +220,15 @@ pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
     let mut hooked = false;
     // From before the restore, every millisecond: the first tick after it runs ahead of the reads.
     glib::timeout_add_local(Duration::from_millis(1), move || {
+        if !hooked && app.restored.get() && &*how == "open" {
+            hooked = true;
+            // Before any tab has landed, so the pane the restore made active is still empty: the
+            // note a reader opens while the window is coming back.
+            let landing = app.awaiting.borrow().len();
+            app.open_path(&rel);
+            done.set(true);
+            println!("bench layout_open {rel} with {landing} still landing");
+        }
         if !hooked && app.restored.get() {
             hooked = true;
             let keys: Vec<String> = app.awaiting.borrow().keys().cloned().collect();
@@ -263,6 +285,22 @@ fn bench_layout_print(app: &Rc<App>) {
         "bench layout_active {}",
         app.active_key().unwrap_or_default()
     );
+    println!(
+        "bench layout_stored_active {}",
+        app.restorable_active().unwrap_or_default()
+    );
+    // Back/forward per pane, in the order the panes were made: a restore must write none of its
+    // own landings or re-selections into them.
+    let history: Vec<String> = app
+        .panes
+        .borrow()
+        .iter()
+        .map(|pane| {
+            let (back, forward) = pane.nav.borrow().depth();
+            format!("{back}/{forward}")
+        })
+        .collect();
+    println!("bench layout_history {}", history.join(" "));
     println!("bench layout_panes {}", app.panes.borrow().len());
 }
 

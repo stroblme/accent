@@ -1182,7 +1182,15 @@ impl App {
             return;
         };
         match pane.tabs.selected_page().as_ref() == Some(page) {
-            true => self.sync_active(),
+            true => {
+                // Selected by being the first page added, before it had a document, so the notify
+                // could not tell whose it was: anything but a restored tab is the reader opening
+                // a note into an empty pane, which makes that pane theirs (`App::put_back`).
+                if how != Opened::Restored {
+                    self.reader_in(&pane);
+                }
+                self.sync_active();
+            }
             false if how == Opened::Restored => {}
             false => pane.tabs.set_selected_page(page),
         }

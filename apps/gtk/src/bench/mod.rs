@@ -80,10 +80,16 @@ use style::{bench_follow, bench_occurrences, bench_style};
 ///
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
-/// quits the way Ctrl+Q does, which writes the session. `=1` prints the tree a restore built once
-/// its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
+/// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
+/// `a`'s pane and puts a terminal in front of it first, a shell being no file and so not
+/// restored, which leaves that pane naming none. Every printout says
+/// which tab is in front of the active pane, which tab the session would write as the active one,
+/// and how many places each pane's Back and Forward hold. `=1` prints the tree a restore built
+/// once its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
 /// selected `<rel>` in its pane as a click on its tab would, between two tabs landing;
-/// `=focus:<rel>` gives it the keyboard instead. On a remote vault they wait for the host to
+/// `=focus:<rel>` gives it the keyboard instead, and `=open:<rel>` opens a note the session does
+/// not hold before any tab has landed, as a reader would into the still-empty active pane. On a
+/// remote vault they wait for the host to
 /// answer, `<a>,…` and `=1` printing what the window shows until then, and `=quit` quits there the
 /// way Ctrl+Q does.
 pub fn install_bench_hooks(app: &Rc<App>) {

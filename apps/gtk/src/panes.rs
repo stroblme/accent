@@ -273,6 +273,12 @@ impl Nav {
         Some(to)
     }
 
+    /// How many places are behind and ahead. What the `ACCENT_BENCH_LAYOUT` drill reads to say
+    /// that a restore wrote none of its own steps into the history.
+    pub fn depth(&self) -> (usize, usize) {
+        (self.back.len(), self.forward.len())
+    }
+
     /// A tab has closed: its places go with it, because there is nothing left to go back into.
     pub fn forget(&mut self, key: &str) {
         self.back.retain(|p| p.key != key);
