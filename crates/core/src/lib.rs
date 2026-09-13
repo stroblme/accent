@@ -5,6 +5,7 @@ pub mod config;
 pub mod csv;
 pub mod diff;
 pub mod fs;
+pub mod fuzzy;
 pub mod git;
 pub mod index;
 pub mod markdown;

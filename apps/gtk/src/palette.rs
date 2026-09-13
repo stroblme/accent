@@ -13,12 +13,11 @@
 
 use crate::start;
 use crate::widgets::{Debounce, status_page};
+use accent_core::fuzzy::{self, Corpus};
 use accent_core::path::{basename, parent_dir};
 use adw::prelude::*;
 use gtk::glib;
 use gtk::{gdk, gio, pango};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -165,55 +164,14 @@ fn parse_query(raw: &str, opened_in: Mode) -> (Mode, &str) {
 
 /// Indices of `haystacks` that match `query`, best first, capped at [`MAX_RESULTS`].
 ///
-/// This is `Pattern::match_list` with the index kept instead of the string, so the caller can map a
-/// hit back to the [`Item`] it came from. Ties keep corpus order, as nucleo's stable sort does.
-///
-/// A haystack whose *last segment* matches leads, because a query is nearly always the name of
-/// the thing and only rarely the folder it sits in: for "tes", `test.md` comes before `tes/t.md`.
-/// The whole path is still matched — it is what lets a folder narrow a search — it just sorts
-/// below. A haystack with no delimiter is its own last segment, so command and tag mode are
-/// unaffected.
-///
-/// `recent` is either empty or one entry per haystack, holding how recently it was used. Inside
-/// each of the two tiers anything used before leads, in use order, and the rest follow by score: a
-/// command run twice is what the user means by that half-typed query, however well something else
-/// scores. This is VS Code's quick-open behaviour.
-fn rank(
-    haystacks: &[String],
-    recent: &[Option<usize>],
-    query: &str,
-    matcher: &mut Matcher,
-) -> Vec<usize> {
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-    let mut buf = Vec::new();
-    // (index, score against the last segment, score against the whole path).
-    let mut hits: Vec<(usize, Option<u32>, u32)> = haystacks
-        .iter()
-        .enumerate()
-        .filter_map(|(i, h)| {
-            let path = pattern.score(Utf32Str::new(h, &mut buf), matcher)?;
-            let name = basename(h);
-            // Scoring the whole path again when it has no folder in it would give the same number.
-            let base = match name.len() == h.len() {
-                true => Some(path),
-                false => pattern.score(Utf32Str::new(name, &mut buf), matcher),
-            };
-            Some((i, base, path))
-        })
-        .collect();
-    let used = |i: usize| recent.get(i).copied().flatten().unwrap_or(usize::MAX);
-    hits.sort_by(|a, b| {
-        a.1.is_none()
-            .cmp(&b.1.is_none())
-            .then(used(a.0).cmp(&used(b.0)))
-            .then(b.1.cmp(&a.1))
-            .then(b.2.cmp(&a.2))
-            .then(a.0.cmp(&b.0))
-    });
-    hits.into_iter()
-        .take(MAX_RESULTS)
-        .map(|(i, _, _)| i)
-        .collect()
+/// [`fuzzy::rank`] with the cap on: the ranking itself is the core's, shared with the note
+/// completion popup and with Android's file switcher, so one query typed on the phone and on the
+/// laptop offers the same note first. `recent` is this window's own, and is what makes a command
+/// run twice lead a half-typed query.
+fn rank(haystacks: &[String], recent: &[Option<usize>], query: &str, corpus: Corpus) -> Vec<usize> {
+    let mut hits = fuzzy::rank(haystacks, recent, query, corpus);
+    hits.truncate(MAX_RESULTS);
+    hits
 }
 
 /// Where each of `corpus` sits in `mru`, for [`rank`]'s recency tiebreak. A map rather than a
@@ -543,7 +501,6 @@ pub fn present(
     // it is one pass over every path in the vault, and the corpus does not change while the
     // dialog is up.
     let note_recent: Rc<OnceCell<Vec<Option<usize>>>> = Rc::new(OnceCell::new());
-    let matcher = Rc::new(RefCell::new(Matcher::new(Config::DEFAULT)));
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -611,11 +568,10 @@ pub fn present(
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
         let (mru, note_recent) = (mru.clone(), note_recent.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
-        let (commands, command_text, command_recent, matcher) = (
+        let (commands, command_text, command_recent) = (
             commands.clone(),
             command_text.clone(),
             command_recent.clone(),
-            matcher.clone(),
         );
         move |raw: &str| {
             let t0 = Instant::now();
@@ -632,30 +588,20 @@ pub fn present(
                         .collect(),
                     Mode::Files => {
                         let used = note_recent.get_or_init(|| places(&files, &mru));
-                        let mut m = matcher.borrow_mut();
-                        m.config = Config::DEFAULT.match_paths();
-                        rank(&files, used, query, &mut m)
+                        rank(&files, used, query, Corpus::Paths)
                             .into_iter()
                             .map(|i| Rc::new(Item::File(files[i].clone())))
                             .collect()
                     }
                     // Labels and tags are not paths, so they score better under the plain config.
-                    Mode::Commands => {
-                        let mut m = matcher.borrow_mut();
-                        m.config = Config::DEFAULT;
-                        rank(&command_text, &command_recent, query, &mut m)
-                            .into_iter()
-                            .map(|i| commands.borrow()[i].clone())
-                            .collect()
-                    }
-                    Mode::Tags => {
-                        let mut m = matcher.borrow_mut();
-                        m.config = Config::DEFAULT;
-                        rank(&tags, &[], query, &mut m)
-                            .into_iter()
-                            .map(|i| Rc::new(Item::Tag(tags[i].clone())))
-                            .collect()
-                    }
+                    Mode::Commands => rank(&command_text, &command_recent, query, Corpus::Words)
+                        .into_iter()
+                        .map(|i| commands.borrow()[i].clone())
+                        .collect(),
+                    Mode::Tags => rank(&tags, &[], query, Corpus::Words)
+                        .into_iter()
+                        .map(|i| Rc::new(Item::Tag(tags[i].clone())))
+                        .collect(),
                     // The two ways of opening a vault that is *not* in the list end the rows, and are
                     // never filtered out: one surface reaches every way of changing vault, and the
                     // picker is never the empty status page even in a window on the only vault known.
@@ -668,9 +614,7 @@ pub fn present(
                                 .map(|key| Rc::new(Item::Vault(key.clone())))
                                 .collect()
                         } else {
-                            let mut m = matcher.borrow_mut();
-                            m.config = Config::DEFAULT.match_paths();
-                            rank(&vaults, &vault_places.borrow(), query, &mut m)
+                            rank(&vaults, &vault_places.borrow(), query, Corpus::Paths)
                                 .into_iter()
                                 .map(|i| Rc::new(Item::Vault(vaults[i].clone())))
                                 .collect()
@@ -1003,63 +947,18 @@ mod tests {
         assert_eq!(parse_query(">save", Mode::Tags), (Mode::Commands, "save"));
     }
 
+    /// The rules themselves are `accent_core::fuzzy`'s and tested there; what this wrapper adds
+    /// is the cap.
     #[test]
-    fn rank_keeps_matches_and_drops_the_rest() {
-        let corpus = vec![
-            "archive/2020/notes.md".to_string(),
-            "daily/2026-09-03.md".to_string(),
-            "projects/deep-work.md".to_string(),
-        ];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, &[], "deep", &mut m), vec![2]);
-        assert_eq!(rank(&corpus, &[], "daily", &mut m), vec![1]);
-        assert!(rank(&corpus, &[], "zzzz", &mut m).is_empty());
-        // An empty pattern matches everything, in corpus order.
-        assert_eq!(rank(&corpus, &[], "", &mut m), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn rank_prefers_a_contiguous_match() {
-        let corpus = vec!["d-e-e-p.md".to_string(), "deep-work.md".to_string()];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, &[], "deep", &mut m), vec![1, 0]);
-    }
-
-    #[test]
-    fn rank_leads_with_what_was_used_before() {
-        let corpus = vec!["d-e-e-p.md".to_string(), "deep-work.md".to_string()];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        // The worse match was used last, so it leads; score decides everything below.
-        assert_eq!(rank(&corpus, &[Some(0), None], "deep", &mut m), vec![0, 1]);
-        // Two recent hits keep their use order, not their score order.
+    fn rank_stops_at_the_cap() {
+        let corpus: Vec<String> = (0..MAX_RESULTS + 5)
+            .map(|n| format!("note{n}.md"))
+            .collect();
+        assert_eq!(rank(&corpus, &[], "note", Corpus::Paths).len(), MAX_RESULTS);
         assert_eq!(
-            rank(&corpus, &[Some(1), Some(0)], "deep", &mut m),
-            vec![1, 0]
+            rank(&corpus, &[], "zzzz", Corpus::Paths),
+            Vec::<usize>::new()
         );
-        // Recency never rescues a non-match.
-        assert!(rank(&corpus, &[Some(0), Some(1)], "zzzz", &mut m).is_empty());
-    }
-
-    #[test]
-    fn rank_puts_a_filename_match_above_a_path_match() {
-        let corpus = vec!["tes/t.md".to_string(), "test.md".to_string()];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, &[], "tes", &mut m), vec![1, 0]);
-    }
-
-    #[test]
-    fn rank_prefers_a_filename_over_a_recent_folder() {
-        let corpus = vec!["tes/t.md".to_string(), "test.md".to_string()];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        // Recency orders the files whose name matches; it does not promote one whose folder does.
-        assert_eq!(rank(&corpus, &[Some(0), None], "tes", &mut m), vec![1, 0]);
-    }
-
-    #[test]
-    fn rank_leads_with_the_recent_file_when_both_names_match() {
-        let corpus = vec!["a/test.md".to_string(), "b/test.md".to_string()];
-        let mut m = Matcher::new(Config::DEFAULT.match_paths());
-        assert_eq!(rank(&corpus, &[None, Some(0)], "test", &mut m), vec![1, 0]);
     }
 
     fn command(action: &str, accels: &[&str]) -> Rc<Item> {

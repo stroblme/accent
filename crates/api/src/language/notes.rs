@@ -7,6 +7,7 @@
 //! The pure half sits at the top and is tested without a vault; the provider below only reads
 //! the index and the open documents.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -14,6 +15,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 
+use accent_core::fuzzy;
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
@@ -164,42 +166,48 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
 
 /// Paths matching what has been typed, and whether there were more than fit.
 ///
-/// The query is looked for *anywhere* in the path, not only at its start: `[[work]]` has to offer
-/// `Projects/Rework.md`, the way a link picker does everywhere else. What starts with the query
-/// still comes first — that is the file the reader most likely means — and after that the
-/// shortest path wins, so a note at the root beats one buried under three directories.
+/// The query is matched *anywhere* in the path and need not be contiguous, because it is
+/// [`fuzzy`]'s match — the same one the palette and the file switcher use: `[[work]]` offers
+/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. What starts with the query still
+/// comes first — that is the file the reader most likely means — then the better match, then the
+/// shortest path, so a note at the root beats one buried under three directories.
 ///
 /// The `more` half is what makes the popup ask again as the word grows. It used to say the list
 /// was complete while handing back twenty of several hundred paths, so the popup narrowed those
 /// twenty client-side and everything else stayed unreachable however much was typed.
 pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
+    let mut matcher = fuzzy::Query::new(query, fuzzy::Corpus::Paths);
     let query = query.to_lowercase();
-    let mut hits: Vec<(bool, usize, &String)> = paths
+    let mut hits: Vec<(bool, Reverse<u32>, usize, &String)> = paths
         .iter()
         .filter_map(|rel| {
+            let score = matcher.score(rel)?;
+            // Lowercased only for what matched: it is an allocation per path otherwise. The whole
+            // name, so that `logo.p` still opens `logo.png`.
             let low = rel.to_lowercase();
-            // The whole name, so that `logo.p` still opens `logo.png`.
             let opens = basename(&low).starts_with(&query) || low.starts_with(&query);
-            (opens || low.contains(&query)).then_some((!opens, rel.len(), rel))
+            Some((!opens, Reverse(score), rel.len(), rel))
         })
         .collect();
     // Stable, so paths of equal rank and length keep the index's alphabetical order.
-    hits.sort_by_key(|(later, len, _)| (*later, *len));
+    hits.sort_by_key(|(later, score, len, _)| (*later, *score, *len));
     let more = hits.len() > COMPLETIONS;
     hits.truncate(COMPLETIONS);
     (
-        hits.into_iter().map(|(_, _, rel)| rel.clone()).collect(),
+        hits.into_iter().map(|(_, _, _, rel)| rel.clone()).collect(),
         more,
     )
 }
 
 /// Tags matching what has been typed, in the order the index hands them over: most used first.
-/// Prefix only, because a tag is one word and typing more of it is how it is narrowed.
+///
+/// Matched the same way a path is, so `#bc` offers `a/bc`: a tag is one word but a nested one is
+/// several, and the part that is remembered is rarely the first.
 pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> (Vec<String>, bool) {
-    let prefix = prefix.to_lowercase();
+    let mut matcher = fuzzy::Query::new(prefix, fuzzy::Corpus::Words);
     let hits: Vec<String> = tags
         .iter()
-        .filter(|(name, _)| name.to_lowercase().starts_with(&prefix))
+        .filter(|(name, _)| matcher.score(name).is_some())
         .map(|(name, _)| name.clone())
         .take(COMPLETIONS + 1)
         .collect();
@@ -1072,7 +1080,10 @@ mod tests {
         // The index counts them, so the order it hands them over in is the one to keep.
         let tags = [("alpha".to_string(), 2), ("alphabet".to_string(), 1)];
         assert_eq!(tag_candidates(&tags, "alp").0, ["alpha", "alphabet"]);
-        assert!(tag_candidates(&tags, "b").0.is_empty());
+        // Not only from the start: the part of a nested tag one remembers is rarely the first.
+        let nested = [("a/bc".to_string(), 1), ("other".to_string(), 1)];
+        assert_eq!(tag_candidates(&nested, "bc").0, ["a/bc"]);
+        assert!(tag_candidates(&tags, "z").0.is_empty());
     }
 
     /// The two halves of "[[...]] gets no suggestions": a query in the middle of a name has to
@@ -1090,6 +1101,10 @@ mod tests {
             "what starts with the query first, then the shortest path"
         );
         assert!(!more, "everything that matched fits");
+        // Nor does it have to be contiguous, since the matcher is the palette's.
+        let scattered: Vec<String> = ["a-bc.md", "Deep-Work.md"].map(String::from).into();
+        assert_eq!(path_candidates(&scattered, "bc").0, ["a-bc.md"]);
+        assert_eq!(path_candidates(&scattered, "dpwk").0, ["Deep-Work.md"]);
 
         let many: Vec<String> = (0..COMPLETIONS + 5)
             .map(|n| format!("Note{n}.md"))
