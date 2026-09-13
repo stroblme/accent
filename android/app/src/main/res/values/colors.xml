@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      The paper the logo is drawn on, which is the one colour the app ships. Everything it draws
+      at runtime comes from the system's palette instead.
+    -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>

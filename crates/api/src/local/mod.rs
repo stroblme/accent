@@ -54,6 +54,17 @@ impl Local {
         db: &Path,
         cfg: VaultConfig,
     ) -> Result<(Local, Receiver<Event>)> {
+        Local::open_with(root, db, cfg, true)
+    }
+
+    /// [`open_at`](Self::open_at) saying whether the vault is watched. `watch` is false on
+    /// Android; see [`worker::spawn`].
+    pub(crate) fn open_with(
+        root: &Path,
+        db: &Path,
+        cfg: VaultConfig,
+        watch: bool,
+    ) -> Result<(Local, Receiver<Event>)> {
         // One spelling of the root for everything downstream: index paths, watcher events and
         // symlink targets are all compared against it. A root that is not a folder is refused
         // rather than opened as an empty vault: on a host, that is a mistyped address.
@@ -72,7 +83,7 @@ impl Local {
         let (events, event_rx) = channel::<Event>();
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
-        let handle = worker::spawn(root.clone(), writer, rx, tx.clone(), events)?;
+        let handle = worker::spawn(root.clone(), writer, rx, tx.clone(), events, watch)?;
 
         Ok((
             Local {

@@ -1,0 +1,30 @@
+[package]
+name = "accent-android"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Not published, not built by a desktop `cargo build`: it is only in `members`, never in
+# `default-members`.
+publish = false
+
+# The shared library the APK loads. It carries `accent-api`'s uniffi scaffolding and nothing of
+# its own — the annotations live in the façade, which is what Android calls. A cdylib of its own
+# rather than a second crate-type on `accent-api`, because every desktop build would otherwise
+# link a shared object nobody loads, and the static musl server build refuses cdylibs outright.
+[lib]
+name = "accent_android"
+crate-type = ["cdylib"]
+
+# The binding generator, run on the host. `cli` is off by default so the Android build never
+# compiles clap into the library.
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+accent-api = { workspace = true, features = ["android"] }
+uniffi = "0.32"

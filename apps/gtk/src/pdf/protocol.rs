@@ -1,7 +1,6 @@
 //! What crosses the channel between the tab and the thread that renders its document.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
 use accent_api::PdfLink;
@@ -13,16 +12,7 @@ use super::cache::{TileKey, Want};
 /// index of the link each came from.
 pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 
-/// One ink stroke as the tools address it: the id it was given, which unlike its place in
-/// `/Annots` survives every erase and move made before it lands, and its shape.
-pub type NamedInk = (u32, accent_core::pdf::InkShape);
-
-/// A name no stroke in the process has had. One counter for every thread, so the widget can name
-/// the pieces its eraser cuts before the render thread has seen them.
-pub fn fresh_id() -> u32 {
-    static NEXT: AtomicU32 = AtomicU32::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
+pub use accent_core::pdf::{NamedInk, fresh_id};
 
 /// One report of a partial eraser across a stroke: the line it moved along, its radius, and the
 /// names the widget gave the pieces it worked out would be left, in order.
