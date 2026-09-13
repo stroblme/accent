@@ -660,6 +660,17 @@ impl Language for Notes {
         Ok(())
     }
 
+    /// A hint here is about the index, not about the text: a `[[link]]` is dangling until the
+    /// note it names exists. So a reconcile is a reason to say it all again, with the text the
+    /// editor last sent rather than what is on disk.
+    fn rediagnose(&self, rel: &str) -> Result<()> {
+        let text = locked(&self.docs).get(rel).cloned();
+        if let Some(text) = text {
+            self.publish(rel, &text);
+        }
+        Ok(())
+    }
+
     fn close(&self, rel: &str) {
         locked(&self.docs).remove(rel);
         let _ = self.events.send(Event::Diagnostics {
