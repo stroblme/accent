@@ -233,9 +233,16 @@ fn parse_boxes(measured: &str) -> (f64, Vec<(f64, f64, f64, f64)>) {
 /// runs as spans, each formula as MathML (its source, if it does not parse), wrapped at `width`
 /// page units or not at all.
 pub fn label_html(runs: &[Run], font: &Font, align: Align, width: Option<f64>) -> String {
+    // `Arial,Helvetica` is a list of two families, as draw.io's default is: each is quoted on its
+    // own, or CSS reads the whole thing as one family name nothing answers to.
+    let families: Vec<String> = font
+        .family
+        .split(',')
+        .map(|f| format!("'{}'", f.trim().replace('\'', "")))
+        .collect();
     let mut style = format!(
-        "font-family: '{}', sans-serif; font-size: {}px; color: {};",
-        font.family.replace('\'', ""),
+        "font-family: {}, sans-serif; font-size: {}px; color: {};",
+        families.join(", "),
         font.size,
         colour(font.color)
     );
@@ -329,7 +336,7 @@ mod tests {
     fn a_label_becomes_html_with_its_formula_as_mathml() {
         let font = Font {
             size: 14.0,
-            family: "Helvetica".into(),
+            family: "Arial,Helvetica".into(),
             color: Color::rgb(0, 0, 0),
             bold: false,
             italic: false,
@@ -350,6 +357,10 @@ mod tests {
         ];
         let html = label_html(&runs, &font, Align::Center, Some(100.0));
         assert!(html.contains("width: 100px"), "{html}");
+        assert!(
+            html.contains("font-family: 'Arial', 'Helvetica', sans-serif;"),
+            "{html}"
+        );
         assert!(
             html.contains("<span style=\"font-weight: bold;\">a &lt; b</span>"),
             "{html}"
