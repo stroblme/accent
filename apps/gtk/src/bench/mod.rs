@@ -19,7 +19,7 @@ use chrome::bench_chrome;
 use compare::bench_compare;
 use diagram::bench_diagram;
 use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
-use git::{bench_git, bench_git_press};
+use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
@@ -34,7 +34,8 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
 /// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
-/// an XTEST press held while the repository changes.
+/// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
+/// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions. `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
@@ -185,9 +186,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_keys(&app);
         }
         if let Some(arg) = git {
-            return match arg.strip_prefix("press:") {
-                Some(path) => bench_git_press(&app, path),
-                None => bench_git(&app),
+            return match (arg.strip_prefix("press:"), arg.as_str()) {
+                (Some(path), _) => bench_git_press(&app, path),
+                (None, "init") => bench_git_init(&app),
+                _ => bench_git(&app),
             };
         }
         if let Some(rel) = style {

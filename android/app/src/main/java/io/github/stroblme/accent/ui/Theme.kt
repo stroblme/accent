@@ -2,8 +2,10 @@ package io.github.stroblme.accent.ui
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -12,6 +14,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
@@ -31,8 +34,29 @@ fun AccentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -
         dark -> darkColorScheme()
         else -> lightColorScheme()
     }
-    MaterialTheme(colorScheme = scheme.flattened(), typography = AccentTypography, content = content)
+    MaterialTheme(
+        colorScheme = scheme.flattened(),
+        shapes = AccentShapes,
+        typography = AccentTypography,
+        content = content,
+    )
 }
+
+/**
+ * One radius scale, and nothing rounds itself.
+ *
+ * Material's own starts at 4 dp, which on a flat page reads as a rectangle somebody failed to
+ * round. Everything here is softer and steps by the same 4 / 8 the spacing does, so a field, a
+ * chip and a floating button are recognisably the same family. `extraLarge` is past half the
+ * height of anything it is used on, which is what makes a pill a pill.
+ */
+private val AccentShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(16.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
 
 /** Every container tone collapsed onto the surface: one background, no cards, no elevation. */
 private fun ColorScheme.flattened(): ColorScheme = copy(

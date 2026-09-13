@@ -26,10 +26,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.constrainHeight
+import androidx.compose.ui.unit.constrainWidth
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.PdfModel
@@ -205,6 +209,19 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
     val gap = with(density) { PAGE_GAP.toPx() }
     val pages = remember(doc) { Pagination(doc, gap) }
 
+    /** Take what the fingers did to the layer and lay the column out that way. */
+    fun commit() {
+        val above = pages.above(list, viewport.width, zoom)
+        val down = anchor(above, pivot.y, live, shift.y)
+        val across = anchor(-panX, pivot.x, live, shift.x)
+        zoom = (zoom * live).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        panX = holdXAt(-across, viewport.width, zoom)
+        val (page, into) = pages.at(down, viewport.width, zoom)
+        list.requestScrollToItem(page, into)
+        live = 1f
+        shift = Offset.Zero
+    }
+
     Box(
         Modifier
             .fillMaxSize()
@@ -232,15 +249,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
                             // The one place the column is laid out again, on a list that has not
                             // moved since the pinch began: where the reader was, plus what the
                             // fingers did to it, is where they have to be put back.
-                            val above = pages.above(list, viewport.width, zoom)
-                            val down = anchor(above, pivot.y, live, shift.y)
-                            val across = anchor(-panX, pivot.x, live, shift.x)
-                            zoom = (zoom * live).coerceIn(MIN_ZOOM, MAX_ZOOM)
-                            panX = holdXAt(-across, viewport.width, zoom)
-                            val (page, into) = pages.at(down, viewport.width, zoom)
-                            list.requestScrollToItem(page, into)
-                            live = 1f
-                            shift = Offset.Zero
+                            commit()
                             return@panZoom
                         }
                         scope.launch {
@@ -266,13 +275,12 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
             // Every drag goes through the gesture above, which is what lets one follow both axes.
             userScrollEnabled = false,
             modifier = Modifier
-                // Required, not plain: the box would otherwise hold the column to the width of
-                // the screen while the pages grew taller, which is a page squeezed sideways.
-                .requiredWidth(with(density) { (viewport.width * zoom).toDp() })
-                // A pinch that shrinks the layer shows more of the column than the screen holds,
-                // so the column is made that much taller for as long as it lasts and the rows to
-                // fill it are composed.
-                .requiredHeight(with(density) { (viewport.height / live.coerceAtMost(1f)).toDp() })
+                // As wide as the zoom makes it, and — while a pinch is shrinking the layer — tall
+                // enough that the rows to fill the screen are still composed.
+                .oversize(
+                    width = (viewport.width * zoom).toInt(),
+                    height = (viewport.height / live.coerceAtMost(1f)).toInt(),
+                )
                 .graphicsLayer {
                     transformOrigin = TransformOrigin(0f, 0f)
                     scaleX = live
@@ -298,6 +306,23 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
                 }
             }
         }
+    }
+}
+
+/**
+ * Lay the content out exactly this big and put its top-left corner in the parent's, however much
+ * bigger than the parent that is.
+ *
+ * `requiredWidth` looks like it does this and does not: it reports the parent a size coerced back
+ * into the incoming constraints and then centres the content in it, so half of everything the zoom
+ * added was taken off the left — a page that jumped sideways on every pinch and left a band of
+ * background down its right. Anchoring the corner is the whole of what a scrolled, panned surface
+ * wants, and it is the same answer on both axes.
+ */
+private fun Modifier.oversize(width: Int, height: Int) = layout { measurable, constraints ->
+    val placeable = measurable.measure(Constraints.fixed(width, height))
+    layout(constraints.constrainWidth(width), constraints.constrainHeight(height)) {
+        placeable.place(0, 0)
     }
 }
 

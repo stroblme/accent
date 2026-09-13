@@ -70,17 +70,16 @@ pub fn paint(view: &multicaret::View, snapshot: &gtk::Snapshot, strength: f32) {
     }
 }
 
-/// The lines the carets and the selection cover, first to last.
-fn span(view: &multicaret::View) -> RangeInclusive<i32> {
-    let buffer = view.buffer();
-    let bound = buffer.iter_at_mark(&buffer.selection_bound()).line();
-    let (first, last) = view
-        .caret_positions()
-        .into_iter()
-        .fold((bound, bound), |(first, last), (line, _)| {
-            (first.min(line), last.max(line))
-        });
-    first..=last
+/// The lines the carets and their selections cover, first to last: every caret *and* every
+/// anchor, so a selection made upwards at a column does not run into veiled lines.
+pub(crate) fn span(view: &multicaret::View) -> RangeInclusive<i32> {
+    let selections = view.selections();
+    let lines = || {
+        selections
+            .iter()
+            .flat_map(|(from, to)| [from.line(), to.line()])
+    };
+    lines().min().unwrap_or(0)..=lines().max().unwrap_or(0)
 }
 
 /// What the view's background is painted in, which is what a veiled line recedes into: the

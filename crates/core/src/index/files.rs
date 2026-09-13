@@ -386,6 +386,39 @@ mod tests {
         assert_eq!(hits(&ix, true).len(), 4);
     }
 
+    /// Git reports a wholly ignored directory as one entry, so a file created inside it leaves
+    /// the exclusion set unchanged and no second [`Index::set_excluded`] ever comes back to mark
+    /// the row. The row has to be excluded as it is indexed, or the artefact stays in search
+    /// until something unrelated moves the set.
+    #[test]
+    fn a_file_added_under_an_ignored_directory_is_excluded_as_it_is_indexed() {
+        let (vault, db) = ignore_fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        ix.set_excluded(&["paper/".to_string()]).unwrap();
+        assert_eq!(hits(&ix, false), ["notes/a.md"]);
+
+        fs::write(vault.path().join("paper/main.log"), "zorblat\n").unwrap();
+        ix.update_file_batched(vault.path(), "paper/main.log")
+            .unwrap();
+        assert_eq!(
+            hits(&ix, false),
+            ["notes/a.md"],
+            "the new artefact is inside `paper/`, which the set already names"
+        );
+
+        // And a directory made under it hands the exclusion on to what lands inside.
+        fs::create_dir(vault.path().join("paper/out")).unwrap();
+        fs::write(vault.path().join("paper/out/deep.log"), "zorblat\n").unwrap();
+        ix.update_file_batched(vault.path(), "paper/out").unwrap();
+        ix.update_file_batched(vault.path(), "paper/out/deep.log")
+            .unwrap();
+        assert_eq!(hits(&ix, false), ["notes/a.md"]);
+
+        // A row already in the index keeps whatever the set last said about it.
+        assert_eq!(hits(&ix, true).len(), 5);
+    }
+
     /// A vault with no repository at all: nothing is ignored, so nothing is filtered.
     #[test]
     fn an_empty_ignore_set_filters_nothing() {

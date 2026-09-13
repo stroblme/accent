@@ -58,6 +58,32 @@ fun HomeScreen(model: VaultModel) {
         contentWindowInsets = WindowInsets.safeDrawing,
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
+            // What is being read stays composed under the other two rather than being swapped out
+            // for them: a note's rendered view is a `WebView`, and one built again is one scrolled
+            // back to the top. Closing Browse is coming back to the same line.
+            val pdf = state.pdf
+            val open = state.open
+            when {
+                pdf != null -> PdfScreen(path = pdf, chrome = chrome)
+                open != null -> NoteScreen(
+                    model = model,
+                    open = open,
+                    root = state.root.orEmpty(),
+                    chrome = chrome,
+                )
+                else -> Empty(
+                    indexing = state.indexing,
+                    scanned = state.scanned,
+                    listing = state.phase == Phase.SCAN,
+                )
+            }
+            Buttons(
+                visible = screen == Screen.Home && chrome.shown,
+                onBrowse = { screen = Screen.Browse },
+                onLaunch = { screen = Screen.Launch },
+                modifier = Modifier.align(Alignment.BottomCenter),
+            )
+
             when (screen) {
                 Screen.Browse -> BrowseScreen(
                     model = model,
@@ -71,30 +97,7 @@ fun HomeScreen(model: VaultModel) {
                     onClose = { screen = Screen.Home },
                 )
                 Screen.Launch -> SwitcherScreen(model) { screen = Screen.Home }
-                Screen.Home -> {
-                    val pdf = state.pdf
-                    val open = state.open
-                    when {
-                        pdf != null -> PdfScreen(path = pdf, chrome = chrome)
-                        open != null -> NoteScreen(
-                            model = model,
-                            open = open,
-                            root = state.root.orEmpty(),
-                            chrome = chrome,
-                        )
-                        else -> Empty(
-                            indexing = state.indexing,
-                            scanned = state.scanned,
-                            listing = state.phase == Phase.SCAN,
-                        )
-                    }
-                    Buttons(
-                        chrome = chrome,
-                        onBrowse = { screen = Screen.Browse },
-                        onLaunch = { screen = Screen.Launch },
-                        modifier = Modifier.align(Alignment.BottomCenter),
-                    )
-                }
+                Screen.Home -> Unit
             }
         }
     }
@@ -109,14 +112,14 @@ fun HomeScreen(model: VaultModel) {
  */
 @Composable
 private fun Buttons(
-    chrome: Chrome,
+    visible: Boolean,
     onBrowse: () -> Unit,
     onLaunch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val typing = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     AnimatedVisibility(
-        visible = chrome.shown && !typing,
+        visible = visible && !typing,
         enter = fadeIn(),
         exit = fadeOut(),
         modifier = modifier.padding(bottom = 24.dp),

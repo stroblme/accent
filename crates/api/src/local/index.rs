@@ -151,7 +151,22 @@ impl Local {
         // Two threads can overshoot the budget between the load and the store; the extra rows
         // are real matches, but the pane asked for `limit` of them.
         out.sort_unstable_by(|a, b| (&a.rel_path, a.line).cmp(&(&b.rel_path, b.line)));
-        out.truncate(limit);
+        // `more` rides on a file's last listed row, so a cut that lands inside a file would drop
+        // its "+N more in this file" tail and leave the rows above it under-reporting. What the
+        // cut takes from that file is folded into the last row that survived — the rows are
+        // sorted, so those are the ones at the front of the cut. A file the cut misses entirely
+        // is not listed at all, which is the cap the pane already announces.
+        if out.len() > limit {
+            let cut = out.split_off(limit);
+            if let Some(tail) = out.last_mut() {
+                let lost: usize = cut
+                    .iter()
+                    .take_while(|m| m.rel_path == tail.rel_path)
+                    .map(|m| 1 + m.more)
+                    .sum();
+                tail.more += lost;
+            }
+        }
         Ok(out)
     }
 
@@ -373,6 +388,34 @@ mod tests {
         let mut sorted = paths.clone();
         sorted.sort_unstable();
         assert_eq!(paths, sorted, "rows must be ordered for the reader");
+    }
+
+    /// The cap can fall inside a file's rows, and the "+N more in this file" tail rides on the
+    /// last of them: what the cut takes has to end up on the row before it rather than going with
+    /// the row it was on.
+    #[test]
+    fn a_cut_inside_a_file_folds_its_dropped_rows_into_the_tail_row() {
+        let f = Fixture::open(VaultConfig::default());
+        // Two unindexed files of six matches each. The budget is only read before a file is
+        // opened, so both are greped whole and ten rows come back for a budget of seven.
+        for name in ["a.js", "b.js"] {
+            f.write(&format!("node_modules/{name}"), &"zorblat\n".repeat(6));
+        }
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let hits = f
+            .vault
+            .grep_unindexed("zorblat", Options::default(), 7)
+            .unwrap();
+        assert_eq!(hits.len(), 7, "{hits:?}");
+        // Five of a.js's six matches are listed; the sixth is the per-file cap's own tail.
+        assert_eq!(hits[4].rel_path, "node_modules/a.js");
+        assert_eq!(hits[4].more, 1, "{hits:?}");
+        // b.js got the two rows left of the budget, and the four matches the cut took are on the
+        // second of them.
+        assert_eq!(hits[6].rel_path, "node_modules/b.js");
+        assert_eq!(hits[6].more, 4, "{hits:?}");
     }
 
     /// The exclusion set is written by the vault worker, and the call still means it is written:

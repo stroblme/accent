@@ -142,11 +142,9 @@ struct State {
 pub struct Panel {
     hooks: Hooks,
     root: gtk::Widget,
-    /// "empty" (no repository) or "repo".
-    stack: gtk::Stack,
     /// Over the pane while the selected repository is part way through a merge.
     banner: adw::Banner,
-    /// The "repo" page's box, and the only widget here a popover may hang off: GTK re-presents a
+    /// The pane's own box, and the only widget here a popover may hang off: GTK re-presents a
     /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
     /// (`fileops::context_menu` documents the symptom).
     column: gtk::Box,
@@ -245,150 +243,23 @@ impl Panel {
             .list_factory(&name_factory(false))
             .build();
 
-        // The branch is a menu button rather than a chooser: its popover is a list of the local
-        // branches, each row switching to that branch and carrying a trash button, then the
-        // remote-only ones under a Remote heading, with Create Branch… underneath. A
-        // `GtkDropDown` can only ever pick one of the rows it already has.
-        // Flat and `heading`, because it stands where the branch label stood and reads as the
-        // branch first and as a control second; the label ellipsizes so that a long branch name
-        // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
-        // width without taking it, so Sync and Commit stay at the trailing edge.
-        let branch_label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::End)
-            .build();
-        let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        face.append(&branch_label);
-        // `go-down-symbolic` rather than `pan-down-symbolic`: WhiteSur writes the latter with
-        // single-quoted attributes, which GTK 4's symbolic recolouring does not parse, and the
-        // chevron drew nothing (DESIGN.md, Iconography).
-        face.append(&gtk::Image::from_icon_name("go-down-symbolic"));
-
-        let branch_list = gtk::ListBox::builder()
-            .selection_mode(gtk::SelectionMode::None)
-            .build();
-        branch_list.add_css_class("navigation-sidebar");
-        let create = gtk::Button::builder().label("Create Branch…").build();
-        create.add_css_class("flat");
-        let merge = gtk::Button::builder().label("Merge Branch…").build();
-        merge.add_css_class("flat");
-        let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        // A repository with fifty branches is a list that scrolls, not a popover taller than the
-        // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
-        branch_box.append(
-            &gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .propagate_natural_height(true)
-                .max_content_height(280)
-                .child(&branch_list)
-                .build(),
-        );
-        branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        branch_box.append(&create);
-        branch_box.append(&merge);
-        let branch_menu = gtk::Popover::builder().child(&branch_box).build();
-        let branch = gtk::MenuButton::builder()
-            .hexpand(true)
-            .halign(gtk::Align::Start)
-            .child(&face)
-            .popover(&branch_menu)
-            .build();
-        for class in ["flat", "heading"] {
-            branch.add_css_class(class);
-        }
-        let counts = gtk::Label::new(None);
-        counts.add_css_class("dim-label");
-        counts.add_css_class("numeric");
-        // One button, both halves, and the counts inside it, which is the pane's whole answer to
-        // "is there anything to pull": a background fetch keeps them current, so `↓2` inside the
-        // Sync button is what says a pull would bring something. Three buttons was also what
-        // stopped the sidebar shrinking — the branch row measured 186 px of minimum width with
-        // them and 105 with one.
-        let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        arrows.append(&counts);
-        arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
-        let sync = gtk::Button::builder()
-            .child(&arrows)
-            .valign(gtk::Align::Center)
-            .build();
-        sync.add_css_class("flat");
-        // While a sync runs, a spinner stands where the button was. A stack is as big as its
-        // biggest child, so the spinner keeps the button's footprint and the row does not move.
-        let sync_slot = gtk::Stack::new();
-        sync_slot.add_named(&sync, Some("button"));
-        sync_slot.add_named(
-            &adw::Spinner::builder()
-                .halign(gtk::Align::Center)
-                .valign(gtk::Align::Center)
-                .build(),
-            Some("spinner"),
-        );
-        // The "No Repository" page's own button: `git init` in a vault with no repository writes
-        // nowhere the pane is watching, so this is the one refresh a user still has to ask for.
-        let check = gtk::Button::builder()
-            .label("Check Again")
-            .halign(gtk::Align::Center)
-            .build();
-        check.add_css_class("pill");
-
-        let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        branch_row.append(&branch);
-        branch_row.append(&sync_slot);
-
-        // The message box is a card so it reads as somewhere to type rather than as a label, and
-        // it grows with what is in it: one line while the message is a subject, taller as a body
-        // is written, and scrolling once it reaches [`MESSAGE_MAX_HEIGHT`], because past that it
-        // would push the changes and the history off the pane. The scroller does the growing on
-        // its own — `propagate-natural-height` asks the view how tall it wants to be and
-        // `max-content-height` is the cap — so nothing here measures text.
-        //
-        // The margins are the 9 px Adwaita gives `entry` either side of its text, so the box has
-        // the same inset as the search field rather than a tighter one of its own.
-        let message = gtk::TextView::builder()
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .accepts_tab(false)
-            .left_margin(9)
-            .right_margin(9)
-            .top_margin(9)
-            .bottom_margin(9)
-            .build();
-        message.add_css_class("card");
-        let message_scroller = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .max_content_height(MESSAGE_MAX_HEIGHT)
-            .child(&message)
-            .build();
-        // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
-        // clicked through to, which would otherwise put the caret nowhere.
-        let placeholder = gtk::Label::builder()
-            .label("Commit message")
-            .halign(gtk::Align::Start)
-            .valign(gtk::Align::Start)
-            .margin_start(9)
-            .margin_top(9)
-            .can_target(false)
-            .build();
-        placeholder.add_css_class("dim-label");
-        let overlay = gtk::Overlay::builder().child(&message_scroller).build();
-        overlay.add_overlay(&placeholder);
-
-        let commit = gtk::Button::builder()
-            .label("Commit")
-            .halign(gtk::Align::End)
-            .sensitive(false)
-            .build();
-        commit.add_css_class("suggested-action");
-        // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
-        // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
-        // changes and the history, and a message box that now grows needs that room. Trailing
-        // edge, which is where GNOME puts the affirmative action. It is hidden and shown with the
-        // box below it, so a clean tree still shows neither.
-        branch_row.append(&commit);
-        // Nothing but the message box now, kept as its own container so the whole thing is hidden
-        // and shown in one call.
-        let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        commit_box.append(&overlay);
+        let BranchRow {
+            row: branch_row,
+            label: branch_label,
+            menu: branch_menu,
+            list: branch_list,
+            create,
+            merge,
+            counts,
+            sync,
+            sync_slot,
+            commit,
+        } = build_branch_row();
+        let MessageBox {
+            commit_box,
+            message,
+            placeholder,
+        } = build_message_box();
 
         let changes = gio::ListStore::new::<glib::BoxedAnyObject>();
         let changes_view = gtk::ListView::new(
@@ -425,6 +296,7 @@ impl Panel {
 
         let column = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
+            .vexpand(true)
             .spacing(12)
             .margin_start(6)
             .margin_end(6)
@@ -436,11 +308,6 @@ impl Panel {
         column.append(&commit_box);
         column.append(&divider);
 
-        let stack = gtk::Stack::builder().vexpand(true).build();
-        stack.add_named(&empty_page(&check), Some("empty"));
-        stack.add_named(&column, Some("repo"));
-        stack.set_visible_child_name("empty");
-
         // A banner and not a toast (DESIGN.md, States): a merge that stopped is a state that
         // lasts until it is committed or aborted, and Abort is the one decision it can offer.
         let banner = adw::Banner::builder()
@@ -449,7 +316,7 @@ impl Panel {
             .build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&banner);
-        root.append(&stack);
+        root.append(&column);
 
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
@@ -457,7 +324,6 @@ impl Panel {
             pressed: Cell::new(false),
             hooks,
             root: root.upcast(),
-            stack,
             banner,
             column,
             names,
@@ -496,7 +362,7 @@ impl Panel {
         });
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&check, &create, &merge);
+        panel.wire_header(&create, &merge);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -585,14 +451,8 @@ impl Panel {
         self.schedule_refresh(Depth::Discover);
     }
 
-    fn wire_header(
-        self: &Rc<Self>,
-        check: &gtk::Button,
-        create: &gtk::Button,
-        merge: &gtk::Button,
-    ) {
+    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
-        on_click(self, check, |panel| panel.refresh(Depth::Discover));
         on_click(self, create, |panel| panel.create_branch());
         on_click(self, merge, |panel| panel.merge_branch());
         let weak = Rc::downgrade(self);
@@ -663,7 +523,7 @@ impl Panel {
     /// up. From an idle: the chord shows the pane in the same frame, and a widget that is not on
     /// screen yet cannot take focus.
     pub fn focus_commit(&self) {
-        if self.stack.visible_child_name().as_deref() != Some("repo") {
+        if !self.has_repos() {
             return;
         }
         let message = self.message.clone();
@@ -726,10 +586,6 @@ impl Panel {
             self.syncing.set(false);
         }
         self.chooser.set_visible(repos.len() > 1);
-        self.stack.set_visible_child_name(match repos.is_empty() {
-            true => "empty",
-            false => "repo",
-        });
 
         let selected = clamp(self.state.borrow().selected, repos.len());
         let status_kept = fetched.statuses.get(selected).is_some_and(Option::is_none);
@@ -1143,20 +999,191 @@ fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &st
     directory.set_text(dir);
 }
 
-/// The "No Repository" state, with the one refresh the pane cannot do for itself: a `git init`
-/// in a vault that had no repository writes only inside `.git`, which the walk skips and which no
-/// monitor is watching yet, so nothing would ever tell the pane to look again.
-fn empty_page(check: &gtk::Button) -> adw::StatusPage {
-    let page = adw::StatusPage::builder()
-        .icon_name(SYNC_ICON)
-        .title("No Repository")
-        .description("Run git init in the terminal to start one.")
-        .child(check)
-        .vexpand(true)
+/// The branch row's widgets: the row the panel appends to its column, everything on it the panel
+/// keeps a handle on, and the two buttons at the foot of the branch popover, which only the
+/// wiring wants. Split out of [`Panel::new`] for reading; the row it builds is the same one.
+struct BranchRow {
+    row: gtk::Box,
+    label: gtk::Label,
+    menu: gtk::Popover,
+    list: gtk::ListBox,
+    create: gtk::Button,
+    merge: gtk::Button,
+    counts: gtk::Label,
+    sync: gtk::Button,
+    sync_slot: gtk::Stack,
+    commit: gtk::Button,
+}
+
+/// The branch, the counts and the pane's two actions, on one line.
+fn build_branch_row() -> BranchRow {
+    // The branch is a menu button rather than a chooser: its popover is a list of the local
+    // branches, each row switching to that branch and carrying a trash button, then the
+    // remote-only ones under a Remote heading, with Create Branch… underneath. A
+    // `GtkDropDown` can only ever pick one of the rows it already has.
+    // Flat and `heading`, because it stands where the branch label stood and reads as the
+    // branch first and as a control second; the label ellipsizes so that a long branch name
+    // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
+    // width without taking it, so Sync and Commit stay at the trailing edge.
+    let branch_label = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(pango::EllipsizeMode::End)
         .build();
-    // Without this the icon alone takes 128 px of a 200 px column (DESIGN.md, States).
-    page.add_css_class("compact");
-    page
+    let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    face.append(&branch_label);
+    // `go-down-symbolic` rather than `pan-down-symbolic`: WhiteSur writes the latter with
+    // single-quoted attributes, which GTK 4's symbolic recolouring does not parse, and the
+    // chevron drew nothing (DESIGN.md, Iconography).
+    face.append(&gtk::Image::from_icon_name("go-down-symbolic"));
+
+    let branch_list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    branch_list.add_css_class("navigation-sidebar");
+    let create = gtk::Button::builder().label("Create Branch…").build();
+    create.add_css_class("flat");
+    let merge = gtk::Button::builder().label("Merge Branch…").build();
+    merge.add_css_class("flat");
+    let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    // A repository with fifty branches is a list that scrolls, not a popover taller than the
+    // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
+    branch_box.append(
+        &gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(280)
+            .child(&branch_list)
+            .build(),
+    );
+    branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    branch_box.append(&create);
+    branch_box.append(&merge);
+    let branch_menu = gtk::Popover::builder().child(&branch_box).build();
+    let branch = gtk::MenuButton::builder()
+        .hexpand(true)
+        .halign(gtk::Align::Start)
+        .child(&face)
+        .popover(&branch_menu)
+        .build();
+    for class in ["flat", "heading"] {
+        branch.add_css_class(class);
+    }
+    let counts = gtk::Label::new(None);
+    counts.add_css_class("dim-label");
+    counts.add_css_class("numeric");
+    // One button, both halves, and the counts inside it, which is the pane's whole answer to
+    // "is there anything to pull": a background fetch keeps them current, so `↓2` inside the
+    // Sync button is what says a pull would bring something. Three buttons was also what
+    // stopped the sidebar shrinking — the branch row measured 186 px of minimum width with
+    // them and 105 with one.
+    let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    arrows.append(&counts);
+    arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
+    let sync = gtk::Button::builder()
+        .child(&arrows)
+        .valign(gtk::Align::Center)
+        .build();
+    sync.add_css_class("flat");
+    // While a sync runs, a spinner stands where the button was. A stack is as big as its
+    // biggest child, so the spinner keeps the button's footprint and the row does not move.
+    let sync_slot = gtk::Stack::new();
+    sync_slot.add_named(&sync, Some("button"));
+    sync_slot.add_named(
+        &adw::Spinner::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .build(),
+        Some("spinner"),
+    );
+
+    let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    branch_row.append(&branch);
+    branch_row.append(&sync_slot);
+
+    let commit = gtk::Button::builder()
+        .label("Commit")
+        .halign(gtk::Align::End)
+        .sensitive(false)
+        .build();
+    commit.add_css_class("suggested-action");
+    // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
+    // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
+    // changes and the history, and a message box that now grows needs that room. Trailing
+    // edge, which is where GNOME puts the affirmative action. It is hidden and shown with the
+    // box below it, so a clean tree still shows neither.
+    branch_row.append(&commit);
+
+    BranchRow {
+        row: branch_row,
+        label: branch_label,
+        menu: branch_menu,
+        list: branch_list,
+        create,
+        merge,
+        counts,
+        sync,
+        sync_slot,
+        commit,
+    }
+}
+
+/// The commit message box: the container the panel hides and shows in one call, the view the
+/// message is typed into, and the placeholder laid over it. Split out of [`Panel::new`] for
+/// reading; the widgets are the same ones.
+struct MessageBox {
+    commit_box: gtk::Box,
+    message: gtk::TextView,
+    placeholder: gtk::Label,
+}
+
+fn build_message_box() -> MessageBox {
+    // The message box is a card so it reads as somewhere to type rather than as a label, and
+    // it grows with what is in it: one line while the message is a subject, taller as a body
+    // is written, and scrolling once it reaches [`MESSAGE_MAX_HEIGHT`], because past that it
+    // would push the changes and the history off the pane. The scroller does the growing on
+    // its own — `propagate-natural-height` asks the view how tall it wants to be and
+    // `max-content-height` is the cap — so nothing here measures text.
+    //
+    // The margins are the 9 px Adwaita gives `entry` either side of its text, so the box has
+    // the same inset as the search field rather than a tighter one of its own.
+    let message = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .accepts_tab(false)
+        .left_margin(9)
+        .right_margin(9)
+        .top_margin(9)
+        .bottom_margin(9)
+        .build();
+    message.add_css_class("card");
+    let message_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(MESSAGE_MAX_HEIGHT)
+        .child(&message)
+        .build();
+    // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
+    // clicked through to, which would otherwise put the caret nowhere.
+    let placeholder = gtk::Label::builder()
+        .label("Commit message")
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .margin_start(9)
+        .margin_top(9)
+        .can_target(false)
+        .build();
+    placeholder.add_css_class("dim-label");
+    let overlay = gtk::Overlay::builder().child(&message_scroller).build();
+    overlay.add_overlay(&placeholder);
+    // Nothing but the message box now, kept as its own container so the whole thing is hidden
+    // and shown in one call.
+    let commit_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    commit_box.append(&overlay);
+
+    MessageBox {
+        commit_box,
+        message,
+        placeholder,
+    }
 }
 
 /// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width

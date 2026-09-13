@@ -37,56 +37,56 @@ pub fn context_menu(
 
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
-        menu.append_item(&item("Open", "open", rel));
+        menu.append_item(&item(GROUP, "Open", "open", rel));
     }
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
     let dir = row_dir(row);
-    menu.append_item(&item("New File", "new-file", dir));
-    menu.append_item(&item("New Folder", "new-folder", dir));
+    menu.append_item(&item(GROUP, "New File", "new-file", dir));
+    menu.append_item(&item(GROUP, "New Folder", "new-folder", dir));
     // Putting files in is only worth offering where they are not here already; a folder of a
     // local vault is one the file manager can be dropped onto.
     if ops.vault.is_remote() {
-        menu.append_item(&item("Upload Files…", "upload", dir));
+        menu.append_item(&item(GROUP, "Upload Files…", "upload", dir));
     }
     // Everything below names one file or folder, so none of it belongs on a menu opened over
     // blank space. Splitting is not here at all: it opens a note beside the active tab, which is
     // what the tab's own menu and `win.split-*` are for, not something done to a path.
     let Some((rel, is_dir)) = row else {
         menu.append_section(None, &listing());
-        return popup(host, &menu, anchor);
+        return popup(host, &menu, anchor, None);
     };
     // Rename is the move as well as the name: a path typed into it carries the file, which is
     // what replaced Move to… when the tree learned to take a drop. A folder's is an action of its
     // own because the dialog selects a folder's whole name and only a file's stem.
     let rename = if is_dir { "rename-folder" } else { "rename" };
-    menu.append_item(&item("Rename", rename, rel));
+    menu.append_item(&item(GROUP, "Rename", rename, rel));
     // Only a directory can be left out: `[search] exclude` is a list of folders, and the path is
     // right here, which is why this beats a preferences row nobody can point at a folder from.
     if is_dir {
-        menu.append_item(&item("Leave Out of Search", "exclude", rel));
+        menu.append_item(&item(GROUP, "Leave Out of Search", "exclude", rel));
     }
     // Reading the name or the path out and leaving the app are neither edits nor deletions, so
     // they get a section of their own between the two. The name first: it is the shortest of the
     // three answers to "what is this file called", and the one a note's own prose wants.
     let elsewhere = gio::Menu::new();
-    elsewhere.append_item(&item("Copy Name", "copy-name", rel));
-    elsewhere.append_item(&item("Copy Relative Path", "copy-rel", rel));
-    elsewhere.append_item(&item("Copy Absolute Path", "copy-abs", rel));
+    elsewhere.append_item(&item(GROUP, "Copy Name", "copy-name", rel));
+    elsewhere.append_item(&item(GROUP, "Copy Relative Path", "copy-rel", rel));
+    elsewhere.append_item(&item(GROUP, "Copy Absolute Path", "copy-abs", rel));
     // Download… takes Show in Files' place when the file is on a host: no file manager here can
     // show it, and a copy here is the only way to reach it with anything but accent.
     if !ops.vault.is_remote() {
-        elsewhere.append_item(&item("Show in Files", "show", rel));
+        elsewhere.append_item(&item(GROUP, "Show in Files", "show", rel));
     } else if !is_dir {
-        elsewhere.append_item(&item("Download…", "download", rel));
+        elsewhere.append_item(&item(GROUP, "Download…", "download", rel));
     }
     menu.append_section(None, &elsewhere);
     // Its own section, so the one destructive item is never next to Rename by accident.
     let danger = gio::Menu::new();
-    danger.append_item(&item("Move to Trash", "trash", rel));
+    danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
     menu.append_section(None, &listing());
-    popup(host, &menu, anchor);
+    popup(host, &menu, anchor, None);
 }
 
 /// The section every tree menu ends with, blank area included, as GTK's own file chooser has it:
@@ -111,9 +111,13 @@ pub fn row_dir(row: Option<(&str, bool)>) -> &str {
     }
 }
 
-/// Hang the menu off `host` and show it.
-fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle) {
+/// Hang the menu off `host` and show it. `class` is a style class for the popover, for a host
+/// that gives it no background of its own.
+pub fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle, class: Option<&str>) {
     let popover = gtk::PopoverMenu::from_model(Some(menu));
+    if let Some(class) = class {
+        popover.add_css_class(class);
+    }
     popover.set_parent(host);
     popover.set_has_arrow(false);
     popover.set_pointing_to(Some(&anchor));
@@ -130,11 +134,15 @@ fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle) {
     popover.popup();
 }
 
-/// One menu item carrying its path as a `String` target rather than in a detailed-action string,
-/// where an apostrophe in a note name would break the quoting.
-fn item(label: &str, action: &str, rel: &str) -> gio::MenuItem {
+/// One menu item of `group` carrying its target as a `String` rather than in a detailed-action
+/// string, where an apostrophe in a note name would break the quoting. The Git pane's history
+/// menu builds its items through here too, its targets being commit ids and branch names.
+pub fn item(group: &str, label: &str, action: &str, target: &str) -> gio::MenuItem {
     let item = gio::MenuItem::new(Some(label), None);
-    item.set_action_and_target_value(Some(&format!("{GROUP}.{action}")), Some(&rel.to_variant()));
+    item.set_action_and_target_value(
+        Some(&format!("{group}.{action}")),
+        Some(&target.to_variant()),
+    );
     item
 }
 

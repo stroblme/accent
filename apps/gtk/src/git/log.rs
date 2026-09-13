@@ -2,6 +2,7 @@
 
 use super::compare::Sides;
 use super::*;
+use crate::fileops;
 
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;
@@ -223,10 +224,11 @@ impl Panel {
 
     /// What can be done with the commit under the pointer.
     ///
-    /// The shape `fileops::context_menu` uses, and for the reasons documented there: the popover
-    /// hangs off a layout-managed box rather than off the list, the actions live on that same box
-    /// so an item can resolve them, and the unparent waits for an idle because `closed` is emitted
-    /// from inside the item's own click and an unparented popover has no path to the action group.
+    /// The menu is built here and shown by `fileops::popup`, which is where the mechanics are
+    /// documented: the popover hangs off a layout-managed box rather than off the list, the
+    /// actions live on that same box so an item can resolve them, and the unparent waits for an
+    /// idle. The style class is this menu's own — the sidebar behind it is a list, so it needs a
+    /// background the file tree's menu gets from its host.
     fn commit_menu(self: &Rc<Self>, commit: &Commit, anchor: gdk::Rectangle) {
         self.column
             .insert_action_group(MENU_GROUP, Some(&self.commit_actions()));
@@ -237,13 +239,14 @@ impl Panel {
         let branches = gio::Menu::new();
         for (label, action, target) in ref_items(&commit.refs, &self.state.borrow().branches.local)
         {
-            branches.append_item(&menu_item(&label, action, &target));
+            branches.append_item(&fileops::item(MENU_GROUP, &label, action, &target));
         }
         if branches.n_items() > 0 {
             menu.append_section(None, &branches);
         }
         let checkout = gio::Menu::new();
-        checkout.append_item(&menu_item(
+        checkout.append_item(&fileops::item(
+            MENU_GROUP,
             "Check Out Commit",
             "checkout-commit",
             &commit.id,
@@ -251,20 +254,15 @@ impl Panel {
         menu.append_section(None, &checkout);
         // Its own section: reading an id out is not a thing that moves HEAD.
         let copy = gio::Menu::new();
-        copy.append_item(&menu_item("Copy Commit ID", "copy-id", &commit.id));
+        copy.append_item(&fileops::item(
+            MENU_GROUP,
+            "Copy Commit ID",
+            "copy-id",
+            &commit.id,
+        ));
         menu.append_section(None, &copy);
 
-        let popover = gtk::PopoverMenu::from_model(Some(&menu));
-        // The sidebar behind it is a list, so the menu needs a background of its own.
-        popover.add_css_class("git-menu");
-        popover.set_parent(&self.column);
-        popover.set_has_arrow(false);
-        popover.set_pointing_to(Some(&anchor));
-        popover.connect_closed(|p| {
-            let p = p.clone();
-            glib::idle_add_local_once(move || p.unparent());
-        });
-        popover.popup();
+        fileops::popup(self.column.upcast_ref(), &menu, anchor, Some("git-menu"));
     }
 
     /// The actions the menu items name, each taking the commit's id or a branch's name as its
@@ -618,17 +616,6 @@ fn lane_width(row: &LogRow) -> i32 {
         .max()
         .unwrap_or(0);
     (widest as i32 + 1) * LANE + LANE
-}
-
-/// One context-menu item carrying its commit id or branch name as a `String` target rather than
-/// in a detailed-action string, which is the shape `fileops::item` settled on.
-fn menu_item(label: &str, action: &str, target: &str) -> gio::MenuItem {
-    let item = gio::MenuItem::new(Some(label), None);
-    item.set_action_and_target_value(
-        Some(&format!("{MENU_GROUP}.{action}")),
-        Some(&target.to_variant()),
-    );
-    item
 }
 
 /// The commit menu's branch items, as (label, action, branch): Switch to each local branch here
