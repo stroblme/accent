@@ -55,6 +55,38 @@ pub(super) fn bench_git(app: &Rc<App>) {
     });
 }
 
+/// Whether the Git pane is on the switcher, before and after a `git init` in the vault root.
+///
+/// A vault with no repository has no Git pane (DESIGN.md, Layout map), so the page that used to
+/// say so was never reachable. What replaced it has nothing to click: `git init` writes inside
+/// `.git`, the watcher reports that write like any other, and a vault with no repository answers
+/// one by going looking for repositories. Point it at a throwaway vault that is not a repository;
+/// it makes one, so never run it anywhere that matters.
+pub(super) fn bench_git_init(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        // The first refresh has to have landed, or the pane would be hidden for not having been
+        // asked yet rather than for having no repository.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        println!("bench git_pane {}", has_git_pane(&app));
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(app.root())
+            .status();
+        println!("bench git_init {}", status.is_ok_and(|s| s.success()));
+        // The watcher's own debounce, the pane's, and a discovery that runs git per directory.
+        glib::timeout_future(Duration::from_millis(4000)).await;
+        println!("bench git_pane {}", has_git_pane(&app));
+        bench_quit(&app);
+    });
+}
+
+/// Whether the sidebar is showing a Git pane at all, which is the whole readout above: the pane
+/// appearing is a switcher icon, and the headless image has no pointer to find it with.
+fn has_git_pane(app: &Rc<App>) -> bool {
+    app.sidebar.get().is_some_and(|s| s.has_pane("git"))
+}
+
 /// The changes list's splices, printed as they happen, across a refresh that changes nothing and
 /// two Stage clicks, and whether a row below the staged one kept its widget. A row that is spliced
 /// out from under a press loses its release, so this is the headless half of "rapid Stage clicks

@@ -14,7 +14,7 @@ mod menu;
 mod paths;
 mod transfer;
 
-pub use menu::{context_menu, row_dir};
+pub use menu::{context_menu, item, popup, row_dir};
 pub use paths::move_dest;
 pub use transfer::{download, upload};
 
