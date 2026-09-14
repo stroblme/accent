@@ -1,0 +1,271 @@
+//! Cut, Copy and Paste in the file tree.
+//!
+//! Hybrid, because a vault's files are not always on this machine. A **local** vault's are, so a
+//! Copy writes the real GDK clipboard in the two forms a file manager reads — `text/uri-list`,
+//! and `x-special/gnome-copied-files` for the verb, which is the pair GNOME Files writes and
+//! reads back — and a Paste reads it, so a file crosses between accent and Files in either
+//! direction. A **remote** vault's files are on the host, where no URI from here can point at
+//! them: its Copy remembers vault-relative paths in [`Ops::clip`] and its Paste hands them to
+//! [`Vault::copy`] or to the rename plan, both of which run where the files are, so duplicating a
+//! folder costs no bytes over the link.
+//!
+//! What a Paste does with a path is decided by where it came from, not by which of the two vaults
+//! it is: a path inside this vault is copied or moved there, and anything else is a file on this
+//! machine that has to be carried in ([`transfer::import`]).
+
+use super::paths::{free_path, move_dest};
+use super::{Ops, move_dropped, transfer};
+use accent_core::path::basename;
+use gtk::prelude::*;
+use gtk::{gdk, gio, glib};
+use std::path::PathBuf;
+use std::rc::Rc;
+
+/// The verb and the files under it, as GNOME Files writes them. Its own type rather than a
+/// registered one: nothing but a file manager reads it, and both sides are plain text.
+const GNOME: &str = "x-special/gnome-copied-files";
+/// The cross-desktop half, which says where the files are and nothing about what to do with them.
+const URIS: &str = "text/uri-list";
+
+/// What a Cut or a Copy left behind.
+#[derive(Clone, Default)]
+pub struct Clip {
+    /// Cut rather than Copy: a paste moves the files instead of duplicating them.
+    cut: bool,
+    /// What is in this vault already, each with whether it is a folder — which is what decides
+    /// where a `(copy)` mark goes. Copied or moved where the files are.
+    inside: Vec<(String, bool)>,
+    /// Files on this machine that this vault does not hold, which a paste carries in.
+    outside: Vec<PathBuf>,
+}
+
+impl Clip {
+    fn is_empty(&self) -> bool {
+        self.inside.is_empty() && self.outside.is_empty()
+    }
+}
+
+/// Copy a row: a paste puts a duplicate of it wherever it lands.
+pub fn copy(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
+    take(ops, rel, is_dir, false);
+}
+
+/// Cut a row: a paste moves it, through the same plan a dragged row goes through.
+pub fn cut(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
+    take(ops, rel, is_dir, true);
+}
+
+/// Whether there is anything to paste, asked as the menu is built so an item that could do
+/// nothing is never drawn. The clipboard answers what it holds without a read, which is the only
+/// reason this can be a synchronous question at all.
+pub fn can_paste(ops: &Ops) -> bool {
+    let formats = ops.window.clipboard().formats();
+    let on_this_machine = formats.contain_mime_type(GNOME) || formats.contain_mime_type(URIS);
+    // A remote vault's own Copy never reached the real clipboard, so it has two places to look.
+    on_this_machine || (ops.vault.is_remote() && ops.clip.borrow().is_some())
+}
+
+/// Put what the clipboard holds into `dir` ("" is the vault root).
+pub fn paste(ops: &Rc<Ops>, dir: &str) {
+    // A remote vault answers its own Copy from memory; everything else is on this machine and
+    // has to be read off the real clipboard, which is asynchronous however local it is.
+    //
+    // Read out into a binding first, and not in an `if let`: the borrow would then still be live
+    // inside the branch, where a Cut's own paste takes the clip back out again.
+    let mine = match ops.vault.is_remote() {
+        true => ops.clip.borrow().clone(),
+        false => None,
+    };
+    if let Some(clip) = mine {
+        return apply(ops, dir, clip);
+    }
+    let (ops, dir) = (ops.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        match read_clipboard(&ops).await {
+            Some(clip) => apply(&ops, &dir, clip),
+            None => (ops.toast)("There are no files on the clipboard"),
+        }
+    });
+}
+
+/// [`copy`] and [`cut`], which differ in one flag and in what they leave dimmed.
+fn take(ops: &Rc<Ops>, rel: &str, is_dir: bool, cut: bool) {
+    if !ops.vault.is_remote() {
+        publish(ops, rel, cut);
+    }
+    *ops.clip.borrow_mut() = Some(Clip {
+        cut,
+        inside: vec![(rel.to_string(), is_dir)],
+        outside: Vec::new(),
+    });
+    // The rows a Cut is waiting on read as dimmed until it is pasted, which is the only sign on
+    // screen that anything is in flight at all. A Copy takes nothing away, so it dims nothing.
+    let dimmed: Vec<String> = cut.then(|| rel.to_string()).into_iter().collect();
+    (ops.cut)(&dimmed);
+}
+
+/// Put `rel` on the real clipboard, in both forms, so a file manager can paste it.
+fn publish(ops: &Ops, rel: &str, cut: bool) {
+    let uri = gio::File::for_path(ops.vault.root().join(rel)).uri();
+    let verb = match cut {
+        true => "cut",
+        false => "copy",
+    };
+    let provider = gdk::ContentProvider::new_union(&[
+        gdk::ContentProvider::for_bytes(
+            GNOME,
+            &glib::Bytes::from(format!("{verb}\n{uri}").as_bytes()),
+        ),
+        gdk::ContentProvider::for_bytes(URIS, &glib::Bytes::from(format!("{uri}\r\n").as_bytes())),
+    ]);
+    if let Err(e) = ops.window.clipboard().set_content(Some(&provider)) {
+        tracing::warn!("the clipboard would not take the file: {e}");
+    }
+}
+
+/// What the real clipboard holds, as a [`Clip`], or `None` when it holds no files.
+async fn read_clipboard(ops: &Ops) -> Option<Clip> {
+    let asked = ops
+        .window
+        .clipboard()
+        .read_future(&[GNOME, URIS], glib::Priority::DEFAULT)
+        .await;
+    let (stream, mime) = match asked {
+        Ok(answer) => answer,
+        // What a clipboard holding text rather than files answers, which is not worth a toast of
+        // its own: the Paste item is only drawn where the formats said there were files.
+        Err(e) => {
+            tracing::debug!("nothing on the clipboard to paste: {e}");
+            return None;
+        }
+    };
+    // One read of a generous buffer: a URI is a few dozen bytes, and a selection too large to fit
+    // in 64 KiB is not one anybody made by hand in a file manager.
+    let (buffer, read, _) = stream
+        .read_all_future(vec![0u8; 64 * 1024], glib::Priority::DEFAULT)
+        .await
+        .ok()?;
+    let (cut, uris) = parse(&mime, &String::from_utf8_lossy(&buffer[..read]));
+
+    let root = ops.vault.root();
+    let remote = ops.vault.is_remote();
+    let mut clip = Clip {
+        cut,
+        ..Clip::default()
+    };
+    for uri in uris {
+        let Some(path) = gio::File::for_uri(&uri).path() else {
+            continue;
+        };
+        // A remote vault's root is a path on the *host*, so nothing this machine's clipboard
+        // names is ever inside it, however alike the two spell their folders.
+        match path.strip_prefix(&root) {
+            Ok(rel) if !remote => {
+                clip.inside
+                    .push((rel.to_string_lossy().into_owned(), path.is_dir()));
+            }
+            _ => clip.outside.push(path),
+        }
+    }
+    (!clip.is_empty()).then_some(clip)
+}
+
+/// What a file manager's clipboard says: whether it was a Cut, and the files under it.
+///
+/// `x-special/gnome-copied-files` is a verb line and then one URI per line; `text/uri-list` is
+/// the same list with no verb at all, so a paste of one is always a copy. Blank lines and the
+/// `#` comments the URI list allows are not files.
+fn parse(mime: &str, text: &str) -> (bool, Vec<String>) {
+    let mut lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let cut = mime == GNOME && lines.next() == Some("cut");
+    (cut, lines.map(str::to_string).collect())
+}
+
+/// Put a clip into `dir`: the vault's own files first, then whatever has to be carried in.
+fn apply(ops: &Rc<Ops>, dir: &str, clip: Clip) {
+    for (rel, is_dir) in &clip.inside {
+        match clip.cut {
+            true => move_here(ops, rel, dir),
+            false => copy_here(ops, rel, dir, *is_dir),
+        }
+    }
+    if !clip.outside.is_empty() {
+        transfer::import(ops, dir, clip.outside, clip.cut);
+    }
+    if clip.cut {
+        // A Cut is spent by the paste that answered it: the rows stop being dimmed, and the
+        // clipboard is emptied so a second paste does not go looking for files that have moved.
+        ops.clip.borrow_mut().take();
+        (ops.cut)(&[]);
+        if !ops.vault.is_remote() {
+            let _ = ops
+                .window
+                .clipboard()
+                .set_content(gdk::ContentProvider::NONE);
+        }
+    }
+}
+
+/// A Cut pasted is a move, and a move is the tree's own: the same plan, the same Update Links?
+/// question, and the same rewriting of every note that pointed at the file.
+fn move_here(ops: &Rc<Ops>, rel: &str, dir: &str) {
+    match move_dest(rel, dir) {
+        Some(to) => move_dropped(ops, rel, &to),
+        // The three moves that are not moves: into the folder it is already in, a folder onto
+        // itself, and a folder into something under it. One sentence for all three, because what
+        // the reader did is the same gesture each time.
+        None => (ops.toast)(&format!("Cannot paste {} here", basename(rel))),
+    }
+}
+
+/// A Copy pasted duplicates, under a name the destination does not hold yet.
+fn copy_here(ops: &Rc<Ops>, rel: &str, dir: &str, is_dir: bool) {
+    let (vault, ops) = (ops.vault.clone(), ops.clone());
+    let (rel, dir) = (rel.to_string(), dir.to_string());
+    let name = basename(&rel).to_string();
+    glib::spawn_future_local(async move {
+        let done = gio::spawn_blocking({
+            let name = name.clone();
+            move || {
+                // Naming and copying on the same worker: each candidate name costs a `stat`,
+                // which on a remote vault is a round trip the window must not wait on.
+                let to = free_path(&dir, &name, is_dir, |rel| vault.exists(rel));
+                vault.copy(&rel, &to).map(|()| to)
+            }
+        })
+        .await;
+        // Neither the tree nor the index is poked: the watcher reports what landed, wherever the
+        // files are, the same way it reports a new note.
+        (ops.toast)(&match done {
+            Ok(Ok(to)) => format!("Copied {name} to {to}"),
+            Ok(Err(e)) => format!("Cannot copy {name}: {e}"),
+            Err(_) => format!("Cannot copy {name}"),
+        });
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_reads_the_verb_only_where_the_format_carries_one() {
+        // What GNOME Files puts on the clipboard: the verb, then the files.
+        let (cut, uris) = parse(GNOME, "cut\nfile:///a/b.md\nfile:///a/c.md");
+        assert!(cut);
+        assert_eq!(uris, ["file:///a/b.md", "file:///a/c.md"]);
+        let (cut, uris) = parse(GNOME, "copy\nfile:///a/b.md");
+        assert!(!cut, "the verb line is read, not only skipped");
+        assert_eq!(uris, ["file:///a/b.md"]);
+
+        // A plain URI list says nothing about moving, so it is a copy; its lines end CRLF and it
+        // may carry comments.
+        let (cut, uris) = parse(URIS, "#comment\r\nfile:///a/b.md\r\n");
+        assert!(!cut);
+        assert_eq!(uris, ["file:///a/b.md"]);
+        assert!(parse(URIS, "").1.is_empty());
+    }
+}

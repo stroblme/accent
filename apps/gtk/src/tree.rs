@@ -230,6 +230,8 @@ pub struct Tree {
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
+    /// The rows a Cut is waiting to move, shared with the factory the same way.
+    cut: Rc<RefCell<HashSet<String>>>,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
@@ -248,6 +250,22 @@ impl Tree {
             return;
         }
         *self.ignored.borrow_mut() = ignored;
+        let factory = self.view.factory();
+        self.view.set_factory(None::<&gtk::ListItemFactory>);
+        self.view.set_factory(factory.as_ref());
+    }
+
+    /// Dim the rows a Cut is waiting on, and undim the rest. The same `dim-label` an ignored row
+    /// takes: "this is on its way somewhere" and "search does not reach this" look alike, and one
+    /// signal per row is enough to read (`connect_bind`).
+    ///
+    /// Reset the same way [`set_ignored`](Self::set_ignored) is, and for the same reason: a splice
+    /// would collapse every folder the reader had opened.
+    pub fn set_cut(&self, cut: HashSet<String>) {
+        if *self.cut.borrow() == cut {
+            return;
+        }
+        *self.cut.borrow_mut() = cut;
         let factory = self.view.factory();
         self.view.set_factory(None::<&gtk::ListItemFactory>);
         self.view.set_factory(factory.as_ref());
@@ -641,6 +659,7 @@ pub fn build(
     let asked = Asked::default();
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
+    let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden) = (
             vault.clone(),
@@ -666,6 +685,7 @@ pub fn build(
     vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
     let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
+    let bind_cut = cut.clone();
     let row_moves = moves.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
@@ -773,8 +793,12 @@ pub fn build(
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
         // to have the class taken off it again. A row the index does not hold is dimmed by the
         // same rule and for the same reason the ignored ones are: search does not reach it. A
-        // dot-named row is dimmed so that it still reads as hidden while it is shown.
-        let dim = !item.indexed || dot_named(&item.rel) || bind_ignored.borrow().has(&item.rel);
+        // dot-named row is dimmed so that it still reads as hidden while it is shown, and a cut
+        // one so that it reads as already on its way out.
+        let dim = !item.indexed
+            || dot_named(&item.rel)
+            || bind_ignored.borrow().has(&item.rel)
+            || bind_cut.borrow().contains(&item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             set_class(widget, "dim-label", dim);
         }
@@ -927,6 +951,7 @@ pub fn build(
         show_hidden,
         landed,
         ignored,
+        cut,
         active,
     }
 }

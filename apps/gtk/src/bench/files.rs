@@ -164,6 +164,78 @@ pub(super) fn bench_hidden(app: &Rc<App>) {
     });
 }
 
+/// Copy a file and paste it beside itself, then cut the copy and paste it in the vault root.
+///
+/// What no unit test reaches: the real GDK clipboard a local vault writes and reads back, the
+/// `(copy)` mark a paste beside its source takes, the rows a Cut dims, and that the paste of a Cut
+/// moves the file rather than copying it again. Every step is a clipboard read plus a worker — a
+/// `stat` per candidate name and then the copy — which is what the waits are for.
+///
+/// The files are asked after with `exists`, a plain `stat`: `list_dir` reads the index, and a copy
+/// reaches that only once the watcher and the worker have caught up. It waits up to a minute for
+/// the first reconcile, a move being refused until then, so it wants a small vault rather than the
+/// generated one — `clip_reconciled 0` is the drill saying it never got that far.
+pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        // A move goes through `plan_rename`, which reads the backlinks out of the index and is
+        // refused while the first reconcile is still running — on the generated vault that is
+        // half a minute of walking.
+        for _ in 0..300 {
+            if app.reconciled.get() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        }
+        println!("bench clip_reconciled {}", u8::from(app.reconciled.get()));
+        let dir = accent_core::path::parent_dir(&rel).to_string();
+        // The name a paste beside its source has to land under, spelled out here rather than
+        // asked of `free_path`, so the drill checks the rule instead of repeating it.
+        let copied = match rel.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem} (copy).{ext}"),
+            None => format!("{rel} (copy)"),
+        };
+        fileops::clipboard::copy(&ops, &rel, false);
+        fileops::clipboard::paste(&ops, &dir);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        println!(
+            "bench clip_copied {copied} there={} source_kept={}",
+            u8::from(vault.exists(&copied)),
+            u8::from(vault.exists(&rel))
+        );
+
+        // The row has to be on screen before anything can be said about how it is drawn, and a
+        // file this new is inside a folder the reader never opened.
+        let tree = app.tree.get().expect("a tree");
+        tree.reveal(&copied);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        fileops::clipboard::cut(&ops, &copied, false);
+        // The dim is a re-bind of the rows already on screen, which happens on the spot.
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let dim = drawn_rows(tree.view())
+            .into_iter()
+            .find(|(row, _)| *row == copied)
+            .map(|(_, dim)| dim);
+        println!("bench clip_dim {copied} dim={dim:?}");
+
+        let moved = accent_core::path::basename(&copied).to_string();
+        fileops::clipboard::paste(&ops, "");
+        glib::timeout_future(Duration::from_secs(2)).await;
+        println!(
+            "bench clip_moved to={moved} there={} source_gone={}",
+            u8::from(vault.exists(&moved)),
+            u8::from(!vault.exists(&copied))
+        );
+        // The drill writes into the vault, so it takes its own leavings back out again.
+        let _ = vault.delete(&moved);
+        let _ = vault.delete(&copied);
+        bench_quit(&app);
+    });
+}
+
 /// Every row the list has a widget bound to, as its path and whether its label is dimmed.
 fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
     let mut rows = Vec::new();

@@ -18,7 +18,7 @@ mod style;
 use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
-use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
+use files::{bench_clip, bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
 use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
@@ -82,6 +82,9 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// and prints how many references to the vault the closed window left behind and whether either
 /// dialog outlived it; it exits 1 unless nothing did.
 ///
+/// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
+/// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
+/// of a Cut moved the file rather than copying it again.
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -123,7 +126,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
+    let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     if expand.is_none()
+        && clip.is_none()
         && diagram.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -167,6 +172,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
+        }
+        if let Some(rel) = clip {
+            return bench_clip(&app, &rel);
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);
