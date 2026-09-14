@@ -44,7 +44,7 @@ pub(crate) use lines::{
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
-use search::mute;
+use search::{matched, mute};
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -279,6 +279,11 @@ pub struct Tab {
     occurrence_tag: gtk::TextTag,
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
+    /// Where the jump that opened this note landed, in the scheme's own match colour. See
+    /// [`Tab::reveal_range`].
+    reveal_tag: gtk::TextTag,
+    /// Whether that tag is painting anything, so an ordinary keystroke costs no tag walk.
+    revealed: Cell<bool>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     /// The note's links, each with the character range it covers. Characters and not the bytes
     /// the parse reports them in: the pointer asks which link it is over on every motion event
@@ -527,6 +532,11 @@ pub fn open(
     let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
     buffer.tag_table().add(&occurrence_tag);
     mute(&buffer, &occurrence_tag);
+    // After the muted hint and before the search context, which is the order the three paint in:
+    // see [`Tab::reveal_range`].
+    let reveal_tag = gtk::TextTag::new(Some("reveal"));
+    buffer.tag_table().add(&reveal_tag);
+    matched(&buffer, &reveal_tag);
     // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
     // underline that says a Ctrl+click would land somewhere.
     let follow_tag = gtk::TextTag::new(Some("follow"));
@@ -576,6 +586,8 @@ pub fn open(
         context,
         occurrence_tag,
         occurrence_query: RefCell::new(None),
+        reveal_tag,
+        revealed: Cell::new(false),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
         follow_tag,
@@ -691,6 +703,9 @@ pub fn open(
         move |_, _, mark| {
             let moved = mark.name();
             if matches!(moved.as_deref(), Some("insert" | "selection_bound")) {
+                // A caret move is the reader answering the jump that put the reveal up — by a
+                // click, an arrow key or a keystroke — so it is what takes the reveal back down.
+                tab.clear_reveal();
                 tab.highlight_occurrences();
             }
         }
@@ -1007,8 +1022,9 @@ impl Tab {
     pub fn restyle(&self) {
         // The scheme is what recolours code, and it is also what a note's own tags sit on.
         sync_scheme(&self.buffer);
-        // Derived from the scheme that just changed, so it has to be derived again.
+        // Derived from the scheme that just changed, so both have to be derived again.
         mute(&self.buffer, &self.occurrence_tag);
+        matched(&self.buffer, &self.reveal_tag);
         match self.flavour {
             Flavour::Note => {
                 highlight::restyle(&self.buffer, &self.view);
@@ -1313,6 +1329,9 @@ impl Tab {
         if self.loading.get() {
             return;
         }
+        // The other half of the rule above: an edit that leaves the caret where it was — Delete,
+        // or a replacement over a selection — still answers the jump.
+        self.clear_reveal();
         self.save.edits.set(self.save.edits.get() + 1);
         if !self.save.modified.replace(true) {
             self.page.set_title(&self.tab_title());

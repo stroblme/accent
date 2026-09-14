@@ -1,7 +1,7 @@
 //! The Tags pane: every tag in the vault over the files carrying the selected one.
 
-use super::OnOpen;
 use super::widgets::path_list;
+use super::{OnOpen, Target};
 use crate::widgets::scroller;
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -86,6 +86,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
     view.add_css_class("navigation-sidebar");
 
+    // Which tag the file list is answering for. The listing lands from a worker thread, so an
+    // answer for a tag the user has already clicked past is dropped rather than painted; and a
+    // row opened from it names the tag, so the note opens on where it writes it.
+    let showing: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+
     let files = gtk::StringList::new(&[]);
     let heading = gtk::Label::builder()
         .xalign(0.0)
@@ -101,8 +106,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     files_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     files_box.append(&heading);
     files_box.append(&scroller(&path_list(&files, crate::doc::icon_for, {
-        let on_open = on_open.clone();
-        move |rel: &str| on_open(rel, None)
+        let (on_open, showing) = (on_open.clone(), showing.clone());
+        move |rel: &str| {
+            let tag = showing.borrow().clone();
+            on_open(rel, (!tag.is_empty()).then_some(Target::Tag(tag)));
+        }
     })));
     files_box.set_visible(false);
 
@@ -132,10 +140,6 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             }
         }
     ));
-
-    // Which tag the file list is answering for. The listing lands from a worker thread, so an
-    // answer for a tag the user has already clicked past is dropped rather than painted.
-    let showing: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
     // Selection drives the filter, so a single click picks a tag and the refill's "no selection"
     // hides the list through the same path.

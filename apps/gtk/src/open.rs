@@ -267,7 +267,7 @@ impl App {
             #[weak(rename_to = app)]
             self,
             // A zero-length range: the caret goes to the `[[`, nothing is selected.
-            move |rel, at| app.open_note_at(rel, Some(at..at))
+            move |rel, at| app.open_note_at(rel, Some(sidebar::Target::Range(at..at)))
         ));
         pdf.connect_save_failed(glib::clone!(
             #[weak(rename_to = app)]
@@ -820,12 +820,12 @@ impl App {
         viewer
     }
 
-    /// Open a note over the byte range a sidebar search result matched, so it opens on the match
-    /// rather than at the top and the match is marked where it lands.
+    /// Open a note over the place in it a sidebar row named, so it opens on the match rather than
+    /// at the top and the match is revealed where it lands.
     ///
     /// Every row that leads here — a search hit, a tag — is a single click in the sidebar, so
     /// the note opens as a preview and the next such click takes the same tab.
-    pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<Range<usize>>) {
+    pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<sidebar::Target>) {
         self.mark();
         match at {
             Some(at) => self.select_when_open(rel, at),
@@ -833,13 +833,17 @@ impl App {
         }
     }
 
-    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit or a
-    /// followed link.
-    fn select_when_open(self: &Rc<Self>, rel: &str, at: Range<usize>) {
-        self.with_tab(rel, Opened::Preview, "open", move |_, tab| {
-            if let Some(chars) = char_range(&tab.text(), at) {
-                tab.goto_range(chars);
+    /// Put the caret over `at` once `rel` has a tab, whoever opened it: a search hit, a tag or a
+    /// followed link. A tag names itself rather than a place, because only the note knows where
+    /// it writes it.
+    fn select_when_open(self: &Rc<Self>, rel: &str, at: sidebar::Target) {
+        self.with_tab(rel, Opened::Preview, "open", move |_, tab| match &at {
+            sidebar::Target::Range(bytes) => {
+                if let Some(chars) = char_range(&tab.text(), bytes.clone()) {
+                    tab.goto_range(chars);
+                }
             }
+            sidebar::Target::Tag(name) => tab.goto_tag(name),
         });
     }
 

@@ -621,7 +621,7 @@ fn adopt_sidebar(
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str, at: Option<Range<usize>>| app.open_note_at(rel, at)
+            move |rel: &str, at: Option<sidebar::Target>| app.open_note_at(rel, at)
         ),
         glib::clone!(
             #[weak]

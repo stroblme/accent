@@ -39,8 +39,18 @@ const BACKLINK_ICON: &str = "mail-reply-sender-symbolic";
 /// this follows the precedent the References pane set: a mail name whose drawing says the
 /// right thing.
 const GIT_ICON: &str = "mail-send-receive-symbolic";
-/// Open a note, over the byte range of the match when the row that was activated names one.
-type OnOpen = Rc<dyn Fn(&str, Option<Range<usize>>)>;
+/// Where in the file an activated row points, when it points at more than the file itself.
+#[derive(Clone)]
+pub enum Target {
+    /// The byte range a search hit matched.
+    Range(Range<usize>),
+    /// The tag a row under the Tags pane was listed under. The pane knows the name and not where
+    /// in the note it is written, so the note itself is asked once it is open.
+    Tag(String),
+}
+
+/// Open a note, over the place in it the activated row names.
+type OnOpen = Rc<dyn Fn(&str, Option<Target>)>;
 
 /// Everything the sidebar needs from the index, as closures so it never sees a vault handle.
 /// One field per pane that reads one: a pane is built with its own half and cannot reach the
@@ -100,12 +110,12 @@ impl Sidebar {
     /// `vault` carries the tree widget and the index closures behind Files, Search, Tags and
     /// References; `None` builds a sidebar with only the Outline pane, which is what a window
     /// opened on a single file has to show. `on_open` is called with a vault-relative path when
-    /// the user activates a result, a tagged file or a reference, plus the byte range the match
-    /// covers when the row is one.
+    /// the user activates a result, a tagged file or a reference, plus where in the note the row
+    /// points when it points at anything narrower than the file.
     /// `on_reference` is called with a References row, which carries a line number of its own.
     pub fn new(
         vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
-        on_open: impl Fn(&str, Option<Range<usize>>) + 'static,
+        on_open: impl Fn(&str, Option<Target>) + 'static,
         on_reference: impl Fn(&str) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
