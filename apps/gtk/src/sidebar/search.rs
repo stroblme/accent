@@ -536,6 +536,11 @@ pub(super) struct Pane {
     /// Ask the current question again. The window calls it when the ignore set changes under a
     /// query that is already on screen.
     pub(super) restart: Rc<dyn Fn()>,
+    /// The vault moved while this pane was behind the switcher, so its rows no longer answer the
+    /// question. Set by [`Sidebar::requery_search_soon`](super::Sidebar::requery_search_soon),
+    /// cleared by the query the next show runs. It starts false, unlike the Tags pane's: a box
+    /// with nothing in it has nothing to catch up on.
+    pub(super) dirty: Rc<Cell<bool>>,
     /// The Replace All button, and which page the body is showing with how many rows on it.
     /// What `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say whether the rows
     /// left standing after a rewrite are the new text's.
@@ -855,6 +860,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             let search = search.clone();
             move || search.start()
         }),
+        dirty: Rc::new(Cell::new(false)),
         apply,
         state: Rc::new({
             let search = search.clone();

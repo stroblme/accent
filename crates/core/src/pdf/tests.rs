@@ -409,21 +409,66 @@ fn flatten_samples_a_bezier_and_a_matrix_inverts() {
 }
 
 #[test]
-fn blank_pdf_is_one_a4_page() {
+fn blank_pdf_is_one_page_of_the_size_it_was_asked_for() {
     if !available() {
         eprintln!("skipping: no libpdfium");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("sketch.pdf");
-    std::fs::write(&path, blank_pdf().unwrap()).unwrap();
-    let doc = PdfDoc::open(&path).unwrap();
-    assert_eq!(doc.page_count(), 1);
-    let (w, h) = doc.page_size(0).unwrap();
+    let made = |name: &str, size| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, blank_pdf(size).unwrap()).unwrap();
+        let doc = PdfDoc::open(&path).unwrap();
+        assert_eq!(doc.page_count(), 1);
+        doc.page_size(0).unwrap()
+    };
+    let (w, h) = made("sketch.pdf", A4);
     assert!(
         (w - 595.3).abs() < 1.0 && (h - 841.9).abs() < 1.0,
         "{w}x{h}"
     );
+    // Anything but A4 goes through the same call: landscape and square are page sizes, not modes.
+    let (w, h) = made("wide.pdf", (A4.1, A4.0));
+    assert!(
+        (w - 841.9).abs() < 1.0 && (h - 595.3).abs() < 1.0,
+        "{w}x{h}"
+    );
+}
+
+#[test]
+fn add_page_appends_the_size_of_the_last_one_and_takes_ink() {
+    if !available() {
+        eprintln!("skipping: no libpdfium");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("notepad.pdf");
+    let square = (400.0, 400.0);
+    std::fs::write(&path, blank_pdf(square).unwrap()).unwrap();
+
+    let mut doc = PdfDoc::open(&path).unwrap();
+    doc.add_page().unwrap();
+    assert_eq!(doc.page_count(), 2);
+    assert_eq!(doc.page_sizes().unwrap(), vec![square, square]);
+
+    // The page a stroke lands on is the machinery the pen already uses: an appended page must be
+    // no different from the one the document was created with.
+    let style = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 0, 255],
+        multiply: false,
+    };
+    let area = doc
+        .add_ink(1, &[(10.0, 10.0), (100.0, 120.0)], style)
+        .unwrap();
+    assert!(area.width() > 0.0 && area.height() > 0.0, "{area:?}");
+    assert_eq!(doc.annotation_count(1).unwrap(), 1);
+
+    // And it survives the one save path there is, which is what a reader will open.
+    std::fs::write(&path, doc.save().unwrap()).unwrap();
+    let reopened = PdfDoc::open(&path).unwrap();
+    assert_eq!(reopened.page_sizes().unwrap(), vec![square, square]);
+    assert_eq!(reopened.inks(1).unwrap().len(), 1);
 }
 
 #[test]

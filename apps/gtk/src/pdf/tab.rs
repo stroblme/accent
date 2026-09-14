@@ -562,6 +562,14 @@ impl PdfTab {
         self.ask(Request::Save(None));
     }
 
+    /// Another blank page at the end, the size of the last one — a notebook's answer to running
+    /// out of paper. Written out on the same timer a stroke is: the thread marks the document
+    /// dirty and this asks for the save a second later.
+    pub fn add_page(self: &Rc<Self>) {
+        self.ask(Request::AddPage);
+        self.save_soon();
+    }
+
     /// The same, but wait for it — the window is closing and the process is about to end, so a
     /// write still on the render thread's queue would go with it.
     ///
@@ -928,9 +936,11 @@ impl PdfTab {
 
     /// The page's own menu, on a secondary click over it.
     ///
-    /// Copy and Copy Link to Selection when there is a selection, then Export Highlights, which
-    /// is about the document rather than about what is selected and so is always offered. The
-    /// drawing tools are not here: they are the ring, which the header's Drawing button opens.
+    /// Copy and Copy Link to Selection when there is a selection, then Add Page and Export
+    /// Highlights, which are about the document rather than about what is selected and so are
+    /// always offered — a read-only or remote document says so in a toast rather than by hiding
+    /// the row. The drawing tools are not here: they are the ring, which the header's Drawing
+    /// button opens.
     ///
     /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
     /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
@@ -960,10 +970,9 @@ impl PdfTab {
             menu.append_section(None, &clipboard);
         }
         let file = gio::Menu::new();
-        file.append(
-            Some(crate::actions::label_of("win.pdf-export-highlights")),
-            Some("win.pdf-export-highlights"),
-        );
+        for action in ["win.pdf-add-page", "win.pdf-export-highlights"] {
+            file.append(Some(crate::actions::label_of(action)), Some(action));
+        }
         menu.append_section(None, &file);
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
         // Parented to the box rather than to the view, and pointed at the box's own coordinates:
@@ -1156,6 +1165,15 @@ impl PdfTab {
                 if let Some(f) = hook {
                     f(self, why);
                 }
+            }
+            Reply::Paged(sizes) => {
+                let last = sizes.len().saturating_sub(1);
+                self.view.set_sizes(sizes.clone());
+                self.thumbs.set_sizes(sizes);
+                self.thumbs.queue_draw();
+                // Land on the new page: adding one is asking for somewhere to draw, and a jump
+                // so the reader can come back with Back.
+                self.goto_page(last);
             }
             Reply::Reloaded(sizes) => {
                 // The anchor is taken now rather than when the reload was asked for: the reader

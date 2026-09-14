@@ -30,7 +30,7 @@ build with. This says what to build.
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
 | Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands. The desktop's eight sidebar panes and its palette collapse into this one |
-| Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
+| Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it and, while a find is open, the find bar below it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
 | The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
@@ -122,6 +122,12 @@ state for the whole screen (`ui/Common.kt`), and what scrolls tells it so.
 
 Two things never fade. The bar while the editor is open, because Done is the only way out of it;
 and the content, a message, or anything holding a decision.
+
+A note's own find bar is the exception to the keyboard rule: it stays while the keyboard is up,
+because the keyboard is what it is for. The Browse pill goes instead, so the vault's search and the
+page's find are never on the screen together and nothing floats over the bar. It takes its space
+from the note rather than lying over it — a bar across the last lines would cover the match it just
+found — and Back puts it away, as Back closes the panel.
 
 Motion is two durations and three curves (`ui/Common.kt`): 200 ms for a surface arriving, 150 ms for
 one leaving, 150 ms for one stepping sideways — Material's short-4 and short-3, the fast end of its

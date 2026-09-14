@@ -90,6 +90,10 @@ pub struct Ops {
     /// takes the notes inside it. Only called once the file is really gone, so there is nothing
     /// left to write the buffer into and nothing to ask about.
     pub close: Box<dyn Fn(&str)>,
+    /// Open a drawing that was just created and put the pen down in it, which is the whole point
+    /// of having made it. Not [`Ops::open`]: that one waits for a text tab and reports a PDF as
+    /// "not a text file".
+    pub draw: Box<dyn Fn(&str)>,
     /// Add a directory to the vault's `[search] exclude` list, save it and refresh what search
     /// leaves out. Offered on directory rows alone.
     pub exclude: Box<dyn Fn(&str)>,
@@ -264,6 +268,124 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         });
     });
     focus_name(&entry, None);
+}
+
+/// New blank PDF in `dir` ("" is the vault root), to draw on rather than to read.
+///
+/// The size is picked here and fixed afterwards: a page is paper, and paper does not grow. When
+/// a drawing runs off the end, Add Page puts another page of the same size under it — which is
+/// what makes the file a notebook every PDF reader shows correctly, rather than one growing
+/// `/MediaBox` only we understand.
+///
+/// Local vaults only, for the reason the pen and Insert Sketch refuse on a remote one: a PDF
+/// there is read from the ssh cache copy, so what was drawn would never reach the host. The tree
+/// menu leaves the item out on a remote vault; this is the palette's way in, and it says why.
+pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
+    if ops.vault.is_remote() {
+        return (ops.toast)("Open a local folder to create a drawing");
+    }
+    let current = free_drawing_name(&ops.vault, dir);
+    let entry = name_entry("Drawing name", &current);
+    let form = form();
+    form.append(&vault_path_field(&entry, &ops.vault, dir));
+    form.append(&name_preview(&entry, {
+        let dir = dir.to_string();
+        move |typed| typed_path(&dir, typed).map(drawing_path)
+    }));
+    let picker = gtk::DropDown::from_strings(SIZES);
+    form.append(&labelled("Size", &picker));
+
+    let dialog = name_dialog("New Drawing", "Create", &form);
+    let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
+    let (typed, parent) = (entry.clone(), window.clone());
+    choose(&dialog, Some(&parent), move |response| {
+        if response != CONFIRM {
+            return;
+        }
+        let rel = match typed_path(&dir, &typed.text()) {
+            Ok(rel) => drawing_path(rel),
+            Err(why) => return (ops.toast)(why),
+        };
+        let name = basename(&rel).to_string();
+        // Read now rather than in the worker: the window is the main thread's.
+        let size = drawing_size(
+            picker.selected() as usize,
+            (window.width(), window.height()),
+        );
+        // The folders, the document and the write, on a worker: making a PDF is pdfium work
+        // behind the process-wide lock, which a render thread may be holding.
+        let vault = ops.vault.clone();
+        glib::spawn_future_local(async move {
+            let made = gio::spawn_blocking({
+                let (rel, name) = (rel.clone(), name.clone());
+                move || {
+                    if vault.exists(&rel) {
+                        return Err(format!("Cannot create {name}: it already exists"));
+                    }
+                    make_parents(&vault, &rel)?;
+                    let cannot = |e: String| format!("Cannot create {name}: {e}");
+                    let bytes = accent_core::pdf::blank_pdf(size).map_err(|e| cannot(why(&e)))?;
+                    let path = vault.resolve(&rel).map_err(|e| cannot(e.to_string()))?;
+                    accent_core::fs::write_bytes(&path, &bytes, None)
+                        .map(|_| ())
+                        .map_err(|e| cannot(e.to_string()))
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            match made {
+                // The tab with the pen down is the report, unless the tree will not list the file.
+                Ok(()) => {
+                    (ops.draw)(&rel);
+                    if hidden_now(&ops, &rel) {
+                        (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+                    }
+                }
+                Err(why) => (ops.toast)(&why),
+            }
+        });
+    });
+    focus_name(
+        &entry,
+        Some(renamed_part(&current, false).chars().count() as i32),
+    );
+}
+
+/// The page shapes New Drawing offers, in the order the dropdown lists them.
+const SIZES: &[&str] = &["A4 Portrait", "A4 Landscape", "Square", "This Window"];
+
+/// The size [`SIZES`]`[at]` names, in points. `window` is the window's size in pixels and only
+/// the last shape reads it: A4's width with the window's own proportions, so one page is one
+/// screenful of what the reader is looking at. An unmapped window (0 px either way) is A4.
+fn drawing_size(at: usize, window: (i32, i32)) -> (f32, f32) {
+    let (w, h) = accent_core::pdf::A4;
+    match at {
+        1 => (h, w),
+        2 => (w, w),
+        3 if window.0 > 0 && window.1 > 0 => (w, w * window.1 as f32 / window.0 as f32),
+        _ => (w, h),
+    }
+}
+
+/// A drawing is a PDF whatever it is called: the extension is what opens it in a PDF tab here
+/// and in a reader everywhere else, so a typed name that leaves it out gains it.
+fn drawing_path(rel: String) -> String {
+    match Path::new(&rel)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
+    {
+        true => rel,
+        false => format!("{rel}.pdf"),
+    }
+}
+
+/// What the dialog opens on: the first `Drawing N.pdf` the folder does not already hold, so
+/// Enter alone is another page every time.
+fn free_drawing_name(vault: &Vault, dir: &str) -> String {
+    (1..)
+        .map(|n| format!("Drawing {n}.pdf"))
+        .find(|name| typed_path(dir, name).is_ok_and(|rel| !vault.exists(&rel)))
+        .unwrap_or_default()
 }
 
 /// New note from a template that says where its notes go.
@@ -963,6 +1085,30 @@ fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawing_size_is_a4_turned_four_ways() {
+        let (w, h) = accent_core::pdf::A4;
+        let window = (1600, 900);
+        assert_eq!(drawing_size(0, window), (w, h));
+        assert_eq!(drawing_size(1, window), (h, w));
+        assert_eq!(drawing_size(2, window), (w, w));
+        // The window's own proportions at A4's width: a landscape window, a landscape page.
+        let (pw, ph) = drawing_size(3, window);
+        assert_eq!(pw, w);
+        assert!((ph / pw - 900.0 / 1600.0).abs() < 1e-4, "{pw}x{ph}");
+        // A window with no size yet — the drill's, or one asked before it is mapped — is A4.
+        assert_eq!(drawing_size(3, (0, 0)), (w, h));
+    }
+
+    #[test]
+    fn a_drawing_is_named_pdf_whatever_was_typed() {
+        assert_eq!(drawing_path("Notes/Sketch".into()), "Notes/Sketch.pdf");
+        assert_eq!(drawing_path("Notes/Sketch.pdf".into()), "Notes/Sketch.pdf");
+        assert_eq!(drawing_path("Notes/Sketch.PDF".into()), "Notes/Sketch.PDF");
+        // Another extension is not an extension a PDF reader will open, so `.pdf` goes on top.
+        assert_eq!(drawing_path("plan.v2".into()), "plan.v2.pdf");
+    }
 
     #[test]
     fn rename_message_names_both_kinds_of_leftover() {

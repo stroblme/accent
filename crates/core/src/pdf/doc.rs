@@ -225,6 +225,38 @@ impl PdfDoc {
         self.doc().save_to_bytes().context("save pdf")
     }
 
+    /// Another blank page at the end, the size of the last one: what a paper notebook does when
+    /// the page runs out, and what keeps a drawing readable in any viewer — one MediaBox per
+    /// page, none of them growing.
+    ///
+    /// Nothing reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink.
+    pub fn add_page(&mut self) -> Result<()> {
+        let _guard = lock();
+        let last = self
+            .doc()
+            .pages()
+            .len()
+            .checked_sub(1)
+            .ok_or_else(|| anyhow!("the document has no pages"))?;
+        let rect = self
+            .doc()
+            .pages()
+            .page_size(last)
+            .map_err(|e| anyhow!("page {last}: {e:?}"))?;
+        let size = paper((rect.width().value, rect.height().value));
+        let mut page = self
+            .doc
+            .as_mut()
+            .expect("document is closed only in Drop")
+            .pages_mut()
+            .create_page_at_end(size)
+            .map_err(|e| anyhow!("append a page: {e:?}"))?;
+        // Manual, as every other mutation in this module sets it: dropping the page otherwise
+        // re-serialises a content stream we never wrote.
+        page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
+        Ok(())
+    }
+
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot
     /// resolve to a page or a URI are skipped.
     ///
@@ -359,20 +391,29 @@ fn view_top(view: PdfDestinationViewSettings) -> Option<f32> {
     }
 }
 
-/// A blank single-page A4 document, for a sketch a note wants to draw on.
+/// A4 in points, portrait: the paper a blank document starts on unless another shape is picked.
+pub const A4: (f32, f32) = (595.28, 841.89);
+
+/// A blank single-page document `size` points across, for a sketch or a drawing to be made on.
 ///
-/// Portrait, because a note reads top-down and that is the shape that embeds in its flow; Fit
-/// Width shows the whole page either way. Landscape would be a preference, not a default.
-pub fn blank_pdf() -> Result<Vec<u8>> {
+/// Insert Sketch asks for [`A4`] portrait, because a note reads top-down and that is the shape
+/// that embeds in its flow; New Drawing is where the other shapes are picked. Whatever the size,
+/// the result is a PDF every reader on the machine opens and our own pen draws on.
+pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
     let pdfium = pdfium()?;
     let _guard = lock();
     let mut doc = pdfium.create_new_pdf().context("create pdf")?;
     doc.pages_mut()
-        .create_page_at_end(PdfPagePaperSize::a4())
+        .create_page_at_end(paper(size))
         .context("create page")?;
     let bytes = doc.save_to_bytes().context("save new pdf")?;
     // Closed here rather than at the end of the function, so it happens under the lock like
     // every other document this module drops.
     drop(doc);
     Ok(bytes)
+}
+
+/// A size in points as pdfium's page constructors want it.
+fn paper((width, height): (f32, f32)) -> PdfPagePaperSize {
+    PdfPagePaperSize::from_points(PdfPoints::new(width), PdfPoints::new(height))
 }

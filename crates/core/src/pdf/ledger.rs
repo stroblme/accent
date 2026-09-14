@@ -305,7 +305,7 @@ mod tests {
             return;
         }
         let path = std::env::temp_dir().join(format!("accent-undo-{}.pdf", std::process::id()));
-        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        std::fs::write(&path, pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         let mut doc = PdfDoc::open(&path).unwrap();
         let style = pdf::InkStyle {
             width: 2.0,
@@ -388,7 +388,7 @@ mod tests {
             return;
         }
         let path = std::env::temp_dir().join(format!("accent-cut-{}.pdf", std::process::id()));
-        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        std::fs::write(&path, pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         let mut doc = PdfDoc::open(&path).unwrap();
         let style = pdf::InkStyle {
             width: 2.0,

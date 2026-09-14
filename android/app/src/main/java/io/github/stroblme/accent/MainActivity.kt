@@ -9,7 +9,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import io.github.stroblme.accent.ui.AccentTheme
@@ -27,11 +26,20 @@ import io.github.stroblme.accent.ui.VaultPickerScreen
 class MainActivity : ComponentActivity() {
     private val model: VaultModel by viewModels()
 
+    /**
+     * The PDF a `VIEW` intent asked for, if the app was started by one.
+     *
+     * On the activity rather than inside `setContent`, because [onNewIntent] is what changes it
+     * and nothing inside a composition can be reached from there. That is the whole reason the
+     * activity used to be rebuilt for every intent.
+     */
+    private var loose by mutableStateOf<Uri?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        loose = intent.pdfUri()
         setContent {
-            var loose by remember { mutableStateOf(intent.pdfUri()) }
             AccentTheme {
                 val state by model.state.collectAsState()
                 val pdf = loose
@@ -44,10 +52,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Another intent, which is only worth anything if it names a different PDF.
+     *
+     * Coming back from the launcher is an intent that says nothing about what should be shown, and
+     * rebuilding the activity for it is a reader sent back to the top of the note they were halfway
+     * through — the `WebView` is built again with everything else. So the intent that decided the
+     * screen is the one that stays set, which is also what a later config change reads back.
+     */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        val pdf = intent.pdfUri() ?: return
         setIntent(intent)
-        recreate()
+        loose = pdf
     }
 
     override fun onResume() {

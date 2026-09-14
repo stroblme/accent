@@ -9,7 +9,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import io.github.stroblme.accent.ffi.InkStyle
+import io.github.stroblme.accent.ffi.Outline
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.PdfSession
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Theme
@@ -92,6 +94,20 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
             runCatching { session.renderTile(index.toUInt(), scale, x, y, w, h, theme).bitmap() }
                 .getOrNull()
         }
+
+    /**
+     * The document's bookmarks, flat, each carrying how deep it sits. A file with none answers an
+     * empty list, and so does a file that will not say — there is nothing a reader could do about
+     * the difference.
+     */
+    suspend fun outline(): List<Outline> = on {
+        runCatching { session.outline() }.getOrDefault(emptyList())
+    }
+
+    /** The `/Link` boxes on a page, in page points. Uncached: a read is cheap beside a render. */
+    suspend fun links(index: Int): List<PdfLinkBox> = on {
+        runCatching { session.links(index.toUInt()) }.getOrDefault(emptyList())
+    }
 
     suspend fun stroke(page: Int, points: List<Point>, style: InkStyle) = on {
         runCatching { session.addStroke(page.toUInt(), points, style) }

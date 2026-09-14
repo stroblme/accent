@@ -392,7 +392,7 @@ impl App {
             .find(|key| !vault.exists(key));
         let Some(key) = key else { return };
 
-        let bytes = match accent_core::pdf::blank_pdf() {
+        let bytes = match accent_core::pdf::blank_pdf(accent_core::pdf::A4) {
             Ok(bytes) => bytes,
             Err(e) => return self.cannot("make a sketch", e),
         };
@@ -410,6 +410,32 @@ impl App {
         if let Some(Doc::Pdf(pdf)) = self.doc_for(&key) {
             pdf.set_mode(pdfview::Mode::Pen);
         }
+    }
+
+    /// A drawing New Drawing has just written: open it and put the pen down, which is what it
+    /// was made for. The tab is the report that it worked.
+    ///
+    /// The pen is armed through the window action rather than by hand, so a drawing starts in
+    /// exactly the state `win.pdf-pen` leaves any other PDF in — the ring out, the tool
+    /// remembered, the status bar saying so. The tab has just opened, so it is the active one.
+    pub fn open_drawing(self: &Rc<Self>, key: &str) {
+        self.open_as(key, Opened::Kept);
+        if self.active_pdf().is_some_and(|pdf| pdf.key() == key) {
+            self.pdf_mode(pdfview::Mode::Pen);
+        }
+    }
+
+    /// Another blank page at the end of the open PDF, the size of its last one.
+    ///
+    /// Explicit rather than automatic: a stroke cannot reach past the last page to ask for one —
+    /// the view clamps a drag to the page under it — so "drawing past the end" would have to be
+    /// invented as a gesture rather than observed. See NOTEPAD.
+    pub fn pdf_add_page(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if !self.pdf_is_writable(&pdf) {
+            return self.needs_vault("add a page");
+        }
+        pdf.add_page();
     }
 
     /// Show or hide the ring of drawing tools over the page.

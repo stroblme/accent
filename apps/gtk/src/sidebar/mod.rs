@@ -106,6 +106,8 @@ struct VaultPanes {
     restart_search: Rc<dyn Fn()>,
     /// The Search pane's half of [`INDEX_SETTLE`], the shape the Tags pane's `tags_settle` has.
     search_settle: Debounce,
+    /// And its half of `tags_dirty`: the vault moved while another pane was in front.
+    search_dirty: Rc<Cell<bool>>,
     /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
     apply_replace: gtk::Button,
     search_state: Rc<dyn Fn() -> (String, u32)>,
@@ -189,15 +191,18 @@ impl Sidebar {
             // Hidden until the window says its vault is on another machine.
             ports_page.set_visible(false);
 
-            // Lazy fill: a background reindex only flips the flag, so it costs no query while
-            // the user is looking at Files or Search.
+            // Lazy fill: a background reindex only flips the flag of whichever of the two panes
+            // is not being looked at, and it costs that pane one query the first time it is shown
+            // again. The Search pane's is its query re-run, which is 0.8 ms ranked and some 60 ms
+            // as an exact scan on the generated 40k-file vault, and nothing at all while the box
+            // is empty or the vault has not moved.
             stack.connect_visible_child_notify({
                 let (dirty, refill) = (tags.dirty.clone(), tags.refill.clone());
-                move |stack| {
-                    if stack.visible_child_name().as_deref() == Some("tags") && dirty.replace(false)
-                    {
-                        refill();
-                    }
+                let (searched, restart) = (search.dirty.clone(), search.restart.clone());
+                move |stack| match stack.visible_child_name().as_deref() {
+                    Some("tags") if dirty.replace(false) => refill(),
+                    Some("search") if searched.replace(false) => restart(),
+                    _ => {}
                 }
             });
             (
@@ -254,6 +259,7 @@ impl Sidebar {
                         replace_entry: search.replace_entry,
                         restart_search: search.restart,
                         search_settle: Debounce::new(INDEX_SETTLE),
+                        search_dirty: search.dirty,
                         apply_replace: search.apply,
                         search_state: search.state,
                         references,
@@ -533,11 +539,10 @@ impl Sidebar {
     /// The vault moved under the rows on screen, so ask the question again a moment later.
     ///
     /// Called for every change the window hears about and for every save of its own, so the two
-    /// guards are what keep it from costing anything most of the time: a pane nobody is looking
-    /// at and a box with nothing in it are both left alone. The consequence of the first is that
-    /// the Search pane keeps whatever it last answered until it is on screen *and* something
-    /// changes — switching to it does not re-run the query, which is the behaviour it has always
-    /// had.
+    /// guards are what keep it from costing anything most of the time: a box with nothing in it
+    /// is left alone, and a pane nobody is looking at only takes the flag and asks the first time
+    /// it is shown again — the Tags pane's `tags_dirty` shape, which is why neither pane can be
+    /// left showing rows a change has already made wrong.
     ///
     /// What it costs, measured on the generated 40k-file vault (41 690 entries, 21 360 indexed
     /// bodies) with `ACCENT_BENCH_SEARCH=<query>[:<n>]` and `RUST_LOG=accent=debug`: one settled
@@ -553,23 +558,33 @@ impl Sidebar {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        if !self.is_showing("search") || panes.search_entry.text().trim().is_empty() {
+        if panes.search_entry.text().trim().is_empty() {
             return;
         }
+        if !self.is_showing("search") {
+            return panes.search_dirty.set(true);
+        }
+        panes.search_dirty.set(false);
         let restart = panes.restart_search.clone();
         panes.search_settle.call(move || restart());
     }
 
-    /// Ask the search question again now, if one is on screen. What the window calls when the
-    /// answer would have changed without the box being touched and without the vault moving —
-    /// a git refresh moving the ignore set, which is one call, not a batch.
+    /// Ask the search question again now, if one is on screen, and leave the flag behind if one is
+    /// not. What the window calls when the answer would have changed without the box being touched
+    /// and without the vault moving — a git refresh moving the ignore set, which is one call, not
+    /// a batch, and which reaches rows nobody is looking at the same way a write does.
     pub fn requery_search(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
-        if self.stack.visible_child_name().as_deref() == Some("search") {
-            (panes.restart_search)();
+        if !self.is_showing("search") {
+            if !panes.search_entry.text().trim().is_empty() {
+                panes.search_dirty.set(true);
+            }
+            return;
         }
+        panes.search_dirty.set(false);
+        (panes.restart_search)();
     }
 
     /// Show the Tags pane with `tag` already selected.
