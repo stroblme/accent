@@ -24,11 +24,13 @@ impl App {
             }
             // The same events mean a note may have gained or lost a link into an open PDF.
             self.sync_pdf_links_soon();
-            // And that the vault's tags moved: a note edited in another editor, one deleted, a
-            // whole folder trashed. Every one of these is emitted after the index has taken the
-            // change in, so the pane's query reads what is there now.
+            // And that the vault's tags moved, and that the rows a search is showing are of text
+            // that has changed: a note edited in another editor, one deleted, a whole folder
+            // trashed. Every one of these is emitted after the index has taken the change in, so
+            // both panes read what is there now.
             if let Some(sidebar) = self.sidebar.get() {
                 sidebar.mark_tags_dirty();
+                sidebar.requery_search_soon();
             }
         }
         // A note's hints are about the index as much as about its own text: the file a

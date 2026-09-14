@@ -27,14 +27,20 @@ use widgets::path_list;
 
 use crate::widgets::{Debounce, scroller, status_page};
 
-/// How long a Tags pane that is *on screen* holds a refill back.
+/// How long a pane that is *on screen* holds its refresh back when the vault has moved under it:
+/// the Tags list, and the Search rows.
+///
+/// It is also what collapses a batch into one query. The window says "the vault moved" once per
+/// file the walk touched, so a Syncthing pull of 500 notes is 500 calls in one turn of the main
+/// loop and one refresh a third of a second later. What that one refresh costs is on
+/// [`Sidebar::requery_search_soon`], which is the expensive half.
 ///
 /// ponytail: a timer, because there is no event for "the index is current now" — our own saves
 /// emit nothing at all, by design, and the worker takes the write in after the save has landed.
-/// The ceiling is a tag that appears, or goes, a third of a second after the note is written;
+/// The ceiling is a tag, or a row, that follows a third of a second after the note is written;
 /// the same third of a second the PDF highlights wait (`App::sync_pdf_links_soon`), and an
-/// `Event::Indexed` from the worker is what replaces both.
-const TAGS_SETTLE: Duration = Duration::from_millis(300);
+/// `Event::Indexed` from the worker is what replaces all three.
+const INDEX_SETTLE: Duration = Duration::from_millis(300);
 
 /// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
 /// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
@@ -98,6 +104,8 @@ struct VaultPanes {
     all_toggle: gtk::ToggleButton,
     replace_entry: gtk::Entry,
     restart_search: Rc<dyn Fn()>,
+    /// The Search pane's half of [`INDEX_SETTLE`], the shape the Tags pane's `tags_settle` has.
+    search_settle: Debounce,
     /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
     apply_replace: gtk::Button,
     search_state: Rc<dyn Fn() -> (String, u32)>,
@@ -110,7 +118,7 @@ struct VaultPanes {
     tags_refill: Rc<dyn Fn()>,
     tags_names: Rc<dyn Fn() -> Vec<String>>,
     tags_picked: Rc<dyn Fn() -> Option<String>>,
-    /// Holds a refill of the pane on screen back by [`TAGS_SETTLE`], and swallows a burst of
+    /// Holds a refill of the pane on screen back by [`INDEX_SETTLE`], and swallows a burst of
     /// watcher events into one query.
     tags_settle: Debounce,
     tags_divider: gtk::Paned,
@@ -245,6 +253,7 @@ impl Sidebar {
                         all_toggle: search.all_toggle,
                         replace_entry: search.replace_entry,
                         restart_search: search.restart,
+                        search_settle: Debounce::new(INDEX_SETTLE),
                         apply_replace: search.apply,
                         search_state: search.state,
                         references,
@@ -254,7 +263,7 @@ impl Sidebar {
                         tags_refill: tags.refill,
                         tags_names: tags.names,
                         tags_picked: tags.picked,
-                        tags_settle: Debounce::new(TAGS_SETTLE),
+                        tags_settle: Debounce::new(INDEX_SETTLE),
                         tags_divider: tags.divider,
                         git_page,
                         git_divider,
@@ -422,7 +431,7 @@ impl Sidebar {
     /// which costs no query while the user is looking at Files or Search. The pane *on screen*
     /// has nobody to wait for, so it refills in place — a moment later, so that what was just
     /// written has reached the index and a burst of watcher events is one query. See
-    /// [`TAGS_SETTLE`].
+    /// [`INDEX_SETTLE`].
     pub fn mark_tags_dirty(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;
@@ -521,8 +530,35 @@ impl Sidebar {
         }
     }
 
-    /// Ask the search question again, if one is on screen. What the window calls when the answer
-    /// would have changed without the box being touched — a git refresh moving the ignore set.
+    /// The vault moved under the rows on screen, so ask the question again a moment later.
+    ///
+    /// Called for every change the window hears about and for every save of its own, so the two
+    /// guards are what keep it from costing anything most of the time: a pane nobody is looking
+    /// at and a box with nothing in it are both left alone. The consequence of the first is that
+    /// the Search pane keeps whatever it last answered until it is on screen *and* something
+    /// changes — switching to it does not re-run the query, which is the behaviour it has always
+    /// had.
+    ///
+    /// What it costs, measured on the generated 40k-file vault (41 684 files, `ACCENT_BENCH_SEARCH`
+    /// with `RUST_LOG=accent=debug`): one settled batch is one query, and that query is 2–11 ms
+    /// ranked — which is every default search, and well inside the grace period before a progress
+    /// bar is drawn — but 2.0 s as the exact scan a toggle or the open replace row switches the
+    /// pane to, which does draw one. What limits how often that is paid is the autosave behind it,
+    /// itself 1 s after the last edit: one requery per pause in the typing, not one per keystroke.
+    pub fn requery_search_soon(&self) {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
+        if !self.is_showing("search") || panes.search_entry.text().trim().is_empty() {
+            return;
+        }
+        let restart = panes.restart_search.clone();
+        panes.search_settle.call(move || restart());
+    }
+
+    /// Ask the search question again now, if one is on screen. What the window calls when the
+    /// answer would have changed without the box being touched and without the vault moving —
+    /// a git refresh moving the ignore set, which is one call, not a batch.
     pub fn requery_search(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;

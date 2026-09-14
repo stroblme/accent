@@ -14,6 +14,7 @@ mod outline;
 mod panes;
 mod pdf;
 mod replace;
+mod search;
 mod style;
 mod tags;
 
@@ -29,6 +30,7 @@ use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
 use replace::bench_replace;
+use search::bench_search;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
 use tags::bench_tags;
 
@@ -105,6 +107,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
 /// Replace All on it and prints what the pane lists before and after the rewrite.
 ///
+/// `ACCENT_BENCH_SEARCH=<query>` leaves `<query>` in the Search pane and writes a note holding it
+/// behind the pane's back, printing the rows before, after and once the note is gone again.
+///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -151,9 +156,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
+    let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     if expand.is_none()
         && tags.is_none()
         && !replace
+        && search.is_none()
         && clip.is_none()
         && menu.is_none()
         && diagram.is_none()
@@ -209,6 +216,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if replace {
             return bench_replace(&app);
+        }
+        if let Some(query) = search {
+            return bench_search(&app, &query);
         }
         if let Some(rel) = menu {
             return bench_menu(&app, &rel);
