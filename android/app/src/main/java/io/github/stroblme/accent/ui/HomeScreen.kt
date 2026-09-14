@@ -82,7 +82,10 @@ fun HomeScreen(model: VaultModel) {
                 )
             }
             BrowseButton(
-                visible = screen == Screen.Home && chrome.shown,
+                // Not while the note's own find is open: that bar has the foot of the screen, and
+                // a pill over it would offer the vault's search to a reader already searching the
+                // page in front.
+                visible = screen == Screen.Home && chrome.shown && open?.finding != true,
                 onBrowse = { screen = Screen.Browse },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )

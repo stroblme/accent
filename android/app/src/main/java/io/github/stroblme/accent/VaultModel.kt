@@ -38,6 +38,13 @@ data class Open(
      * rather than something the note now has.
      */
     val find: String? = null,
+    /**
+     * Whether the reader has the note's own find open ([VaultModel.finding]).
+     *
+     * Not [find]: that is one word the app was handed and marks once, this is a bar the reader
+     * types into. It belongs to the note in front, so opening another puts it away.
+     */
+    val finding: Boolean = false,
 )
 
 data class VaultState(
@@ -348,6 +355,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** The query has been marked on the page. One-shot, the same way [said] is. */
     fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
+
+    /**
+     * Open or put away the note's own find.
+     *
+     * With nothing in front there is nothing to find in and this does nothing, which is what
+     * [close] already does from the same palette.
+     */
+    fun finding(on: Boolean) = _state.update { it.copy(open = it.open?.copy(finding = on)) }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }
 

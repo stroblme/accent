@@ -1,6 +1,7 @@
 package io.github.stroblme.accent.ui
 
 import android.graphics.Color as AndroidColor
+import androidx.activity.compose.BackHandler
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -14,7 +15,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.SpanStyle
@@ -114,7 +118,9 @@ private fun ChangedBanner(onReload: () -> Unit) {
  *
  * The marking goes on the reader's first tap, which is the Android analogue of the desktop's
  * reveal highlight going on the first keystroke: it says where you were sent, and once that has
- * been read it is in the way.
+ * been read it is in the way. A tap does *not* take the reader's own find off ([FindBar]): those
+ * matches are being stepped through rather than read once, and a reveal and a find bar are never
+ * on the screen together — opening the bar clears whatever was marked before it.
  */
 @Composable
 private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
@@ -129,70 +135,151 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     // inside the client, which is built once and would keep whichever note was open then.
     var view by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf<String?>(null) }
+    // What the reader has typed into the find bar, and where in the page it got them: which match
+    // of how many, straight off the view's own find listener. Reset every time the bar opens.
+    var query by remember(open.finding) { mutableStateOf("") }
+    var matches by remember { mutableStateOf(0 to 0) }
+    // Read inside the tap below, which is captured once and so cannot close over a parameter.
+    val finding by rememberUpdatedState(open.finding)
+
+    // The reader's own find: every keystroke marks the page again, and an empty field — which is
+    // where the bar opens, and what it leaves behind when it closes — takes the marks off. One
+    // effect for the bar's whole life, so there is no "it has gone" to remember separately.
+    LaunchedEffect(open.finding, query) {
+        val web = view ?: return@LaunchedEffect
+        if (query.isBlank()) web.clearMatches() else web.findAllAsync(query)
+    }
 
     // Text can only be found once it is there to find, so the query waits for the load — and
     // since the page is loaded only when the note or the palette changes, a hit in the note
     // already in front is marked without one.
     LaunchedEffect(loaded, open.find) {
-        val query = open.find ?: return@LaunchedEffect
+        val reveal = open.find ?: return@LaunchedEffect
         val web = view ?: return@LaunchedEffect
         if (loaded != html) return@LaunchedEffect
-        web.findAllAsync(query)
+        web.findAllAsync(reveal)
         model.found()
     }
 
-    AndroidView(
-        modifier = Modifier.fillMaxSize().onTap(chrome) { view?.clearMatches() },
-        factory = { ctx ->
-            WebView(ctx).apply {
-                settings.javaScriptEnabled = false
-                settings.allowFileAccess = false
-                settings.allowContentAccess = false
-                setBackgroundColor(AndroidColor.TRANSPARENT)
-                webViewClient = object : WebViewClient() {
-                    /** What is on the screen now, and so what can be searched. */
-                    override fun onPageFinished(view: WebView, url: String) {
-                        loaded = view.tag as? String
-                    }
+    // Back puts the bar away, which is how the panel closes too.
+    BackHandler(enabled = open.finding) { model.finding(false) }
 
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView,
-                        request: WebResourceRequest,
-                    ): Boolean {
-                        val url = request.url.toString()
-                        if (!url.startsWith("accent://open/")) return true
-                        val target = decode(url.removePrefix("accent://open/"))
-                        model.openLink(target)
-                        return true
-                    }
+    Column(Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.weight(1f).fillMaxWidth().onTap(chrome) {
+                if (!finding) view?.clearMatches()
+            },
+            factory = { ctx ->
+                WebView(ctx).apply {
+                    settings.javaScriptEnabled = false
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    setBackgroundColor(AndroidColor.TRANSPARENT)
+                    webViewClient = object : WebViewClient() {
+                        /** What is on the screen now, and so what can be searched. */
+                        override fun onPageFinished(view: WebView, url: String) {
+                            loaded = view.tag as? String
+                        }
 
-                    override fun shouldInterceptRequest(
-                        view: WebView,
-                        request: WebResourceRequest,
-                    ): WebResourceResponse? {
-                        if (request.isForMainFrame) return null
-                        val url = request.url.toString()
-                        if (!url.startsWith("accent://file/")) return blocked()
-                        val rel = decode(url.removePrefix("accent://file/"))
-                        val file = File(root, rel)
-                        return runCatching {
-                            WebResourceResponse(null, null, file.inputStream())
-                        }.getOrElse { blocked() }
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            val url = request.url.toString()
+                            if (!url.startsWith("accent://open/")) return true
+                            val target = decode(url.removePrefix("accent://open/"))
+                            model.openLink(target)
+                            return true
+                        }
+
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): WebResourceResponse? {
+                            if (request.isForMainFrame) return null
+                            val url = request.url.toString()
+                            if (!url.startsWith("accent://file/")) return blocked()
+                            val rel = decode(url.removePrefix("accent://file/"))
+                            val file = File(root, rel)
+                            return runCatching {
+                                WebResourceResponse(null, null, file.inputStream())
+                            }.getOrElse { blocked() }
+                        }
                     }
+                    setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
+                    setFindListener { active, total, _ -> matches = active to total }
+                    view = this
                 }
-                setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
-                view = this
-            }
-        },
-        update = { web ->
-            // The view's own tag is what it last loaded: `update` runs on every recomposition and
-            // only a different page is worth a load.
-            if (web.tag != html) {
-                web.tag = html
-                web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
-            }
-        },
-    )
+            },
+            update = { web ->
+                // The view's own tag is what it last loaded: `update` runs on every recomposition and
+                // only a different page is worth a load.
+                if (web.tag != html) {
+                    web.tag = html
+                    web.loadDataWithBaseURL(baseUri(open.rel), html, "text/html", "utf-8", null)
+                }
+            },
+        )
+        if (open.finding) {
+            FindBar(
+                query = query,
+                onQuery = { query = it },
+                matches = matches,
+                onStep = { forward -> view?.findNext(forward) },
+            )
+        }
+    }
+}
+
+/**
+ * The note's own find: the page in front, where Browse's Search is every note in the vault.
+ *
+ * At the foot of the screen, which is where every query field in this app is and where the
+ * keyboard leaves the thumb. It is the one piece of chrome that does not go while the keyboard is
+ * up, because the keyboard is what it is for — the Browse pill goes instead, so the vault's search
+ * and the page's find are never on the screen together. It takes its space from the note rather
+ * than floating over it: a bar over the last lines would cover the match it had just found.
+ *
+ * Back is the way out, as it is out of the panel. The arrows are disabled rather than absent while
+ * there is nothing to step through, and the count is the only thing that says a word is not on the
+ * page at all — everything else about a find that matches nothing looks like a find that has not
+ * scrolled yet.
+ */
+@Composable
+private fun FindBar(
+    query: String,
+    onQuery: (String) -> Unit,
+    matches: Pair<Int, Int>,
+    onStep: (Boolean) -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    val (active, total) = matches
+    Row(
+        Modifier.fillMaxWidth().padding(end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Field(
+            value = query,
+            onValue = onQuery,
+            placeholder = "Find in this note",
+            modifier = Modifier.weight(1f).focusRequester(focus),
+        )
+        Text(
+            when {
+                query.isBlank() -> ""
+                total == 0 -> "None"
+                else -> "${active + 1}/$total"
+            },
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        // Off while there is nothing to step through, and off on an emptied field: the count is
+        // whatever the last find reported, and the marks it counted have been cleared.
+        val stepping = query.isNotBlank() && total > 1
+        TextButton(onClick = { onStep(false) }, enabled = stepping) { Text("▴") }
+        TextButton(onClick = { onStep(true) }, enabled = stepping) { Text("▾") }
+    }
 }
 
 private fun blocked() = WebResourceResponse(null, null, null)
