@@ -51,24 +51,19 @@ pub(super) fn install(tab: &Rc<Tab>) {
     ));
     tab.view.add_controller(keys);
 
-    // Whether the popup is up is two signals away and is asked for by three of the steps above,
-    // so it is read from one cell rather than tracked by each of them. A `true` is checked against
-    // the view before it is believed — see [`Tab::popup_shown`] — because a `hide` that never
-    // arrived would otherwise leave every key to the view for the rest of this tab's life.
+    // Whether a popup is up is read off the widgets on each press ([`Tab::popup_shown`]), so
+    // these two are only what happens either side of one: the suggestion goes when a popup takes
+    // the keyboard, and the answers it was in the way of are asked for again when it lets go.
     let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
     completion.connect_show(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| {
-            tab.popup.set(true);
-            ghost::clear(&tab);
-        }
+        move |_| ghost::clear(&tab)
     ));
     completion.connect_hide(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
         move |_| {
-            tab.popup.set(false);
             // The popup was in the way of every answer while it was up, and nothing has been
             // edited since, so there is no refresh coming: ask again here. Through a flush, or the
             // answer is about the text the server was last given — which costs nothing when it
@@ -102,6 +97,20 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
         return answer;
     }
     if let Some(view) = tab.ghost_view().filter(|view| view.has_carets()) {
+        // A column of carets takes Return and Tab before the list helpers below ever see them,
+        // which is one of the ways a note stops continuing its lists (NOTEPAD). A column nobody
+        // meant to leave behind looks like no column at all on screen, so say where the carets
+        // are: the primary one first, then the extras.
+        if matches!(
+            key,
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab | gdk::Key::KP_Tab
+        ) {
+            tracing::debug!(
+                key = key.name().as_deref().unwrap_or("?"),
+                carets = ?view.caret_positions(),
+                "a column of carets answers the key, not the list helpers"
+            );
+        }
         return view.press(key, state);
     }
     if tab.flavour().is_note() && !stepping_a_template {
@@ -110,20 +119,25 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
     glib::Propagation::Proceed
 }
 
-/// Whether the completion popup is on screen right now, asked of the widgets rather than of the
-/// cell that mirrors the completion's two signals.
+/// Whether the completion popup is on screen right now, asked of the widgets every time.
 ///
 /// `GtkSourceCompletion` has no getter for this, so it is read the way GtkSourceView 5.20 builds
 /// the popup rather than guessed (`gtksourcecompletion.c`, `gtksourceview-assistants.c`): the
 /// popup is one `GtkSourceCompletionList`, a `GtkPopover` that `gtk_widget_set_parent` hangs off
 /// the view, and showing and hiding it is `gtk_widget_set_visible` on that widget. So it is a
-/// child of the view, and its own visible flag is the answer. The hover assistant and the
-/// signature popover are children of the view too, which is why the type is read and not merely
-/// "some popover is up".
+/// child of the view. The hover assistant and the signature popover are children of the view too,
+/// which is why the type is read and not merely "some popover is up".
+///
+/// Mapped rather than visible: only a popup on screen can hold the keyboard, and mapped is what
+/// the widget hierarchy itself says about being on screen rather than a flag someone set and may
+/// not have taken back. The two agree in everything `ACCENT_BENCH_KEYS` can stage — GTK pops the
+/// popover down when the view goes out from under it, and the drill prints both flags either side
+/// of that — so this is only the one of them that cannot be left behind. A handful of widgets,
+/// walked once per press, and the cheap flag is read before the type name.
 pub(super) fn popup_visible(view: &sourceview5::View) -> bool {
     let mut child = view.first_child();
     while let Some(widget) = child {
-        if widget.get_visible() && widget.type_().name().starts_with("GtkSourceCompletion") {
+        if widget.is_mapped() && widget.type_().name().starts_with("GtkSourceCompletion") {
             return true;
         }
         child = widget.next_sibling();
