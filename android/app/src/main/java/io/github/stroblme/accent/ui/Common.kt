@@ -142,8 +142,12 @@ class Chrome {
  * A tap and nothing else. A press held past the platform's long-press time belongs to whatever is
  * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
  * given exactly that long and the chrome stays where it was.
+ *
+ * [onTapped] is whatever else the surface wants the same tap to mean: a rendered note takes its
+ * search highlight off with it. It is captured once, along with the gesture, so what it reads has
+ * to be state it can read again rather than a value it closed over.
  */
-fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
+fun Modifier.onTap(chrome: Chrome, onTapped: () -> Unit = {}): Modifier = pointerInput(chrome) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
@@ -159,7 +163,10 @@ fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
             } while (event.changes.any { it.pressed })
             tap
         }
-        if (tapped == true) chrome.tapped()
+        if (tapped == true) {
+            chrome.tapped()
+            onTapped()
+        }
     }
 }
 
