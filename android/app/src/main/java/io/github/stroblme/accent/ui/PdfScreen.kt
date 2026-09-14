@@ -1,11 +1,15 @@
 package io.github.stroblme.accent.ui
 
+import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +28,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
@@ -42,13 +48,16 @@ import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.ffi.InkStyle
+import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.Outline
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Theme
 import java.io.File
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * What the pen is doing. A finger never draws: it moves the page.
@@ -208,9 +217,9 @@ private fun Reader(
  *
  * The surface Browse already uses, because this is the same kind of thing: a list the reader came
  * to on purpose and leaves by the gesture every other panel here leaves by. A depth is an indent
- * and nothing more — a PDF outline nests as deep as its author liked, and rows that fold are rows whose
- * folding has to be remembered. A bookmark that names no page is drawn and does nothing, which is
- * what it does in the file.
+ * and nothing more — a PDF outline nests as deep as its author liked, and rows that fold are rows
+ * whose folding has to be remembered. A bookmark naming no page is drawn and does nothing, which
+ * is what it does in the file.
  */
 @Composable
 private fun Contents(marks: List<Outline>, onClose: () -> Unit, onGo: (Int) -> Unit) {
@@ -269,6 +278,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     val density = LocalDensity.current
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
     val theme = remember(colors) {
         // The same recolouring the desktop applies in a dark theme: the document's paper lands on
@@ -324,8 +334,24 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
         list.requestScrollToItem(row, into)
     }
 
-    // A bookmark is the same jump from further away: the panel that made it is gone by now, and only
-    // the column knows how tall its rows are at the zoom in hand.
+    /**
+     * Follow a link: down the document, or out of the app.
+     *
+     * Either way the chrome comes up. The tap that got here has already been through
+     * [Chrome.tapped] — the toggle is on the parent and on the initial pass, so it is decided first
+     * — and a reader who has been moved somewhere new wants the bar that says where, which is the
+     * rule [Chrome.show] is already there for.
+     */
+    fun follow(target: LinkTarget) {
+        chrome.show()
+        when (target) {
+            is LinkTarget.Page -> goTo(target.page.toInt(), target.top ?: 0f)
+            is LinkTarget.Uri -> leave(context, target.uri)
+        }
+    }
+
+    // A bookmark is the same jump from further away: the panel that made it is gone by now, and
+    // only the column knows how tall its rows are at the zoom in hand.
     LaunchedEffect(wanted, viewport) {
         val page = wanted ?: return@LaunchedEffect
         if (viewport.width == 0) return@LaunchedEffect
@@ -432,6 +458,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
                         ),
                         theme = theme,
                         tool = tool,
+                        onLink = ::follow,
                     )
                 }
             }
@@ -520,10 +547,10 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
      * The row, and the offset into it, that put [y] points down page [index] at the top of the
      * screen — what a bookmark and an internal link both ask for.
      *
-     * The same two steps a pinch commit takes: a distance from the start of the document, then back
-     * to a row at the zoom in hand. A row index on its own would be a different place on the page at
-     * every zoom, and [y] past the end of the page falls through to the next one, which is what [at]
-     * does with any overrun.
+     * The same two steps a pinch commit takes: a distance from the start of the document, then
+     * back to a row at the zoom in hand. A row index on its own would be a different place on the
+     * page at every zoom, and [y] past the end of the page falls through to the next one, which is
+     * what [at] does with any overrun.
      */
     fun to(index: Int, y: Float, width: Int, zoom: Float): Pair<Int, Int> {
         val size = sizes.getOrNull(index) ?: return index to 0
@@ -597,6 +624,7 @@ private fun Page(
     window: IntRect,
     theme: Theme,
     tool: Tool,
+    onLink: (LinkTarget) -> Unit,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -621,10 +649,31 @@ private fun Page(
     // What is being drawn right now, in view pixels, before the core has it.
     val wet = remember { mutableStateListOf<Offset>() }
 
+    // The page's `/Link` boxes, and only while a finger is a pointer: with a tool in hand the page
+    // is a canvas, and a tap on a canvas is the start of a stroke.
+    var links by remember(index) { mutableStateOf(emptyList<PdfLinkBox>()) }
+    LaunchedEffect(index, tool) {
+        links = if (tool == Tool.Read) doc.links(index) else emptyList()
+    }
+    // Read from inside the gesture rather than closed over by it, so neither a pinch nor a jump to
+    // another zoom has to restart the handler to be followed correctly.
+    val perPoint by rememberUpdatedState(scale)
+    val follow by rememberUpdatedState(onLink)
+
     Box(
         Modifier
             .fillMaxWidth()
             .height(with(density) { heightPx.toDp() })
+            .pointerInput(tool, index, links) {
+                // A tap means a link only while nothing else has a claim on it. The drawing handler
+                // below owns the page whenever a tool is in hand and this one owns it whenever none
+                // is, so the two conditions are exact opposites and a tap is never both.
+                if (tool != Tool.Read || links.isEmpty()) return@pointerInput
+                awaitTaps { at ->
+                    val point = Point(at.x / perPoint, at.y / perPoint)
+                    hit(links, point, TAP_SLOP / perPoint)?.let { follow(it.target) }
+                }
+            }
             .pointerInput(tool, index, scale) {
                 if (tool == Tool.Read) return@pointerInput
                 detectDragGestures(
@@ -695,6 +744,67 @@ private fun Page(
 /** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
 private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
 
+/**
+ * Wait for a tap on this page and say where it landed, without taking it.
+ *
+ * Nothing is consumed, because [panZoom] abandons a gesture the moment any change in it is: a
+ * handler here that claimed the press would be one that stopped the reader panning. Watched on the
+ * initial pass for the same reason the chrome's own tap is, so that a page is not a different kind
+ * of surface from a note; a press that moves past the slop, gains a second finger, or is held past
+ * the long-press time is not a tap.
+ */
+private suspend fun PointerInputScope.awaitTaps(onTap: (Offset) -> Unit) {
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+        val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+            var tap = true
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.size > 1) tap = false
+                val moved = event.changes.firstOrNull { it.id == down.id }?.let {
+                    (it.position - down.position).getDistance() > viewConfiguration.touchSlop
+                }
+                if (moved == true) tap = false
+            } while (event.changes.any { it.pressed })
+            tap
+        }
+        if (tapped == true) onTap(down.position)
+    }
+}
+
+/**
+ * Which link a tap landed in, or none.
+ *
+ * [at] and [slop] are in page points, the space the core answers links in, so what zoom the page is
+ * drawn at does not come into it. There is a slop at all because a link is usually one line of text
+ * — about 18 px tall at a phone's fit width, against a fingertip of forty. The last match wins:
+ * `/Link` boxes may overlap, and the later annotation is the one drawn on top of the other.
+ */
+internal fun hit(links: List<PdfLinkBox>, at: Point, slop: Float): PdfLinkBox? =
+    links.lastOrNull {
+        at.x >= it.rect.left - slop && at.x <= it.rect.right + slop &&
+            at.y >= it.rect.top - slop && at.y <= it.rect.bottom + slop
+    }
+
+/** How far off a link a tap may land and still count, in view pixels. */
+private const val TAP_SLOP = 12f
+
+/**
+ * Hand a document's URL to the platform.
+ *
+ * The one place this reader reaches the network, so the system's chooser answers it rather than a
+ * view of ours: nothing is fetched, nothing is opened inside the app, and nothing happens at all
+ * for a scheme a reader would not expect a document to carry — a PDF can say `file:` or
+ * `javascript:` as easily as `https:`, and neither is a link anybody meant to follow.
+ */
+private fun leave(context: Context, uri: String) {
+    val target = Uri.parse(uri)
+    if (target.scheme?.lowercase() !in OUTWARD) return
+    runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, target)) }
+}
+
+/** The schemes a document may send the reader out to. */
+private val OUTWARD = setOf("http", "https", "mailto", "tel")
 
 private const val ERASER_RADIUS = 6f
 
