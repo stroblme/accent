@@ -426,8 +426,22 @@ pub fn unindexed_children(
 
 /// Walk `root`, applying the symlink rules. Returns files, aliases and skip reports.
 pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
+    scan_until(root, opts, &|| false)
+}
+
+/// [`scan`], stoppable. `stop` is asked once per entry, on the walking threads, so a walk halts
+/// within one directory entry rather than at the end of the vault.
+///
+/// What comes back from a stopped walk is **short of files the vault holds**, and it is not
+/// marked: a caller that reads it as the whole vault would take everything it never reached for a
+/// deletion. The one caller asks `stop` again itself and drops the result whole
+/// ([`crate::index::Index::reconcile_with`]).
+pub fn scan_until(root: &Path, opts: &ScanOptions, stop: &(dyn Fn() -> bool + Sync)) -> ScanResult {
     let collected: Mutex<Vec<FileMeta>> = Mutex::new(Vec::new());
     let mut skipped = walk_passes(root, opts, &|f| {
+        if stop() {
+            return WalkState::Quit;
+        }
         collected.lock().unwrap_or_else(|e| e.into_inner()).push(f);
         WalkState::Continue
     });

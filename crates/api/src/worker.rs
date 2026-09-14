@@ -6,6 +6,8 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -23,6 +25,10 @@ use crate::paths::{conflict_original_rel, conflict_pairs};
 ///
 /// `watch` is false on Android, where inotify over emulated storage drops events and the app
 /// asks for a [`Msg::Rescan`] when it comes back to the foreground instead.
+///
+/// `stop` is the one thing that reaches this thread while it is walking: the inbox is only read
+/// between batches, and a walk of 40 000 files is not one message-loop turn. See
+/// [`Worker::reconcile`].
 pub(crate) fn spawn(
     root: PathBuf,
     index: Index,
@@ -30,6 +36,7 @@ pub(crate) fn spawn(
     tx: Sender<Msg>,
     events: Sender<Event>,
     watch: bool,
+    stop: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>> {
     let worker = Worker {
         root,
@@ -43,6 +50,8 @@ pub(crate) fn spawn(
         reported: BTreeSet::new(),
         git_dirs: Vec::new(),
         held: Vec::new(),
+        stop,
+        paused: false,
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
@@ -68,6 +77,10 @@ pub(crate) enum Msg {
     /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.
     Settled(Sender<()>),
     Rescan,
+    /// Walk again after a [`Local::stop_indexing`](crate::local::Local::stop_indexing), and only
+    /// then: while a vault is paused every other reason to rescan is ignored, or the walk the
+    /// user just stopped would start again on the next thing the watcher saw.
+    Resume,
     Shutdown,
 }
 
@@ -93,6 +106,13 @@ struct Worker {
     /// What the inbox held that a walk read between its batches and could not answer there. See
     /// [`Worker::reconcile`].
     held: Vec<Msg>,
+    /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) from another thread
+    /// and read inside the walk: the inbox cannot be reached from there.
+    stop: Arc<AtomicBool>,
+    /// A walk stopped, and nothing but [`Msg::Resume`] may start another. Not persisted, and it
+    /// must not be: the index is a diff, so *opening the vault again* is the resume. What a
+    /// pause has to survive is this session, where the vault stays open and half-indexed.
+    paused: bool,
 }
 
 /// What one batch has accumulated: the directories whose children changed, the paths it took out
@@ -177,6 +197,10 @@ impl Worker {
                 let _ = reply.send(self.index.set_excluded(entries));
             }
         }
+        // Before the test below, which refuses every other reason to walk while paused.
+        if batch.iter().any(|m| matches!(m, Msg::Resume)) {
+            self.paused = false;
+        }
         if batch.iter().any(|m| self.needs_rescan(m)) {
             // The walk replaces the index wholesale, but the moves in this batch are still news:
             // a tab open on a path that was renamed under it has to follow.
@@ -195,6 +219,7 @@ impl Worker {
             match msg {
                 // `Settled` is answered by the caller of this one and never reaches here.
                 Msg::Rescan
+                | Msg::Resume
                 | Msg::Shutdown
                 | Msg::WatchGit(_)
                 | Msg::SetExcluded(..)
@@ -222,8 +247,15 @@ impl Worker {
     }
 
     fn needs_rescan(&self, msg: &Msg) -> bool {
+        // A paused vault walks again when the user says so and at no other prompting: a folder
+        // moved in, a resumed Android app, a reconnect — every one of them would otherwise
+        // restart the walk that was just stopped. What the watcher says about single files is
+        // still applied, so the partial index keeps up with what is edited in it.
+        if self.paused {
+            return false;
+        }
         match msg {
-            Msg::Rescan | Msg::Fs(VaultEvent::Rescan) => true,
+            Msg::Resume | Msg::Rescan | Msg::Fs(VaultEvent::Rescan) => true,
             // A directory that shows up with children was moved in whole, and inotify reports
             // nothing about what is inside it: only a walk can find those files. A directory that
             // was renamed — by us or in a terminal — is the same story, and worse: the removal of
@@ -255,35 +287,45 @@ impl Worker {
             watcher,
             git_dirs,
             held,
+            stop,
             ..
         } = self;
-        let stats = index.reconcile_with(root, &ScanOptions::default(), |index, p| {
-            let _ = events.send(Event::Progress(p));
-            let mut git = false;
-            for msg in rx.try_iter() {
-                match msg {
-                    Msg::Fs(VaultEvent::Git(_)) => git = true,
-                    Msg::WatchGit(dirs) => {
-                        if dirs != *git_dirs {
-                            *git_dirs = dirs;
-                            // A failure is left to the rebuild after the walk, which reports it.
-                            *watcher = None;
-                            *watcher = watch(index, root, git_dirs, tx)
-                                .inspect_err(|e| tracing::warn!("watching the vault: {e:#}"))
-                                .ok();
+        let stats = index.reconcile_with(
+            root,
+            &ScanOptions::default(),
+            &|| stop.load(Ordering::Relaxed),
+            |index, p| {
+                let _ = events.send(Event::Progress(p));
+                let mut git = false;
+                for msg in rx.try_iter() {
+                    match msg {
+                        Msg::Fs(VaultEvent::Git(_)) => git = true,
+                        Msg::WatchGit(dirs) => {
+                            if dirs != *git_dirs {
+                                *git_dirs = dirs;
+                                // A failure is left to the rebuild after the walk, which reports it.
+                                *watcher = None;
+                                *watcher = watch(index, root, git_dirs, tx)
+                                    .inspect_err(|e| tracing::warn!("watching the vault: {e:#}"))
+                                    .ok();
+                            }
                         }
+                        Msg::SetExcluded(entries, reply) => {
+                            let _ = reply.send(index.set_excluded(&entries));
+                            excluded = Some(entries);
+                        }
+                        other => held.push(other),
                     }
-                    Msg::SetExcluded(entries, reply) => {
-                        let _ = reply.send(index.set_excluded(&entries));
-                        excluded = Some(entries);
-                    }
-                    other => held.push(other),
                 }
-            }
-            if git {
-                let _ = events.send(Event::GitChanged);
-            }
-        });
+                if git {
+                    let _ = events.send(Event::GitChanged);
+                }
+            },
+        );
+        // The flag has done its work either way, and a stop that arrived as the walk ended must
+        // not be waiting for the next one.
+        self.stop.store(false, Ordering::Relaxed);
+        self.paused = matches!(&stats, Ok(s) if s.stopped);
         // A set written mid-walk marked the rows that were there, and what the walk added after
         // it inherited its parent's flag — but a directory the set itself names, added after it,
         // had no marked parent to inherit from, so the set is applied once more.
@@ -295,6 +337,8 @@ impl Worker {
         self.rebuild_watcher();
         match stats {
             Ok(stats) => {
+                // Emitted for a stopped walk too, carrying `stopped`: it is what tells the window
+                // it is looking at a partial index rather than a finished one.
                 self.emit(Event::Reconciled(stats));
                 self.emit_conflicts();
             }
@@ -494,8 +538,59 @@ mod tests {
     use crate::{Etag, Event, VaultConfig, fs};
     use accent_core::index::Index;
     use accent_core::watch::VaultEvent;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, Instant};
+
+    /// Stop is a pause the worker remembers: what it wrote stays, every other reason to walk is
+    /// refused until someone asks, and the walk that follows finishes the job. Enough files that
+    /// the flag, set the moment `open` returns, reaches a walk that is still going.
+    #[test]
+    fn a_stopped_vault_keeps_its_index_and_waits_to_be_resumed() {
+        let root = tempfile::tempdir().unwrap();
+        let notes = 1000;
+        for i in 0..notes {
+            std::fs::write(root.path().join(format!("n{i}.md")), "body").unwrap();
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let (vault, events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        vault.stop_indexing().unwrap();
+
+        let first = wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET);
+        let Some(Event::Reconciled(stats)) = first else {
+            panic!("no reconcile: {first:?}");
+        };
+        assert!(stats.stopped, "the first walk was stopped: {stats:?}");
+        let partial = vault.file_paths(false).unwrap().len();
+        assert!(partial < notes, "a partial index, {partial} of {notes}");
+
+        // A rescan is what a folder moved in, an Android resume and a reconnect all come down to.
+        // None of them may restart the walk the user has just stopped.
+        vault.rescan().unwrap();
+        assert!(
+            wait_for(
+                &events,
+                |e| matches!(e, Event::Reconciled(_)),
+                Duration::from_millis(500),
+            )
+            .is_none(),
+            "a paused vault walked again on a rescan"
+        );
+
+        vault.resume_indexing().unwrap();
+        let done = wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET);
+        let Some(Event::Reconciled(stats)) = done else {
+            panic!("no reconcile after resume: {done:?}");
+        };
+        assert!(!stats.stopped);
+        assert_eq!(vault.file_paths(false).unwrap().len(), notes);
+    }
 
     /// Depends on real inotify events.
     #[test]
@@ -835,6 +930,7 @@ mod tests {
             tx.clone(),
             events,
             true,
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 

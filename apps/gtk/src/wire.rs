@@ -318,6 +318,36 @@ pub fn wire_window(app: &Rc<App>) {
     });
     app.statusbar.widget().add_controller(quiet);
 
+    // Stop / Resume beside the indexing readout. Both are round trips on a remote vault, whose
+    // walk runs on the host, so neither is made on the main loop.
+    //
+    // Resume says so at once — a walk is starting, and a second press would post a second one.
+    // Stop does not: the walk runs until the batch it is on commits, and it is still Stop until
+    // the worker answers with a reconcile that says it stopped.
+    app.statusbar.index_control().connect_clicked(glib::clone!(
+        #[weak]
+        app,
+        move |_| {
+            let (Some(vault), weak) = (app.vault().cloned(), Rc::downgrade(&app)) else {
+                return;
+            };
+            let resume = app.statusbar.indexing() == statusbar::Indexing::Paused;
+            if resume {
+                app.statusbar.set_indexing(statusbar::Indexing::Running);
+            }
+            glib::spawn_future_local(async move {
+                let asked = gio::spawn_blocking(move || match resume {
+                    true => vault.resume_indexing(),
+                    false => vault.stop_indexing(),
+                })
+                .await;
+                if let (Ok(Err(e)), Some(app)) = (asked, weak.upgrade()) {
+                    app.toast(&format!("Cannot reach the vault: {e}"));
+                }
+            });
+        }
+    ));
+
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
     // popover has a plain widget to hang off.
