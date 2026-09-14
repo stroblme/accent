@@ -1,6 +1,8 @@
 //! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
 
 use super::*;
+use accent_core::config::Theme;
+use sourceview5::prelude::BufferExt as _;
 
 /// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
 /// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
@@ -256,6 +258,79 @@ async fn bench_dangling(app: Rc<App>) {
         dialog.and_then(|d| d.heading())
     );
     bench_quit(&app);
+}
+
+/// Walk the window through the themes and print what a note's own tags are painted in on each
+/// side of every switch. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
+/// signal a system switch raises, so the `notify::dark` handler in `wire.rs` — `theme::refresh`
+/// then `App::restyle_all` — is what runs here, portal or no portal. Solarized raises no such
+/// notify (it keeps the system's own dark state), so the pass is asked for the way
+/// `Shell::apply_config` asks for it there.
+///
+/// Solarized follows the system between its two halves and Xvfb has no portal to move the system
+/// with, so its dark half is a second launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
+///
+/// `before` is read the instant the switch has been made and says what the tags still hold;
+/// `after` is the same tags once the deferred pass has run. What to look for is `after`: every
+/// foreground-derived tag must be that line's own `view_fg` at its alpha. When the pass ran
+/// inside the notify they were the outgoing theme's instead — `listmarker=rgba(0,0,6,0.4)`,
+/// near-black, against a `view_fg` of `rgb(255,255,255)`, which is the invisible bullet.
+///
+/// `scheme_text` is beside them to say why `view_fg` is the right thing to mix from. It is the
+/// style scheme's own `text` foreground, and in none of the four themes is it what reaches the
+/// glyphs: rendering the view and reading its pixels gives the prose as `view_fg` every time
+/// (`(51,51,55)` on white under Adwaita, where the scheme says `#504E55`), so the scheme's ink is
+/// a colour nothing on screen is drawn in.
+pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        tab.set_text("plain prose\n- item\n> quote\n[link](x) `code`\n");
+        for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            println!("bench theme {theme:?} before {}", bench_theme_colours(&tab));
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench theme {theme:?} after {}", bench_theme_colours(&tab));
+        }
+        bench_quit(&app);
+    });
+}
+
+/// What the theme-derived tags of `tab` hold right now, each with what it reads at against the
+/// page under it, next to what they are derived from: the view's resolved foreground, the scheme
+/// the buffer is on and that scheme's own `text` ink.
+fn bench_theme_colours(tab: &Rc<Tab>) -> String {
+    let table = tab.buffer.tag_table();
+    let page = crate::highlight::page(adw::StyleManager::default().is_dark());
+    let says = |c: Option<gtk::gdk::RGBA>| match c {
+        Some(c) => format!("{c}@{:.2}:1", crate::highlight::reads_at(c, page)),
+        None => "none".to_string(),
+    };
+    let fg = |name: &str| says(table.lookup(name).and_then(|t| t.foreground_rgba()));
+    let scheme = tab.buffer.style_scheme();
+    format!(
+        "dark={} scheme={:?} scheme_text={:?} page={page} view_fg={}@{:.2}:1 marker={} \
+         listmarker={} quote={} taskdone={} code_bg={} link={}",
+        adw::StyleManager::default().is_dark(),
+        scheme.as_ref().map(|s| s.id()),
+        scheme
+            .as_ref()
+            .and_then(|s| s.style("text"))
+            .and_then(|s| s.foreground()),
+        tab.view.color(),
+        crate::highlight::reads_at(tab.view.color(), page),
+        fg("marker"),
+        fg("listmarker"),
+        fg("quote"),
+        fg("taskdone"),
+        says(table.lookup("code").and_then(|t| t.background_rgba())),
+        fg("link"),
+    )
 }
 
 pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {

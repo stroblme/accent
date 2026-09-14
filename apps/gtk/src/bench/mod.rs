@@ -31,7 +31,7 @@ use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
+use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -85,6 +85,11 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
+///
+/// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
+/// system switch and the preferences do, and prints what the note's theme-derived tags hold on
+/// each side of every switch: as it lands, and again once the restyle it defers has run. A second
+/// launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` is Solarized's other half.
 ///
 /// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line
 /// each do, and prints what the temporary reveal painted and what takes it down again, plus the
@@ -145,6 +150,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let theme = std::env::var("ACCENT_BENCH_THEME").ok();
     let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let outline = std::env::var("ACCENT_BENCH_OUTLINE").ok();
@@ -171,6 +177,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && pdf.is_none()
         && tabs.is_none()
         && occur.is_none()
+        && theme.is_none()
         && reveal.is_none()
         && follow.is_none()
         && outline.is_none()
@@ -231,6 +238,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = occur {
             return bench_occurrences(&app, &rel);
+        }
+        if let Some(rel) = theme {
+            return bench_theme(&app, &rel);
         }
         if let Some(rel) = reveal {
             return bench_reveal(&app, &rel);

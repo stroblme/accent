@@ -13,18 +13,21 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * One accent, taken from the system, and one flat surface under everything.
+ * One accent, taken from the system; the page and the ink on it, taken from the desktop.
  *
- * Material You answers the same question GNOME's accent does — what colour is this device — so
- * the app asks it and writes no palette of its own beyond the page it lays everything on. What it
- * does override is Material's tonal elevation: every container tone is flattened onto that page,
- * because a note wants paper to sit on, not a stack of cards. See MOBILE_DESIGN.md.
+ * Material You answers the same question GNOME's accent does — what colour is this device — so the
+ * app asks it for `primary` and the roles that exist to carry it, and for nothing else. What a note
+ * is read off is the desktop's view instead, white paper or libadwaita's dark shade with
+ * libadwaita's text on it, so the two apps are recognisably one editor. Material's tonal elevation
+ * goes the same way: every container tone is flattened onto that page, because a note wants paper
+ * to sit on, not a stack of cards. See MOBILE_DESIGN.md.
  */
 @Composable
 fun AccentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
@@ -60,16 +63,45 @@ private val AccentShapes = Shapes(
 )
 
 /**
- * Every container tone collapsed onto the surface: one background, no cards, no elevation.
+ * The desktop's `--view-bg-color` and the text libadwaita puts on it, both halves of both pairs.
  *
- * In light mode that one surface is paper white, which is the desktop's `--view-bg-color` and the
- * colour a page of text has always been. Material You tints its own surface towards the wallpaper
- * and the result reads cream beside the desktop, so this is the one role the app takes off the
- * system — the accent, the text and the inverted pill still come from it. Dark mode keeps the
- * shade it was given: the argument for white is paper, and it does not run the other way.
+ * Copied from `apps/gtk/src/theme.rs` (`VIEW_LIGHT`/`VIEW_DARK` and the `*_TEXT` pair beside them)
+ * rather than re-derived, so the two apps cannot drift apart. [InkLight] is pre-composited there
+ * for the same reason a rendered page needs it opaque: libadwaita's light `--view-fg-color` is
+ * `RGB(0 0 6 / 80%)`, and over white that is `#333338`.
+ */
+private val PageLight = Color(0xFFFFFFFF)
+private val PageDark = Color(0xFF1D1D20)
+private val InkLight = Color(0xFF333338)
+private val InkDark = Color(0xFFEBEBEB)
+
+/**
+ * The accent kept, everything under it replaced: one page, one ink, no cards, no elevation.
+ *
+ * Material You derives every role from the wallpaper, the page and the text on it included, and
+ * beside the desktop's view the result reads cream. So the page is written onto `surface`, onto
+ * every container tone — which is what flattens the elevation — and onto `background`, and the ink
+ * onto `onSurface` and `onBackground`. `onSurfaceVariant`, `outline` and `outlineVariant` have no
+ * desktop counterpart and are that same ink thinned over that same page: 55% for secondary text,
+ * then 40% for a border and 15% for a hairline. The 55% is libadwaita's own `.dim-label`, taken for
+ * parity rather than for contrast and at a known cost — `#8f8f92` on white is 3.2:1, short of WCAG
+ * AA's 4.5 for body text, where 70% would have cleared it. The desktop's number wins because every
+ * other colour here is already the desktop's literal value; the dark page's `#8e8e8f` is 5.1:1 and
+ * clears it anyway. `scrim` is black in both modes, a dimmed screen being an absence of light
+ * rather than a colour of its own.
+ *
+ * `inverseSurface` and `inverseOnSurface` are the *other* mode's pair, which is what keeps the
+ * Browse pill (and the snackbar, which reads the same two roles) dark on a light theme and light on
+ * a dark one — see [Pill].
+ *
+ * Left to the system by decision, not by oversight, because it is the accent and the app has no
+ * answer of its own: `primary` with its container and `on-` roles, `inversePrimary`, the secondary
+ * and tertiary families, and `error`. `surfaceTint` stays too and is never spent — it only shows
+ * through tonal elevation, and nothing here asks for any.
  */
 internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
-    val page = if (dark) surface else Color.White
+    val page = if (dark) PageDark else PageLight
+    val ink = if (dark) InkDark else InkLight
     return copy(
         surface = page,
         surfaceContainerLowest = page,
@@ -81,6 +113,14 @@ internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
         surfaceBright = page,
         surfaceDim = page,
         background = page,
+        onSurface = ink,
+        onBackground = ink,
+        onSurfaceVariant = ink.copy(alpha = 0.55f).compositeOver(page),
+        outline = ink.copy(alpha = 0.4f).compositeOver(page),
+        outlineVariant = ink.copy(alpha = 0.15f).compositeOver(page),
+        scrim = Color.Black,
+        inverseSurface = if (dark) PageLight else PageDark,
+        inverseOnSurface = if (dark) InkLight else InkDark,
     )
 }
 
