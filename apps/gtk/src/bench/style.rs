@@ -309,7 +309,11 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
             &tab.buffer.iter_at_offset(at + 2),
         );
         let (_, muted) = tab.occurrence_highlight();
-        let find = bench_search_tag(&tab, find_colour.as_deref());
+        let find = bench_search_tag(
+            &tab,
+            find_colour.as_deref(),
+            Some(&tab.reveal_highlight().1),
+        );
         println!(
             "bench occur overlap find={:?} muted={:?}",
             find.as_ref()
@@ -320,7 +324,12 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
         for what in ["unedited", "edited"] {
             println!(
                 "bench occur priority {what} find={:?} muted={}",
-                bench_search_tag(&tab, find_colour.as_deref()).map(|tag| tag.priority()),
+                bench_search_tag(
+                    &tab,
+                    find_colour.as_deref(),
+                    Some(&tab.reveal_highlight().1)
+                )
+                .map(|tag| tag.priority()),
                 muted.priority()
             );
             tab.buffer.insert(&mut tab.buffer.end_iter(), "al\n");
@@ -330,13 +339,186 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Jump into the note at `rel` the three ways a jump arrives — a search hit's range, a tag's
+/// name, a Go to Line — and print what the reveal painted each time, then what each kind of
+/// interaction leaves of it. The find bar's query is printed beside it throughout: a jump used to
+/// hand the bar the matched text, which lit every other occurrence in the note and never expired.
+///
+/// A click is not driven here because it is the same mark move an arrow key is: GtkTextView
+/// places the caret on button-press, and the reveal comes down with the caret wherever it moves.
+///
+/// Point it at a note that carries a tag, or the first three lines have nothing to resolve.
+pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
+    // The cold path first, which is the one a click in the sidebar really takes: the note has no
+    // tab, so the jump waits on `with_tab` until one has landed and the load has filled it. The
+    // note is read from disk here because nothing in the window has parsed it yet.
+    let from_disk = std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
+    match accent_core::markdown::analyze(&from_disk).tags.first() {
+        Some(tag) => app.open_note_at(rel, Some(crate::sidebar::Target::Tag(tag.name.clone()))),
+        None => app.open_path(rel),
+    }
+    let app = app.clone();
+    let rel = rel.to_string();
+    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let under = |ranges: &[(i32, i32)]| {
+            ranges.first().map(|&(from, to)| {
+                tab.buffer
+                    .text(
+                        &tab.buffer.iter_at_offset(from),
+                        &tab.buffer.iter_at_offset(to),
+                        false,
+                    )
+                    .to_string()
+            })
+        };
+        let (on, tag) = tab.reveal_highlight();
+        let ranges = bench_tag_ranges(&tab, &tag);
+        println!(
+            "bench reveal case=cold_open on={on} at={ranges:?} text={:?}",
+            under(&ranges)
+        );
+
+        // The same two targets again with the tab already open, which is the other half of
+        // `with_tab`. Nothing here edits the buffer, so nothing is written back.
+        let on_disk = tab.text();
+        let tagged = accent_core::markdown::analyze(&on_disk)
+            .tags
+            .into_iter()
+            .next();
+        for (label, target) in [
+            (
+                "open_tag",
+                tagged.map(|t| crate::sidebar::Target::Tag(t.name)),
+            ),
+            (
+                "open_hit",
+                // A word out of the note's own body, so what is printed under the reveal says
+                // whether the byte range a search hit carries survived the count into characters.
+                on_disk
+                    .split_whitespace()
+                    .find(|w| w.len() >= 6 && w.chars().all(|c| c.is_ascii_alphabetic()))
+                    .and_then(|w| on_disk.find(w).map(|at| at..at + w.len()))
+                    .map(crate::sidebar::Target::Range),
+            ),
+        ] {
+            let Some(target) = target else {
+                println!("bench reveal case={label} on=false at=[] text=None");
+                continue;
+            };
+            app.open_note_at(&rel, Some(target));
+            let (on, tag) = tab.reveal_highlight();
+            let ranges = bench_tag_ranges(&tab, &tag);
+            println!(
+                "bench reveal case={label} on={on} at={ranges:?} text={:?}",
+                under(&ranges)
+            );
+        }
+        // ASCII throughout, so the byte offset `find` gives is also the character offset the
+        // buffer counts in.
+        let text = "Alpha beta alpha\ngamma #focus delta\nlast line here\n";
+        tab.set_text(text);
+        let (find_colour, muted_colour) = tab.match_colours();
+        let (_, reveal_tag) = tab.reveal_highlight();
+        println!(
+            "bench reveal colours find={find_colour:?} reveal={:?} muted={muted_colour:?}",
+            reveal_tag.background_rgba().map(|c| c.to_str().to_string())
+        );
+        let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
+        let show = |label: &str| {
+            let (on, tag) = tab.reveal_highlight();
+            println!(
+                "bench reveal case={label} on={on} at={:?} query={:?}",
+                bench_tag_ranges(&tab, &tag),
+                sourceview5::prelude::SearchSettingsExt::search_text(
+                    &tab.search_context().settings()
+                )
+            );
+        };
+
+        // What a sidebar search result opens onto: the match itself, selected and revealed.
+        let hit = at("beta") as usize;
+        tab.goto_range(hit..hit + 4);
+        show("search_hit");
+        // What a row under a tag opens onto: where the note writes the tag, marker and all.
+        tab.goto_tag("focus");
+        show("tag");
+        // What Go to Line lands on: the whole of the line, whatever column was asked for.
+        tab.goto_line(3, 6);
+        tab.reveal_line(3);
+        show("goto_line");
+
+        // Each interaction in turn, the reveal put back between them.
+        for (label, act) in [
+            ("caret_move", 0),
+            ("arrow_key", 1),
+            ("keystroke", 2),
+            ("edit_in_place", 3),
+        ] {
+            tab.goto_range(hit..hit + 4);
+            match act {
+                0 => tab.buffer.place_cursor(&tab.buffer.end_iter()),
+                1 => tab
+                    .view
+                    .emit_move_cursor(gtk::MovementStep::VisualPositions, 1, false),
+                2 => tab.buffer.insert_at_cursor("x"),
+                // A delete forward leaves the caret where it is, so the edit is what answers.
+                _ => {
+                    let mut from = tab.buffer.end_iter();
+                    let mut to = tab.buffer.end_iter();
+                    from.backward_char();
+                    tab.buffer.place_cursor(&from);
+                    tab.goto_range(hit..hit + 4);
+                    tab.buffer.delete(&mut from, &mut to);
+                }
+            }
+            show(label);
+        }
+
+        // All three highlights on the same word. The find bar's tag has to outrank the reveal and
+        // the reveal the muted hint, or a revealed match would be painted by the dimmer of them.
+        // The bar's tag is found by its colour, which the reveal now shares, so the reveal is
+        // taken out of the search before the one left is called the bar's.
+        tab.set_text(text);
+        tab.goto_range(hit..hit + 4);
+        tab.set_query("beta");
+        tab.set_highlight(true);
+        bench_pump();
+        let (_, reveal_tag) = tab.reveal_highlight();
+        let (_, muted) = tab.occurrence_highlight();
+        let find = bench_search_tag(&tab, find_colour.as_deref(), Some(&reveal_tag));
+        println!(
+            "bench reveal priority find={:?} reveal={} muted={} at={:?}",
+            find.as_ref().map(|tag| tag.priority()),
+            reveal_tag.priority(),
+            muted.priority(),
+            find.as_ref()
+                .map(|tag| bench_tag_ranges(&tab, tag))
+                .unwrap_or_default()
+        );
+        bench_quit(&app);
+    });
+}
+
 /// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps
-/// that tag to itself, and the scheme's `search-match` background is what it was given.
-fn bench_search_tag(tab: &Rc<Tab>, colour: Option<&str>) -> Option<gtk::TextTag> {
+/// that tag to itself, and the scheme's `search-match` background is what it was given. `skip` is
+/// the reveal tag, which is given the same colour on purpose and would otherwise answer first.
+fn bench_search_tag(
+    tab: &Rc<Tab>,
+    colour: Option<&str>,
+    skip: Option<&gtk::TextTag>,
+) -> Option<gtk::TextTag> {
     let wanted = gdk::RGBA::parse(colour?).ok()?;
     let mut found = None;
     tab.buffer.tag_table().foreach(|tag| {
-        if found.is_none() && tag.is_background_set() && tag.background_rgba() == Some(wanted) {
+        let mine = skip.is_some_and(|skip| skip == tag);
+        if found.is_none()
+            && !mine
+            && tag.is_background_set()
+            && tag.background_rgba() == Some(wanted)
+        {
             found = Some(tag.clone());
         }
     });
