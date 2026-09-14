@@ -190,11 +190,16 @@ pub fn with_alpha(c: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha)
 }
 
-/// Apply the current accent colour and foreground-derived dim colours. Call once after the view is
+/// Apply the standalone accent and the foreground-derived dim colours. Call once after the view is
 /// realised and again on every `notify::accent-color` / `notify::dark`.
 pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let table = buffer.tag_table();
-    let accent = adw::StyleManager::default().accent_color_rgba();
+    let style = adw::StyleManager::default();
+    // The standalone accent, not `accent_color_rgba`: that one is the brand colour a button is
+    // filled with, and it is the same in both halves of the theme. libadwaita darkens it for a
+    // light page and lightens it for a dark one before anybody writes text in it, which is what
+    // `to_standalone_rgba` hands back — the colour the platform's own links are written in.
+    let accent = style.accent_color().to_standalone_rgba(style.is_dark());
     let fg = view.color();
     let set = |name: &str, f: &dyn Fn(&gtk::TextTag)| {
         if let Some(t) = table.lookup(name) {
