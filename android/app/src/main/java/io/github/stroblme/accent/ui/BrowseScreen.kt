@@ -1,5 +1,10 @@
 package io.github.stroblme.accent.ui
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope.SlideDirection
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
@@ -74,45 +79,59 @@ fun BrowseScreen(
 
     PullDownPanel(onClose) {
         ScreenBar("Browse")
-        LazyColumn(
-            Modifier.weight(1f).fillMaxWidth(),
-            reverseLayout = mode != Mode.Search,
-        ) {
-            when {
-                mode != Mode.Search -> items(ranked, key = { it }) { row ->
-                    ListItem(
-                        headlineContent = {
-                            Text(
-                                if (mode == Mode.Command) row else File(row).name,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        },
-                        supportingContent = if (mode == Mode.Command) null else ({
-                            Text(row, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
-                        }),
-                        colors = flatRow(),
-                        modifier = Modifier.row {
-                            if (mode == Mode.Command) {
-                                model.recents.touch(Recents.Kind.Commands, row)
-                                Commands.first { it.label == row }.run(model)
-                                onClose()
-                            } else {
-                                onOpen(row)
-                            }
-                        },
-                    )
-                }
-                query.isBlank() -> rows(children, expanded, "", 0, model, onOpen)
-                else -> items(results, key = { it.relPath }) { hit ->
-                    ListItem(
-                        headlineContent = { Text(hit.title ?: File(hit.relPath).name) },
-                        supportingContent = {
-                            Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        },
-                        colors = flatRow(),
-                        modifier = Modifier.row { onOpen(hit.relPath) },
-                    )
+        // Stepping between the chips moves the list the way the eye went: towards Command is a
+        // step left, back towards Search a step right. The direction is the point of it — what
+        // changed is which of three things the field means, and a list that simply swapped its
+        // contents said nothing about where the reader had come from.
+        AnimatedContent(
+            targetState = mode,
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            transitionSpec = {
+                val towards =
+                    if (targetState.ordinal > initialState.ordinal) SlideDirection.Left
+                    else SlideDirection.Right
+                (slideIntoContainer(towards, stepping()) + fadeIn(stepping())) togetherWith
+                    (slideOutOfContainer(towards, stepping()) + fadeOut(stepping()))
+            },
+            label = "browse mode",
+        ) { tab ->
+            LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
+                when {
+                    tab != Mode.Search -> items(ranked, key = { it }) { row ->
+                        ListItem(
+                            headlineContent = {
+                                Text(
+                                    if (tab == Mode.Command) row else File(row).name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            supportingContent = if (tab == Mode.Command) null else ({
+                                Text(row, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+                            }),
+                            colors = flatRow(),
+                            modifier = Modifier.row {
+                                if (tab == Mode.Command) {
+                                    model.recents.touch(Recents.Kind.Commands, row)
+                                    Commands.first { it.label == row }.run(model)
+                                    onClose()
+                                } else {
+                                    onOpen(row)
+                                }
+                            },
+                        )
+                    }
+                    query.isBlank() -> rows(children, expanded, "", 0, model, onOpen)
+                    else -> items(results, key = { it.relPath }) { hit ->
+                        ListItem(
+                            headlineContent = { Text(hit.title ?: File(hit.relPath).name) },
+                            supportingContent = {
+                                Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            },
+                            colors = flatRow(),
+                            modifier = Modifier.row { onOpen(hit.relPath) },
+                        )
+                    }
                 }
             }
         }

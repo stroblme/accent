@@ -5,7 +5,12 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -61,6 +66,26 @@ val Gutter: Dp = 16.dp
  * same rectangle whichever of the two it is.
  */
 val DocumentGap: Dp = 8.dp
+
+/**
+ * The motion a surface arrives with, leaves with, and steps sideways with.
+ *
+ * Two durations and three curves. 200 ms for something arriving and 150 ms for something leaving
+ * or moving across — Material's short-4 and short-3, the fast end of its own scale, because this
+ * is a reading app and a transition that has to be waited for is worse than no transition at all.
+ * What arrives decelerates into place and what leaves accelerates away, which is Material's
+ * asymmetry and its reason: arriving is watched, leaving is not. A step sideways does both, since
+ * it is one surface travelling rather than a new one showing up.
+ *
+ * Nothing here asks about reduced motion and nothing needs to: Compose scales every animation by
+ * the platform's animator duration scale, so a device with animations turned off gets all of this
+ * at once.
+ */
+fun <T> arriving(): FiniteAnimationSpec<T> = tween(200, easing = LinearOutSlowInEasing)
+
+fun <T> leaving(): FiniteAnimationSpec<T> = tween(150, easing = FastOutLinearInEasing)
+
+fun <T> stepping(): FiniteAnimationSpec<T> = tween(150, easing = FastOutSlowInEasing)
 
 /** A colour as `0xRRGGBB`, which is how both the core and a stylesheet want one. */
 fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
