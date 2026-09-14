@@ -12,11 +12,11 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Where a bookmark or a link puts the reader, and which link a finger landed on.
+ * Where a bookmark or a link puts the reader, which page a finger landed on, and which link.
  *
- * Both are the sort of arithmetic that is wrong by a scale factor and looks almost right, and
- * neither needs a device: the sheet that lists the bookmarks and the intent that leaves the app do,
- * and are checked by hand instead.
+ * All three are the sort of arithmetic that is wrong by a scale factor and looks almost right,
+ * and none needs a device: the panel that lists the bookmarks and the intent that leaves the app
+ * do, and are checked by hand instead.
  */
 class NavigationTest {
     /** Five A4 pages with the 8 px gap the column puts under each, as at a 1080 px fit width. */
@@ -50,6 +50,42 @@ class NavigationTest {
     @Test
     fun `a destination past the end of a page falls onto the next`() {
         assertEquals(1, pages.to(0, 900f, width, 1f).first)
+    }
+
+    /** A tap, once the pan and the scroll have been taken off it, is a point in the column. */
+    @Test
+    fun `a tap on a page comes back in the page's own points`() {
+        val land = pages.on(540f, 764f, width, 1f)!!
+        assertEquals(0, land.page)
+        // Half the width of the column is half the width of the paper, whatever the zoom.
+        assertEquals(297.5f, land.point.x, 0.01f)
+        assertEquals(420.91f, land.point.y, 0.01f)
+        assertEquals(1080f / 595f, land.scale, 0.001f)
+    }
+
+    /** The 8 px under each page belongs to no page, and neither does anything past the last. */
+    @Test
+    fun `a tap that missed every page is on none of them`() {
+        val row = pages.top(1, width, 1f)
+        assertNull(pages.on(540f, row - 4f, width, 1f))
+        assertNull(pages.on(540f, pages.top(4, width, 1f) + 99_000f, width, 1f))
+        assertNull(pages.on(540f, -1f, width, 1f))
+    }
+
+    /**
+     * The property the hit test rests on: the same place on the paper is the same place in points
+     * however far the pages have been pinched, because that is the space links are given in.
+     */
+    @Test
+    fun `the same point on the paper reads the same at any zoom`() {
+        for (zoom in listOf(1f, 8f)) {
+            val scale = width * zoom / 595f
+            val y = pages.top(2, width, zoom) + 100f * scale
+            val land = pages.on(297.5f * scale, y, width, zoom)!!
+            assertEquals(2, land.page)
+            assertEquals(297.5f, land.point.x, 0.05f)
+            assertEquals(100f, land.point.y, 0.05f)
+        }
     }
 
     private fun link(left: Float, top: Float, right: Float, bottom: Float, to: LinkTarget) =
