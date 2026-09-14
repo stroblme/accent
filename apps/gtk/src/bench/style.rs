@@ -1,6 +1,7 @@
 //! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
 
 use super::*;
+use accent_core::config::Theme;
 use sourceview5::prelude::BufferExt as _;
 
 /// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
@@ -259,16 +260,27 @@ async fn bench_dangling(app: Rc<App>) {
     bench_quit(&app);
 }
 
-/// Flip the window between light and dark and print what a note's own tags are painted in either
-/// side of each flip. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
+/// Walk the window through the themes and print what a note's own tags are painted in on each
+/// side of every switch. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
 /// signal a system switch raises, so the `notify::dark` handler in `wire.rs` — `theme::refresh`
-/// then `App::restyle_all` — is what runs here, portal or no portal.
+/// then `App::restyle_all` — is what runs here, portal or no portal. Solarized raises no such
+/// notify (it keeps the system's own dark state), so the pass is asked for the way
+/// `Shell::apply_config` asks for it there.
+///
+/// Solarized follows the system between its two halves and Xvfb has no portal to move the system
+/// with, so its dark half is a second launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
 ///
 /// `before` is read the instant the switch has been made and says what the tags still hold;
 /// `after` is the same tags once the deferred pass has run. What to look for is `after`: every
 /// foreground-derived tag must be that line's own `view_fg` at its alpha. When the pass ran
 /// inside the notify they were the outgoing theme's instead — `listmarker=rgba(0,0,6,0.4)`,
 /// near-black, against a `view_fg` of `rgb(255,255,255)`, which is the invisible bullet.
+///
+/// `scheme_text` is beside them to say why `view_fg` is the right thing to mix from. It is the
+/// style scheme's own `text` foreground, and in none of the four themes is it what reaches the
+/// glyphs: rendering the view and reading its pixels gives the prose as `view_fg` every time
+/// (`(51,51,55)` on white under Adwaita, where the scheme says `#504E55`), so the scheme's ink is
+/// a colour nothing on screen is drawn in.
 pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -277,13 +289,10 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
         let Some(tab) = app.open_tabs().into_iter().next() else {
             return bench_quit(&app);
         };
-        tab.set_text("- one\n- two\n\n> quote\n");
-        for theme in [
-            accent_core::config::Theme::Light,
-            accent_core::config::Theme::Dark,
-            accent_core::config::Theme::Light,
-        ] {
+        tab.set_text("plain prose\n- item\n> quote\n[link](x) `code`\n");
+        for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
             crate::theme::apply(theme);
+            app.restyle_all();
             println!("bench theme {theme:?} before {}", bench_theme_colours(&tab));
             glib::timeout_future(Duration::from_millis(300)).await;
             println!("bench theme {theme:?} after {}", bench_theme_colours(&tab));
@@ -293,8 +302,7 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
 }
 
 /// What the theme-derived tags of `tab` hold right now, next to what they are derived from: the
-/// view's resolved foreground, the scheme the buffer is on, and — for `link`, the one tag that
-/// takes the accent rather than the ink — nothing that a dark switch moves at all.
+/// view's resolved foreground, the scheme the buffer is on and that scheme's own `text` ink.
 fn bench_theme_colours(tab: &Rc<Tab>) -> String {
     let table = tab.buffer.tag_table();
     let fg = |name: &str| {
@@ -303,14 +311,23 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
             .and_then(|t| t.foreground_rgba())
             .map(|c| c.to_string())
     };
+    let scheme = tab.buffer.style_scheme();
     format!(
-        "dark={} scheme={:?} view_fg={} listmarker={:?} marker={:?} quote={:?} link={:?}",
+        "dark={} scheme={:?} scheme_text={:?} view_fg={} listmarker={:?} quote={:?} \
+         code_bg={:?} link={:?}",
         adw::StyleManager::default().is_dark(),
-        tab.buffer.style_scheme().map(|s| s.id()),
+        scheme.as_ref().map(|s| s.id()),
+        scheme
+            .as_ref()
+            .and_then(|s| s.style("text"))
+            .and_then(|s| s.foreground()),
         tab.view.color(),
         fg("listmarker"),
-        fg("marker"),
         fg("quote"),
+        table
+            .lookup("code")
+            .and_then(|t| t.background_rgba())
+            .map(|c| c.to_string()),
         fg("link"),
     )
 }

@@ -86,9 +86,10 @@ use tags::bench_tags;
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
 ///
-/// `ACCENT_BENCH_THEME=<rel_note>` switches the window between light and dark the way a system
-/// switch does and prints what the note's theme-derived tags hold on each side of it: as the
-/// switch lands, and again once the restyle it defers has run.
+/// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
+/// system switch and the preferences do, and prints what the note's theme-derived tags hold on
+/// each side of every switch: as it lands, and again once the restyle it defers has run. A second
+/// launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark` is Solarized's other half.
 ///
 /// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line
 /// each do, and prints what the temporary reveal painted and what takes it down again, plus the
