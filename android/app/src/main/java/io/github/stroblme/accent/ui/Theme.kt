@@ -82,10 +82,13 @@ private val InkDark = Color(0xFFEBEBEB)
  * beside the desktop's view the result reads cream. So the page is written onto `surface`, onto
  * every container tone — which is what flattens the elevation — and onto `background`, and the ink
  * onto `onSurface` and `onBackground`. `onSurfaceVariant`, `outline` and `outlineVariant` have no
- * desktop counterpart and are that same ink thinned over that same page: 70% for secondary text,
- * which is the faintest that still clears 4.5:1 on white, then 40% for a border and 15% for a
- * hairline. `scrim` is black in both modes, a dimmed screen being an absence of light rather than a
- * colour of its own.
+ * desktop counterpart and are that same ink thinned over that same page: 55% for secondary text,
+ * then 40% for a border and 15% for a hairline. The 55% is libadwaita's own `.dim-label`, taken for
+ * parity rather than for contrast and at a known cost — `#8f8f92` on white is 3.2:1, short of WCAG
+ * AA's 4.5 for body text, where 70% would have cleared it. The desktop's number wins because every
+ * other colour here is already the desktop's literal value; the dark page's `#8e8e8f` is 5.1:1 and
+ * clears it anyway. `scrim` is black in both modes, a dimmed screen being an absence of light
+ * rather than a colour of its own.
  *
  * `inverseSurface` and `inverseOnSurface` are the *other* mode's pair, which is what keeps the
  * Browse pill (and the snackbar, which reads the same two roles) dark on a light theme and light on
@@ -112,7 +115,7 @@ internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
         background = page,
         onSurface = ink,
         onBackground = ink,
-        onSurfaceVariant = ink.copy(alpha = 0.7f).compositeOver(page),
+        onSurfaceVariant = ink.copy(alpha = 0.55f).compositeOver(page),
         outline = ink.copy(alpha = 0.4f).compositeOver(page),
         outlineVariant = ink.copy(alpha = 0.15f).compositeOver(page),
         scrim = Color.Black,

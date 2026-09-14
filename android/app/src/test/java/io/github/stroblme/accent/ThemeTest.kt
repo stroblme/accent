@@ -3,6 +3,7 @@ package io.github.stroblme.accent
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import io.github.stroblme.accent.ui.flattened
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -39,6 +40,18 @@ class ThemeTest {
         assertEquals(Color(0xFF333338), light.onSurface)
         val dark = darkColorScheme(onSurface = tinted).flattened(dark = true)
         assertEquals(Color(0xFFEBEBEB), dark.onSurface)
+    }
+
+    /**
+     * The dim step is libadwaita's `.dim-label`, 55% of the ink over the page, and is pinned
+     * because it is the one value here chosen for parity over contrast: 3.2:1 on white.
+     */
+    @Test
+    fun `secondary text is the dim label over the same page`() {
+        val light = lightColorScheme(onSurfaceVariant = tinted).flattened(dark = false)
+        assertEquals(0xFF8F8F92.toInt(), light.onSurfaceVariant.toArgb())
+        val dark = darkColorScheme(onSurfaceVariant = tinted).flattened(dark = true)
+        assertEquals(0xFF8E8E8F.toInt(), dark.onSurfaceVariant.toArgb())
     }
 
     /** The one family that is still the device's answer to what colour it is. */
