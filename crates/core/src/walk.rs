@@ -6,24 +6,27 @@
 //! `(dev, ino)` so the same inode reached by two paths yields one [`FileMeta`] plus an alias.
 //!
 //! Ignore files differ inside and outside the vault, so the walk runs in two kinds of pass.
-//! The **vault tree** honours no ignore file at all, only the skip lists below: a notes vault
-//! routinely gitignores `*.md` on purpose, and that must not hide the user's notes. What git
-//! ignores is left out of *queries* instead ([`crate::index::Index::set_excluded`]), which is
-//! the only place it can be done without the walk having to guess. A **symlink target** is
-//! somebody else's tree — usually a code repo — so it honours its own `.gitignore`/`.ignore`,
-//! which is what keeps `.venv`, `target` and friends out.
+//! The **vault tree** honours no ignore file *for files*: a notes vault routinely gitignores
+//! `*.md` on purpose, and that must not hide the user's notes. What git ignores file by file is
+//! left out of *queries* instead ([`crate::index::Index::set_excluded`]), which is the only place
+//! it can be done without the walk having to guess. A gitignored **directory** is a different
+//! animal — an `mlruns/`, a `node_modules/`, a `.venv/`, somebody's build output — and the walk
+//! does not enter one ([`dir_ignores`]); its contents reach the file tree a level at a time when
+//! the reader opens the row ([`unindexed_children`]). A **symlink target** is somebody else's
+//! tree — usually a code repo — so it honours its own `.gitignore`/`.ignore` whole, files
+//! included, which is what keeps `.venv`, `target` and friends out.
 //! Each pass therefore walks with `follow_links(false)` and hands accepted directory symlinks
 //! back as new passes; nested symlinks under a target obey exactly the same rules.
 //!
-//! Inside the vault that leaves dependency trees, which no ignore file mentions because the user
-//! never wrote one: a `.venv` or a `target/` dropped next to the notes. Those are skipped by
+//! Inside the vault that leaves dependency trees nobody gitignored, because the user never wrote
+//! an ignore file at all: a `.venv` or a `target/` dropped next to the notes. Those are skipped by
 //! their own **marker file** ([`DEPENDENCY_MARKERS`]) rather than by name, so one rule covers
 //! cargo, `python -m venv`, and every other tool that follows the `CACHEDIR.TAG` convention.
 //!
 //! ponytail: unix-only (`MetadataExt` for dev/ino/mtime_nsec). Targets are Linux + Android;
 //! a Windows port would need a `cfg` branch using `FileIndex`/`VolumeSerialNumber`.
 
-use ignore::{WalkBuilder, WalkState};
+use ignore::{IncrementalIgnore, WalkBuilder, WalkState};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -69,6 +72,46 @@ const DEPENDENCY_MARKERS: &[&str] = &["CACHEDIR.TAG", "pyvenv.cfg"];
 /// that is not a cache tag has never been seen in the wild.
 fn is_dependency_tree(dir: &Path) -> bool {
     DEPENDENCY_MARKERS.iter().any(|m| dir.join(m).exists())
+}
+
+/// A matcher for the vault's own ignore files, asked about **directories only**.
+///
+/// `ignore`'s own walker cannot do this: turning its gitignore on hides ignored files too, and a
+/// vault that gitignores `*.md` would lose its notes. [`IncrementalIgnore`] is the same matcher
+/// stack asked one path at a time, so the rule can be applied to directories and to nothing else.
+///
+/// `.gitignore` and `.git/info/exclude` only. Not the machine's global excludes file — that is a
+/// preference of the person, not a fact about the project — and not `.ignore`, which is
+/// ripgrep's file and not git's.
+///
+/// ponytail: a fresh matcher per call, and callers that ask about one path ([`stat_one`]) build
+/// one per path. It reads an ignore file per directory on the way down and caches nothing across
+/// calls, which is a handful of failed `open`s for a watcher event. Holding one per vault would
+/// have to be invalidated whenever a `.gitignore` is edited, which is the harder half.
+fn dir_ignores(root: &Path) -> IncrementalIgnore {
+    let mut b = WalkBuilder::new(root);
+    b.hidden(false)
+        .parents(false)
+        .git_global(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .ignore(false)
+        .require_git(false);
+    b.build_matchers()
+        .pop()
+        .expect("one walk root yields one matcher")
+}
+
+/// Does a directory on the way to `rel` — or `rel` itself, when it is one — get ignored by git?
+///
+/// `is_dir` decides which: a file is asked about its parent, never about its own name, because a
+/// gitignored file is indexed like any other and left out of queries instead.
+fn in_ignored_dir(ignores: &mut IncrementalIgnore, rel: &str, is_dir: bool) -> bool {
+    let dir = match is_dir {
+        true => rel,
+        false => rel.rsplit_once('/').map(|(parent, _)| parent).unwrap_or(""),
+    };
+    !dir.is_empty() && ignores.matched(dir, true).is_ignore()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -140,6 +183,8 @@ pub enum SkipReason {
     SymlinkLoop,
     /// A dependency or build tree: the directory carries one of [`DEPENDENCY_MARKERS`].
     DependencyTree,
+    /// A directory git ignores. Not walked, and opened by hand in the file tree instead.
+    GitIgnored,
     /// Broken symlink, permission denied, vanished mid-walk.
     Io,
 }
@@ -151,6 +196,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::TargetOverlapsSymlink => "symlink target overlaps another symlink",
             SkipReason::SymlinkLoop => "symlink loop",
             SkipReason::DependencyTree => "dependency or build tree",
+            SkipReason::GitIgnored => "git ignores this directory",
             SkipReason::Io => "io error",
         })
     }
@@ -276,16 +322,22 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     }
     let path = root.join(rel);
     let meta = std::fs::metadata(&path)?;
+    // Last, because it is the only test that needs to know whether the path is a directory: a
+    // gitignored *file* is indexed, a gitignored *directory* is not entered.
+    if in_ignored_dir(&mut dir_ignores(root), rel, meta.is_dir()) {
+        return Ok(None);
+    }
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
 /// Does the walk refuse to look inside `rel`? True for the trees [`scan`] never enters:
-/// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], and anything at or under a [`DEPENDENCY_MARKERS`] file.
+/// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], anything at or under a [`DEPENDENCY_MARKERS`] file, and
+/// anything at or under a directory git ignores.
 ///
 /// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
 /// disagree about which paths the index holds. The vault root is the user's own choice and is
 /// never refused.
-fn is_unindexed(root: &Path, rel: &str) -> bool {
+fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> bool {
     if rel.is_empty() {
         return false;
     }
@@ -293,10 +345,12 @@ fn is_unindexed(root: &Path, rel: &str) -> bool {
         return true;
     }
     let mut dir = root.to_path_buf();
-    rel.split('/').any(|part| {
+    let marked = rel.split('/').any(|part| {
         dir.push(part);
         is_dependency_tree(&dir)
-    })
+    });
+    // Only ever asked about a directory the reader has opened, so the name is a directory's.
+    marked || in_ignored_dir(ignores, rel, true)
 }
 
 /// The children of the directory `rel` that `held` — the index's own listing of it — does not
@@ -308,8 +362,9 @@ fn is_unindexed(root: &Path, rel: &str) -> bool {
 /// stored — so the only place their contents can come from is a `read_dir`, one level at a time,
 /// when the reader opens the row.
 ///
-/// Two kinds of row come back: the skipped directories themselves, listed beside their indexed
-/// siblings, and — where `rel` is already inside one — everything in it. [`ALWAYS_SKIP_DIRS`],
+/// Two kinds of row come back: the refused directories themselves — a `node_modules`, a marked
+/// dependency tree, a directory git ignores — listed beside their indexed siblings, and, where
+/// `rel` is already inside one, everything in it. [`ALWAYS_SKIP_DIRS`],
 /// Syncthing's temporaries and our own save temporaries are refused at every depth, exactly as
 /// [`scan`] refuses them, so `.git` and `.trash` are out of reach here too.
 ///
@@ -323,7 +378,10 @@ pub fn unindexed_children(
     rel: &str,
     held: &std::collections::HashSet<&str>,
 ) -> io::Result<Vec<(String, FileKind)>> {
-    let inside = is_unindexed(root, rel);
+    // One matcher for the whole listing: it caches the ignore files it reads on the way down, so
+    // a directory of a thousand children asks the disk for them once.
+    let mut ignores = dir_ignores(root);
+    let inside = is_unindexed(root, rel, &mut ignores);
     let mut out = Vec::new();
     for entry in std::fs::read_dir(root.join(rel))? {
         let entry = entry?;
@@ -354,7 +412,11 @@ pub fn unindexed_children(
         // of the trees the walk refuses. Anything else missing from the index is missing for a
         // reason of its own — a symlink pointing back into the vault, a file that vanished
         // between the scan and now — and guessing at it here is not this function's business.
-        if !inside && !(dir && (SKIP_DIRS.contains(&name.as_str()) || is_dependency_tree(&path))) {
+        let refused = dir
+            && (SKIP_DIRS.contains(&name.as_str())
+                || is_dependency_tree(&path)
+                || in_ignored_dir(&mut ignores, &rel_path, true));
+        if !inside && !refused {
             continue;
         }
         out.push((rel_path, if dir { FileKind::Dir } else { classify(&name) }));
@@ -400,8 +462,11 @@ pub fn scan(root: &Path, opts: &ScanOptions) -> ScanResult {
     // Debug, not a toast: skipping a `.venv` is the expected outcome, not news the user has to
     // acknowledge on every start. It still has to be findable when a folder is missing from the tree.
     for s in &skipped {
-        if s.reason == SkipReason::DependencyTree {
-            tracing::debug!(tree = %s.path.display(), "not indexed: dependency or build tree");
+        if matches!(
+            s.reason,
+            SkipReason::DependencyTree | SkipReason::GitIgnored
+        ) {
+            tracing::debug!(tree = %s.path.display(), why = %s.reason, "not indexed");
         }
     }
 
@@ -461,6 +526,8 @@ fn walk_passes(
         root: root.to_path_buf(),
         prefix: String::new(),
         gitignore: opts.vault_gitignore,
+        // The All toggle exists to reach exactly these trees, so it turns the rule off.
+        dir_gitignore: !opts.vault_gitignore && !opts.include_skipped,
     });
 
     // Breadth-first over passes: the vault, then one pass per accepted symlink target, then
@@ -477,6 +544,7 @@ fn walk_passes(
                 root: target,
                 prefix,
                 gitignore: opts.target_gitignore,
+                dir_gitignore: false,
             });
         }
     }
@@ -488,7 +556,12 @@ struct Pass {
     root: PathBuf,
     /// Vault-relative path this root appears at ("" for the vault itself).
     prefix: String,
+    /// Honour the ignore files whole, files included.
     gitignore: bool,
+    /// Honour them for directories only: the vault's rule, where hiding a file would hide a note.
+    /// Never set on a symlink target — that tree either honours its ignore files whole or has
+    /// been told to ignore them, and a half rule in between is nobody's ask.
+    dir_gitignore: bool,
 }
 
 #[derive(Default)]
@@ -536,6 +609,9 @@ fn walk_pass(
         let follow_links = opts.follow_links;
         let skip_deps = opts.skip_dependency_trees && !opts.include_skipped;
         let include_skipped = opts.include_skipped;
+        // Per thread rather than shared: `IncrementalIgnore` caches what it reads behind `&mut`,
+        // and a lock per directory would be paid on the one hot path the walk has.
+        let mut ignores = pass.dir_gitignore.then(|| dir_ignores(&pass.root));
         Box::new(move |result| {
             let entry = match result {
                 Ok(e) => e,
@@ -560,6 +636,23 @@ fn walk_pass(
                 let _ = tx.send(Msg::Skip(Skipped {
                     path: path.to_path_buf(),
                     reason: SkipReason::DependencyTree,
+                }));
+                return WalkState::Skip;
+            }
+            // A directory git ignores is not walked; the file tree opens it a level at a time
+            // (`unindexed_children`). Real directories only — a directory *symlink* is admitted
+            // below and then walked as its own pass, which honours the target's own ignore files
+            // whole, so the tree behind it is pruned there instead.
+            if let Some(ignores) = ignores.as_mut()
+                && entry.depth() > 0
+                && entry.file_type().is_some_and(|t| t.is_dir())
+                && path
+                    .strip_prefix(&walk_root)
+                    .is_ok_and(|rel| ignores.matched(rel, true).is_ignore())
+            {
+                let _ = tx.send(Msg::Skip(Skipped {
+                    path: path.to_path_buf(),
+                    reason: SkipReason::GitIgnored,
                 }));
                 return WalkState::Skip;
             }
@@ -953,7 +1046,7 @@ mod tests {
     fn vault_gitignore_does_not_hide_notes_unless_asked() {
         let vault = tempfile::tempdir().unwrap();
         // Exactly the user's real vault shape: a notes repo that gitignores its own markdown.
-        fs::write(vault.path().join(".gitignore"), "*.md\n!README.md\nrefs\n").unwrap();
+        fs::write(vault.path().join(".gitignore"), "*.md\n!README.md\n").unwrap();
         fs::write(vault.path().join("note.md"), "n").unwrap();
         fs::create_dir(vault.path().join("refs")).unwrap();
         fs::write(vault.path().join("refs/r.md"), "r").unwrap();
@@ -968,6 +1061,81 @@ mod tests {
         };
         let r = scan(vault.path(), &strict);
         assert!(!rels(&r).contains(&"note.md"), "{:?}", rels(&r));
+    }
+
+    /// The heavy-folder rule: a gitignored *directory* costs the index nothing, while a
+    /// gitignored *file* is indexed like any other. The tree is what opens the directory.
+    #[test]
+    fn a_gitignored_directory_is_not_walked_but_a_gitignored_file_is_indexed() {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |p: &str| vault.path().join(p);
+        fs::create_dir(at("Projects")).unwrap();
+        fs::write(at("Projects/.gitignore"), "mlruns/\nscratch.md\n").unwrap();
+        fs::write(at("Projects/note.md"), "n").unwrap();
+        fs::write(at("Projects/scratch.md"), "s").unwrap();
+        fs::create_dir_all(at("Projects/mlruns/0/run")).unwrap();
+        fs::write(at("Projects/mlruns/0/run/meta.yaml"), "m").unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        let paths = rels(&r);
+        assert!(paths.contains(&"Projects/note.md"), "{paths:?}");
+        assert!(paths.contains(&"Projects/scratch.md"), "{paths:?}");
+        assert!(
+            !paths.iter().any(|p| p.contains("mlruns")),
+            "the ignored tree was walked: {paths:?}"
+        );
+        assert_eq!(
+            r.skipped
+                .iter()
+                .filter(|s| s.reason == SkipReason::GitIgnored)
+                .count(),
+            1,
+            "{:?}",
+            r.skipped
+        );
+
+        // The watcher path agrees, or a training run would put the tree back event by event.
+        assert!(stat_one(vault.path(), "Projects/mlruns").unwrap().is_none());
+        assert!(
+            stat_one(vault.path(), "Projects/mlruns/0/run/meta.yaml")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            stat_one(vault.path(), "Projects/scratch.md")
+                .unwrap()
+                .is_some(),
+            "a gitignored file is still a file the vault holds"
+        );
+
+        // And the tree lists it beside its indexed siblings, then opens it a level at a time.
+        let names = |rel: &str, held: HashSet<&str>| {
+            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &held)
+                .unwrap()
+                .into_iter()
+                .map(|(rel, _)| rel)
+                .collect();
+            n.sort();
+            n
+        };
+        let held = HashSet::from(["Projects/note.md", "Projects/scratch.md"]);
+        assert_eq!(names("Projects", held), ["Projects/mlruns"]);
+        assert_eq!(
+            names("Projects/mlruns", HashSet::new()),
+            ["Projects/mlruns/0"]
+        );
+
+        // The Search pane's All toggle is the way in: `grep_unindexed` walks with it on.
+        let all = ScanOptions {
+            include_skipped: true,
+            skip_dependency_trees: false,
+            ..ScanOptions::default()
+        };
+        assert!(
+            rels(&scan(vault.path(), &all))
+                .iter()
+                .any(|p| p.contains("mlruns/0/run/meta.yaml"))
+        );
     }
 
     #[test]
@@ -1080,7 +1248,8 @@ mod tests {
     #[test]
     fn is_unindexed_covers_the_trees_the_walk_refuses() {
         let vault = skipped_vault();
-        let un = |rel| is_unindexed(vault.path(), rel);
+        let mut ignores = dir_ignores(vault.path());
+        let mut un = |rel| is_unindexed(vault.path(), rel, &mut ignores);
         assert!(un("node_modules"));
         assert!(un("node_modules/pkg/index.js"));
         assert!(

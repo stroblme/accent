@@ -41,6 +41,13 @@ PDFIUM_SHA256_android_x86_64    := 67a1865b961e9c58d1ada607e8b40c685685cc34de29a
 PDFIUM_ASSET_arm64-v8a := arm64
 PDFIUM_ASSET_x86_64    := x64
 ANDROID_TARGETS := aarch64-linux-android x86_64-linux-android
+# A release cross build takes `[profile.android]` from Cargo.toml — release plus `opt-level = "z"`
+# and `strip` — because the `.so` ships in the APK and the desktop must keep release's speed.
+ANDROID_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--profile android,)
+# uniffi keeps its metadata in the symbol table, which that profile strips, so the bindings are
+# read out of a host build of the same crate — the flow uniffi documents. Dev profile, because
+# that is the one the generator itself is built with.
+HOST_FFI_LIB := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/debug/libaccent_android.so
 # The NDK's own readelf, for the 16 KB page-size check; the host's would do, but the NDK is what
 # a machine building for Android is guaranteed to have.
 ANDROID_NDK_HOME ?= $(firstword $(wildcard $(HOME)/Android/Sdk/ndk/*))
@@ -73,7 +80,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help \
-        android android-check android-test android-tools apk pdfium-android bindings
+        android android-check android-test android-tools apk apk-release pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -123,16 +130,17 @@ android-tools:
 android:
 	@command -v cargo-ndk >/dev/null || { echo "cargo-ndk is missing: run 'make android-tools'"; exit 1; }
 	$(CARGO) ndk $(foreach abi,$(ANDROID_ABIS),-t $(abi)) -o $(JNI_LIBS) \
-		build $(CARGO_PROFILE_FLAG) -p accent-android
+		build $(ANDROID_PROFILE_FLAG) -p accent-android
 	@# cargo-ndk copies every shared object the build produced. `pdfium-render` emits one of its
 	@# own that nothing links or loads — we reach libpdfium through dlopen — so it would be half a
 	@# megabyte of APK for nothing.
 	rm -f $(JNI_LIBS)/*/libpdfium_render-*.so
 
-## bindings: regenerate the Kotlin bindings from the built library
+## bindings: regenerate the Kotlin bindings from a host build of the FFI crate
 bindings:
+	$(CARGO) build -q -p accent-android --features cli
 	$(CARGO) run -q -p accent-android --features cli --bin uniffi-bindgen -- \
-		generate --library $(JNI_LIBS)/arm64-v8a/libaccent_android.so \
+		generate --library $(HOST_FFI_LIB) \
 		--language kotlin --out-dir android/app/build/generated/uniffi
 
 ## pdfium-android: fetch libpdfium for every Android ABI into the APK's jniLibs
@@ -157,9 +165,16 @@ $(foreach abi,$(ANDROID_ABIS),$(eval $(call pdfium-android-rule,$(abi))))
 android-test:
 	cd android && ./gradlew testDebugUnitTest
 
-## apk: build the debug APK (Gradle runs the cross build and the bindings itself)
+## apk: build the debug APKs, one per ABI (Gradle runs the cross build and the bindings itself)
 apk: pdfium-android
 	cd android && ./gradlew assembleDebug
+
+## apk-release: build the release APKs, one per ABI
+#
+# Unsigned, on purpose: whoever publishes a build signs it with their own key, which is how
+# F-Droid and a GitHub release both work. `apksigner sign` is the last step, not this file's.
+apk-release: pdfium-android
+	cd android && ./gradlew assembleRelease
 
 ## android-check: the Android gate — lint the bindings on the host, then cross-build them
 android-check:

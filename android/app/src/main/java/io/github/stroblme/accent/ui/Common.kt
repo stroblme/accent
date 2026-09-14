@@ -142,8 +142,12 @@ class Chrome {
  * A tap and nothing else. A press held past the platform's long-press time belongs to whatever is
  * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
  * given exactly that long and the chrome stays where it was.
+ *
+ * [onTapped] is whatever else the surface wants the same tap to mean: a rendered note takes its
+ * search highlight off with it. It is captured once, along with the gesture, so what it reads has
+ * to be state it can read again rather than a value it closed over.
  */
-fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
+fun Modifier.onTap(chrome: Chrome, onTapped: () -> Unit = {}): Modifier = pointerInput(chrome) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
@@ -159,7 +163,10 @@ fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
             } while (event.changes.any { it.pressed })
             tap
         }
-        if (tapped == true) chrome.tapped()
+        if (tapped == true) {
+            chrome.tapped()
+            onTapped()
+        }
     }
 }
 
@@ -295,6 +302,10 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
                 source: NestedScrollSource,
             ): Offset {
                 if (consumed.y != 0f) scrolled = true
+                // A drag something took sideways is a page turn, not a pull. What it hands on is
+                // only what a thumb spills crossing the screen, and a panel that followed it would
+                // be a panel that moves when the reader changes tab.
+                if (consumed.x != 0f) return Offset.Zero
                 if (available.y <= 0f) return Offset.Zero
                 // Not the tail of a scroll, and not a fling running on past the end.
                 if (scrolled || source != NestedScrollSource.UserInput) return Offset.Zero

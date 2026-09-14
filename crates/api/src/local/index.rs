@@ -79,7 +79,8 @@ impl Local {
     }
 
     /// The same exact search over the files the index does not hold at all: those under a
-    /// dependency tree, a `node_modules` or a `target/` the walk deliberately never entered.
+    /// dependency tree, a `node_modules`, a `target/` or a gitignored directory the walk
+    /// deliberately never entered.
     ///
     /// This is the second half of the Search pane's All toggle, and only the exact-match path
     /// runs it. The first half drops the git-ignored exclusion, which is a column in the index and
@@ -113,9 +114,10 @@ impl Local {
         let opts = walk::ScanOptions {
             include_skipped: true,
             skip_dependency_trees: false,
-            // Inside the vault, what git ignores is already indexed, so the walk can skip it and
-            // the `known` test would have dropped it anyway.
-            vault_gitignore: true,
+            // Off, because a gitignored *directory* is one of the trees this exists to reach:
+            // the walk leaves it out of the index and the file tree opens it by hand. The
+            // gitignored *files* it also brings back are already indexed, so `known` drops them.
+            vault_gitignore: false,
             target_gitignore: true,
             ..walk::ScanOptions::default()
         };
@@ -328,6 +330,43 @@ mod tests {
             names(&f.vault.list_dir("node_modules/pkg").unwrap()),
             ["node_modules/pkg/index.js"]
         );
+    }
+
+    /// A gitignored folder costs a cold open nothing: the walk never enters it, the tree lists
+    /// it beside its indexed siblings, and All is what reaches what is inside.
+    #[test]
+    fn a_gitignored_folder_is_opened_by_the_tree_rather_than_indexed() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("ml/.gitignore", "mlruns/\n");
+        f.write("ml/README.md", "zorblat in a note\n");
+        f.write("ml/mlruns/0/run/meta.yaml", "zorblat: 1\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let paths = f.vault.file_paths(true).unwrap();
+        assert!(
+            !paths.iter().any(|p| p.contains("mlruns")),
+            "the ignored tree reached the index: {paths:?}"
+        );
+
+        let rows = f.vault.list_dir("ml").unwrap();
+        assert_eq!(names(&rows), ["ml/mlruns", "ml/.gitignore", "ml/README.md"]);
+        assert_eq!(
+            rows.iter().find(|r| r.rel_path == "ml/mlruns").unwrap().id,
+            0,
+            "the row comes off the disk, not out of the index"
+        );
+        assert_eq!(
+            names(&f.vault.list_dir("ml/mlruns/0").unwrap()),
+            ["ml/mlruns/0/run"]
+        );
+
+        // The index cannot see inside it; the All toggle's walk can.
+        let plain = Options::default();
+        assert_eq!(f.vault.grep("zorblat", plain, 10, true).unwrap().1, 1);
+        let hits = f.vault.grep_unindexed("zorblat", plain, 10).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "ml/mlruns/0/run/meta.yaml");
     }
 
     /// What the file tree's Show Hidden Files has to choose from: every dotfile, and never `.git`.

@@ -33,7 +33,10 @@ const PULSE: Duration = Duration::from_millis(80);
 const CONFIRM_ABOVE: usize = 1;
 /// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
 /// Nothing else in the window starts a search, so a query the user did not ask for — the requery
-/// a changed file triggers under a finished search — is over inside this and never draws one.
+/// a changed file triggers under a finished search — is over inside this and never draws one:
+/// on the generated 40k-file vault, 0.8–11 ms ranked and 50–67 ms as the exact scan. The one
+/// query there that does outlive it is the reader's own first exact scan on an index the page
+/// cache has not got yet, which reads every body off the disk (459 ms) and is worth reporting.
 const SHOW_AFTER: u32 = 2;
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
@@ -875,8 +878,9 @@ mod tests {
 
     #[test]
     fn a_query_shorter_than_the_grace_period_never_draws_a_bar() {
-        // A requery nobody asked for costs a few milliseconds on a warm index; the wait has to be
-        // long enough to cover one and short enough that a real query still reports itself.
+        // A requery nobody asked for is a few milliseconds on a warm index ranked and some 60 ms
+        // as an exact scan; the wait has to be long enough to cover one and short enough that a
+        // real query still reports itself.
         assert!((100..=300).contains(&(PULSE * SHOW_AFTER).as_millis()));
     }
 

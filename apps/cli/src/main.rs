@@ -27,8 +27,8 @@ struct Common {
     /// Index database. Defaults to $XDG_CACHE_HOME/accent/<hash-of-vault-path>.db
     #[arg(long)]
     db: Option<PathBuf>,
-    /// Also honour .gitignore inside the vault tree (off by default: vaults often
-    /// gitignore *.md).
+    /// Also leave out gitignored *files* inside the vault tree (off by default: vaults often
+    /// gitignore *.md). A gitignored directory is left out either way.
     #[arg(long)]
     vault_gitignore: bool,
     /// Do not honour .gitignore inside directory-symlink targets (on by default, so that
