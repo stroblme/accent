@@ -693,6 +693,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let reload = Rc::downgrade(app);
     let close = Rc::downgrade(app);
     let reconciled = Rc::downgrade(app);
+    let draw = Rc::downgrade(app);
     let exclude = Rc::downgrade(app);
     let cut = Rc::downgrade(app);
     Rc::new(fileops::Ops {
@@ -738,6 +739,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 .filter_map(|rel| app.tab_for(rel))
                 .filter(|tab| !app.refresh_tab(tab))
                 .count()
+        }),
+        draw: Box::new(move |rel| {
+            if let Some(app) = draw.upgrade() {
+                app.open_drawing(rel);
+            }
         }),
         exclude: Box::new(move |dir| {
             let Some(app) = exclude.upgrade() else { return };

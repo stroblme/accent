@@ -16,7 +16,7 @@ pub mod ledger;
 mod tests;
 mod text;
 
-pub use doc::{PdfDoc, blank_pdf};
+pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
 pub use ledger::{Ink, NamedInk, fresh_id};
 pub use text::{line_top, same_quads, selection_link, selection_quads};

@@ -28,7 +28,7 @@ use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
-use pdf::bench_pdf;
+use pdf::{bench_drawing, bench_pdf};
 use replace::bench_replace;
 use search::bench_search;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
@@ -67,8 +67,14 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
-/// and prints the layout either side of it. Point it at a document of several pages: a one-page
-/// PDF is wholly on screen whatever the scroll offset was.
+/// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
+/// prints the page count, where the reader landed and the page sizes the file holds on disk once
+/// the save has run. It writes to the document, so point it at a scratch copy; and point it at a
+/// document of several pages, since a one-page PDF is wholly on screen whatever the scroll
+/// offset was.
+/// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
+/// with, answers it with the window-shaped size and prints the file that landed and the tool the
+/// tab it opened has in hand.
 /// `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>` walks a note, a shell and a PDF through one pane and
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
@@ -150,6 +156,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
+    let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let theme = std::env::var("ACCENT_BENCH_THEME").ok();
@@ -177,6 +184,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && panes.is_none()
         && compare.is_none()
         && pdf.is_none()
+        && !drawing
         && tabs.is_none()
         && occur.is_none()
         && theme.is_none()
@@ -216,6 +224,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
+        }
+        if drawing {
+            return bench_drawing(&app);
         }
         if let Some(rel) = clip {
             return bench_clip(&app, &rel);

@@ -351,6 +351,15 @@ fn render_loop(
                         }
                     }
                 }
+                Request::AddPage => match doc.add_page() {
+                    Ok(()) => {
+                        // Dirty like a stroke, so the tab's own timer writes it out: an appended
+                        // page is a change to the file and nothing else would save it.
+                        ink.dirty = true;
+                        send(&view, Reply::Paged(page_sizes(&doc)));
+                    }
+                    Err(e) => tracing::warn!("appending a page: {e:#}"),
+                },
                 request @ (Request::Undo | Request::Redo) => {
                     for (page, area) in ink.walk(&mut doc, matches!(request, Request::Redo)) {
                         ink.dirty = true;
