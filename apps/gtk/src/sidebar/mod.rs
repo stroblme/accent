@@ -98,6 +98,9 @@ struct VaultPanes {
     all_toggle: gtk::ToggleButton,
     replace_entry: gtk::Entry,
     restart_search: Rc<dyn Fn()>,
+    /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
+    apply_replace: gtk::Button,
+    search_state: Rc<dyn Fn() -> (String, u32)>,
     references: gtk::StringList,
     references_stack: gtk::Stack,
     /// The empty page of the References pane. Its words change with what the tab holds — a note
@@ -242,6 +245,8 @@ impl Sidebar {
                         all_toggle: search.all_toggle,
                         replace_entry: search.replace_entry,
                         restart_search: search.restart,
+                        apply_replace: search.apply,
+                        search_state: search.state,
                         references,
                         references_stack,
                         references_empty,
@@ -489,6 +494,31 @@ impl Sidebar {
         };
         self.show_pane("search");
         panes.all_toggle.set_active(!panes.all_toggle.is_active());
+    }
+
+    /// Put `text` in the Search pane's replace box, which re-runs the query with the preview.
+    /// The counterpart of [`set_search_text`](Self::set_search_text), for `ACCENT_BENCH_REPLACE`.
+    pub fn set_replace_text(&self, text: &str) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.replace_entry.set_text(text);
+        }
+    }
+
+    /// Press Replace All, as a click on the button does. Headless, that is the only way in: the
+    /// button is in the sidebar and Xvfb has nothing to click it with.
+    pub fn press_replace_all(&self) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.apply_replace.emit_clicked();
+        }
+    }
+
+    /// Which page the Search pane's body is showing — "prompt", "results", "empty" or
+    /// "invalid" — and how many rows are on it. What `ACCENT_BENCH_REPLACE` reads.
+    pub fn search_state(&self) -> (String, u32) {
+        match self.panes.as_ref() {
+            Some(panes) => (panes.search_state)(),
+            None => (String::new(), 0),
+        }
     }
 
     /// Ask the search question again, if one is on screen. What the window calls when the answer

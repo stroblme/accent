@@ -63,6 +63,10 @@ pub(crate) enum Msg {
     /// What search leaves out, and where to say it has been written. See
     /// [`Local::set_excluded`]: the worker holds the only writing connection.
     SetExcluded(Vec<String>, Sender<Result<()>>),
+    /// Answered once everything posted before it has reached the index. The one thing the
+    /// worker's batching costs a caller is that a write it has just made is not yet readable;
+    /// this is how [`Local::settle_index`] waits for it instead of guessing at a delay.
+    Settled(Sender<()>),
     Rescan,
     Shutdown,
 }
@@ -132,6 +136,21 @@ impl Worker {
     }
 
     fn process(&mut self, batch: Vec<Msg>) {
+        // Taken out first and answered last, whichever way the batch goes below — a rescan is
+        // the index brought up to date too, only wholesale. Everything posted before one of
+        // these is in the same batch or an earlier one, so answering here means it has landed.
+        let (settled, batch): (Vec<Msg>, Vec<Msg>) = batch
+            .into_iter()
+            .partition(|m| matches!(m, Msg::Settled(_)));
+        self.process_batch(batch);
+        for msg in settled {
+            if let Msg::Settled(reply) = msg {
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    fn process_batch(&mut self, batch: Vec<Msg>) {
         // Git first, and before anything else looks at these paths. A `.git` directory is full of
         // children, so `needs_rescan` would read a commit as a whole tree moved in and walk the
         // vault; and `rel` cannot place a submodule's git directory, which lives outside the
@@ -174,7 +193,12 @@ impl Worker {
         let mut batched = Batch::default();
         for msg in batch {
             match msg {
-                Msg::Rescan | Msg::Shutdown | Msg::WatchGit(_) | Msg::SetExcluded(..) => {}
+                // `Settled` is answered by the caller of this one and never reaches here.
+                Msg::Rescan
+                | Msg::Shutdown
+                | Msg::WatchGit(_)
+                | Msg::SetExcluded(..)
+                | Msg::Settled(_) => {}
                 Msg::Update { rel, own } => self.update(&rel, own, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
             }

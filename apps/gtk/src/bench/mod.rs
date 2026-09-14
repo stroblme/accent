@@ -13,6 +13,7 @@ mod keys;
 mod outline;
 mod panes;
 mod pdf;
+mod replace;
 mod style;
 mod tags;
 
@@ -27,6 +28,7 @@ use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
+use replace::bench_replace;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
 use tags::bench_tags;
 
@@ -100,6 +102,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
 /// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
 ///
+/// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
+/// Replace All on it and prints what the pane lists before and after the rewrite.
+///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -145,8 +150,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
+    let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
     if expand.is_none()
         && tags.is_none()
+        && !replace
         && clip.is_none()
         && menu.is_none()
         && diagram.is_none()
@@ -199,6 +206,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);
+        }
+        if replace {
+            return bench_replace(&app);
         }
         if let Some(rel) = menu {
             return bench_menu(&app, &rel);
