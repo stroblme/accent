@@ -98,11 +98,23 @@ private fun ChangedBanner(onReload: () -> Unit) {
 // ------------------------------------------------------------------------------------ reading
 
 /**
- * The rendered note.
+ * The rendered note, and where a search hit lands in it.
  *
  * `accent://open/…` is a link to another note and is handed back to the app; `accent://file/…` is
  * an image, served off the vault. Nothing else loads at all — the same rule the desktop preview
  * enforces with a content blocker.
+ *
+ * A hit arrives as the query it was found by ([Open.find]) and is placed by the WebView's own
+ * find-in-page: every occurrence marked, the first one scrolled to. No offset crosses into the
+ * app at all — `SearchHit.at` is bytes into the markdown source and this screen holds the page
+ * that source rendered to — so there is nothing to convert and nothing to get wrong. What it
+ * costs is that the two do not agree on everything: the index folds accents and reads the markup,
+ * find-in-page does neither, so a query it cannot match marks nothing and the note opens at the
+ * top, which is where it opened before any of this (see NOTEPAD).
+ *
+ * The marking goes on the reader's first tap, which is the Android analogue of the desktop's
+ * reveal highlight going on the first keystroke: it says where you were sent, and once that has
+ * been read it is in the way.
  */
 @Composable
 private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
@@ -113,9 +125,24 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
     val html = remember(open.text, colors) {
         page(toHtml(open.text), colors.onSurface, colors.surface, colors.primary)
     }
+    // The view, and the page it has finished loading. Both are held here rather than read from
+    // inside the client, which is built once and would keep whichever note was open then.
+    var view by remember { mutableStateOf<WebView?>(null) }
+    var loaded by remember { mutableStateOf<String?>(null) }
+
+    // Text can only be found once it is there to find, so the query waits for the load — and
+    // since the page is loaded only when the note or the palette changes, a hit in the note
+    // already in front is marked without one.
+    LaunchedEffect(loaded, open.find) {
+        val query = open.find ?: return@LaunchedEffect
+        val web = view ?: return@LaunchedEffect
+        if (loaded != html) return@LaunchedEffect
+        web.findAllAsync(query)
+        model.found()
+    }
 
     AndroidView(
-        modifier = Modifier.fillMaxSize().onTap(chrome),
+        modifier = Modifier.fillMaxSize().onTap(chrome) { view?.clearMatches() },
         factory = { ctx ->
             WebView(ctx).apply {
                 settings.javaScriptEnabled = false
@@ -123,6 +150,11 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                 settings.allowContentAccess = false
                 setBackgroundColor(AndroidColor.TRANSPARENT)
                 webViewClient = object : WebViewClient() {
+                    /** What is on the screen now, and so what can be searched. */
+                    override fun onPageFinished(view: WebView, url: String) {
+                        loaded = view.tag as? String
+                    }
+
                     override fun shouldOverrideUrlLoading(
                         view: WebView,
                         request: WebResourceRequest,
@@ -149,6 +181,7 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
                     }
                 }
                 setOnScrollChangeListener { _, _, y, _, was -> chrome.scrolled((y - was).toFloat()) }
+                view = this
             }
         },
         update = { web ->

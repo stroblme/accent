@@ -101,8 +101,8 @@ fun HomeScreen(model: VaultModel) {
                     children = state.children,
                     expanded = state.expanded,
                     results = state.results,
-                    onOpen = { rel ->
-                        model.openFile(rel)
+                    onOpen = { rel, find ->
+                        model.openFile(rel, find)
                         screen = Screen.Home
                     },
                     onClose = { screen = Screen.Home },

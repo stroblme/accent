@@ -29,6 +29,15 @@ data class Open(
     val changedOnDisk: Boolean = false,
     /** Conflict copies Syncthing left beside it. */
     val conflicts: List<String> = emptyList(),
+    /**
+     * The query that led here, until the page has been marked with it.
+     *
+     * A search hit and a file row are the same act of opening a note, and this is the only thing
+     * that tells them apart: one was looked for, the other was picked off a list. Consumed once
+     * the way [VaultState.message] is ([found]), because where a reader was sent is a moment
+     * rather than something the note now has.
+     */
+    val find: String? = null,
 )
 
 data class VaultState(
@@ -187,7 +196,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------------------ one file
 
-    fun openFile(rel: String) {
+    /**
+     * Open a file, and — for a search hit — say what was being looked for.
+     *
+     * [find] is the query rather than [SearchHit.at]: the hit's range is bytes into the markdown
+     * source and the screen holds the page that source rendered to, so the only thing that
+     * survives the crossing is the words. A PDF drops it; there is no find in that reader yet.
+     */
+    fun openFile(rel: String, find: String? = null) {
         val v = vault ?: return
         recents.touch(Recents.Kind.Notes, rel)
         if (rel.endsWith(".pdf", ignoreCase = true)) {
@@ -204,7 +220,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             }
             read.onSuccess { (note, conflicts) ->
                 _state.update {
-                    it.copy(pdf = null, open = Open(rel, note.text, note.etag, conflicts = conflicts))
+                    it.copy(
+                        pdf = null,
+                        open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
+                    )
                 }
             }.onFailure { fail("Cannot read this note", it) }
         }
@@ -326,6 +345,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val hits = runCatching { v.search(query, 100u, false) }.getOrDefault(emptyList())
         _state.update { it.copy(results = hits) }
     }
+
+    /** The query has been marked on the page. One-shot, the same way [said] is. */
+    fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }
 

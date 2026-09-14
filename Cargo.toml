@@ -28,3 +28,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The Android core, built for size rather than speed: the `.so` is the download, and the desktop
+# app shares `release` above and wants the other trade. `make android` and the cross build Gradle
+# runs itself both name this profile; nothing else does. Measured on the arm64 library, 8.7 MB
+# before: 6.9 MB stripped, 5.2 MB stripped and built for size. The symbol table it drops is where
+# uniffi keeps its metadata, which is why `make bindings` reads a host build instead.
+[profile.android]
+inherits = "release"
+opt-level = "z"
+strip = "symbols"

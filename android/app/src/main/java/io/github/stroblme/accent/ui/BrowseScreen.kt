@@ -40,6 +40,11 @@ private enum class Mode { Search, Files, Command }
  * Files and Command lay their rows out from the bottom up, so the best match is the one nearest
  * the field and the thumb. Search keeps the tree the way a tree reads, from the top.
  *
+ * A row hands over the file it names and, if it was a search hit, the query it was found by:
+ * that query is the whole difference between the two ways in, and it is what the note marks
+ * itself with (`NoteScreen`). A row picked off the tree or the switcher hands over nothing and
+ * so lands at the top of its note, which is where a file somebody chose by name belongs.
+ *
  * The three are pages of one pager rather than three states of one list, so the swipe between them
  * is the platform's own: the surface follows the thumb and settles at the speed it was thrown, and
  * the drag is claimed by the direction it is going in rather than by whichever node saw the finger
@@ -53,7 +58,7 @@ fun BrowseScreen(
     children: Map<String, List<FileRow>>,
     expanded: Set<String>,
     results: List<SearchHit>,
-    onOpen: (String) -> Unit,
+    onOpen: (rel: String, find: String?) -> Unit,
     onClose: () -> Unit,
 ) {
     val pager = rememberPagerState { Mode.entries.size }
@@ -117,7 +122,7 @@ fun BrowseScreen(
                                     Commands.first { it.label == row }.run(model)
                                     onClose()
                                 } else {
-                                    onOpen(row)
+                                    onOpen(row, null)
                                 }
                             },
                         )
@@ -130,7 +135,7 @@ fun BrowseScreen(
                                 Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             },
                             colors = flatRow(),
-                            modifier = Modifier.row { onOpen(hit.relPath) },
+                            modifier = Modifier.row { onOpen(hit.relPath, query) },
                         )
                     }
                 }
@@ -174,7 +179,7 @@ private fun LazyListScope.rows(
     dir: String,
     depth: Int,
     model: VaultModel,
-    onOpen: (String) -> Unit,
+    onOpen: (rel: String, find: String?) -> Unit,
 ) {
     val here = children[dir].orEmpty()
     for (row in here) {
@@ -204,7 +209,11 @@ private fun LazyListScope.rows(
                 modifier = Modifier
                     .padding(start = (depth * 12).dp)
                     .row {
-                        if (row.kind == FileKind.DIR) model.toggle(row.relPath) else onOpen(row.relPath)
+                        if (row.kind == FileKind.DIR) {
+                            model.toggle(row.relPath)
+                        } else {
+                            onOpen(row.relPath, null)
+                        }
                     },
             )
         }

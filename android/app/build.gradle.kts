@@ -25,10 +25,35 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "0.1.0"
-        ndk { abiFilters += abis }
     }
 
     buildFeatures { compose = true }
+
+    // One APK per ABI instead of one carrying both: the second copy of the two libraries packed
+    // below is 11.6 MB no device can use. An app bundle would defer the same split to Play, which
+    // this app is not released through; a split APK installs as it is. No universal APK either —
+    // the two ABIs answer that themselves: arm64-v8a is every phone, x86_64 is the emulator.
+    //
+    // This list is also the only one: AGP refuses `ndk.abiFilters` beside a split, and the split
+    // does that job too — without it JNA's four ABIs would each get an APK of their own.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include(*abis.toTypedArray())
+        }
+    }
+
+    buildTypes {
+        release {
+            // R8 stays off. uniffi's bindings reach the core by name — `Native.register` binds
+            // each `external fun uniffi_accent_api_*` to the symbol spelled the same way, and
+            // `@Structure.FieldOrder("capacity", "len", "data")` names struct fields as strings —
+            // so a rename breaks the core when its class initialises, and there is no device here
+            // to prove a keep set right. NOTEPAD.md says what a real session would have to check.
+            isMinifyEnabled = false
+        }
+    }
 
     packaging {
         // Uncompressed and page-aligned in the APK, which is what a 16 KB device needs in order
@@ -54,8 +79,9 @@ val uniffiBindgen by tasks.registering(Exec::class) {
     dependsOn(cargoNdk)
     workingDir = repo
     commandLine("make", "bindings")
-    // The library it reads the surface out of. Without this Gradle calls the task up to date
-    // whenever the output directory exists, and the bindings quietly go stale.
+    // Not what it reads — that is a host build, since the shipped library is stripped of the
+    // symbols uniffi keeps its metadata in — but it moves whenever the surface can have moved.
+    // Without it Gradle calls the task up to date whenever the output directory exists.
     inputs.file(repo.resolve("android/app/src/main/jniLibs/arm64-v8a/libaccent_android.so"))
     outputs.dir(layout.projectDirectory.dir(bindings))
 }
