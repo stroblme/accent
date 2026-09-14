@@ -229,6 +229,31 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
             u8::from(vault.exists(&moved)),
             u8::from(!vault.exists(&copied))
         );
+        // Two files on the clipboard at once, which is what a Ctrl+click set puts there: the
+        // real GDK clipboard carries a list in both of its formats, and the paste reads them
+        // back and lands both beside each other in the vault root.
+        let second = vault
+            .list_dir(&dir)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|row| row.kind != accent_core::walk::FileKind::Dir && row.rel_path != rel)
+            .map(|row| row.rel_path);
+        if let Some(second) = second {
+            let both = [(rel.clone(), false), (second, false)];
+            fileops::clipboard::copy_all(&ops, &both);
+            fileops::clipboard::paste(&ops, "");
+            glib::timeout_future(Duration::from_secs(2)).await;
+            let landed: Vec<(String, bool)> = both
+                .iter()
+                .map(|(rel, _)| accent_core::path::basename(rel).to_string())
+                .map(|name| (name.clone(), vault.exists(&name)))
+                .collect();
+            println!("bench clip_copied_many {landed:?}");
+            for (name, _) in &landed {
+                let _ = vault.delete(name);
+            }
+        }
+
         // The drill writes into the vault, so it takes its own leavings back out again.
         let _ = vault.delete(&moved);
         let _ = vault.delete(&copied);
@@ -237,12 +262,16 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
 }
 
 /// Open a tree row's context menu and then take the pointer away from the list, which is what the
-/// popover itself does: the highlight has to stay on the row the menu is pointing at.
+/// popover itself does: the highlight has to stay on the row the menu is pointing at. Then mark a
+/// second row as a Ctrl+click does and open the menu again, which is the marked set's whole
+/// mechanism bar the modifier: the rows that carry the mark class, and the items a menu over one
+/// of them offers.
 ///
 /// The leave is emitted on the list's own motion controller, found among its controllers, because
 /// under Xvfb nothing moves a pointer. That is the event the popover's grab really sends, so this
 /// drives the mechanism the bug was in; what it does not show is the menu on screen over the lit
-/// row, which wants eyes.
+/// row, which wants eyes — nor does anything here press Ctrl, there being no pointer to hold it
+/// with.
 pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
     let Some(ops) = app.ops().cloned() else {
         return bench_quit(app);
@@ -250,12 +279,19 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
-        tree.reveal(&rel);
+        // The root listing lands from a worker thread and each folder above the row is listed
+        // again as it is expanded, so the path is not in the model on the first frame.
+        for _ in 0..50 {
+            if tree.reveal(&rel) {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        }
         glib::timeout_future(Duration::from_millis(400)).await;
         println!("bench menu_row {:?}", tree.selected().map(|row| row.rel));
 
         let at = gdk::Rectangle::new(0, 0, 1, 1);
-        let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), at);
+        let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), &[], at);
         // What `wire_tree` does with the popover it was handed.
         tree.pin(Some(&rel));
         leave(tree.view());
@@ -271,6 +307,76 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
             "bench menu_closed selected={:?}",
             tree.selected().map(|row| row.rel)
         );
+
+        // The marked half: this row and one more, the menu over one of them, and the rows drawn
+        // with the mark on them once the factory has re-bound what is on screen.
+        let other = tree::expanders(tree.view())
+            .into_iter()
+            .filter_map(|expander| expander.list_row()?.item().as_ref().and_then(tree::decode))
+            .find(|row| row.rel != rel && row.indexed);
+        tree.toggle_mark(&rel);
+        if let Some(other) = &other {
+            tree.toggle_mark(&other.rel);
+        }
+        let marked = tree.marked();
+        println!("bench menu_marked {marked:?}");
+        let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), &marked, at);
+        let items = popover.menu_model().map(|m| fileops::labels(&m));
+        println!("bench menu_marked_items {items:?}");
+        glib::timeout_future(Duration::from_millis(200)).await;
+        println!("bench menu_marked_drawn {:?}", marked_rows(tree.view()));
+        popover.popdown();
+        // Escape's half, which is what the key controller calls.
+        tree.clear_marks();
+        glib::timeout_future(Duration::from_millis(200)).await;
+        println!("bench menu_marked_cleared {:?}", marked_rows(tree.view()));
+        bench_quit(&app);
+    });
+}
+
+/// Reveal a row, print where it is on screen and stay up, for an XTEST Ctrl+click held against
+/// it: the modifier is the one half no drill can fake, the mark being made in a gesture that
+/// reads the press's own state. Prints the marked rows and how many documents are open twice —
+/// before the press and after it — so one run says both what the Ctrl+click marked and that it
+/// opened nothing, and then that a plain click let the marks go again.
+pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        for _ in 0..50 {
+            if tree.reveal(&rel) {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let at = tree::expanders(tree.view())
+            .into_iter()
+            .find(|expander| {
+                let row = expander.list_row().and_then(|row| row.item());
+                row.as_ref()
+                    .and_then(tree::decode)
+                    .is_some_and(|r| r.rel == rel)
+            })
+            .and_then(|expander| {
+                let middle = graphene::Point::new(
+                    expander.width() as f32 / 2.0,
+                    expander.height() as f32 / 2.0,
+                );
+                expander.compute_point(&app.window, &middle)
+            });
+        match at {
+            Some(at) => println!("bench menu_press {} {}", at.x() as i32, at.y() as i32),
+            None => println!("bench menu_press none"),
+        }
+        for step in 0..3 {
+            glib::timeout_future(Duration::from_secs(5)).await;
+            println!(
+                "bench menu_marks {step} {:?} docs={}",
+                marked_rows(tree.view()),
+                app.docs().len()
+            );
+        }
         bench_quit(&app);
     });
 }
@@ -290,26 +396,32 @@ fn leave(view: &gtk::ListView) {
 
 /// Every row the list has a widget bound to, as its path and whether its label is dimmed.
 fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
-    let mut rows = Vec::new();
-    let mut todo = vec![view.clone().upcast::<gtk::Widget>()];
-    while let Some(widget) = todo.pop() {
-        if let Some(expander) = widget.downcast_ref::<gtk::TreeExpander>() {
+    let mut rows: Vec<(String, bool)> = tree::expanders(view)
+        .into_iter()
+        .filter_map(|expander| {
             let row = expander.list_row().and_then(|row| row.item());
             let dim = expander
                 .child()
                 .and_then(|row| row.last_child())
                 .is_some_and(|label| label.has_css_class("dim-label"));
-            if let Some(row) = row.as_ref().and_then(tree::decode) {
-                rows.push((row.rel, dim));
-            }
-            continue;
-        }
-        let mut child = widget.first_child();
-        while let Some(c) = child {
-            child = c.next_sibling();
-            todo.push(c);
-        }
-    }
+            Some((tree::decode(row.as_ref()?)?.rel, dim))
+        })
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// The rows drawn with the Ctrl+click mark on them, which is what the factory binds off the
+/// marked set.
+fn marked_rows(view: &gtk::ListView) -> Vec<String> {
+    let mut rows: Vec<String> = tree::expanders(view)
+        .into_iter()
+        .filter(|expander| expander.has_css_class("accent-marked"))
+        .filter_map(|expander| {
+            let row = expander.list_row().and_then(|row| row.item());
+            Some(tree::decode(row.as_ref()?)?.rel)
+        })
+        .collect();
     rows.sort();
     rows
 }
