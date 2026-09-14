@@ -15,19 +15,19 @@ import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.Phase
 
 /**
- * Which of the three the screen is showing.
+ * Which of the two the screen is showing.
  *
- * No stack and no navigation graph: a phone holds one thing at a time, Browse and Launch are both
- * one step from what is being read, and Back is the way out of either.
+ * No stack and no navigation graph: a phone holds one thing at a time, Browse is one step from
+ * what is being read, and Back is the way out of it.
  */
-private enum class Screen { Home, Browse, Launch }
+private enum class Screen { Home, Browse }
 
 /**
- * The vault: whatever is open, and the two buttons that reach everything else.
+ * The vault: whatever is open, and the one button that reaches everything else.
  *
- * Browse is the file tree, Launch the switcher. Both are screens rather than a drawer and a sheet,
- * because an edge swipe and a pull are gestures nothing announces, and every gesture here has to
- * have a visible twin (MOBILE_DESIGN.md).
+ * Browse is the files, the search and the palette behind one set of chips. A screen rather than a
+ * drawer or a sheet, because an edge swipe and a pull are gestures nothing announces, and every
+ * gesture here has to have a visible twin (MOBILE_DESIGN.md).
  */
 @Composable
 fun HomeScreen(model: VaultModel) {
@@ -77,10 +77,9 @@ fun HomeScreen(model: VaultModel) {
                     listing = state.phase == Phase.SCAN,
                 )
             }
-            Buttons(
+            BrowseButton(
                 visible = screen == Screen.Home && chrome.shown,
                 onBrowse = { screen = Screen.Browse },
-                onLaunch = { screen = Screen.Launch },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
 
@@ -96,7 +95,6 @@ fun HomeScreen(model: VaultModel) {
                     },
                     onClose = { screen = Screen.Home },
                 )
-                Screen.Launch -> SwitcherScreen(model) { screen = Screen.Home }
                 Screen.Home -> Unit
             }
         }
@@ -104,17 +102,16 @@ fun HomeScreen(model: VaultModel) {
 }
 
 /**
- * Browse and Launch, floating over whatever is being read.
+ * Browse, floating over whatever is being read.
  *
- * They fade with the rest of the chrome, and they go outright while the keyboard is up: there is
- * no room for them there, and a keyboard means the reader is writing rather than looking for
- * something else to read.
+ * It fades with the rest of the chrome, and goes outright while the keyboard is up: there is no
+ * room for it there, and a keyboard means the reader is writing rather than looking for something
+ * else to read.
  */
 @Composable
-private fun Buttons(
+private fun BrowseButton(
     visible: Boolean,
     onBrowse: () -> Unit,
-    onLaunch: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val typing = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -124,10 +121,7 @@ private fun Buttons(
         exit = fadeOut(),
         modifier = modifier.padding(bottom = 24.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Pill("Browse", onBrowse)
-            Pill("Launch", onLaunch)
-        }
+        Pill("Browse", onBrowse)
     }
 }
 
@@ -152,7 +146,7 @@ private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean) {
                 listing -> "Looking through your files."
                 indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
                 indexing -> "Reading what it found."
-                else -> "Browse your files, or Launch straight to a note."
+                else -> "Browse your files, or search straight to a note."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
