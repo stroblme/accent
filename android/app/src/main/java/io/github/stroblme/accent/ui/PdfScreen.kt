@@ -434,14 +434,17 @@ private val PAGE_GAP = 8.dp
 private const val MIN_ZOOM = 1f
 
 /**
- * How far in a pinch may go on a phone.
+ * How far in a pinch may go.
  *
  * Memory no longer decides it: past [WHOLE_PAGE_PX] a page is drawn one screenful at a time, so a
- * render costs the same at any zoom. Usefulness does. 16× fit width puts an A0 poster — 2384 pt
- * across, the case that asked for this — at 7.3 px/pt on a 1080 px screen, so its 8 pt small print
- * stands 58 px tall where 6× left it 22; an A4 page reaches 29 px/pt, which is past any paper.
+ * render costs the same at any zoom. What the pixels are worth does. 8× fit width puts an A0 poster
+ * — 2384 pt across, the widest paper anyone opens and the case that asked for this — at 3.6 px/pt on
+ * a 1080 px screen, about the 2.6 px/pt such a screen draws a point at 1:1. Its 8 pt small print
+ * stands 29 px tall, where the old ceiling of 6× reached 22 and then failed to draw at all, a whole
+ * A0 page at 6× being 59 M pixels. An A4 page reaches 14.5 px/pt. Deeper buys detail the paper has
+ * not got, and a shallower range is easier to land a pinch with on the thing being looked at.
  */
-private const val MAX_ZOOM = 16f
+private const val MAX_ZOOM = 8f
 
 /** How long the hands rest before the pages are drawn again at where they left them. */
 private const val RESHARPEN_MS = 180L
@@ -462,7 +465,10 @@ private data class Settled(val zoom: Float, val window: IntRect)
  * [oversize] asks Compose to lay the column out `width × zoom` wide, and a pinch shrinking back
  * from the ceiling asks for it `height × zoom` tall. `Constraints` packs a pair of sizes into one
  * `Long` and can hold at most 32766 px in one dimension beside 65534 in the other, so a column past
- * that throws where it is measured. A phone has room to spare; a 2560 px tablet stops at 12.8.
+ * that throws where it is measured. At 8× that leaves every phone and tablet the whole of it — the
+ * clamp bites only above a 4095 px-wide or 8191 px-tall viewport, which is a desktop-sized window
+ * rather than a device — but it is what makes [MAX_ZOOM] a number the layout can honour rather than
+ * one that happens to fit the screens on sale.
  */
 internal fun ceiling(viewport: IntSize): Float =
     minOf(MAX_ZOOM, 32766f / viewport.width, 65534f / viewport.height)

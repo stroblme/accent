@@ -17,8 +17,8 @@ class TileTest {
     /** A4 on a 1080 px phone at fit width. */
     private val a4 = IntRect(0, 0, 1080, 1528)
 
-    /** A0 on the same phone at 16×, which is 422 M pixels and cannot be drawn in one go. */
-    private val poster = IntRect(0, 0, 17280, 24432)
+    /** A0 on the same phone at 8×, which is 105 M pixels and cannot be drawn in one go. */
+    private val poster = IntRect(0, 0, 8640, 12213)
 
     private val screen = IntSize(1080, 2400)
 
@@ -50,11 +50,12 @@ class TileTest {
 
     @Test
     fun `the ceiling is what the layout can be asked for`() {
-        // A phone has room to spare, so it gets the whole of what posters want.
-        assertEquals(16f, ceiling(screen), 0.001f)
-        // A landscape tablet runs into the packing first, and stops rather than throwing.
-        assertEquals(12.799f, ceiling(IntSize(2560, 1600)), 0.001f)
-        for (size in listOf(screen, IntSize(1440, 3200), IntSize(2560, 1600), IntSize(2960, 1848))) {
+        // At 8× a phone and a tablet both get the whole of what posters want.
+        assertEquals(8f, ceiling(screen), 0.001f)
+        assertEquals(8f, ceiling(IntSize(2560, 1600)), 0.001f)
+        // A desktop-sized window runs into the packing first, and stops rather than throwing.
+        assertEquals(6.3996f, ceiling(IntSize(5120, 2880)), 0.001f)
+        for (size in listOf(screen, IntSize(1440, 3200), IntSize(2560, 1600), IntSize(5120, 2880))) {
             val at = ceiling(size)
             assertTrue("$size wide at $at", size.width * at <= 32766f)
             assertTrue("$size tall at $at", size.height * at <= 65534f)
