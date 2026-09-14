@@ -295,6 +295,10 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
                 source: NestedScrollSource,
             ): Offset {
                 if (consumed.y != 0f) scrolled = true
+                // A drag something took sideways is a page turn, not a pull. What it hands on is
+                // only what a thumb spills crossing the screen, and a panel that followed it would
+                // be a panel that moves when the reader changes tab.
+                if (consumed.x != 0f) return Offset.Zero
                 if (available.y <= 0f) return Offset.Zero
                 // Not the tail of a scroll, and not a fling running on past the end.
                 if (scrolled || source != NestedScrollSource.UserInput) return Offset.Zero

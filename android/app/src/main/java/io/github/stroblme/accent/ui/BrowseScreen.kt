@@ -1,14 +1,11 @@
 package io.github.stroblme.accent.ui
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedContentTransitionScope.SlideDirection
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -24,6 +21,7 @@ import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.fuzzyRank
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -41,6 +39,13 @@ private enum class Mode { Search, Files, Command }
  *
  * Files and Command lay their rows out from the bottom up, so the best match is the one nearest
  * the field and the thumb. Search keeps the tree the way a tree reads, from the top.
+ *
+ * The three are pages of one pager rather than three states of one list, so the swipe between them
+ * is the platform's own: the surface follows the thumb and settles at the speed it was thrown, and
+ * the drag is claimed by the direction it is going in rather than by whichever node saw the finger
+ * first — a page turn and a scroll down cannot be taken for each other, and neither can steal the
+ * pull that closes the panel. The chips remain the control and the only announcement: tapping one
+ * scrolls the pager, so it still travels the way the ordinal moved.
  */
 @Composable
 fun BrowseScreen(
@@ -51,9 +56,15 @@ fun BrowseScreen(
     onOpen: (String) -> Unit,
     onClose: () -> Unit,
 ) {
-    var mode by remember { mutableStateOf(Mode.Search) }
+    val pager = rememberPagerState { Mode.entries.size }
+    val scope = rememberCoroutineScope()
+    // Which page the pager is nearest, which is what the field means and which chip is lit: both
+    // follow the surface across, rather than waiting for it to land.
+    val mode = Mode.entries[pager.currentPage]
     var query by remember { mutableStateOf("") }
-    var ranked by remember { mutableStateOf<List<String>>(emptyList()) }
+    // The ranking and the page it was ranked for. Two pages are composed at once while one is being
+    // dragged in, and a file path drawn as a command label is a row that says the wrong thing.
+    var ranked by remember { mutableStateOf(Mode.Search to emptyList<String>()) }
     val focus = remember { FocusRequester() }
 
     LaunchedEffect(query, mode) {
@@ -63,7 +74,7 @@ fun BrowseScreen(
         // The note corpus is fetched on demand rather than kept in step with the index, so the
         // first query in a session waits for it once.
         val corpus = if (commands) Commands.map { it.label } else model.corpus()
-        ranked = withContext(Dispatchers.Default) {
+        ranked = mode to withContext(Dispatchers.Default) {
             if (query.isBlank() && !commands) {
                 model.recents.list(Recents.Kind.Notes).filter { it in corpus }.take(50)
             } else {
@@ -74,30 +85,20 @@ fun BrowseScreen(
     }
 
     // Reaching for a chip is reaching for the keyboard. Opening the screen is not: Search lands on
-    // the tree, and a keyboard over it would be half the screen spent on nothing.
-    LaunchedEffect(mode) { if (mode != Mode.Search) focus.requestFocus() }
+    // the tree, and a keyboard over it would be half the screen spent on nothing. This one waits
+    // for the page to settle — half the screen taken away mid-swipe is taken away from a gesture
+    // that has not finished.
+    val landed = Mode.entries[pager.settledPage]
+    LaunchedEffect(landed) { if (landed != Mode.Search) focus.requestFocus() }
 
     PullDownPanel(onClose) {
         ScreenBar("Browse")
-        // Stepping between the chips moves the list the way the eye went: towards Command is a
-        // step left, back towards Search a step right. The direction is the point of it — what
-        // changed is which of three things the field means, and a list that simply swapped its
-        // contents said nothing about where the reader had come from.
-        AnimatedContent(
-            targetState = mode,
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-            transitionSpec = {
-                val towards =
-                    if (targetState.ordinal > initialState.ordinal) SlideDirection.Left
-                    else SlideDirection.Right
-                (slideIntoContainer(towards, stepping()) + fadeIn(stepping())) togetherWith
-                    (slideOutOfContainer(towards, stepping()) + fadeOut(stepping()))
-            },
-            label = "browse mode",
-        ) { tab ->
+        HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
+            val tab = Mode.entries[page]
+            val rows = if (ranked.first == tab) ranked.second else emptyList()
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
-                    tab != Mode.Search -> items(ranked, key = { it }) { row ->
+                    tab != Mode.Search -> items(rows, key = { it }) { row ->
                         ListItem(
                             headlineContent = {
                                 Text(
@@ -142,7 +143,13 @@ fun BrowseScreen(
             for (choice in Mode.entries) {
                 FilterChip(
                     selected = mode == choice,
-                    onClick = { mode = choice },
+                    // The tap travels the same distance the thumb would have dragged, at the
+                    // sideways token; a swipe settles on its own velocity, as a thrown page should.
+                    onClick = {
+                        scope.launch {
+                            pager.animateScrollToPage(choice.ordinal, animationSpec = stepping())
+                        }
+                    },
                     label = { Text(choice.name) },
                 )
             }

@@ -29,7 +29,7 @@ build with. This says what to build.
 | Surface | What it is |
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
-| Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their chip is tapped. The desktop's eight sidebar panes and its palette collapse into this one |
+| Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands. The desktop's eight sidebar panes and its palette collapse into this one |
 | Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
@@ -57,11 +57,12 @@ of them must also exist as a visible control.
 | Gesture | What it does | Its visible twin |
 |---|---|---|
 | Pull the panel down | Closes Browse | The handle at its top |
+| Swipe across the panel | Steps between Search, Files and Command | The chips, which travel with it |
 | Tap the content | Puts the chrome up or takes it down | — |
 | Scroll on | Takes the chrome down; scrolling back brings it up | — |
 | Pinch on a page | Zooms a PDF, 1× to 6×, around the point between the fingers | — |
 | Drag on a zoomed page | Pans it, both axes at once | — |
-| Long press | The context sheet for the thing under it | — |
+| Long press on a note | Selects the text under the finger: the WebView's own handles, which is what a page of prose does everywhere else on the platform | The handles it raises |
 
 A panel is closed by pulling it down, which is the one gesture here that reads as itself: the
 handle at the top says a panel can be moved, and moving it down is where a panel goes. What is
