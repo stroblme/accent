@@ -1,6 +1,9 @@
 package io.github.stroblme.accent
 
 import android.app.Application
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.stroblme.accent.ffi.AccentException
@@ -12,17 +15,38 @@ import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.Vault
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * Put a note's text in the buffer as its own, with nothing to undo back into.
+ *
+ * The state object outlives every note it holds, and a programmatic edit is an undo step like any
+ * other, so the history has to go with the text: an undo that walked back past the load would put
+ * one file's words in another's.
+ */
+fun TextFieldState.load(text: String) {
+    setTextAndPlaceCursorAtEnd(text)
+    undoState.clearHistory()
+}
+
 /** What the note in front of the reader is, and what the vault has to say about it. */
 data class Open(
     val rel: String,
+    /**
+     * The text as the vault has it: what was read off disk, or what was last written back.
+     *
+     * What the *reader* has is [VaultModel.buffer], and the difference between the two is the
+     * whole of "this note is dirty" — it is what autosave compares against and what a write
+     * replaces.
+     */
     val text: String = "",
     val etag: Etag? = null,
     /** Somebody else wrote the file while it was open and dirty: autosave has stopped. */
@@ -80,6 +104,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     val recents = Recents(app)
 
+    /**
+     * The note's text, as the reader has it: the editor's field state, hoisted.
+     *
+     * The editor is not the only thing that touches it. Taking the version on disk replaces it,
+     * closing the vault has to write it out before the handle goes, and the rendered view draws
+     * from it so that an edit cannot be in one view and not the other — none of which a state
+     * remembered inside the editor could be reached for. One object for the app's life, because
+     * building another throws away the undo history with it; the text in it is replaced ([load]).
+     */
+    val buffer = TextFieldState()
+
     private var vault: Vault? = null
 
     /** Every file in the vault, for the switcher. See [corpus]. */
@@ -88,6 +123,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** How far the batch being applied said the walk had got, and when the tree last caught up. */
     private var seen: Progress? = null
     private var lastRelist = 0L
+
+    init {
+        // Autosave: a pause in the typing, not a queue of them — `collectLatest` drops the wait
+        // the moment the next keystroke lands. It runs for as long as the model does rather than
+        // for as long as the editor is composed, so leaving the editor inside that second no
+        // longer needs a write of its own, and what it is compared against is read when the wait
+        // is over: typing a word and taking it back again saves nothing, and a note replaced
+        // under it (a reload, another note) is left alone.
+        viewModelScope.launch {
+            snapshotFlow { buffer.text.toString() }.collectLatest { text ->
+                delay(SAVE_AFTER_MS)
+                if (text != _state.value.open?.text) write(text)
+            }
+        }
+    }
 
     fun open(root: String) {
         viewModelScope.launch {
@@ -213,19 +263,24 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun openFile(rel: String, find: String? = null) {
         val v = vault ?: return
         recents.touch(Recents.Kind.Notes, rel)
-        if (rel.endsWith(".pdf", ignoreCase = true)) {
-            viewModelScope.launch {
+        viewModelScope.launch {
+            // What is in the buffer belongs to the note it was typed into, and the buffer is about
+            // to hold another note's text: a write left pending across the swap would put these
+            // words in that file.
+            flush()
+            if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
                 path.onSuccess { p -> _state.update { it.copy(pdf = p, open = null) } }
                     .onFailure { fail("Cannot open this file", it) }
+                return@launch
             }
-            return
-        }
-        viewModelScope.launch {
             val read = withContext(Dispatchers.IO) {
                 runCatching { v.read(rel) to v.conflictsOf(rel) }
             }
             read.onSuccess { (note, conflicts) ->
+                // The buffer and the state in one step, so nothing composes a note's name over
+                // another note's text.
+                buffer.load(note.text)
                 _state.update {
                     it.copy(
                         pdf = null,
@@ -236,7 +291,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun close() = _state.update { it.copy(open = null, pdf = null) }
+    /** Put the note down, writing anything the pause was still holding. */
+    fun close() = viewModelScope.launch {
+        flush()
+        _state.update { it.copy(open = null, pdf = null) }
+    }
 
     /**
      * Put the vault down and go back to the picker.
@@ -248,7 +307,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * counts the calls in flight and frees the object behind the last of them, and the next one
      * throws, which that loop already treats as the end.
      */
-    fun closeVault() {
+    fun closeVault() = viewModelScope.launch {
+        // Before the handle, because the write goes through it: the buffer is the only copy of
+        // whatever was typed in the last second.
+        flush()
         vault?.close()
         vault = null
         corpus = emptyList()
@@ -278,10 +340,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
      * both the edits and the answer nobody has given yet. Same rule as the desktop.
      */
-    fun save(text: String) = viewModelScope.launch {
-        val v = vault ?: return@launch
-        val open = _state.value.open ?: return@launch
-        if (open.changedOnDisk) return@launch
+    private suspend fun write(text: String) {
+        val v = vault ?: return
+        val open = _state.value.open ?: return
+        if (open.changedOnDisk) return
         val written = withContext(Dispatchers.IO) {
             runCatching { v.save(open.rel, text, open.etag) }
         }
@@ -298,8 +360,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Write what is in the buffer before whatever is about to take it away.
+     *
+     * The pause is a coroutine that will be cancelled with the vault or superseded by the next
+     * note, so the exits ask for the write themselves. A note with saving paused is left alone:
+     * that pause is the point of the banner, and writing anyway would overwrite the file the
+     * reader has not chosen yet.
+     */
+    private suspend fun flush() {
+        val text = buffer.text.toString()
+        if (text != _state.value.open?.text) write(text)
+    }
+
     /** Take what is on disk, dropping the edits in the buffer. */
     fun reload() {
+        // The banner goes first, so the read that follows is allowed to replace the buffer.
         _state.update { it.copy(open = it.open?.copy(changedOnDisk = false)) }
         _state.value.open?.let { openFile(it.rel) }
     }
@@ -399,6 +475,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        /** How long a pause in the typing is worth a write. The same second the desktop waits. */
+        private const val SAVE_AFTER_MS = 1000L
+
         /** How often the tree catches up with a running walk. Often enough to watch it fill. */
         private const val RELIST_EVERY_MS = 700L
 
