@@ -539,12 +539,16 @@ impl Sidebar {
     /// changes — switching to it does not re-run the query, which is the behaviour it has always
     /// had.
     ///
-    /// What it costs, measured on the generated 40k-file vault (41 684 files, `ACCENT_BENCH_SEARCH`
-    /// with `RUST_LOG=accent=debug`): one settled batch is one query, and that query is 2–11 ms
-    /// ranked — which is every default search, and well inside the grace period before a progress
-    /// bar is drawn — but 2.0 s as the exact scan a toggle or the open replace row switches the
-    /// pane to, which does draw one. What limits how often that is paid is the autosave behind it,
-    /// itself 1 s after the last edit: one requery per pause in the typing, not one per keystroke.
+    /// What it costs, measured on the generated 40k-file vault (41 690 entries, 21 360 indexed
+    /// bodies) with `ACCENT_BENCH_SEARCH=<query>[:<n>]` and `RUST_LOG=accent=debug`: one settled
+    /// batch is one query however many files it touched — 0.8 ms ranked and 50 ms as the exact
+    /// scan a toggle or the open replace row switches the pane to when one note moved, 11 ms and
+    /// 63 ms when fifty did — and both are well inside the grace period before a progress bar is
+    /// drawn (`search::SHOW_AFTER`). Reading only the files the batch touched instead of every
+    /// body would buy back some 60 ms of a worker thread, which does not pay for merging a
+    /// partial scan into rows that are already up. What limits how often even that is paid is the
+    /// autosave behind it, itself 1 s after the last edit: one requery per pause in the typing,
+    /// not one per keystroke.
     pub fn requery_search_soon(&self) {
         let Some(panes) = self.panes.as_ref() else {
             return;

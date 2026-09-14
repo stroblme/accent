@@ -112,8 +112,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_REPLACE=1` writes a note holding one unique word, presses the Search pane's
 /// Replace All on it and prints what the pane lists before and after the rewrite.
 ///
-/// `ACCENT_BENCH_SEARCH=<query>` leaves `<query>` in the Search pane and writes a note holding it
-/// behind the pane's back, printing the rows before, after and once the note is gone again.
+/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` leaves `<query>` in the Search pane and writes `n` notes
+/// holding it behind the pane's back, printing the rows before, after and once they are gone
+/// again — once ranked, then once more with the replace row open, which is the exact scan.
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
