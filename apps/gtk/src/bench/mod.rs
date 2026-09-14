@@ -114,7 +114,8 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` leaves `<query>` in the Search pane and writes `n` notes
 /// holding it behind the pane's back, printing the rows before, after and once they are gone
-/// again — once ranked, then once more with the replace row open, which is the exact scan.
+/// again — once ranked, then once more with the replace row open, which is the exact scan, and
+/// last with another pane in front, which is the catch-up the Search pane owes on its way back.
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
