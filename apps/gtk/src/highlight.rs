@@ -190,6 +190,70 @@ pub fn with_alpha(c: gdk::RGBA, alpha: f32) -> gdk::RGBA {
     gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha)
 }
 
+/// The lowest contrast a dim colour may read at against the page under it.
+///
+/// The alphas below say what a marker is worth where the page has contrast to spare, and on
+/// Adwaita they give 2.8:1 in light and 3.8:1 in dark — which is what every note has been read
+/// at. On a page whose own ink is close to it they say nothing: Solarized's prose is 4.1:1
+/// against its paper, so 40 % of it is 1.6:1 and the bullet is not there. This is the floor those
+/// alphas are held above, so a scheme is lifted into the band rather than needing an alpha of its
+/// own.
+///
+/// A contrast target and not WCAG's 4.5:1 on purpose. That floor is for text somebody reads; a
+/// marker is punctuation the eye is meant to pass over, and lifting markup to 4.5:1 would make it
+/// louder than the prose in every theme. The number is Adwaita's own dimmer half, so the default
+/// theme does not move and nothing here is a judgement about what reads well — only that no page
+/// may be quieter than the one people already read.
+const DIM_FLOOR: f32 = 2.8;
+
+/// What `colour` reads at against `page`, composited over it: a translucent foreground *is* a mix
+/// with what is behind it, so that mix is the contrast the reader gets. WCAG 2.1's ratio, which
+/// is the only definition of "reads at" anyone shares.
+pub fn reads_at(colour: gdk::RGBA, page: gdk::RGBA) -> f32 {
+    let a = colour.alpha();
+    let over = |c: f32, p: f32| a * c + (1.0 - a) * p;
+    let luminance = |r: f32, g: f32, b: f32| {
+        let lin = |v: f32| match v <= 0.040_45 {
+            true => v / 12.92,
+            false => ((v + 0.055) / 1.055).powf(2.4),
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    };
+    let mixed = luminance(
+        over(colour.red(), page.red()),
+        over(colour.green(), page.green()),
+        over(colour.blue(), page.blue()),
+    );
+    let under = luminance(page.red(), page.green(), page.blue());
+    (mixed.max(under) + 0.05) / (mixed.min(under) + 0.05)
+}
+
+/// `ink` at `alpha`, or at as much more of it as it takes to clear [`DIM_FLOOR`] against `page`.
+///
+/// Contrast against the page only grows as the ink does, so the smallest alpha that clears the
+/// floor is a bisection away; a page with no room left hands back the ink itself.
+pub fn dim(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32) -> gdk::RGBA {
+    if reads_at(with_alpha(ink, alpha), page) >= DIM_FLOOR {
+        return with_alpha(ink, alpha);
+    }
+    let (mut lo, mut hi) = (alpha, 1.0);
+    // Twenty halvings land within 1e-6 of the boundary, far finer than the 1/255 it is painted at.
+    for _ in 0..20 {
+        let mid = 0.5 * (lo + hi);
+        match reads_at(with_alpha(ink, mid), page) >= DIM_FLOOR {
+            true => hi = mid,
+            false => lo = mid,
+        }
+    }
+    with_alpha(ink, hi)
+}
+
+/// The page a note is written on. `theme::view_bg` is the one place that literal is written down,
+/// for the widgets that cannot read GTK's CSS variables; this is the second such reader.
+pub fn page(dark: bool) -> gdk::RGBA {
+    gdk::RGBA::parse(crate::theme::view_bg(dark)).unwrap_or(gdk::RGBA::WHITE)
+}
+
 /// Apply the standalone accent and the foreground-derived dim colours. Call once after the view is
 /// realised and again on every `notify::accent-color` / `notify::dark`.
 pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
@@ -201,6 +265,7 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     // `to_standalone_rgba` hands back — the colour the platform's own links are written in.
     let accent = style.accent_color().to_standalone_rgba(style.is_dark());
     let fg = view.color();
+    let page = page(style.is_dark());
     let set = |name: &str, f: &dyn Fn(&gtk::TextTag)| {
         if let Some(t) = table.lookup(name) {
             f(&t);
@@ -210,11 +275,13 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         set(name, &|t| t.set_foreground_rgba(Some(&accent)));
     }
     for name in ["marker", "frontmatter", "listmarker"] {
-        set(name, &|t| t.set_foreground_rgba(Some(&with_alpha(fg, 0.4))));
+        set(name, &|t| t.set_foreground_rgba(Some(&dim(fg, page, 0.4))));
     }
     for name in ["quote", "taskdone"] {
-        set(name, &|t| t.set_foreground_rgba(Some(&with_alpha(fg, 0.6))));
+        set(name, &|t| t.set_foreground_rgba(Some(&dim(fg, page, 0.6))));
     }
+    // A wash behind a run of code rather than ink on the page: it is meant to be barely there, so
+    // the floor — which is about a mark being findable — would turn it into a slab.
     for name in ["code", "codeblock"] {
         set(name, &|t| {
             t.set_background_rgba(Some(&with_alpha(fg, 0.07)))
@@ -464,6 +531,34 @@ pub(crate) fn rotate(hsv: (f32, f32, f32), column: usize) -> (f32, f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dim_colour_the_page_has_room_for_keeps_its_alpha() {
+        // Adwaita light: near-black ink on white paper, 12.6:1 before it is dimmed at all.
+        let ink = gdk::RGBA::new(0.0, 0.0, 6.0 / 255.0, 0.8);
+        let page = gdk::RGBA::WHITE;
+        assert_eq!(dim(ink, page, 0.4).alpha(), 0.4);
+        assert!(reads_at(dim(ink, page, 0.4), page) >= DIM_FLOOR);
+    }
+
+    #[test]
+    fn a_dim_colour_the_page_swallows_is_given_more_ink() {
+        // Solarized light: base00 on base3, 4.1:1 to start with, so 40 % of it is 1.6:1.
+        let ink = gdk::RGBA::parse("#657b83").unwrap();
+        let page = gdk::RGBA::parse("#fdf6e3").unwrap();
+        assert!(reads_at(with_alpha(ink, 0.4), page) < DIM_FLOOR);
+        let lifted = dim(ink, page, 0.4);
+        assert!(lifted.alpha() > 0.4, "alpha {}", lifted.alpha());
+        assert!((reads_at(lifted, page) - DIM_FLOOR).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_page_with_no_room_left_gets_all_the_ink() {
+        // An ink the floor is out of reach of: the answer is the ink, not a colour past it.
+        let ink = gdk::RGBA::parse("#888888").unwrap();
+        let page = gdk::RGBA::parse("#777777").unwrap();
+        assert_eq!(dim(ink, page, 0.4).alpha(), 1.0);
+    }
 
     #[test]
     fn ascii_offsets_are_identity() {

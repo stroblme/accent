@@ -301,20 +301,21 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// What the theme-derived tags of `tab` hold right now, next to what they are derived from: the
-/// view's resolved foreground, the scheme the buffer is on and that scheme's own `text` ink.
+/// What the theme-derived tags of `tab` hold right now, each with what it reads at against the
+/// page under it, next to what they are derived from: the view's resolved foreground, the scheme
+/// the buffer is on and that scheme's own `text` ink.
 fn bench_theme_colours(tab: &Rc<Tab>) -> String {
     let table = tab.buffer.tag_table();
-    let fg = |name: &str| {
-        table
-            .lookup(name)
-            .and_then(|t| t.foreground_rgba())
-            .map(|c| c.to_string())
+    let page = crate::highlight::page(adw::StyleManager::default().is_dark());
+    let says = |c: Option<gtk::gdk::RGBA>| match c {
+        Some(c) => format!("{c}@{:.2}:1", crate::highlight::reads_at(c, page)),
+        None => "none".to_string(),
     };
+    let fg = |name: &str| says(table.lookup(name).and_then(|t| t.foreground_rgba()));
     let scheme = tab.buffer.style_scheme();
     format!(
-        "dark={} scheme={:?} scheme_text={:?} view_fg={} listmarker={:?} quote={:?} \
-         code_bg={:?} link={:?}",
+        "dark={} scheme={:?} scheme_text={:?} page={page} view_fg={}@{:.2}:1 marker={} \
+         listmarker={} quote={} taskdone={} code_bg={} link={}",
         adw::StyleManager::default().is_dark(),
         scheme.as_ref().map(|s| s.id()),
         scheme
@@ -322,12 +323,12 @@ fn bench_theme_colours(tab: &Rc<Tab>) -> String {
             .and_then(|s| s.style("text"))
             .and_then(|s| s.foreground()),
         tab.view.color(),
+        crate::highlight::reads_at(tab.view.color(), page),
+        fg("marker"),
         fg("listmarker"),
         fg("quote"),
-        table
-            .lookup("code")
-            .and_then(|t| t.background_rgba())
-            .map(|c| c.to_string()),
+        fg("taskdone"),
+        says(table.lookup("code").and_then(|t| t.background_rgba())),
         fg("link"),
     )
 }
