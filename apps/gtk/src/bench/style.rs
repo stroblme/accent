@@ -341,8 +341,10 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
 
 /// Jump into the note at `rel` the three ways a jump arrives — a search hit's range, a tag's
 /// name, a Go to Line — and print what the reveal painted each time, then what each kind of
-/// interaction leaves of it. The find bar's query is printed beside it throughout: a jump used to
-/// hand the bar the matched text, which lit every other occurrence in the note and never expired.
+/// interaction leaves of it. The find bar's query and whether it is painting are printed beside
+/// it throughout: a jump hands the bar the matched text so `F3` steps through it, and that is all
+/// it hands over — turning the highlight on with it is what used to light every other occurrence
+/// in the note and never expire.
 ///
 /// A click is not driven here because it is the same mark move an arrow key is: GtkTextView
 /// places the caret on button-press, and the reveal comes down with the caret wherever it moves.
@@ -429,12 +431,12 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let show = |label: &str| {
             let (on, tag) = tab.reveal_highlight();
+            let context = tab.search_context();
             println!(
-                "bench reveal case={label} on={on} at={:?} query={:?}",
+                "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                sourceview5::prelude::SearchSettingsExt::search_text(
-                    &tab.search_context().settings()
-                )
+                sourceview5::prelude::SearchSettingsExt::search_text(&context.settings()),
+                context.is_highlight()
             );
         };
 
@@ -449,6 +451,17 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         tab.goto_line(3, 6);
         tab.reveal_line(3);
         show("goto_line");
+
+        // `F3` straight after a jump, which is what the prefilled query is for: it steps from the
+        // match the row pointed at to the next one, wrapping, without the bar ever being opened.
+        let second = at("alpha") as usize;
+        tab.goto_range(second..second + 5);
+        tab.step(true, false);
+        let stepped = tab
+            .buffer
+            .selection_bounds()
+            .map(|(s, e)| (s.offset(), e.offset()));
+        println!("bench reveal case=step_after_jump at={stepped:?}");
 
         // Each interaction in turn, the reveal put back between them.
         for (label, act) in [
