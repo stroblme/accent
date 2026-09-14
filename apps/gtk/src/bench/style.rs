@@ -390,6 +390,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             .tags
             .into_iter()
             .next();
+        let tagged_name = tagged.as_ref().map(|t| t.name.clone());
         for (label, target) in [
             (
                 "open_tag",
@@ -418,6 +419,50 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 under(&ranges)
             );
         }
+
+        // A jump arriving while the bar is already open: the box has to end up saying what the tab
+        // is now searching, and the write must not come back round as a search of the reader's
+        // own — that would paint every match and step the caret off the place just revealed. The
+        // box says `search-changed` twice for one write, the second after its delay, so the same
+        // line is printed at the jump and again once that delay has passed.
+        //
+        // Before the note's text is replaced, and not after: the bar taking the keyboard is the
+        // view losing it, which is one of the two things that autosave the buffer. A drill must
+        // not write the vault it reads.
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        bench_pump();
+        let bar = app.pane().find.clone();
+        let state = |label: &str, tab: &Rc<Tab>, bar: &Rc<crate::find::Bar>| {
+            println!(
+                "bench reveal {label} query={:?} painting={} on={} at={:?}",
+                bar.query_text(),
+                tab.search_context().is_highlight(),
+                tab.reveal_highlight().0,
+                tab.buffer
+                    .selection_bounds()
+                    .map(|(s, e)| (s.offset(), e.offset()))
+            );
+        };
+        state("bar_open", &tab, &bar);
+        if let Some(name) = tagged_name {
+            tab.goto_tag(&name);
+        }
+        state("bar_jump", &tab, &bar);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            state("bar_settled", &tab, &bar);
+            // The bar goes away again so the view has the keyboard back: from here on the drill
+            // edits the buffer, and nothing may take the focus off a note that is dirty.
+            bar.close();
+            bench_reveal_marks(&app, &tab);
+        });
+    });
+}
+
+/// The second half of [`bench_reveal`], over text of the drill's own: what each kind of jump
+/// paints, what each kind of interaction leaves of it, and the three match tags' priorities.
+fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
+    {
+        let (app, tab) = (app.clone(), tab.clone());
         // ASCII throughout, so the byte offset `find` gives is also the character offset the
         // buffer counts in.
         let text = "Alpha beta alpha\ngamma #focus delta\nlast line here\n";
@@ -512,7 +557,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 .unwrap_or_default()
         );
         bench_quit(&app);
-    });
+    }
 }
 
 /// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps

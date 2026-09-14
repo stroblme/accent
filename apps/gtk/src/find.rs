@@ -16,6 +16,7 @@
 use crate::editor::Tab;
 use adw::prelude::*;
 use gtk::{gdk, glib};
+use sourceview5::prelude::SearchSettingsExt;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::rc::Rc;
 
@@ -56,6 +57,16 @@ pub enum Mode {
     Goto,
 }
 
+/// A tab the bar is pointed at, with the handlers watching its match count, its line count and
+/// its query. All three go when the bar is pointed elsewhere, or they accumulate one per tab
+/// switch.
+type Watch = (
+    Rc<Tab>,
+    glib::SignalHandlerId,
+    glib::SignalHandlerId,
+    glib::SignalHandlerId,
+);
+
 pub struct Bar {
     bar: gtk::SearchBar,
     rows: gtk::Stack,
@@ -65,8 +76,13 @@ pub struct Bar {
     matches: gtk::Label,
     line: gtk::Entry,
     lines: gtk::Label,
-    /// The tab being searched, with the handlers watching its match count and its line count.
-    target: RefCell<Option<(Rc<Tab>, glib::SignalHandlerId, glib::SignalHandlerId)>>,
+    /// The tab being searched, and what is watching it.
+    target: RefCell<Option<Watch>>,
+    /// What the bar last wrote into the query box on the tab's behalf, waiting for the delayed
+    /// `search-changed` that follows it. A sidebar jump sets the tab's query and deliberately
+    /// leaves it unpainted; running it here as a search of the reader's own would light every
+    /// match and step the caret off the place the jump just revealed.
+    synced: RefCell<Option<String>>,
     /// Set while the bar itself moves the caret, so the resulting count notification does not
     /// walk the label back to the value it had before the jump.
     busy: Cell<bool>,
@@ -162,6 +178,7 @@ impl Bar {
             line: line.clone(),
             lines,
             target: RefCell::new(None),
+            synced: RefCell::new(None),
             busy: Cell::new(false),
             marked: Cell::new(false),
             wiring: OnceCell::new(),
@@ -170,7 +187,27 @@ impl Bar {
         query.connect_search_changed(glib::clone!(
             #[weak(rename_to = bar)]
             this,
-            move |entry| bar.search(&entry.text())
+            move |entry| {
+                let text = entry.text();
+                // Put there by the tab rather than typed into: see [`Bar::synced`].
+                let mine = {
+                    let mut synced = bar.synced.borrow_mut();
+                    match synced.as_deref() {
+                        Some(written) if written == text.as_str() => {
+                            *synced = None;
+                            true
+                        }
+                        Some(_) if text.is_empty() => true,
+                        _ => {
+                            *synced = None;
+                            false
+                        }
+                    }
+                };
+                if !mine {
+                    bar.search(&text);
+                }
+            }
         ));
         query.connect_activate(glib::clone!(
             #[weak(rename_to = bar)]
@@ -265,11 +302,13 @@ impl Bar {
     ///
     /// The old tab keeps its query and its marks: they are the tab's, not the bar's, so a note
     /// opened from a search hit is still marked after a switch away and back. Only the handlers
-    /// watching its match count and its length go, or they accumulate one per tab switch.
+    /// watching its match count, its length and its query go, or they accumulate one per tab
+    /// switch.
     pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
-        if let Some((old, matches, lines)) = self.target.borrow_mut().take() {
+        if let Some((old, matches, lines, query)) = self.target.borrow_mut().take() {
             old.search_context().disconnect(matches);
             old.buffer.disconnect(lines);
+            old.search_context().settings().disconnect(query);
         }
         let Some(tab) = tab else {
             return self.refresh_count();
@@ -286,11 +325,30 @@ impl Bar {
             self,
             move |_| bar.refresh_count()
         ));
+        // The query is the tab's, so it can change without the bar being touched: a sidebar jump
+        // hands the tab the text it landed on. The box follows it, or the bar would say one thing
+        // while `F3` stepped through another. Nothing is written when the box already says it,
+        // which is what keeps the bar's own searches from coming back round to it.
+        let query = tab
+            .search_context()
+            .settings()
+            .connect_search_text_notify(glib::clone!(
+                #[weak(rename_to = bar)]
+                self,
+                move |settings| {
+                    let text = settings.search_text().unwrap_or_default();
+                    if bar.query.text() == text {
+                        return;
+                    }
+                    *bar.synced.borrow_mut() = Some(text.to_string());
+                    bar.query.set_text(&text);
+                }
+            ));
         if self.showing("find") {
             tab.set_query(&self.query.text());
             tab.set_highlight(true);
         }
-        *self.target.borrow_mut() = Some((tab, matches, lines));
+        *self.target.borrow_mut() = Some((tab, matches, lines, query));
         self.refresh_matches();
         self.refresh_count();
     }
@@ -377,7 +435,7 @@ impl Bar {
     // --- internals -------------------------------------------------------------------------
 
     fn tab(&self) -> Option<Rc<Tab>> {
-        self.target.borrow().as_ref().map(|(tab, _, _)| tab.clone())
+        self.target.borrow().as_ref().map(|(tab, ..)| tab.clone())
     }
 
     fn presenting(&self) -> bool {
@@ -494,6 +552,11 @@ impl Bar {
                 }
             }
         }
+    }
+
+    /// What the query box says. Only `ACCENT_BENCH_REVEAL` reads it.
+    pub fn query_text(&self) -> String {
+        self.query.text().to_string()
     }
 
     /// The bar went away: drop the match highlight on both possible targets.
