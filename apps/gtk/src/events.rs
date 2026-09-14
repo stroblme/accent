@@ -49,6 +49,9 @@ impl App {
                     0 => "Indexing…".to_string(),
                     total => format!("Indexing… {}/{total} files", p.done),
                 }));
+                // A walk is running, so the control beside the line is Stop. Set on every batch
+                // rather than once, which is also what turns Resume back into Stop.
+                self.statusbar.set_indexing(statusbar::Indexing::Running);
                 // The indexer commits rows in batches and the walk hands it files depth-first,
                 // so the root level is queryable long before the reconcile ends. Without this the
                 // tree of a cold vault stays empty for the whole two seconds. Throttled, and
@@ -82,8 +85,22 @@ impl App {
                     unchanged = stats.unchanged,
                     "reconcile done"
                 );
-                self.statusbar.set_progress(None);
-                self.reconciled.set(true);
+                // A stopped walk left a *partial* index, so nothing downstream may read this as
+                // "the vault is indexed": `reconciled` is what the file operations and the
+                // benches ask, and it stays false until a walk finishes. The vault's own line
+                // keeps the slot meanwhile — it wins it over a transfer and over the suggestion
+                // index — and carries the Resume that finishes the job.
+                self.reconciled.set(!stats.stopped);
+                match stats.stopped {
+                    true => {
+                        self.statusbar.set_progress(Some(statusbar::PAUSED));
+                        self.statusbar.set_indexing(statusbar::Indexing::Paused);
+                    }
+                    false => {
+                        self.statusbar.set_progress(None);
+                        self.statusbar.set_indexing(statusbar::Indexing::Idle);
+                    }
+                }
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
@@ -92,10 +109,13 @@ impl App {
                 // Conflicts on notes nobody has open have no banner to appear on, so the toast
                 // that is already there says how many are waiting in the vault. Counted on a
                 // worker, the index being on the host for a remote vault.
-                let message = format!(
-                    "Indexed {} files ({} new, {} updated)",
-                    stats.scanned, stats.added, stats.updated
-                );
+                let message = match stats.stopped {
+                    true => "Indexing paused — what is indexed so far is kept".to_string(),
+                    false => format!(
+                        "Indexed {} files ({} new, {} updated)",
+                        stats.scanned, stats.added, stats.updated
+                    ),
+                };
                 let (Some(vault), weak) = (self.vault().cloned(), Rc::downgrade(self)) else {
                     return self.toast(&message);
                 };

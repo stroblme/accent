@@ -10,9 +10,24 @@
 //! document nobody is looking at while they are writing into it, and an exception would be one
 //! thing left lit under a window that is otherwise out of the way.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use gtk::prelude::*;
+
+/// What the vault's line says while it is paused. One string, because [`crate::App::sync_opening`]
+/// borrows the slot for a PDF and has to put this back: no further progress will.
+pub const PAUSED: &str = "Indexing paused";
+
+/// What the vault's own indexing is doing, which is what the control beside the line offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Indexing {
+    /// A walk is running: Stop.
+    Running,
+    /// A walk was stopped and the index is partial: Resume.
+    Paused,
+    /// Nothing to offer.
+    Idle,
+}
 
 /// The bar itself. Every label hides when it has nothing to say, so an empty bar is an empty
 /// line rather than a row of dashes.
@@ -26,6 +41,12 @@ pub struct Bar {
     vault_busy: RefCell<Option<String>>,
     transfers: RefCell<Vec<String>>,
     provider_busy: RefCell<Option<String>>,
+    /// Stop while the vault is indexing, Resume while it is paused, nothing otherwise. It sits
+    /// beside [`Bar::progress`] and belongs to the vault's line alone: a transfer and the
+    /// suggestion index, which share that slot, have nothing to stop.
+    index: gtk::Button,
+    index_label: gtk::Label,
+    indexing: Cell<Indexing>,
     /// The branch readout, which is also the Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
@@ -47,10 +68,14 @@ impl Bar {
         row.add_css_class("accent-statusbar");
 
         let progress = label(false);
+        // The control for the line beside it. No action name: nothing else offers a Stop, so it
+        // would be an action for one button, and the window wires it in `wire_window`.
+        let index_label = label(false);
+        let index = bar_button(&index_label, None, "");
         // The branch is the Sync control as well as the readout: it names the repository the
         // document sits in, and clicking it pulls and pushes that one (DESIGN.md, Layout map).
         let branch_label = label(true);
-        let branch = bar_button(&branch_label, "win.git-sync", "Sync");
+        let branch = bar_button(&branch_label, Some("win.git-sync"), "Sync");
         let kind = label(false);
         // Between what the file is and how long it is, so the right-hand group still reads left
         // to right: Markdown, unsaved, 12 words. Its own label rather than a prefix on the kind,
@@ -63,9 +88,10 @@ impl Bar {
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
         // and Fit Height for a PDF.
         let zoom_label = label(true);
-        let zoom = bar_button(&zoom_label, "win.zoom-reset", "Reset Zoom");
+        let zoom = bar_button(&zoom_label, Some("win.zoom-reset"), "Reset Zoom");
 
         row.append(&progress);
+        row.append(&index);
         row.append(&branch);
         // The file's own facts sit at the far end, away from what the window is busy with.
         kind.set_hexpand(true);
@@ -81,6 +107,9 @@ impl Bar {
             vault_busy: RefCell::new(None),
             transfers: RefCell::new(Vec::new()),
             provider_busy: RefCell::new(None),
+            index,
+            index_label,
+            indexing: Cell::new(Indexing::Idle),
             branch,
             branch_label,
             kind,
@@ -99,6 +128,35 @@ impl Bar {
     pub fn set_progress(&self, text: Option<&str>) {
         *self.vault_busy.borrow_mut() = text.map(str::to_string);
         self.show_busy();
+    }
+
+    /// What the vault's own indexing is doing, and so what the control beside its line offers.
+    /// Separate from [`set_progress`], because that slot is also where a transfer and the
+    /// suggestion index write and neither of those can be stopped.
+    ///
+    /// [`set_progress`]: Self::set_progress
+    pub fn set_indexing(&self, state: Indexing) {
+        self.indexing.set(state);
+        let (label, tooltip) = match state {
+            Indexing::Running => ("Stop", "Stop indexing; what is indexed so far is kept"),
+            Indexing::Paused => ("Resume", "Finish indexing this vault"),
+            Indexing::Idle => ("", ""),
+        };
+        set(
+            &self.index_label,
+            (state != Indexing::Idle).then_some(label),
+        );
+        self.index.set_tooltip_text(Some(tooltip));
+        self.index.set_visible(state != Indexing::Idle);
+    }
+
+    pub fn indexing(&self) -> Indexing {
+        self.indexing.get()
+    }
+
+    /// The control itself, which the window hangs its click on.
+    pub fn index_control(&self) -> &gtk::Button {
+        &self.index
     }
 
     /// A language provider is busy with something worth waiting for, named: "suggestions" while
@@ -194,14 +252,18 @@ impl Bar {
 /// padding either side, and a box is as tall as its tallest child whatever its alignment, so one
 /// of these appearing pushed the bar from 29 px to 46 px. The class pins it to the caption's own
 /// line height; it stays a button, so it keeps its focus, its role and its tooltip.
-fn bar_button(child: &impl IsA<gtk::Widget>, action: &str, tooltip: &str) -> gtk::Button {
+///
+/// `action` is `None` for a button the window connects by hand rather than through the action map.
+fn bar_button(child: &impl IsA<gtk::Widget>, action: Option<&str>, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::builder()
         .child(child)
-        .action_name(action)
         .tooltip_text(tooltip)
         .valign(gtk::Align::Center)
         .visible(false)
         .build();
+    if let Some(action) = action {
+        button.set_action_name(Some(action));
+    }
     button.add_css_class("flat");
     button.add_css_class("accent-bar-button");
     button
