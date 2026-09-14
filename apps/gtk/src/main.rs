@@ -801,7 +801,26 @@ impl App {
     /// Re-colour what this window paints itself rather than through GTK's CSS, after the theme or
     /// the accent moved: the notes' tags and schemes, both sides of a comparison, the PDF pages,
     /// the preview and the shells.
-    fn restyle_all(&self) {
+    ///
+    /// One turn of the main loop later, never inside the change itself. `AdwStyleManager` raises
+    /// `notify::dark` *before* it swaps the stylesheet on the display, so for the whole of that
+    /// emission `view.color()` still resolves to the theme being left — and half of what this
+    /// pass writes is mixed from that foreground: a note's list markers, heading markers, quotes
+    /// and code backgrounds, the gutter's change bars, the diagnostic underlines, the fold
+    /// chevrons, a comparison's row tints and the preview's own CSS. Run there, every one of them
+    /// came out in the outgoing theme, which on a light-to-dark switch is near-black ink on a
+    /// near-black page.
+    fn restyle_all(self: &Rc<Self>) {
+        glib::idle_add_local_once(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move || app.restyle_now()
+        ));
+    }
+
+    /// The pass itself, once the cascade has settled. Split out only so the deferral above is the
+    /// one thing [`App::restyle_all`] says.
+    fn restyle_now(&self) {
         for tab in self.open_tabs() {
             tab.restyle();
         }

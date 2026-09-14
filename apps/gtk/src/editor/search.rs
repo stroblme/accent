@@ -315,9 +315,10 @@ impl Tab {
     /// open a note onto.
     ///
     /// The reveal is what the reader is shown, not the find bar. Handing the bar the matched text
-    /// as its query used to be how this was marked, and it marked too much for too long: every
-    /// other occurrence in the note lit up as well, and none of it went away until the bar was
-    /// opened and closed again.
+    /// *and painting it* used to be how this was marked, and it marked too much for too long:
+    /// every other occurrence in the note lit up as well, and none of it went away until the bar
+    /// was opened and closed again. The query alone is kept, unpainted, because `F3` is worth
+    /// having over the text the row pointed at and a query nothing paints costs nothing to look at.
     pub fn goto_range(&self, chars: Range<usize>) {
         let last = self.buffer.char_count();
         let start = self
@@ -331,8 +332,16 @@ impl Tab {
             return;
         }
         self.buffer.select_range(&start, &end);
+        // So `F3` and `Shift+F3` step through the matched text from here on. Painting it is turned
+        // off with the same breath, and not merely left alone: a `SearchContext` highlights by
+        // default, so a query handed over quietly is a query lit up. The bar turns it back on the
+        // moment it is opened or typed in (`find.rs::search`), which is when a reader has asked to
+        // see every match rather than the one they were sent to.
+        self.set_query(&self.buffer.text(&start, &end, false));
+        self.set_highlight(false);
         // After the caret and the selection have moved: both are mark moves, and a mark move is
-        // one of the interactions that takes the reveal back down again.
+        // one of the interactions that takes the reveal back down again. The query's own rescan
+        // moves no mark and changes no text, so it cannot take the reveal down with it.
         self.reveal_range(&start, &end);
     }
 

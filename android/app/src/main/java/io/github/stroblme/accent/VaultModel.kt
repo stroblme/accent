@@ -213,6 +213,23 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun close() = _state.update { it.copy(open = null, pdf = null) }
 
     /**
+     * Put the vault down and go back to the picker.
+     *
+     * The recent list keeps it, so the picker offers it straight back; what goes is the handle and
+     * everything the screen was reading out of it. Closed in the order [open] closes the one it
+     * replaces, and for the same reason: [listen] is waiting on a half-second drain, sees that
+     * `vault` is no longer the vault it was given, and leaves. Its blocked call is safe — uniffi
+     * counts the calls in flight and frees the object behind the last of them, and the next one
+     * throws, which that loop already treats as the end.
+     */
+    fun closeVault() {
+        vault?.close()
+        vault = null
+        corpus = emptyList()
+        _state.value = VaultState()
+    }
+
+    /**
      * Follow a link out of the rendered note.
      *
      * The target is what the link spelled — a note's name, a path, possibly with a `#heading` or

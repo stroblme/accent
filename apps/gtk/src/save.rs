@@ -100,6 +100,14 @@ impl App {
                 editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
                     app.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
                     app.sync_pdf_links_soon();
+                    // A note carries its tags, and the text a search matched, in its own body —
+                    // and our own save is the one write the vault reports nothing about. Without
+                    // this both panes would only ever follow what another editor did, which is
+                    // also what leaves the find bar's Replace All inside this very tab unseen.
+                    if let Some(sidebar) = app.sidebar.get() {
+                        sidebar.mark_tags_dirty();
+                        sidebar.requery_search_soon();
+                    }
                     if report && explicit {
                         app.toast("Saved");
                     }

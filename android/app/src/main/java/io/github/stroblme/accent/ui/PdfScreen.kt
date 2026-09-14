@@ -31,6 +31,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.constrainWidth
@@ -41,6 +43,7 @@ import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Theme
 import java.io.File
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
@@ -215,27 +218,40 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
     var zoom by remember { mutableFloatStateOf(1f) }
     /** How far the pages are pushed sideways: 0 at fit width, negative once they are wider. */
     var panX by remember { mutableFloatStateOf(0f) }
-    /** The zoom the bitmaps were drawn at. It follows the fingers once they stop. */
-    var drawn by remember { mutableFloatStateOf(1f) }
     /** How much further apart the fingers have got since the pinch began; 1 while none is on. */
     var live by remember { mutableFloatStateOf(1f) }
     /** Where they were between them when it began, and how far they have moved since. */
     var pivot by remember { mutableStateOf(Offset.Zero) }
     var shift by remember { mutableStateOf(Offset.Zero) }
-    LaunchedEffect(zoom) {
-        delay(RESHARPEN_MS)
-        drawn = zoom
-    }
 
     val gap = with(density) { PAGE_GAP.toPx() }
     val pages = remember(doc) { Pagination(doc, gap) }
+    val maxZoom = remember(viewport) { ceiling(viewport) }
+
+    /**
+     * The zoom the bitmaps were drawn at, and the part of the column they were drawn for. Both
+     * follow the hands once they stop rather than every frame: a render started mid-gesture is
+     * thrown away before it lands, and past [WHOLE_PAGE_PX] there is no whole page to draw anyway,
+     * only whichever rectangle of it the screen is over.
+     */
+    var settled by remember { mutableStateOf(Settled(1f, IntRect.Zero)) }
+    LaunchedEffect(pages, viewport) {
+        snapshotFlow {
+            val top = pages.above(list, viewport.width, zoom).roundToInt()
+            val left = (-panX).roundToInt()
+            Settled(zoom, IntRect(left, top, left + viewport.width, top + viewport.height))
+        }.collectLatest {
+            delay(RESHARPEN_MS)
+            settled = it
+        }
+    }
 
     /** Take what the fingers did to the layer and lay the column out that way. */
     fun commit() {
         val above = pages.above(list, viewport.width, zoom)
         val down = anchor(above, pivot.y, live, shift.y)
         val across = anchor(-panX, pivot.x, live, shift.x)
-        zoom = (zoom * live).coerceIn(MIN_ZOOM, MAX_ZOOM)
+        zoom = (zoom * live).coerceIn(MIN_ZOOM, maxZoom)
         panX = holdXAt(-across, viewport.width, zoom)
         val (page, into) = pages.at(down, viewport.width, zoom)
         list.requestScrollToItem(page, into)
@@ -261,7 +277,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
                         } else {
                             // Two: the layer below carries all of it until they are lifted.
                             if (live == 1f) pivot = centroid
-                            live = (live * step).coerceIn(MIN_ZOOM / zoom, MAX_ZOOM / zoom)
+                            live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
                             shift += pan
                         }
                     },
@@ -320,7 +336,13 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome) {
                         pageWidth = size.width,
                         pageHeight = size.height,
                         shownPx = (viewport.width * zoom).toInt(),
-                        renderPx = (viewport.width * drawn).toInt(),
+                        renderPx = (viewport.width * settled.zoom).toInt(),
+                        // The settled screen in this page's own pixels: a page is exactly as wide
+                        // as the column, so the only difference is where the page starts down it.
+                        window = settled.window.translate(
+                            0,
+                            -pages.top(index, viewport.width, settled.zoom).roundToInt(),
+                        ),
                         theme = theme,
                         tool = tool,
                     )
@@ -385,12 +407,16 @@ private class Pagination(private val doc: PdfModel, private val gap: Float) {
         return size.height * (width * zoom / size.width) + gap
     }
 
-    /** How much of the document is above the top of the screen, in pixels at [zoom]. */
-    fun above(list: LazyListState, width: Int, zoom: Float): Float {
+    /** Where page [index] starts, in pixels from the start of the document at [zoom]. */
+    fun top(index: Int, width: Int, zoom: Float): Float {
         var y = 0f
-        for (i in 0 until list.firstVisibleItemIndex) y += height(i, width, zoom)
-        return y + list.firstVisibleItemScrollOffset
+        for (i in 0 until index) y += height(i, width, zoom)
+        return y
     }
+
+    /** How much of the document is above the top of the screen, in pixels at [zoom]. */
+    fun above(list: LazyListState, width: Int, zoom: Float): Float =
+        top(list.firstVisibleItemIndex, width, zoom) + list.firstVisibleItemScrollOffset
 
     /** The page, and the offset into it, that [y] pixels from the start lands on at [zoom]. */
     fun at(y: Float, width: Int, zoom: Float): Pair<Int, Int> {
@@ -406,10 +432,55 @@ private class Pagination(private val doc: PdfModel, private val gap: Float) {
 
 private val PAGE_GAP = 8.dp
 private const val MIN_ZOOM = 1f
-private const val MAX_ZOOM = 6f
 
-/** How long the fingers rest before the page is drawn again at the zoom they left it at. */
+/**
+ * How far in a pinch may go.
+ *
+ * Memory no longer decides it: past [WHOLE_PAGE_PX] a page is drawn one screenful at a time, so a
+ * render costs the same at any zoom. What the pixels are worth does. 8× fit width puts an A0 poster
+ * — 2384 pt across, the widest paper anyone opens and the case that asked for this — at 3.6 px/pt on
+ * a 1080 px screen, about the 2.6 px/pt such a screen draws a point at 1:1. Its 8 pt small print
+ * stands 29 px tall, where the old ceiling of 6× reached 22 and then failed to draw at all, a whole
+ * A0 page at 6× being 59 M pixels. An A4 page reaches 14.5 px/pt. Deeper buys detail the paper has
+ * not got, and a shallower range is easier to land a pinch with on the thing being looked at.
+ */
+private const val MAX_ZOOM = 8f
+
+/** How long the hands rest before the pages are drawn again at where they left them. */
 private const val RESHARPEN_MS = 180L
+
+/**
+ * How big a whole-page render may get before only the part on screen is drawn: 8 M pixels, which is
+ * 32 MB of ARGB. An A4 page at a phone's fit width is 1.7 M, so ordinary reading and a pinch to
+ * about twice that stay whole and nothing blanks while the column is scrolled.
+ */
+private const val WHOLE_PAGE_PX = 8_000_000L
+
+/** Where the reader had got to when the hands stopped: the zoom, and the column rect on screen. */
+private data class Settled(val zoom: Float, val window: IntRect)
+
+/**
+ * How far in this screen may be pinched, which is not always [MAX_ZOOM].
+ *
+ * [oversize] asks Compose to lay the column out `width × zoom` wide, and a pinch shrinking back
+ * from the ceiling asks for it `height × zoom` tall. `Constraints` packs a pair of sizes into one
+ * `Long` and can hold at most 32766 px in one dimension beside 65534 in the other, so a column past
+ * that throws where it is measured. At 8× that leaves every phone and tablet the whole of it — the
+ * clamp bites only above a 4095 px-wide or 8191 px-tall viewport, which is a desktop-sized window
+ * rather than a device — but it is what makes [MAX_ZOOM] a number the layout can honour rather than
+ * one that happens to fit the screens on sale.
+ */
+internal fun ceiling(viewport: IntSize): Float =
+    minOf(MAX_ZOOM, 32766f / viewport.width, 65534f / viewport.height)
+
+/**
+ * The part of a page worth drawing, in the page's own pixels.
+ *
+ * The whole of [page] while that is small enough to hold, which is every page at reading zoom and
+ * is why a scrolling column never waits for a tile; only what [window] covers once it is not.
+ */
+internal fun visible(page: IntRect, window: IntRect): IntRect =
+    if (page.width.toLong() * page.height <= WHOLE_PAGE_PX) page else page.intersect(window)
 
 @Composable
 private fun Page(
@@ -421,19 +492,29 @@ private fun Page(
     shownPx: Int,
     /** The width its bitmap was drawn at, which follows the pinch once it settles. */
     renderPx: Int,
+    /** What the screen covers of this page, in its own pixels at [renderPx]. */
+    window: IntRect,
     theme: Theme,
     tool: Tool,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
     val heightPx = (pageHeight * scale).toInt()
-    var bitmap by remember(index, theme) { mutableStateOf<ImageBitmap?>(null) }
+    var sheet by remember(index, theme) { mutableStateOf<Sheet?>(null) }
     var generation by remember(index) { mutableIntStateOf(0) }
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
 
-    LaunchedEffect(index, renderPx, theme, generation) {
-        bitmap = doc.page(index, renderPx / pageWidth, theme)
+    val whole = IntRect(0, 0, renderPx, (pageHeight * renderPx / pageWidth).toInt())
+    val want = visible(whole, window)
+    LaunchedEffect(index, renderPx, theme, generation, want) {
+        // Nothing of it on screen and too big to draw whole: keep whatever it has until it is.
+        if (want.isEmpty) return@LaunchedEffect
+        val perPoint = renderPx / pageWidth
+        val image =
+            if (want == whole) doc.page(index, perPoint, theme)
+            else doc.tile(index, perPoint, want.left, want.top, want.width, want.height, theme)
+        if (image != null) sheet = Sheet(image, want, renderPx)
     }
 
     // What is being drawn right now, in view pixels, before the core has it.
@@ -472,14 +553,24 @@ private fun Page(
                 )
             },
     ) {
-        bitmap?.let { image ->
+        sheet?.let { (image, at, px) ->
             Canvas(Modifier.fillMaxSize()) {
-                // Stretched to the size it is shown at rather than drawn 1:1, so a pinch moves
-                // the page with the fingers and the sharper render catches up afterwards.
+                // Stretched from the pixels it was drawn in to the ones it is shown at rather than
+                // drawn 1:1, so a pinch moves the page with the fingers and the sharper render
+                // catches up afterwards. A tile lands where on the page it came from; a whole
+                // page's rectangle is the page, so it covers the lot as it always did.
+                val stretch = size.width / px
                 drawImage(
                     image = image,
                     srcSize = IntSize(image.width, image.height),
-                    dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+                    dstOffset = IntOffset(
+                        (at.left * stretch).roundToInt(),
+                        (at.top * stretch).roundToInt(),
+                    ),
+                    dstSize = IntSize(
+                        (image.width * stretch).roundToInt(),
+                        (image.height * stretch).roundToInt(),
+                    ),
                 )
                 if (wet.size > 1) {
                     val path = Path().apply {
@@ -499,6 +590,9 @@ private fun Page(
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
     }
 }
+
+/** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
+private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
 
 private const val ERASER_RADIUS = 6f
 

@@ -132,15 +132,20 @@ a circle of radius 78, so the group scales to half size to sit inside one whole.
 
 ## Colour
 
-Material You is the same answer GNOME's accent is: ask the device what colour it is. `primary` is
-the one accent and it is used for exactly what the desktop uses it for — links, the caret, a
-selected tool, an ink stroke's default. Everything else is `surface`, `onSurface` and
-`onSurfaceVariant`. The app ships one colour of its own, the launcher icon's background.
+The device is asked for the accent and for nothing else. Material You is the same answer GNOME's
+accent is — what colour is this device — so `primary` comes from it, for exactly what the desktop
+uses it for: links, the caret, a selected tool, an ink stroke's default. The page and the ink on it
+are the app's own, and the app's own are the desktop's: `#333338` ink on `#ffffff` paper in light,
+`#ebebeb` on `#1d1d20` in dark, which are libadwaita's view colours out of `apps/gtk/src/theme.rs`,
+the light ink composited down from the 80% alpha it has there. A wallpaper-tinted page reads cream
+beside that view, and the same vault should look like one editor on both. Secondary text and borders
+are that ink thinned over that page, so nothing under the accent is tinted by anything. Those four
+values are every colour the app ships; the launcher icon's paper is the light page.
 
-The Browse button is the exception: `inverseSurface`, so it is dark on a light theme and light on
-a dark one. It is the one thing on the screen that is not the document, and a pale pill on a pale
-page is a pill nobody sees. Contrast rather than colour, so the accent still
-means only one thing.
+The Browse button is the exception: `inverseSurface`, which is the *other* mode's pair, so it is
+dark on a light theme and light on a dark one. It is the one thing on the screen that is not the
+document, and a pale pill on a pale page is a pill nobody sees. Contrast rather than colour, so the
+accent still means only one thing.
 
 A PDF is recoloured in a dark theme the way the desktop does it: the document's paper lands on the
 app's surface and its ink on the app's text, each pixel keeping its own chroma, so a coloured

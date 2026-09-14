@@ -1,6 +1,7 @@
 package io.github.stroblme.accent
 
 import android.graphics.Bitmap
+import android.util.LruCache
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -17,6 +18,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
 /**
@@ -55,9 +57,34 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         sizes = session.pageSizes()
     }
 
+    /**
+     * Pages already drawn, so scrolling back to one shows it instead of drawing it again.
+     *
+     * Sized against the heap the device hands this process rather than a number picked by hand: an
+     * eighth of it, which is what Android's own bitmap-caching guidance spends. On the 256 MB a
+     * phone usually gives that is 32 MB — five A4 pages at a 1080 px fit width, so about two
+     * screens either side of the one being read survive a scroll away and back.
+     *
+     * Whole pages only. A tile is cut to the screen it was drawn for, so the next look at that page
+     * wants a different rectangle of it, and keeping them would fill the budget with pixels nobody
+     * asks for twice.
+     */
+    private val pages = object : LruCache<Drawn, ImageBitmap>(
+        (Runtime.getRuntime().maxMemory() / 8).toInt(),
+    ) {
+        override fun sizeOf(key: Drawn, value: ImageBitmap) = value.width * value.height * 4
+    }
+
+    /** Everything about a whole-page render that decides what its pixels are. */
+    private data class Drawn(val page: Int, val scale: Float, val theme: Theme)
+
     /** A whole page at [scale], which is what the reader sees until nothing better arrives. */
     suspend fun page(index: Int, scale: Float, theme: Theme): ImageBitmap? = on {
-        runCatching { session.renderPage(index.toUInt(), scale, theme).bitmap() }.getOrNull()
+        val key = Drawn(index, scale, theme)
+        pages[key]
+            ?: runCatching { session.renderPage(index.toUInt(), scale, theme).bitmap() }
+                .getOrNull()
+                ?.also { pages.put(key, it) }
     }
 
     suspend fun tile(index: Int, scale: Float, x: Int, y: Int, w: Int, h: Int, theme: Theme): ImageBitmap? =
@@ -110,6 +137,10 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         canRedo = history.redo
         dirty = session.dirty()
         revision++
+        // A cached page under fresh ink is worse than one drawn again, and undo and redo do not
+        // say which page they touched; a document changing is rare beside a scroll, so all of it
+        // goes.
+        pages.evictAll()
     }
 
     private suspend fun <T> on(block: () -> T): T = withContext(dispatcher) { block() }
@@ -130,17 +161,18 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     }
 }
 
-/** The core hands over tightly packed RGBA8; Android wants a bitmap. */
-private fun Tile.bitmap(): ImageBitmap {
-    val pixels = IntArray(width.toInt() * height.toInt())
-    for (i in pixels.indices) {
-        val at = i * 4
-        val r = rgba[at].toInt() and 0xFF
-        val g = rgba[at + 1].toInt() and 0xFF
-        val b = rgba[at + 2].toInt() and 0xFF
-        val a = rgba[at + 3].toInt() and 0xFF
-        pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
-    }
-    return Bitmap.createBitmap(pixels, width.toInt(), height.toInt(), Bitmap.Config.ARGB_8888)
+/**
+ * The core hands over tightly packed RGBA8; Android wants a bitmap. One copy, not a loop.
+ *
+ * `ARGB_8888` is named for how a pixel packs into an `int`, not for how it lies in memory, and the
+ * platform spells the memory out: "When accessing directly via #copyPixelsFromBuffer or
+ * #copyPixelsToBuffer, use this formula to pack into 32 bits: `(A & 0xff) << 24 | (B & 0xff) << 16
+ * | (G & 0xff) << 8 | (R & 0xff)`". Little-endian, that int is the bytes R, G, B, A in that order
+ * — what the core already produces — and `copyPixelsFromBuffer` copies them without changing them.
+ *
+ * Which is also why it may: not converting means not premultiplying, and a page render is opaque.
+ */
+private fun Tile.bitmap(): ImageBitmap =
+    Bitmap.createBitmap(width.toInt(), height.toInt(), Bitmap.Config.ARGB_8888)
+        .apply { copyPixelsFromBuffer(ByteBuffer.wrap(rgba)) }
         .asImageBitmap()
-}

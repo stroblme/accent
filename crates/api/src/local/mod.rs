@@ -168,6 +168,23 @@ impl Local {
             tracing::debug!("vault worker is gone; dropping an index update");
         }
     }
+
+    /// Wait until the worker has taken in every message posted before this one.
+    ///
+    /// The index has one writer and it is the worker, so a caller that has just written files is
+    /// ahead of it: the updates are posted and the write returns. Anyone whose very next move is
+    /// to read those files back *out of the index* — the Search pane asking its question again
+    /// after a Replace All — waits here rather than reading rows that are one batch old.
+    ///
+    /// The caller must already be off the main loop: the worker may be in the middle of a walk,
+    /// and this then waits for the batch that walk is on. A worker that has gone answers nothing,
+    /// which is no reason to fail a write that already reached the disk.
+    fn settle_index(&self) {
+        let (reply, answer) = channel();
+        if self.tx.send(Msg::Settled(reply)).is_err() || answer.recv().is_err() {
+            tracing::debug!("vault worker is gone; not waiting for the index");
+        }
+    }
 }
 
 impl Drop for Local {

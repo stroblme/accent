@@ -533,6 +533,11 @@ pub(super) struct Pane {
     /// Ask the current question again. The window calls it when the ignore set changes under a
     /// query that is already on screen.
     pub(super) restart: Rc<dyn Fn()>,
+    /// The Replace All button, and which page the body is showing with how many rows on it.
+    /// What `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say whether the rows
+    /// left standing after a rewrite are the new text's.
+    pub(super) apply: gtk::Button,
+    pub(super) state: Rc<dyn Fn() -> (String, u32)>,
 }
 
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
@@ -846,6 +851,20 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         restart: Rc::new({
             let search = search.clone();
             move || search.start()
+        }),
+        apply,
+        state: Rc::new({
+            let search = search.clone();
+            move || {
+                (
+                    search
+                        .body
+                        .visible_child_name()
+                        .map(|name| name.to_string())
+                        .unwrap_or_default(),
+                    search.results.n_items(),
+                )
+            }
         }),
     }
 }

@@ -1,6 +1,8 @@
 //! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
 
 use super::*;
+use accent_core::config::Theme;
+use sourceview5::prelude::BufferExt as _;
 
 /// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
 /// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
@@ -258,6 +260,79 @@ async fn bench_dangling(app: Rc<App>) {
     bench_quit(&app);
 }
 
+/// Walk the window through the themes and print what a note's own tags are painted in on each
+/// side of every switch. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
+/// signal a system switch raises, so the `notify::dark` handler in `wire.rs` — `theme::refresh`
+/// then `App::restyle_all` — is what runs here, portal or no portal. Solarized raises no such
+/// notify (it keeps the system's own dark state), so the pass is asked for the way
+/// `Shell::apply_config` asks for it there.
+///
+/// Solarized follows the system between its two halves and Xvfb has no portal to move the system
+/// with, so its dark half is a second launch with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`.
+///
+/// `before` is read the instant the switch has been made and says what the tags still hold;
+/// `after` is the same tags once the deferred pass has run. What to look for is `after`: every
+/// foreground-derived tag must be that line's own `view_fg` at its alpha. When the pass ran
+/// inside the notify they were the outgoing theme's instead — `listmarker=rgba(0,0,6,0.4)`,
+/// near-black, against a `view_fg` of `rgb(255,255,255)`, which is the invisible bullet.
+///
+/// `scheme_text` is beside them to say why `view_fg` is the right thing to mix from. It is the
+/// style scheme's own `text` foreground, and in none of the four themes is it what reaches the
+/// glyphs: rendering the view and reading its pixels gives the prose as `view_fg` every time
+/// (`(51,51,55)` on white under Adwaita, where the scheme says `#504E55`), so the scheme's ink is
+/// a colour nothing on screen is drawn in.
+pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        tab.set_text("plain prose\n- item\n> quote\n[link](x) `code`\n");
+        for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
+            crate::theme::apply(theme);
+            app.restyle_all();
+            println!("bench theme {theme:?} before {}", bench_theme_colours(&tab));
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench theme {theme:?} after {}", bench_theme_colours(&tab));
+        }
+        bench_quit(&app);
+    });
+}
+
+/// What the theme-derived tags of `tab` hold right now, each with what it reads at against the
+/// page under it, next to what they are derived from: the view's resolved foreground, the scheme
+/// the buffer is on and that scheme's own `text` ink.
+fn bench_theme_colours(tab: &Rc<Tab>) -> String {
+    let table = tab.buffer.tag_table();
+    let page = crate::highlight::page(adw::StyleManager::default().is_dark());
+    let says = |c: Option<gtk::gdk::RGBA>| match c {
+        Some(c) => format!("{c}@{:.2}:1", crate::highlight::reads_at(c, page)),
+        None => "none".to_string(),
+    };
+    let fg = |name: &str| says(table.lookup(name).and_then(|t| t.foreground_rgba()));
+    let scheme = tab.buffer.style_scheme();
+    format!(
+        "dark={} scheme={:?} scheme_text={:?} page={page} view_fg={}@{:.2}:1 marker={} \
+         listmarker={} quote={} taskdone={} code_bg={} link={}",
+        adw::StyleManager::default().is_dark(),
+        scheme.as_ref().map(|s| s.id()),
+        scheme
+            .as_ref()
+            .and_then(|s| s.style("text"))
+            .and_then(|s| s.foreground()),
+        tab.view.color(),
+        crate::highlight::reads_at(tab.view.color(), page),
+        fg("marker"),
+        fg("listmarker"),
+        fg("quote"),
+        fg("taskdone"),
+        says(table.lookup("code").and_then(|t| t.background_rgba())),
+        fg("link"),
+    )
+}
+
 pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -341,8 +416,10 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
 
 /// Jump into the note at `rel` the three ways a jump arrives — a search hit's range, a tag's
 /// name, a Go to Line — and print what the reveal painted each time, then what each kind of
-/// interaction leaves of it. The find bar's query is printed beside it throughout: a jump used to
-/// hand the bar the matched text, which lit every other occurrence in the note and never expired.
+/// interaction leaves of it. The find bar's query and whether it is painting are printed beside
+/// it throughout: a jump hands the bar the matched text so `F3` steps through it, and that is all
+/// it hands over — turning the highlight on with it is what used to light every other occurrence
+/// in the note and never expire.
 ///
 /// A click is not driven here because it is the same mark move an arrow key is: GtkTextView
 /// places the caret on button-press, and the reveal comes down with the caret wherever it moves.
@@ -388,6 +465,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             .tags
             .into_iter()
             .next();
+        let tagged_name = tagged.as_ref().map(|t| t.name.clone());
         for (label, target) in [
             (
                 "open_tag",
@@ -416,6 +494,50 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 under(&ranges)
             );
         }
+
+        // A jump arriving while the bar is already open: the box has to end up saying what the tab
+        // is now searching, and the write must not come back round as a search of the reader's
+        // own — that would paint every match and step the caret off the place just revealed. The
+        // box says `search-changed` twice for one write, the second after its delay, so the same
+        // line is printed at the jump and again once that delay has passed.
+        //
+        // Before the note's text is replaced, and not after: the bar taking the keyboard is the
+        // view losing it, which is one of the two things that autosave the buffer. A drill must
+        // not write the vault it reads.
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        bench_pump();
+        let bar = app.pane().find.clone();
+        let state = |label: &str, tab: &Rc<Tab>, bar: &Rc<crate::find::Bar>| {
+            println!(
+                "bench reveal {label} query={:?} painting={} on={} at={:?}",
+                bar.query_text(),
+                tab.search_context().is_highlight(),
+                tab.reveal_highlight().0,
+                tab.buffer
+                    .selection_bounds()
+                    .map(|(s, e)| (s.offset(), e.offset()))
+            );
+        };
+        state("bar_open", &tab, &bar);
+        if let Some(name) = tagged_name {
+            tab.goto_tag(&name);
+        }
+        state("bar_jump", &tab, &bar);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            state("bar_settled", &tab, &bar);
+            // The bar goes away again so the view has the keyboard back: from here on the drill
+            // edits the buffer, and nothing may take the focus off a note that is dirty.
+            bar.close();
+            bench_reveal_marks(&app, &tab);
+        });
+    });
+}
+
+/// The second half of [`bench_reveal`], over text of the drill's own: what each kind of jump
+/// paints, what each kind of interaction leaves of it, and the three match tags' priorities.
+fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
+    {
+        let (app, tab) = (app.clone(), tab.clone());
         // ASCII throughout, so the byte offset `find` gives is also the character offset the
         // buffer counts in.
         let text = "Alpha beta alpha\ngamma #focus delta\nlast line here\n";
@@ -429,12 +551,12 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let show = |label: &str| {
             let (on, tag) = tab.reveal_highlight();
+            let context = tab.search_context();
             println!(
-                "bench reveal case={label} on={on} at={:?} query={:?}",
+                "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                sourceview5::prelude::SearchSettingsExt::search_text(
-                    &tab.search_context().settings()
-                )
+                sourceview5::prelude::SearchSettingsExt::search_text(&context.settings()),
+                context.is_highlight()
             );
         };
 
@@ -449,6 +571,17 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         tab.goto_line(3, 6);
         tab.reveal_line(3);
         show("goto_line");
+
+        // `F3` straight after a jump, which is what the prefilled query is for: it steps from the
+        // match the row pointed at to the next one, wrapping, without the bar ever being opened.
+        let second = at("alpha") as usize;
+        tab.goto_range(second..second + 5);
+        tab.step(true, false);
+        let stepped = tab
+            .buffer
+            .selection_bounds()
+            .map(|(s, e)| (s.offset(), e.offset()));
+        println!("bench reveal case=step_after_jump at={stepped:?}");
 
         // Each interaction in turn, the reveal put back between them.
         for (label, act) in [
@@ -499,7 +632,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 .unwrap_or_default()
         );
         bench_quit(&app);
-    });
+    }
 }
 
 /// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps

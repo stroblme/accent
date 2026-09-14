@@ -4,12 +4,15 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.Phase
@@ -75,6 +78,7 @@ fun HomeScreen(model: VaultModel) {
                     indexing = state.indexing,
                     scanned = state.scanned,
                     listing = state.phase == Phase.SCAN,
+                    onCloseVault = { model.closeVault() },
                 )
             }
             BrowseButton(
@@ -83,8 +87,16 @@ fun HomeScreen(model: VaultModel) {
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
 
-            when (screen) {
-                Screen.Browse -> BrowseScreen(
+            // Browse comes up from the foot of the screen, where its field and its chips are, and
+            // goes back down the way a pull sends it: the gesture and the transition say the same
+            // thing. It fades as it travels, so the note it is covering is briefly visible through
+            // it and the panel reads as being over the note rather than instead of it.
+            AnimatedVisibility(
+                visible = screen == Screen.Browse,
+                enter = slideInVertically(arriving()) { it } + fadeIn(arriving()),
+                exit = slideOutVertically(leaving()) { it } + fadeOut(leaving()),
+            ) {
+                BrowseScreen(
                     model = model,
                     children = state.children,
                     expanded = state.expanded,
@@ -95,7 +107,6 @@ fun HomeScreen(model: VaultModel) {
                     },
                     onClose = { screen = Screen.Home },
                 )
-                Screen.Home -> Unit
             }
         }
     }
@@ -125,8 +136,28 @@ private fun BrowseButton(
     }
 }
 
+/** The bar under the text: as wide as a word, as tall as Material draws its own track. */
+private val ProgressWidth: Dp = 160.dp
+private val ProgressHeight: Dp = 4.dp
+
+/**
+ * The screen with nothing open: what the vault is doing, and the way back out of it.
+ *
+ * A first index is watched from here, so it says in words how far the walk has got and draws the
+ * platform's own indeterminate bar under them. Indeterminate because the walk has no total until
+ * it ends, and a percentage nobody can honour is worse than a bar that only says "still going".
+ *
+ * Closing the vault belongs here and nowhere else. It is the one thing that makes sense with no
+ * note in front of the reader, and a control that reached over an open document would be a way of
+ * losing one's place by mistake.
+ */
 @Composable
-private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean) {
+private fun Empty(
+    indexing: Boolean,
+    scanned: Long,
+    listing: Boolean,
+    onCloseVault: () -> Unit,
+) {
     Column(
         Modifier.fillMaxSize().padding(Gutter),
         verticalArrangement = Arrangement.Center,
@@ -151,5 +182,13 @@ private fun Empty(indexing: Boolean, scanned: Long, listing: Boolean) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        Spacer(Modifier.height(24.dp))
+        // The space is kept whether or not there is a bar in it, so the lines above stay where
+        // they are when the walk ends rather than settling half its height downwards.
+        Box(Modifier.height(ProgressHeight), contentAlignment = Alignment.Center) {
+            if (indexing || listing) LinearProgressIndicator(Modifier.width(ProgressWidth))
+        }
+        Spacer(Modifier.height(24.dp))
+        TextButton(onClick = onCloseVault) { Text("Close vault") }
     }
 }

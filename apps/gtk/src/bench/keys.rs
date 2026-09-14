@@ -575,13 +575,17 @@ fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     bench_quit(app);
 }
 
-/// The cached "the completion popup is up" flag against the popup itself: a `true` that no `hide`
-/// ever took back used to leave every key to the view for the rest of a tab's life.
+/// "The completion popup is up" against the popup itself: an answer that no `hide` ever took back
+/// used to leave every key to the view for the rest of a tab's life.
 ///
 /// A words provider gives the tab a popup of its own to raise, so what is read is a real
 /// `GtkSourceCompletion` popup and not a stand-in. Prints the view's children either side of it —
-/// the widget the check reads — then forges the stale flag with the completion's own `show`
-/// signal, which is what a missed `hide` leaves behind, and presses Return on a list line.
+/// the widgets the check reads, each `visible/mapped` — and stages the two ways the old cell was
+/// stranded: the view taken off screen with the popup still up and no `hide` emitted, which is a
+/// tab switched away from, and the completion's own `show` forged with nothing on screen. Neither
+/// may say yes, and Return must still continue a list after both. On a scratch vault:
+/// `popup_up true … GtkSourceCompletionList=true/true`, `popup_unmapped false …=false/false`,
+/// `popup_stale false` and `popup_stale_return "- "`.
 ///
 /// `GtkSourceCompletion` refuses to show while the view has no input focus, and under Xvfb no
 /// window manager hands it out: run `build-aux/xtest.py :<display> "move 700 500; focus"` in a
@@ -614,7 +618,18 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
             let answer = editor::press(&tab, gdk::Key::Return, none);
             println!("bench popup_return {answer:?} {:?}", caret_prefix(&tab));
 
-            // The popup gone, and then the flag left behind as if its `hide` had never arrived.
+            // The popup still up and the view taken off screen under it: GTK takes the popover
+            // with it, but the completion's own `hide` is never emitted, so this is the shape
+            // that used to strand the cached answer.
+            tab.view.set_visible(false);
+            println!(
+                "bench popup_unmapped {} {:?}",
+                tab.popup_shown(),
+                children(&tab)
+            );
+            tab.view.set_visible(true);
+
+            // The popup gone, and then its `show` forged as a missed `hide` would have left it.
             completion.hide();
             completion.remove_provider(&words);
             words.unregister(&tab.buffer);
@@ -634,16 +649,18 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     });
 }
 
-/// The view's own children and whether each is on screen: where the completion popup is, the
-/// hover assistant and the signature popover beside it.
+/// The view's own children, each as `visible/mapped`: where the completion popup is, the hover
+/// assistant and the signature popover beside it. The two flags are printed apart because they
+/// disagree exactly where the old cached answer went stale.
 fn children(tab: &Rc<Tab>) -> Vec<String> {
     let mut out = Vec::new();
     let mut child = tab.view.first_child();
     while let Some(widget) = child {
         out.push(format!(
-            "{}={}",
+            "{}={}/{}",
             widget.type_().name(),
-            widget.get_visible()
+            widget.get_visible(),
+            widget.is_mapped()
         ));
         child = widget.next_sibling();
     }

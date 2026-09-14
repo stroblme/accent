@@ -309,10 +309,6 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
-    /// Whether the completion popup is up, as its `show` and `hide` said last. Read through
-    /// [`Tab::popup_shown`], never straight: while the popup is showing it owns the keyboard and
-    /// nothing else in the view may answer a key, so a stale `true` would silence the lot.
-    popup: Cell<bool>,
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
@@ -599,7 +595,6 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
-        popup: Cell::new(false),
         snippet: RefCell::new(None),
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
@@ -1223,14 +1218,15 @@ impl Tab {
         *self.snippet.borrow_mut() = Some(snippet.clone());
     }
 
-    /// Whether the completion popup is on screen. The cell it is remembered in mirrors two
-    /// signals, and a `hide` that never arrives would leave every key to the view for the rest of
-    /// this tab's life — so a `true` is checked against the widgets before it is believed, and a
-    /// stale one is dropped here. The check only runs while the cell says a popup is up.
+    /// Whether the completion popup is on screen, asked of the widgets on this very press.
+    ///
+    /// While the popup is up it owns the keyboard and nothing else in the view may answer a key,
+    /// so an answer that can go stale silences the lot: this used to be a cell mirroring the
+    /// completion's `show` and `hide`, and a `hide` that never arrived left every key — Return
+    /// and Tab with it — to the view for the rest of this tab's life. Derived, there is nothing
+    /// left to strand: see [`keys::popup_visible`] for what the widgets are asked.
     pub(crate) fn popup_shown(&self) -> bool {
-        let up = self.popup.get() && keys::popup_visible(&self.view);
-        self.popup.set(up);
-        up
+        keys::popup_visible(&self.view)
     }
 
     /// Whether a template's stops are still being walked. A snippet lets its buffer go when it

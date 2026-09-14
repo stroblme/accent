@@ -210,9 +210,12 @@ impl Renderer {
     /// which is what an icon-theme change needs. Called from `Tab::restyle` and on every map.
     pub fn restyle(&self, view: &impl IsA<gtk::Widget>) {
         let fg = view.as_ref().color();
+        // Held above the same floor a list marker is: a chevron nobody can find is a fold nobody
+        // can open, and the gutter is the same page the markers sit on.
+        let page = crate::highlight::page(adw::StyleManager::default().is_dark());
         self.imp()
             .colour
-            .set(crate::highlight::with_alpha(fg, ALPHA));
+            .set(crate::highlight::dim(fg, page, ALPHA));
         if let Some(display) = gdk::Display::default() {
             let theme = gtk::IconTheme::for_display(&display);
             let look = |name| {
