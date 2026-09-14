@@ -113,21 +113,28 @@ class Chrome {
  * `WebView` consumes what its own scrolling used, and a consumed change is one no gesture on the
  * main pass can read. Nothing is consumed here either, so the tap still reaches whatever it was
  * aimed at.
+ *
+ * A tap and nothing else. A press held past the platform's long-press time belongs to whatever is
+ * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
+ * given exactly that long and the chrome stays where it was.
  */
 fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        var tap = true
-        do {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            // A second finger is a pinch, and anything past the slop is a scroll.
-            if (event.changes.size > 1) tap = false
-            val moved = event.changes.firstOrNull { it.id == down.id }?.let {
-                (it.position - down.position).getDistance() > viewConfiguration.touchSlop
-            }
-            if (moved == true) tap = false
-        } while (event.changes.any { it.pressed })
-        if (tap) chrome.tapped()
+        val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+            var tap = true
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                // A second finger is a pinch, and anything past the slop is a scroll.
+                if (event.changes.size > 1) tap = false
+                val moved = event.changes.firstOrNull { it.id == down.id }?.let {
+                    (it.position - down.position).getDistance() > viewConfiguration.touchSlop
+                }
+                if (moved == true) tap = false
+            } while (event.changes.any { it.pressed })
+            tap
+        }
+        if (tapped == true) chrome.tapped()
     }
 }
 
@@ -209,6 +216,18 @@ fun ScreenBar(title: String) {
 private val PullToClose: Dp = 96.dp
 
 /**
+ * Where a pointer event stops.
+ *
+ * A panel lies over what is being read rather than replacing it, and a background is paint rather
+ * than a target: with no gesture of its own the blank half of the panel is never hit at all and
+ * the press reaches the document below it, so a tap beside a file row toggles the note's chrome.
+ * Nothing is consumed, so the rows, the chips and the field still get their own.
+ */
+private fun Modifier.stopsHere(): Modifier = pointerInput(Unit) {
+    awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
+}
+
+/**
  * A panel over the document that goes when it is pulled down.
  *
  * What is inside it scrolls first: only a drag the list cannot use — one with nothing left above
@@ -274,6 +293,7 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
             .offset { IntOffset(0, pulled.roundToInt()) }
             // A ground of its own: this lies over whatever is being read, which stays composed.
             .background(MaterialTheme.colorScheme.surface)
+            .stopsHere()
             .nestedScroll(nested),
     ) {
         Handle(
