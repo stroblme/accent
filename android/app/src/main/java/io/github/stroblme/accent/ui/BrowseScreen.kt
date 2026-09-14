@@ -226,10 +226,16 @@ private fun LazyListScope.rows(
 /** What the palette can do here. Everything a phone has no place for is simply not in the list. */
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
+/**
+ * Close Vault was reachable only from the screen with nothing open, which is the one place a
+ * reader is not thinking about the vault they are in. It drops the handle and comes back to the
+ * picker, which still offers the vault back: `Recents` keeps it.
+ */
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
     Command("Reload Vault") { it.rescan() },
     Command("Close Note") { it.close() },
+    Command("Close Vault") { it.closeVault() },
 )
 
 private fun newName(): String {
