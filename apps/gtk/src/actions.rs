@@ -13,6 +13,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-file", "New File", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
+    ("win.new-drawing", "New Drawing", &[]),
     ("win.upload", "Upload Files…", &[]),
     ("win.close-tab", "Close Tab", &["<Control>w"]),
     // Most-recently-used order, so one press is the note before this one. Both spellings of the
@@ -158,6 +159,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-circle", "Circle", &[]),
     ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
+    ("win.pdf-add-page", "Add Page", &[]),
     // The diagram tab. Undo, Redo, Delete Selection, Select All Shapes, Edit Label and the
     // paging commands are the canvas's own keys, which fire these, and carry no chord for the
     // PDF's reason: `Ctrl+Z`, `Ctrl+A`, `Delete` and `Return` belong to whatever has the
@@ -247,6 +249,13 @@ impl App {
             "new-folder" => {
                 if let Some(ops) = self.need_ops("create a folder") {
                     fileops::new_folder(ops, &self.selected_dir().unwrap_or_default())
+                }
+            }
+            // Where New File reads the selection, so the palette's way in lands in the folder the
+            // tree is showing — the same target the row's own menu item is given.
+            "new-drawing" => {
+                if let Some(ops) = self.need_ops("create a drawing") {
+                    fileops::new_drawing(ops, &self.selected_dir().unwrap_or_default())
                 }
             }
             // The one way to upload into the vault root: the tree has no row for it, so the
@@ -355,6 +364,7 @@ impl App {
             "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
             "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
+            "pdf-add-page" => self.pdf_add_page(),
             "pdf-fit-width" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitWidth)),
             "pdf-fit-page" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitPage)),
             "minimap" => self.toggle_minimap(),

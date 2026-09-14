@@ -400,7 +400,7 @@ mod tests {
             return;
         }
         let path = scratch("pen");
-        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        std::fs::write(&path, pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         let s = PdfSession::open(path.to_string_lossy().into_owned()).unwrap();
         assert_eq!(s.page_count(), 1);
         assert!(!s.dirty());
@@ -439,7 +439,7 @@ mod tests {
 
         // The file moves under the session, and the next save is refused rather than clobbering.
         s.add_stroke(0, line(), pen()).unwrap();
-        std::fs::write(&path, pdf::blank_pdf().unwrap()).unwrap();
+        std::fs::write(&path, pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         assert_ne!(accent_core::fs::Etag::of(&path).unwrap(), etag);
         assert!(
             matches!(s.save(), Err(AccentError::ChangedOnDisk { .. })),
@@ -455,7 +455,7 @@ mod tests {
             eprintln!("skipping: no libpdfium");
             return;
         }
-        let s = PdfSession::open_bytes(pdf::blank_pdf().unwrap()).unwrap();
+        let s = PdfSession::open_bytes(pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         s.add_stroke(0, line(), pen()).unwrap();
         assert!(matches!(s.save(), Err(AccentError::Failed { .. })));
         let bytes = s.save_bytes().unwrap();
