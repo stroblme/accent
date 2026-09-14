@@ -40,6 +40,30 @@ pub(super) struct Pane {
     pub(super) dirty: Rc<Cell<bool>>,
     pub(super) select: Rc<dyn Fn(&str)>,
     pub(super) refill: Rc<dyn Fn()>,
+    /// The tag names on screen and the one picked, which is what `ACCENT_BENCH_TAGS` reads:
+    /// nothing else can say whether a refill landed, or whether it kept the reader's place.
+    pub(super) names: Rc<dyn Fn() -> Vec<String>>,
+    pub(super) picked: Rc<dyn Fn() -> Option<String>>,
+}
+
+/// The name of the tag in row `i`, or `None` past the end of the list.
+fn name_at(tags: &gio::ListStore, i: u32) -> Option<String> {
+    tags.item(i)
+        .and_downcast::<glib::BoxedAnyObject>()
+        .map(|boxed| boxed.borrow::<(String, i64)>().0.clone())
+}
+
+/// Where `wanted` sits in the list as it stands, or `None` when the list does not hold it.
+fn position_of(tags: &gio::ListStore, wanted: &str) -> Option<u32> {
+    (0..tags.n_items()).find(|i| name_at(tags, *i).as_deref() == Some(wanted))
+}
+
+/// The tag the reader has picked, or `None` while none is.
+fn selected_name(selection: &gtk::SingleSelection) -> Option<String> {
+    selection
+        .selected_item()
+        .and_downcast::<glib::BoxedAnyObject>()
+        .map(|boxed| boxed.borrow::<(String, i64)>().0.clone())
 }
 
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
@@ -200,12 +224,18 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             #[weak]
             filter,
             move || {
+                // What the user had picked, so a refill behind them — a note saved with a tag
+                // added or gone — puts the same tag back instead of snapping the file list shut
+                // under the pointer. A tag the refill dropped, or one the filter now hides,
+                // selects nothing, which is the "no selection" the file list already hides on.
+                let picked = selected_name(&selection);
                 let rows: Vec<glib::BoxedAnyObject> = filtered(&all.borrow(), &filter.text())
                     .into_iter()
                     .map(glib::BoxedAnyObject::new)
                     .collect();
                 tags.splice(0, tags.n_items(), &rows);
-                selection.set_selected(gtk::INVALID_LIST_POSITION);
+                let found = picked.and_then(|name| position_of(&tags, &name));
+                selection.set_selected(found.unwrap_or(gtk::INVALID_LIST_POSITION));
             }
         )
     });
@@ -236,11 +266,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             // The tag the caller wants may be filtered out of the list; clearing the filter puts
             // every tag back before it is looked for.
             filter.set_text("");
-            let found = (0..tags.n_items()).find(|i| {
-                tags.item(*i)
-                    .and_downcast::<glib::BoxedAnyObject>()
-                    .is_some_and(|b| b.borrow::<(String, i64)>().0 == wanted)
-            });
+            let found = position_of(&tags, wanted);
             selection.set_selected(found.unwrap_or(gtk::INVALID_LIST_POSITION));
         }
     });
@@ -249,6 +275,20 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     column.append(&filter);
     column.append(&paned);
 
+    let names: Rc<dyn Fn() -> Vec<String>> = Rc::new({
+        let tags = tags.clone();
+        move || {
+            (0..tags.n_items())
+                .filter_map(|i| name_at(&tags, i))
+                .collect()
+        }
+    });
+
+    let picked: Rc<dyn Fn() -> Option<String>> = Rc::new({
+        let selection = selection.clone();
+        move || selected_name(&selection)
+    });
+
     Pane {
         divider: paned.clone(),
         widget: column.upcast(),
@@ -256,6 +296,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         dirty: Rc::new(Cell::new(true)),
         select,
         refill,
+        names,
+        picked,
     }
 }
 

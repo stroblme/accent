@@ -22,9 +22,19 @@ use adw::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Duration;
 use widgets::path_list;
 
-use crate::widgets::{scroller, status_page};
+use crate::widgets::{Debounce, scroller, status_page};
+
+/// How long a Tags pane that is *on screen* holds a refill back.
+///
+/// ponytail: a timer, because there is no event for "the index is current now" — our own saves
+/// emit nothing at all, by design, and the worker takes the write in after the save has landed.
+/// The ceiling is a tag that appears, or goes, a third of a second after the note is written;
+/// the same third of a second the PDF highlights wait (`App::sync_pdf_links_soon`), and an
+/// `Event::Indexed` from the worker is what replaces both.
+const TAGS_SETTLE: Duration = Duration::from_millis(300);
 
 /// Notes pointing back at the open one, as an arrow returning to where it came from. Adwaita's one
 /// link-named glyph, `insert-link-symbolic`, is a text-insertion mark (two rules over a caret): it
@@ -94,6 +104,12 @@ struct VaultPanes {
     /// has backlinks, a source file has references — so they are set rather than built in.
     references_empty: adw::StatusPage,
     tags_dirty: Rc<Cell<bool>>,
+    tags_refill: Rc<dyn Fn()>,
+    tags_names: Rc<dyn Fn() -> Vec<String>>,
+    tags_picked: Rc<dyn Fn() -> Option<String>>,
+    /// Holds a refill of the pane on screen back by [`TAGS_SETTLE`], and swallows a burst of
+    /// watcher events into one query.
+    tags_settle: Debounce,
     tags_divider: gtk::Paned,
     /// The Git pane's page, so it can be hidden: a vault under no version control has nothing to
     /// put in it, and one more icon in the switcher is one more thing to explain.
@@ -230,6 +246,10 @@ impl Sidebar {
                         references_stack,
                         references_empty,
                         tags_dirty: tags.dirty,
+                        tags_refill: tags.refill,
+                        tags_names: tags.names,
+                        tags_picked: tags.picked,
+                        tags_settle: Debounce::new(TAGS_SETTLE),
                         tags_divider: tags.divider,
                         git_page,
                         git_divider,
@@ -391,11 +411,37 @@ impl Sidebar {
         self.outline_bin.child()
     }
 
-    /// The tag list is out of date; refill it the next time the Tags pane is shown.
+    /// The tag list is out of date.
+    ///
+    /// A pane behind the switcher only takes the flag and refills the next time it is shown,
+    /// which costs no query while the user is looking at Files or Search. The pane *on screen*
+    /// has nobody to wait for, so it refills in place — a moment later, so that what was just
+    /// written has reached the index and a burst of watcher events is one query. See
+    /// [`TAGS_SETTLE`].
     pub fn mark_tags_dirty(&self) {
-        if let Some(panes) = self.panes.as_ref() {
+        let Some(panes) = self.panes.as_ref() else {
+            return;
+        };
+        if !self.is_showing("tags") {
             panes.tags_dirty.set(true);
+            return;
         }
+        panes.tags_dirty.set(false);
+        let refill = panes.tags_refill.clone();
+        panes.tags_settle.call(move || refill());
+    }
+
+    /// The tag names the Tags pane is showing, and the one selected: what `ACCENT_BENCH_TAGS`
+    /// reads, a refill being invisible from anywhere else.
+    pub fn tag_names(&self) -> Vec<String> {
+        match self.panes.as_ref() {
+            Some(panes) => (panes.tags_names)(),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn selected_tag(&self) -> Option<String> {
+        self.panes.as_ref().and_then(|panes| (panes.tags_picked)())
     }
 
     /// Show a pane by name: "files", "search", "tags", "references", "git", "ports", "outline"

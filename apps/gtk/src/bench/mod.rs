@@ -14,6 +14,7 @@ mod outline;
 mod panes;
 mod pdf;
 mod style;
+mod tags;
 
 use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_pads};
@@ -27,6 +28,7 @@ use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
+use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
 /// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
@@ -94,6 +96,10 @@ use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed.
+///
+/// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
+/// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
+///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -138,7 +144,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
+    let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
     if expand.is_none()
+        && tags.is_none()
         && clip.is_none()
         && menu.is_none()
         && diagram.is_none()
@@ -188,6 +196,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = clip {
             return bench_clip(&app, &rel);
+        }
+        if let Some(rel) = tags {
+            return bench_tags(&app, &rel);
         }
         if let Some(rel) = menu {
             return bench_menu(&app, &rel);

@@ -100,6 +100,12 @@ impl App {
                 editor::Landing::Clean(etag) | editor::Landing::Behind(etag) => {
                     app.wrote(tab, etag, matches!(landed, editor::Landing::Clean(_)));
                     app.sync_pdf_links_soon();
+                    // A note carries its tags in its own text, and our own save is the one write
+                    // the vault reports nothing about: without this the Tags pane would only ever
+                    // follow what another editor did.
+                    if let Some(sidebar) = app.sidebar.get() {
+                        sidebar.mark_tags_dirty();
+                    }
                     if report && explicit {
                         app.toast("Saved");
                     }

@@ -24,6 +24,12 @@ impl App {
             }
             // The same events mean a note may have gained or lost a link into an open PDF.
             self.sync_pdf_links_soon();
+            // And that the vault's tags moved: a note edited in another editor, one deleted, a
+            // whole folder trashed. Every one of these is emitted after the index has taken the
+            // change in, so the pane's query reads what is there now.
+            if let Some(sidebar) = self.sidebar.get() {
+                sidebar.mark_tags_dirty();
+            }
         }
         // A note's hints are about the index as much as about its own text: the file a
         // `[[link]]` names may have just been created, renamed or deleted, and none of that is
@@ -79,9 +85,6 @@ impl App {
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
-                if let Some(sidebar) = self.sidebar.get() {
-                    sidebar.mark_tags_dirty();
-                }
                 self.refresh_corpus();
                 self.sync_active();
                 // Conflicts on notes nobody has open have no banner to appear on, so the toast
@@ -109,9 +112,6 @@ impl App {
             Event::DirsChanged(dirs) => {
                 if let Some(tree) = self.tree.get() {
                     tree.invalidate(&dirs);
-                }
-                if let Some(sidebar) = self.sidebar.get() {
-                    sidebar.mark_tags_dirty();
                 }
             }
             Event::FileChanged(rel) => {
