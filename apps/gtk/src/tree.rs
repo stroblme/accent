@@ -10,10 +10,13 @@ use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
+
+/// The style class a row a Ctrl+click has marked carries, defined in `build::install_chrome_css`.
+const MARKED: &str = "accent-marked";
 
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +235,11 @@ pub struct Tree {
     ignored: Rc<RefCell<Ignored>>,
     /// The rows a Cut is waiting to move, shared with the factory the same way.
     cut: Rc<RefCell<HashSet<String>>>,
+    /// The rows a Ctrl+click has marked, which is the set the context menu acts on when the
+    /// right-click lands on one of them. Sorted, so the menu and the toasts name them in the
+    /// order the tree lists them. Shared with the factory like [`cut`](Self::cut): a marked row
+    /// scrolled out of view and back has to come back marked.
+    marked: Rc<RefCell<BTreeSet<String>>>,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
@@ -253,9 +261,7 @@ impl Tree {
             return;
         }
         *self.ignored.borrow_mut() = ignored;
-        let factory = self.view.factory();
-        self.view.set_factory(None::<&gtk::ListItemFactory>);
-        self.view.set_factory(factory.as_ref());
+        rebind(&self.view);
     }
 
     /// Dim the rows a Cut is waiting on, and undim the rest. The same `dim-label` an ignored row
@@ -269,9 +275,49 @@ impl Tree {
             return;
         }
         *self.cut.borrow_mut() = cut;
-        let factory = self.view.factory();
-        self.view.set_factory(None::<&gtk::ListItemFactory>);
-        self.view.set_factory(factory.as_ref());
+        rebind(&self.view);
+    }
+
+    /// The rows a Ctrl+click has marked, each with whether it is a directory, in path order.
+    ///
+    /// ponytail: the kind is read back off the rows the model holds right now, the set itself
+    /// keeping paths alone. A marked row whose folder has been collapsed again since is reported
+    /// as a file, which decides nothing but where a `(copy)` mark would go.
+    pub fn marked(&self) -> Vec<(String, bool)> {
+        self.marked
+            .borrow()
+            .iter()
+            .map(|rel| (rel.clone(), self.is_dir(rel)))
+            .collect()
+    }
+
+    fn is_dir(&self, rel: &str) -> bool {
+        find_row(&self.model, rel)
+            .and_then(|row| row.item())
+            .as_ref()
+            .and_then(decode)
+            .is_some_and(|row| row.is_dir())
+    }
+
+    /// Mark `rel`, or take the mark off it again.
+    pub fn toggle_mark(&self, rel: &str) {
+        let mut marked = self.marked.borrow_mut();
+        if !marked.remove(rel) {
+            marked.insert(rel.to_string());
+        }
+        redraw_marks(&self.view, &marked);
+    }
+
+    /// Forget every mark, and say whether there was one to forget — which is what lets Escape
+    /// fall through to the rest of the window when the tree has nothing marked.
+    pub fn clear_marks(&self) -> bool {
+        let mut marked = self.marked.borrow_mut();
+        if marked.is_empty() {
+            return false;
+        }
+        marked.clear();
+        redraw_marks(&self.view, &marked);
+        true
     }
 
     /// Show or hide the dot-named rows. Every level already listed is listed again, since a
@@ -493,6 +539,63 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
     expander.list_row()?.item().as_ref().and_then(decode)
 }
 
+/// Put the mark on the rows on screen that carry it and take it off the rest.
+///
+/// Written straight onto the row widgets rather than through [`rebind`]: a factory reset recreates
+/// every row widget, and the press that clears the marks is one the list still has to answer —
+/// with the widget pulled out from under it the note under a plain click stopped opening
+/// (`ACCENT_BENCH_MENU=press:<rel>` and an XTEST click, 2026-09-14). The factory reads the set on
+/// every bind all the same, which is what brings a mark back with a row scrolled out of view.
+fn redraw_marks(view: &gtk::ListView, marked: &BTreeSet<String>) {
+    for expander in expanders(view) {
+        let rel = expander
+            .list_row()
+            .and_then(|row| row.item())
+            .as_ref()
+            .and_then(decode)
+            .map(|row| row.rel);
+        set_class(
+            &expander,
+            MARKED,
+            rel.is_some_and(|rel| marked.contains(&rel)),
+        );
+    }
+}
+
+/// The row widgets the list has on screen, which is where anything a bind writes can be read back
+/// off or written again. Used by the drills as well.
+pub fn expanders(view: &gtk::ListView) -> Vec<gtk::TreeExpander> {
+    let mut found = Vec::new();
+    let mut todo = vec![view.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        let widget = match widget.downcast::<gtk::TreeExpander>() {
+            Ok(expander) => {
+                found.push(expander);
+                continue;
+            }
+            Err(widget) => widget,
+        };
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    found
+}
+
+/// Redraw the rows on screen against the state the factory reads on every bind — what git
+/// ignores, what a Cut is waiting on.
+///
+/// The factory is reset rather than the model spliced: a splice recreates every `GtkTreeListRow`
+/// and collapses the directories the reader had opened, while re-binding only touches the handful
+/// of rows actually visible.
+fn rebind(view: &gtk::ListView) {
+    let factory = view.factory();
+    view.set_factory(None::<&gtk::ListItemFactory>);
+    view.set_factory(factory.as_ref());
+}
+
 /// Put the selection on `rel`'s row, or on no row at all. Cheap when it is already there, which
 /// is what keeps it out of the way of the pointer selecting rows as it crosses the list.
 fn select(view: &gtk::ListView, rel: Option<&str>) {
@@ -682,6 +785,7 @@ pub fn build(
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
+    let marked: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden) = (
             vault.clone(),
@@ -708,6 +812,7 @@ pub fn build(
     let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
+    let bind_marked = marked.clone();
     let row_moves = moves.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
@@ -824,6 +929,9 @@ pub fn build(
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             set_class(widget, "dim-label", dim);
         }
+        // On the expander rather than on the label: a mark is about the row, not about its name,
+        // and the expander is the one widget here that spans the whole of it.
+        set_class(&expander, MARKED, bind_marked.borrow().contains(&item.rel));
     });
 
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -834,6 +942,46 @@ pub fn build(
     // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
     // so a click never costs anything you did not ask for.
     view.set_single_click_activate(true);
+    // Ctrl+click marks a row instead of opening it, which is the only multiple selection the tree
+    // has: the context menu acts on the whole set when the right-click lands on one of them. The
+    // gesture runs in the capture phase and claims the press, so the list never sees it and
+    // neither a note opens nor a folder toggles. A click with nothing held is the reader saying
+    // "this one", so it forgets the set again — and so does a click on the blank area below the
+    // last row. Rows the index does not hold are never marked: nothing the menu offers may happen
+    // inside a tree nothing is watching.
+    let marking = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_PRIMARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    marking.connect_pressed({
+        let marked = marked.clone();
+        move |gesture, _, x, y| {
+            let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
+                return;
+            };
+            let ctrl = gesture
+                .current_event_state()
+                .contains(gdk::ModifierType::CONTROL_MASK);
+            let row = row_at(&view, x, y).filter(|row| row.indexed);
+            match (ctrl, row) {
+                (true, Some(row)) => {
+                    let mut set = marked.borrow_mut();
+                    if !set.remove(&row.rel) {
+                        set.insert(row.rel);
+                    }
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    redraw_marks(&view, &set);
+                }
+                _ if !marked.borrow().is_empty() => {
+                    let mut set = marked.borrow_mut();
+                    set.clear();
+                    redraw_marks(&view, &set);
+                }
+                _ => {}
+            }
+        }
+    });
+    view.add_controller(marking);
     view.connect_activate(move |view, pos| {
         let Some(row) = view
             .model()
@@ -984,6 +1132,7 @@ pub fn build(
         landed,
         ignored,
         cut,
+        marked,
         active,
         pinned,
     }

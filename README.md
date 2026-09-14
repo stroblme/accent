@@ -57,5 +57,4 @@ make apk               # cross-builds the core, generates the bindings, packs th
 Accent is licensed under GPL-3.0-or-later.
 
 References and inspiration from: [Apostrophe](), [Obsidian](), [VSCodium]()
-Icons from:
-Other references:
+Icons from: [Tabler](https://github.com/tabler/tabler-icons)

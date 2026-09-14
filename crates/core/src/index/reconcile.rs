@@ -24,20 +24,29 @@ impl Index {
         root: &Path,
         mut on_progress: impl FnMut(Progress),
     ) -> Result<ReconcileStats> {
-        self.reconcile_with(root, &ScanOptions::default(), |_, p| on_progress(p))
+        self.reconcile_with(root, &ScanOptions::default(), &|| false, |_, p| {
+            on_progress(p)
+        })
     }
 
     /// [`reconcile`](Self::reconcile) with explicit walk options, and the index handed to
     /// `on_progress`. It is called between batches with no transaction open, so the caller can
     /// write in the middle of a long walk instead of after it.
+    ///
+    /// `stop` asks the caller, once per scanned entry and once per write batch, whether to give
+    /// up. Stopping is a **pause**: every row already written stays, and the next reconcile is a
+    /// diff over the same vault, so it indexes the remainder instead of starting over. What comes
+    /// back then has [`ReconcileStats::stopped`] set, which is the only thing that tells a partial
+    /// index from a finished one.
     pub fn reconcile_with(
         &mut self,
         root: &Path,
         opts: &ScanOptions,
+        stop: &(dyn Fn() -> bool + Sync),
         mut on_progress: impl FnMut(&mut Index, Progress),
     ) -> Result<ReconcileStats> {
         let t_scan = Instant::now();
-        let scan = walk::scan(root, opts);
+        let scan = walk::scan_until(root, opts, stop);
         let mut stats = ReconcileStats {
             scanned: scan.files.len(),
             aliases: scan.aliases.len(),
@@ -59,6 +68,14 @@ impl Index {
             scan_ms: t_scan.elapsed().as_millis() as u64,
             ..Default::default()
         };
+        // A scan cut short is the one result that cannot be used at all: the files it never
+        // reached are missing from `scan.files`, and the diff below reads everything missing as a
+        // deletion. So it is dropped whole — nothing written, nothing removed, the index exactly
+        // as the last full walk left it — and the batch loop is where a stop keeps its work.
+        if stop() {
+            stats.stopped = true;
+            return Ok(stats);
+        }
         on_progress(
             self,
             Progress {
@@ -125,6 +142,13 @@ impl Index {
         for chunk in jobs.chunks(BATCH) {
             let tx = self.write_tx()?;
             for job in chunk {
+                // Per file rather than per batch: a batch is 500 files, and one of 500 large ones
+                // measured 2.5 s on the bench vault — a Stop that waits that long is not a Stop.
+                // The transaction still commits: every file in it is a whole row either way.
+                if stop() {
+                    stats.stopped = true;
+                    break;
+                }
                 let touched = stats.touched;
                 upsert(&tx, &scan.files[job.idx], job.existing_id, &mut stats)?;
                 if stats.touched == touched {
@@ -141,6 +165,9 @@ impl Index {
                     total,
                 },
             );
+            if stats.stopped {
+                break;
+            }
         }
 
         if dirty {
@@ -503,6 +530,74 @@ mod tests {
     use super::*;
     use crate::index::testing::{fixture, open};
     use std::fs;
+
+    /// Stop is a pause: what was written stays, and the next reconcile is a diff that indexes
+    /// only what is left. More than one batch of notes, so there is a second batch to cut.
+    #[test]
+    fn a_stop_mid_walk_keeps_its_rows_and_the_next_reconcile_finishes_them() {
+        let vault = tempfile::tempdir().unwrap();
+        let notes = BATCH + 100;
+        for i in 0..notes {
+            fs::write(
+                vault.path().join(format!("n{i}.md")),
+                format!("# Note {i}\n"),
+            )
+            .unwrap();
+        }
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+
+        // Stop once the first batch has been committed and reported.
+        let stopped = std::sync::atomic::AtomicBool::new(false);
+        let stats = ix
+            .reconcile_with(
+                vault.path(),
+                &ScanOptions::default(),
+                &|| stopped.load(std::sync::atomic::Ordering::Relaxed),
+                |_, p| {
+                    if p.phase == Phase::Index {
+                        stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                },
+            )
+            .unwrap();
+        assert!(stats.stopped, "the walk reports that it was stopped");
+        assert_eq!(stats.added, BATCH, "one batch written, the rest left");
+        assert_eq!(ix.file_paths(false).unwrap().len(), BATCH);
+
+        // Nothing said the index is partial except the flag, so the next open just reconciles.
+        let stats = ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert!(!stats.stopped);
+        assert_eq!(stats.added, notes - BATCH, "only the remainder is indexed");
+        assert_eq!(
+            stats.unchanged, BATCH,
+            "what was written is not written again"
+        );
+        assert_eq!(ix.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// A scan cut short is short of files the vault holds, and the diff would read every one of
+    /// them as a deletion. It is dropped whole instead, so a stop can never empty the index.
+    #[test]
+    fn a_stop_during_the_scan_writes_nothing_and_deletes_nothing() {
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let before = ix.file_paths(false).unwrap().len();
+        assert!(before > 0);
+
+        let stats = ix
+            .reconcile_with(vault.path(), &ScanOptions::default(), &|| true, |_, _| {
+                panic!("a stopped scan reports no progress")
+            })
+            .unwrap();
+        assert!(stats.stopped);
+        assert_eq!(
+            stats.removed, 0,
+            "nothing the walk never reached is deleted"
+        );
+        assert_eq!(ix.file_paths(false).unwrap().len(), before);
+    }
 
     #[test]
     fn first_pass_indexes_then_second_pass_is_a_no_op() {

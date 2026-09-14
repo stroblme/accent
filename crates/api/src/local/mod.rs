@@ -7,8 +7,9 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use anyhow::Result;
@@ -36,6 +37,10 @@ pub(crate) struct Local {
     /// The language providers answering for the open documents.
     pub(crate) lang: std::sync::Arc<language::Languages>,
     tx: Sender<Msg>,
+    /// Raised to stop the walk the worker is in the middle of. A flag rather than a message
+    /// because the worker only reads its inbox between write batches, and the scan half of a
+    /// walk has no batches at all.
+    stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -83,7 +88,16 @@ impl Local {
         let (events, event_rx) = channel::<Event>();
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
-        let handle = worker::spawn(root.clone(), writer, rx, tx.clone(), events, watch)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = worker::spawn(
+            root.clone(),
+            writer,
+            rx,
+            tx.clone(),
+            events,
+            watch,
+            stop.clone(),
+        )?;
 
         Ok((
             Local {
@@ -93,6 +107,7 @@ impl Local {
                 cfg: Mutex::new(cfg),
                 lang,
                 tx,
+                stop,
                 worker: Some(handle),
             },
             event_rx,
@@ -119,6 +134,26 @@ impl Local {
     /// Ask for a full walk: after a resume, or when the UI suspects it missed something.
     pub fn rescan(&self) {
         self.post(Msg::Rescan);
+    }
+
+    /// Stop the walk that is running, keeping everything it has already written.
+    ///
+    /// This is a pause, not a cancel: the index is a diff of the disk, so the next walk — the one
+    /// [`resume_indexing`](Self::resume_indexing) asks for, or simply the next time the vault is
+    /// opened — indexes what is left instead of starting over. Until then the vault is usable and
+    /// says so: the reconcile it ends reports [`ReconcileStats::stopped`], and nothing else in the
+    /// worker will walk again on its own.
+    ///
+    /// [`ReconcileStats::stopped`]: accent_core::index::ReconcileStats::stopped
+    pub fn stop_indexing(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
+    /// Walk again after [`stop_indexing`](Self::stop_indexing). The only thing that does: a
+    /// paused vault ignores every other reason to rescan.
+    pub fn resume_indexing(&self) {
+        self.stop.store(false, Ordering::Relaxed);
+        self.post(Msg::Resume);
     }
 
     /// Join `rel` to the vault root, refusing anything that would land outside it. Every

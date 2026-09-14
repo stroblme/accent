@@ -699,6 +699,16 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
             vault.rescan();
             ok(())
         }
+        // Answered on a thread of its own while the host's worker walks, which is the whole point
+        // of it: it raises the flag that walk reads and never waits for the walk.
+        "stop_indexing" => {
+            vault.stop_indexing();
+            ok(())
+        }
+        "resume_indexing" => {
+            vault.resume_indexing();
+            ok(())
+        }
         "repos" => ok(vault.repos()),
 
         // The document's lifecycle. Opening one is the only call that reads the vault's config,
@@ -767,10 +777,18 @@ mod tests {
 
     impl Wired {
         fn open() -> Wired {
+            Wired::seeded(&|root| {
+                std::fs::write(root.join("a.md"), "hello [[b]]\n").unwrap();
+                std::fs::write(root.join("b.md"), "#tag\n").unwrap();
+            })
+        }
+
+        /// [`open`](Self::open) over a vault the caller fills, for a test that needs a walk still
+        /// running when the first request lands.
+        fn seeded(write: &dyn Fn(&std::path::Path)) -> Wired {
             let root = tempfile::tempdir().unwrap();
             let cache = tempfile::tempdir().unwrap();
-            std::fs::write(root.path().join("a.md"), "hello [[b]]\n").unwrap();
-            std::fs::write(root.path().join("b.md"), "#tag\n").unwrap();
+            write(root.path());
 
             let (vault, vault_events) = Local::open_at(
                 root.path(),
@@ -1111,6 +1129,29 @@ mod tests {
         assert_eq!(e.code, REFUSED);
         assert!(server.join().unwrap().is_err(), "serve must exit failing");
         assert!(!db.exists(), "no index for a vault that is not there");
+    }
+
+    /// A remote vault's walk runs on the host, so Stop has to reach the worker there while it is
+    /// going. It does: every request is served on a thread of its own, and these two raise a flag
+    /// rather than queueing behind the walk. Enough notes that the walk outlives the `hello`
+    /// round trip `Wired::open` ends with.
+    #[test]
+    fn stop_and_resume_reach_the_hosts_worker_over_the_wire() {
+        let w = Wired::seeded(&|root| {
+            for i in 0..4000 {
+                std::fs::write(root.join(format!("n{i}.md")), "body").unwrap();
+            }
+        });
+        w.client.call::<()>("stop_indexing", json!([])).unwrap();
+        assert!(
+            w.wait(|e| matches!(e, Event::Reconciled(s) if s.stopped)),
+            "the host's walk was not stopped"
+        );
+        w.client.call::<()>("resume_indexing", json!([])).unwrap();
+        assert!(
+            w.wait(|e| matches!(e, Event::Reconciled(s) if !s.stopped)),
+            "the host's walk did not finish after a resume"
+        );
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.

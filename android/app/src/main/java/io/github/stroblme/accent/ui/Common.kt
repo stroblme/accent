@@ -143,11 +143,20 @@ class Chrome {
  * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
  * given exactly that long and the chrome stays where it was.
  *
+ * [claimed] is asked first, and is told where the tap landed: a surface with something of its own
+ * at that point — a link on a PDF page — takes the tap by answering true, and the chrome does not
+ * move. It is only ever asked about a gesture that turned out to be a tap, so it may act on what it
+ * finds rather than answer and wait to be called again.
+ *
  * [onTapped] is whatever else the surface wants the same tap to mean: a rendered note takes its
- * search highlight off with it. It is captured once, along with the gesture, so what it reads has
- * to be state it can read again rather than a value it closed over.
+ * search highlight off with it. Both are captured once, along with the gesture, so what either
+ * reads has to be state it can read again rather than a value it closed over.
  */
-fun Modifier.onTap(chrome: Chrome, onTapped: () -> Unit = {}): Modifier = pointerInput(chrome) {
+fun Modifier.onTap(
+    chrome: Chrome,
+    claimed: (Offset) -> Boolean = { false },
+    onTapped: () -> Unit = {},
+): Modifier = pointerInput(chrome) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
         val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
@@ -164,6 +173,9 @@ fun Modifier.onTap(chrome: Chrome, onTapped: () -> Unit = {}): Modifier = pointe
             tap
         }
         if (tapped == true) {
+            // Asked before the chrome moves, which is the whole of why it is here: a link has to be
+            // able to take a tap that would otherwise have been spent putting the bar up.
+            if (claimed(down.position)) return@awaitEachGesture
             chrome.tapped()
             onTapped()
         }

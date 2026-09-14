@@ -66,6 +66,10 @@ pub struct ReconcileStats {
     pub skipped_symlinks: usize,
     pub bytes_read: u64,
     pub scan_ms: u64,
+    /// The walk was asked to stop and did, so every number above is of a **partial** index: what
+    /// is in it is right, what is missing is still on disk. The next reconcile is a diff, so it
+    /// finishes the remainder rather than starting over — which is why stopping is a pause.
+    pub stopped: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

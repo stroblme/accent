@@ -173,6 +173,36 @@ impl Vault {
         }
     }
 
+    /// Stop the walk that is running, keeping every row it has already written.
+    ///
+    /// A pause rather than a cancel: the reconcile it ends reports
+    /// [`ReconcileStats::stopped`](accent_core::index::ReconcileStats::stopped), the vault stays
+    /// usable with the part of the index that exists, and the remainder is indexed by
+    /// [`resume_indexing`](Self::resume_indexing) or by the next open of the vault. A remote
+    /// vault's walk runs on the host, so this is a round trip to the worker there; the server
+    /// gives every request a thread of its own, so it is answered while that walk runs.
+    pub fn stop_indexing(&self) -> Result<()> {
+        match &self.backend {
+            Backend::Local(v) => {
+                v.stop_indexing();
+                Ok(())
+            }
+            Backend::Remote(r) => r.call("stop_indexing", json!([])).map_err(remote_err),
+        }
+    }
+
+    /// Walk again after [`stop_indexing`](Self::stop_indexing), which is the only thing that
+    /// will: a paused vault ignores every other reason to rescan.
+    pub fn resume_indexing(&self) -> Result<()> {
+        match &self.backend {
+            Backend::Local(v) => {
+                v.resume_indexing();
+                Ok(())
+            }
+            Backend::Remote(r) => r.call("resume_indexing", json!([])).map_err(remote_err),
+        }
+    }
+
     /// Join `rel` to the vault root, refusing anything that would land outside it.
     ///
     /// For a remote vault the answer is a path on the *host*, so it is what to show and what to

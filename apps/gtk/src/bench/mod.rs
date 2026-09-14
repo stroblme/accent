@@ -22,7 +22,8 @@ use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
 use files::{
-    bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_paths, bench_templates,
+    bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
+    bench_templates,
 };
 use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_list, bench_shell_keys};
@@ -107,10 +108,16 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
-/// of a Cut moved the file rather than copying it again.
+/// of a Cut moved the file rather than copying it again. Last it puts two files on the clipboard
+/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root.
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
-/// is up and which once it has closed.
+/// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click
+/// does, and prints the set, the items a menu over one of them offers, the rows drawn with the
+/// mark on them, and the same once the marks are let go. `=press:<rel_file>` instead reveals that
+/// row, prints where it is on screen and stays up for an XTEST Ctrl+click — `build-aux/xtest.py
+/// :99 "move X Y; keydown ctrl; down; up; keyup ctrl"` — printing the marked rows and how many
+/// documents are open every five seconds, which is how the modifier half is driven at all.
 ///
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
 /// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
@@ -241,6 +248,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_search(&app, &query);
         }
         if let Some(rel) = menu {
+            if let Some(rel) = rel.strip_prefix("press:") {
+                return bench_menu_press(&app, rel);
+            }
             return bench_menu(&app, &rel);
         }
         if let Some(arg) = diagram {

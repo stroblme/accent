@@ -292,6 +292,9 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     stack
 }
 
+/// The marker class on a list row whose buttons already follow its hover ([`reveal_on_hover`]).
+const WATCHED: &str = "git-row";
+
 /// Which of a row's three buttons was pressed.
 #[derive(Clone, Copy)]
 enum Act {
@@ -300,10 +303,60 @@ enum Act {
     Discard,
 }
 
+/// Show a row's buttons while the pointer or the keyboard is on it, and give them no width at all
+/// the rest of the time, so the name beside them reads out to the whole width of the pane and is
+/// cut short only where there is really something to give way to. `.git-actions` fades them in
+/// and out; what it cannot do is stop them reserving their room, a `GtkRevealer` that is shut
+/// measuring nothing.
+///
+/// Watched on the list row rather than on the stack inside it: that is the widget GTK marks with
+/// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
+/// the keyboard — and it is the one the keyboard lands on first, so Tab reveals the buttons it
+/// would otherwise never be able to reach.
+fn reveal_on_hover(row: &gtk::Widget) {
+    // Once per list row widget, which is recycled and bound again and again. The class is the
+    // marker, there being nowhere else to keep one bit on a widget GTK made for itself.
+    // ponytail: it is also a hook if a row of this list ever wants styling of its own.
+    if row.has_css_class(WATCHED) {
+        return;
+    }
+    row.add_css_class(WATCHED);
+    row.connect_state_flags_changed(|row, _| {
+        let on = row.state_flags().intersects(
+            gtk::StateFlags::PRELIGHT | gtk::StateFlags::FOCUS_WITHIN | gtk::StateFlags::FOCUSED,
+        );
+        for revealer in revealers(row) {
+            revealer.set_reveal_child(on);
+        }
+    });
+}
+
+/// Every [`actions`] revealer under `row` — one per layout the row's stack can show.
+fn revealers(row: &gtk::Widget) -> Vec<gtk::Revealer> {
+    let mut found = Vec::new();
+    let mut todo = vec![row.clone()];
+    while let Some(widget) = todo.pop() {
+        let widget = match widget.downcast::<gtk::Revealer>() {
+            Ok(revealer) => {
+                found.push(revealer);
+                continue;
+            }
+            Err(widget) => widget,
+        };
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    found
+}
+
 /// A row's Stage / Unstage / Discard buttons, the same three on a file and on a folder. They show
 /// on the row's hover and `:focus-within` (`.git-actions`), and the binder picks which of them the
-/// row offers.
-fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
+/// row offers. In a revealer, which is what keeps them from reserving their width while they are
+/// away ([`reveal_on_hover`]).
+fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     actions.add_css_class("git-actions");
     for (icon, tooltip, act) in [
@@ -324,7 +377,18 @@ fn actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         ));
         actions.append(&button);
     }
-    actions
+    gtk::Revealer::builder()
+        .child(&actions)
+        .transition_type(gtk::RevealerTransitionType::SlideLeft)
+        .build()
+}
+
+/// The buttons inside an [`actions`] revealer, which is what the binder sets up.
+fn buttons(revealer: Option<gtk::Widget>) -> Option<gtk::Box> {
+    revealer
+        .and_downcast::<gtk::Revealer>()?
+        .child()
+        .and_downcast::<gtk::Box>()
 }
 
 impl Panel {
@@ -355,6 +419,17 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
+    // The list row itself, which is not there at setup — `set_child` only stores the widget and
+    // the row it goes in is made when the item is first bound — and must not be touched from
+    // inside the bind either: a class added or a handler connected on it there left the list
+    // manager handing GTK null children, a `gtk_widget_insert_after: assertion 'GTK_IS_WIDGET'`
+    // per row. An idle is past the manager's pass and costs one closure per bind.
+    let list_row = stack.parent();
+    glib::idle_add_local_once(move || {
+        if let Some(list_row) = list_row {
+            reveal_on_hover(&list_row);
+        }
+    });
     let (Some(header), Some(folder), Some(entry)) = (
         stack.child_by_name("header").and_downcast::<gtk::Box>(),
         stack.child_by_name("folder").and_downcast::<gtk::Box>(),
@@ -371,7 +446,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let Some(all) = title.next_sibling().and_downcast::<gtk::Button>() else {
         return;
     };
-    let Some(actions) = entry.last_child().and_downcast::<gtk::Box>() else {
+    let Some(actions) = buttons(entry.last_child()) else {
         return;
     };
 
@@ -402,13 +477,17 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             discardable,
         } => {
             stack.set_visible_child_name("folder");
-            let buttons = folder.last_child().and_downcast::<gtk::Box>();
-            let (Some(chevron), Some(buttons)) =
-                (folder.first_child().and_downcast::<gtk::Image>(), buttons)
-            else {
+            let (Some(chevron), Some(buttons)) = (
+                folder.first_child().and_downcast::<gtk::Image>(),
+                buttons(folder.last_child()),
+            ) else {
                 return;
             };
-            let Some(text) = buttons.prev_sibling().and_downcast::<gtk::Label>() else {
+            let Some(text) = folder
+                .last_child()
+                .and_then(|revealer| revealer.prev_sibling())
+                .and_downcast::<gtk::Label>()
+            else {
                 return;
             };
             // None in Merge Conflicts, for the reason its header has no Stage All: a conflict is

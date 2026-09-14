@@ -318,6 +318,36 @@ pub fn wire_window(app: &Rc<App>) {
     });
     app.statusbar.widget().add_controller(quiet);
 
+    // Stop / Resume beside the indexing readout. Both are round trips on a remote vault, whose
+    // walk runs on the host, so neither is made on the main loop.
+    //
+    // Resume says so at once — a walk is starting, and a second press would post a second one.
+    // Stop does not: the walk runs until the batch it is on commits, and it is still Stop until
+    // the worker answers with a reconcile that says it stopped.
+    app.statusbar.index_control().connect_clicked(glib::clone!(
+        #[weak]
+        app,
+        move |_| {
+            let (Some(vault), weak) = (app.vault().cloned(), Rc::downgrade(&app)) else {
+                return;
+            };
+            let resume = app.statusbar.indexing() == statusbar::Indexing::Paused;
+            if resume {
+                app.statusbar.set_indexing(statusbar::Indexing::Running);
+            }
+            glib::spawn_future_local(async move {
+                let asked = gio::spawn_blocking(move || match resume {
+                    true => vault.resume_indexing(),
+                    false => vault.stop_indexing(),
+                })
+                .await;
+                if let (Ok(Err(e)), Some(app)) = (asked, weak.upgrade()) {
+                    app.toast(&format!("Cannot reach the vault: {e}"));
+                }
+            });
+        }
+    ));
+
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
     // popover has a plain widget to hang off.
@@ -679,8 +709,12 @@ pub fn wire_tree(app: &Rc<App>) {
                 return;
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            // A right-click on a marked row is about the whole set; one anywhere else is the
+            // reader pointing at a single file, and forgets the marks the way a plain click does.
+            let marked = marks_under(tree, row.as_ref());
             if let Some(ops) = app.ops() {
-                let popover = fileops::context_menu(ops, tree.widget(), clicked(&row), anchor);
+                let popover =
+                    fileops::context_menu(ops, tree.widget(), clicked(&row), &marked, anchor);
                 pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
             }
         }
@@ -713,16 +747,25 @@ pub fn wire_tree(app: &Rc<App>) {
                         fileops::trash(ops, &row.rel);
                     }
                 }
+                // Escape is how the keyboard lets a Ctrl+click selection go; with nothing marked
+                // it is not ours, and whatever else answers Escape gets it.
+                gdk::Key::Escape => {
+                    if !tree.clear_marks() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
                 // Nothing selected is the keyboard's version of a click on blank space, and it
                 // gets the same root-scoped menu the pointer path shows there.
                 gdk::Key::Menu => {
                     let Some(ops) = app.ops() else {
                         return glib::Propagation::Proceed;
                     };
+                    let marked = marks_under(tree, row.as_ref());
                     let popover = fileops::context_menu(
                         ops,
                         tree.widget(),
                         clicked(&row),
+                        &marked,
                         row_anchor(tree.view(), tree.widget()),
                     );
                     pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
@@ -784,6 +827,18 @@ fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
             }
         }
     ));
+}
+
+/// The marked rows a menu opened over `row` acts on: the whole set when the click landed on one
+/// of its rows, and nothing otherwise — a click anywhere else forgets them, which is what a plain
+/// left click does too.
+fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)> {
+    let marked = tree.marked();
+    if row.is_some_and(|row| marked.iter().any(|(rel, _)| *rel == row.rel)) {
+        return marked;
+    }
+    tree.clear_marks();
+    Vec::new()
 }
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays

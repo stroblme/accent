@@ -916,6 +916,8 @@ fn install_chrome_css() {
              .dividers-hidden scrolledwindow > undershoot {{ box-shadow: none; \
                background-image: none; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
+             .accent-marked {{ border-radius: 6px; \
+               background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
              .git-actions {{ opacity: 0; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \

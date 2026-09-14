@@ -2,7 +2,7 @@
 //! the action group its items resolve through.
 
 use super::clipboard::{self, can_paste};
-use super::{Ops, download, new_drawing, new_file, new_folder, rename, trash, upload};
+use super::{Ops, download, new_drawing, new_file, new_folder, rename, trash, trash_all, upload};
 use super::{copy_absolute_path, copy_name, copy_relative_path, show_in_files};
 use accent_core::path::parent_dir;
 use gtk::prelude::*;
@@ -19,6 +19,10 @@ const GROUP: &str = "fileops";
 /// and everything else but [`listing`] needs a path, so a menu opened over nothing holds the create
 /// items and that alone.
 ///
+/// `marked` is the set a Ctrl+click has built, and is empty unless the click landed on one of its
+/// rows — the caller decides that, since it is the tree that holds the marks. A menu over a marked
+/// row is [`marked_menu`]: the whole set, and nothing that names one file.
+///
 /// ponytail: the popover is parented to the box rather than to the `GtkListView` inside it,
 /// because GTK only re-presents a popover from its parent's `allocate_native_children`, which a
 /// widget with a custom `size_allocate` such as `GtkListView` never reaches. A menu parented to
@@ -29,6 +33,7 @@ pub fn context_menu(
     ops: &Rc<Ops>,
     host: &gtk::Widget,
     row: Option<(&str, bool)>,
+    marked: &[(String, bool)],
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
     // On the host, not the list: an action resolves up the widget tree from the popover's parent.
@@ -36,6 +41,10 @@ pub fn context_menu(
     // costs a handful of small objects, which is less than remembering whether it is already there.
     host.insert_action_group(GROUP, Some(&actions(ops)));
 
+    if !marked.is_empty() {
+        let menu = marked_menu(marked, row_dir(row), can_paste(ops));
+        return popup(host, &menu, anchor, None);
+    }
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
         menu.append_item(&item(GROUP, "Open", "open", rel));
@@ -101,6 +110,30 @@ pub fn context_menu(
     menu.append_section(None, &danger);
     menu.append_section(None, &listing());
     popup(host, &menu, anchor, None)
+}
+
+/// The menu a right-click on a marked row offers: what can act on several paths at once, and
+/// nothing else. Open, the create items, Rename, Leave Out of Search, the three Copy … Path items,
+/// Show in Files and Download… all name one file, and an item that could do nothing — or that
+/// would quietly act on one row out of several — is never on the menu (DESIGN.md, Principle 1).
+///
+/// `dir` is where a Paste puts what it holds, the same answer [`row_dir`] gives the single-row
+/// menu, and `paste` whether there is anything to paste at all.
+fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
+    let menu = gio::Menu::new();
+    let clip = gio::Menu::new();
+    clip.append_item(&many("Cut", "cut-many", marked));
+    clip.append_item(&many("Copy", "copy-many", marked));
+    if paste {
+        clip.append_item(&item(GROUP, "Paste", "paste", dir));
+    }
+    menu.append_section(None, &clip);
+    // Its own section, so the one destructive item is never next to Copy by accident.
+    let danger = gio::Menu::new();
+    danger.append_item(&many("Move to Trash", "trash-many", marked));
+    menu.append_section(None, &danger);
+    menu.append_section(None, &listing());
+    menu
 }
 
 /// Cut, Copy and Paste. `row` is the file the first two act on, `None` on a menu opened over
@@ -181,6 +214,39 @@ pub fn popup(
     popover
 }
 
+/// The type a marked set travels as: the paths and, for each, whether it is a directory, which is
+/// what decides where a `(copy)` mark goes.
+const PATHS: &str = "a(sb)";
+
+/// One item of the marked menu, carrying the whole set as its target. Its own builder because the
+/// target is a list rather than the one path [`item`] takes.
+fn many(label: &str, action: &str, marked: &[(String, bool)]) -> gio::MenuItem {
+    let item = gio::MenuItem::new(Some(label), None);
+    item.set_action_and_target_value(
+        Some(&format!("{GROUP}.{action}")),
+        Some(&marked.to_variant()),
+    );
+    item
+}
+
+/// Every label a menu model offers, sections walked through, for the drills and the tests: a
+/// `GtkPopoverMenu` keeps its model, so what is on screen can be read back out of it.
+pub fn labels(menu: &gio::MenuModel) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..menu.n_items() {
+        if let Some(section) = menu.item_link(i, gio::MENU_LINK_SECTION) {
+            out.extend(labels(&section));
+        }
+        if let Some(label) = menu
+            .item_attribute_value(i, gio::MENU_ATTRIBUTE_LABEL, Some(glib::VariantTy::STRING))
+            .and_then(|v| v.str().map(str::to_string))
+        {
+            out.push(label);
+        }
+    }
+    out
+}
+
 /// One menu item of `group` carrying its target as a `String` rather than in a detailed-action
 /// string, where an apostrophe in a note name would break the quoting. The Git pane's history
 /// menu builds its items through here too, its targets being commit ids and branch names.
@@ -195,6 +261,9 @@ pub fn item(group: &str, label: &str, action: &str, target: &str) -> gio::MenuIt
 
 /// What one context-menu action does with the path it was handed.
 type Run = Box<dyn Fn(&Rc<Ops>, &str)>;
+
+/// What one of the marked menu's actions does with the whole set it was handed.
+type RunMany = Box<dyn Fn(&Rc<Ops>, Vec<(String, bool)>)>;
 
 /// The actions the menu items name, each taking the row's path as its parameter.
 fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
@@ -237,6 +306,31 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("upload", Box::new(upload));
     add("trash", Box::new(trash));
     add("exclude", Box::new(|ops, rel| (ops.exclude)(rel)));
+
+    // The marked set's three, which take the whole list rather than one path.
+    let add_many = |name: &str, run: RunMany| {
+        let ty = glib::VariantTy::new(PATHS).expect("a valid variant type");
+        let action = gio::SimpleAction::new(name, Some(ty));
+        let ops = ops.clone();
+        action.connect_activate(move |_, target| {
+            if let Some(marked) = target.and_then(|t| t.get::<Vec<(String, bool)>>()) {
+                run(&ops, marked);
+            }
+        });
+        group.add_action(&action);
+    };
+    add_many(
+        "cut-many",
+        Box::new(|ops, marked| clipboard::cut_all(ops, &marked)),
+    );
+    add_many(
+        "copy-many",
+        Box::new(|ops, marked| clipboard::copy_all(ops, &marked)),
+    );
+    add_many(
+        "trash-many",
+        Box::new(|ops, marked| trash_all(ops, marked.into_iter().map(|(rel, _)| rel).collect())),
+    );
     group
 }
 
@@ -251,5 +345,19 @@ mod tests {
         // A file at the vault root, and no row at all: both the root.
         assert_eq!(row_dir(Some(("todo.md", false))), "");
         assert_eq!(row_dir(None), "");
+    }
+
+    #[test]
+    fn a_marked_set_offers_only_what_can_act_on_several_paths() {
+        let marked = [("a.md".to_string(), false), ("Notes".to_string(), true)];
+        assert_eq!(
+            labels(marked_menu(&marked, "", true).upcast_ref()),
+            ["Cut", "Copy", "Paste", "Move to Trash", "Show Hidden Files"]
+        );
+        // Paste is drawn only where the clipboard holds something, as it is on the single-row menu.
+        assert_eq!(
+            labels(marked_menu(&marked, "", false).upcast_ref()),
+            ["Cut", "Copy", "Move to Trash", "Show Hidden Files"]
+        );
     }
 }

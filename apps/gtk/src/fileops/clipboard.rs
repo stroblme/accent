@@ -47,12 +47,22 @@ impl Clip {
 
 /// Copy a row: a paste puts a duplicate of it wherever it lands.
 pub fn copy(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
-    take(ops, rel, is_dir, false);
+    copy_all(ops, &[(rel.to_string(), is_dir)]);
 }
 
 /// Cut a row: a paste moves it, through the same plan a dragged row goes through.
 pub fn cut(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
-    take(ops, rel, is_dir, true);
+    cut_all(ops, &[(rel.to_string(), is_dir)]);
+}
+
+/// [`copy`] for every row a Ctrl+click has marked, each with whether it is a directory.
+pub fn copy_all(ops: &Rc<Ops>, rows: &[(String, bool)]) {
+    take(ops, rows, false);
+}
+
+/// [`cut`] for every row a Ctrl+click has marked.
+pub fn cut_all(ops: &Rc<Ops>, rows: &[(String, bool)]) {
+    take(ops, rows, true);
 }
 
 /// Whether there is anything to paste, asked as the menu is built so an item that could do
@@ -88,39 +98,63 @@ pub fn paste(ops: &Rc<Ops>, dir: &str) {
     });
 }
 
-/// [`copy`] and [`cut`], which differ in one flag and in what they leave dimmed.
-fn take(ops: &Rc<Ops>, rel: &str, is_dir: bool, cut: bool) {
+/// [`copy`] and [`cut`], which differ in one flag and in what they leave dimmed. One row or
+/// several: a marked set travels as a whole from here on, and the file managers' own formats
+/// carry a list either way.
+fn take(ops: &Rc<Ops>, rows: &[(String, bool)], cut: bool) {
+    if rows.is_empty() {
+        return;
+    }
     if !ops.vault.is_remote() {
-        publish(ops, rel, cut);
+        publish(ops, rows, cut);
     }
     *ops.clip.borrow_mut() = Some(Clip {
         cut,
-        inside: vec![(rel.to_string(), is_dir)],
+        inside: rows.to_vec(),
         outside: Vec::new(),
     });
     // The rows a Cut is waiting on read as dimmed until it is pasted, which is the only sign on
     // screen that anything is in flight at all. A Copy takes nothing away, so it dims nothing.
-    let dimmed: Vec<String> = cut.then(|| rel.to_string()).into_iter().collect();
+    let dimmed: Vec<String> = match cut {
+        true => rows.iter().map(|(rel, _)| rel.clone()).collect(),
+        false => Vec::new(),
+    };
     (ops.cut)(&dimmed);
 }
 
-/// Put `rel` on the real clipboard, in both forms, so a file manager can paste it.
-fn publish(ops: &Ops, rel: &str, cut: bool) {
-    let uri = gio::File::for_path(ops.vault.root().join(rel)).uri();
+/// Put the rows on the real clipboard, in both forms, so a file manager can paste them.
+fn publish(ops: &Ops, rows: &[(String, bool)], cut: bool) {
+    let uris: Vec<String> = rows
+        .iter()
+        .map(|(rel, _)| gio::File::for_path(ops.vault.root().join(rel)).uri().into())
+        .collect();
+    let (gnome, list) = payload(&uris, cut);
+    let provider = gdk::ContentProvider::new_union(&[
+        gdk::ContentProvider::for_bytes(GNOME, &glib::Bytes::from(gnome.as_bytes())),
+        gdk::ContentProvider::for_bytes(URIS, &glib::Bytes::from(list.as_bytes())),
+    ]);
+    if let Err(e) = ops.window.clipboard().set_content(Some(&provider)) {
+        tracing::warn!("the clipboard would not take the files: {e}");
+    }
+}
+
+/// What the two formats carry, which is what [`parse`] reads back out of them: GNOME's verb line
+/// and then one URI per line, and the cross-desktop list, whose lines end CRLF and which says
+/// nothing about the verb.
+fn payload(uris: &[String], cut: bool) -> (String, String) {
     let verb = match cut {
         true => "cut",
         false => "copy",
     };
-    let provider = gdk::ContentProvider::new_union(&[
-        gdk::ContentProvider::for_bytes(
-            GNOME,
-            &glib::Bytes::from(format!("{verb}\n{uri}").as_bytes()),
-        ),
-        gdk::ContentProvider::for_bytes(URIS, &glib::Bytes::from(format!("{uri}\r\n").as_bytes())),
-    ]);
-    if let Err(e) = ops.window.clipboard().set_content(Some(&provider)) {
-        tracing::warn!("the clipboard would not take the file: {e}");
+    let mut gnome = verb.to_string();
+    let mut list = String::new();
+    for uri in uris {
+        gnome.push('\n');
+        gnome.push_str(uri);
+        list.push_str(uri);
+        list.push_str("\r\n");
     }
+    (gnome, list)
 }
 
 /// What the real clipboard holds, as a [`Clip`], or `None` when it holds no files.
@@ -267,5 +301,18 @@ mod tests {
         assert!(!cut);
         assert_eq!(uris, ["file:///a/b.md"]);
         assert!(parse(URIS, "").1.is_empty());
+    }
+
+    #[test]
+    fn a_clip_of_several_files_is_read_back_as_it_was_written() {
+        let uris = ["file:///a/b.md".to_string(), "file:///a/c d.md".to_string()];
+        let (gnome, list) = payload(&uris, true);
+        assert_eq!(parse(GNOME, &gnome), (true, uris.to_vec()));
+        // The plain list carries the files and no verb, so a paste of it is always a copy.
+        assert_eq!(parse(URIS, &list), (false, uris.to_vec()));
+        assert_eq!(
+            parse(GNOME, &payload(&uris, false).0),
+            (false, uris.to_vec())
+        );
     }
 }

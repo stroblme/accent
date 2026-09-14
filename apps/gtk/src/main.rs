@@ -1018,6 +1018,10 @@ impl App {
         // still going, and let `Reconciled` clear it.
         if self.vault.is_none() || self.reconciled.get() {
             self.statusbar.set_progress(None);
+        } else if self.statusbar.indexing() == statusbar::Indexing::Paused {
+            // A paused vault is the one case where nothing will put the line back on its own:
+            // there is no walk left to report progress. Say again what the slot was saying.
+            self.statusbar.set_progress(Some(statusbar::PAUSED));
         }
     }
 

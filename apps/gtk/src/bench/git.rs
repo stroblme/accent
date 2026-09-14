@@ -117,6 +117,9 @@ fn bench_git_stage(app: &Rc<App>) {
                 button.emit_clicked();
             }
         };
+        if let Some(list) = list.as_ref() {
+            bench_git_hover(list, "src").await;
+        }
         // The command's own refresh and the one its `.git` write schedules both land in this.
         let settle = || glib::timeout_future(Duration::from_millis(1500));
 
@@ -163,6 +166,49 @@ fn bench_git_stage(app: &Rc<App>) {
         println!("bench git_changes_rows {}", git.changes_rows());
         bench_quit(&app);
     });
+}
+
+/// What a row's name has room for either side of the pointer arriving on it.
+///
+/// The buttons sit in a revealer, so while they are away they measure nothing and the label has
+/// the whole width of the pane; the truncation starts only where they really appear. PRELIGHT is
+/// set by hand — Xvfb has no pointer — which is the flag GTK puts on the row it is over and the
+/// one `reveal_on_hover` watches.
+async fn bench_git_hover(list: &gtk::Widget, path: &str) {
+    let stack = change_row(list, path).and_downcast::<gtk::Stack>();
+    let shown = stack.as_ref().and_then(|stack| stack.visible_child());
+    let label = shown
+        .as_ref()
+        .and_then(|shown| {
+            find_widget(shown, &|w| {
+                w.downcast_ref::<gtk::Label>()
+                    .is_some_and(WidgetExt::hexpands)
+            })
+        })
+        .and_downcast::<gtk::Label>();
+    let buttons = shown
+        .as_ref()
+        .and_then(|shown| shown.last_child())
+        .and_downcast::<gtk::Revealer>();
+    let (Some(label), Some(buttons), Some(row)) =
+        (label, buttons, stack.and_then(|stack| stack.parent()))
+    else {
+        return println!("bench git_hover {path} none");
+    };
+    for on in [false, true, false] {
+        match on {
+            true => row.set_state_flags(gtk::StateFlags::PRELIGHT, false),
+            false => row.unset_state_flags(gtk::StateFlags::PRELIGHT),
+        }
+        // Past the reveal's own slide, which is what the label's width waits on.
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench git_hover {path} pointer={on} name={} buttons={} revealed={}",
+            label.width(),
+            buttons.width(),
+            buttons.reveals_child()
+        );
+    }
 }
 
 /// Hold a real press on the Stage button of `path`'s row while the list changes under it. Prints

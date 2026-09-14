@@ -132,12 +132,17 @@ fn main() -> Result<()> {
         Cmd::Index { common, progress } => {
             let mut ix = common.open()?;
             let t = Instant::now();
-            let stats =
-                ix.reconcile_with(&common.vault, &common.scan_options(), |_, p: Progress| {
+            let stats = ix.reconcile_with(
+                &common.vault,
+                &common.scan_options(),
+                // Nothing to press Stop here: the walk runs to the end or the process is killed.
+                &|| false,
+                |_, p: Progress| {
                     if progress && p.phase == Phase::Index {
                         eprintln!("  indexing {}/{}", p.done, p.total);
                     }
-                })?;
+                },
+            )?;
             let total_ms = t.elapsed().as_millis();
             let db = common.db_path();
             println!("db            {}", db.display());
