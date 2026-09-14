@@ -1,6 +1,7 @@
 //! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
 
 use super::*;
+use sourceview5::prelude::BufferExt as _;
 
 /// Type a heading into the note at `rel`, at a size that styles on the keystroke and at one that
 /// used to wait for the debounce, and print whether the `h1` tag is on the line *before the main
@@ -256,6 +257,62 @@ async fn bench_dangling(app: Rc<App>) {
         dialog.and_then(|d| d.heading())
     );
     bench_quit(&app);
+}
+
+/// Flip the window between light and dark and print what a note's own tags are painted in either
+/// side of each flip. `theme::apply` moves `AdwStyleManager`'s dark state, which is the very
+/// signal a system switch raises, so the `notify::dark` handler in `wire.rs` — `theme::refresh`
+/// then `App::restyle_all` — is what runs here, portal or no portal.
+///
+/// `before` is read the instant the switch has been made and says what the tags still hold;
+/// `after` is the same tags once the deferred pass has run. What to look for is `after`: every
+/// foreground-derived tag must be that line's own `view_fg` at its alpha. When the pass ran
+/// inside the notify they were the outgoing theme's instead — `listmarker=rgba(0,0,6,0.4)`,
+/// near-black, against a `view_fg` of `rgb(255,255,255)`, which is the invisible bullet.
+pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        tab.set_text("- one\n- two\n\n> quote\n");
+        for theme in [
+            accent_core::config::Theme::Light,
+            accent_core::config::Theme::Dark,
+            accent_core::config::Theme::Light,
+        ] {
+            crate::theme::apply(theme);
+            println!("bench theme {theme:?} before {}", bench_theme_colours(&tab));
+            glib::timeout_future(Duration::from_millis(300)).await;
+            println!("bench theme {theme:?} after {}", bench_theme_colours(&tab));
+        }
+        bench_quit(&app);
+    });
+}
+
+/// What the theme-derived tags of `tab` hold right now, next to what they are derived from: the
+/// view's resolved foreground, the scheme the buffer is on, and — for `link`, the one tag that
+/// takes the accent rather than the ink — nothing that a dark switch moves at all.
+fn bench_theme_colours(tab: &Rc<Tab>) -> String {
+    let table = tab.buffer.tag_table();
+    let fg = |name: &str| {
+        table
+            .lookup(name)
+            .and_then(|t| t.foreground_rgba())
+            .map(|c| c.to_string())
+    };
+    format!(
+        "dark={} scheme={:?} view_fg={} listmarker={:?} marker={:?} quote={:?} link={:?}",
+        adw::StyleManager::default().is_dark(),
+        tab.buffer.style_scheme().map(|s| s.id()),
+        tab.view.color(),
+        fg("listmarker"),
+        fg("marker"),
+        fg("quote"),
+        fg("link"),
+    )
 }
 
 pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
