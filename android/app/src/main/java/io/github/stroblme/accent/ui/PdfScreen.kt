@@ -8,8 +8,6 @@ import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -28,8 +26,6 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
@@ -57,7 +53,6 @@ import io.github.stroblme.accent.ffi.Theme
 import java.io.File
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * What the pen is doing. A finger never draws: it moves the page.
@@ -305,6 +300,18 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     val maxZoom = remember(viewport) { ceiling(viewport) }
 
     /**
+     * The `/Link` boxes of the pages that are composed, left here by each of them.
+     *
+     * The hit test has to happen where the chrome's tap is decided, and that is this box rather
+     * than any one page, so what each page reads goes somewhere the box can see. A page scrolled
+     * away takes its entry with it.
+     */
+    val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
+    // [onTap] captures its predicate once, so what the predicate reads has to be state it can read
+    // again. The zoom, the pan, the viewport and the map above all are; the tool in hand is not.
+    val inHand by rememberUpdatedState(tool)
+
+    /**
      * The zoom the bitmaps were drawn at, and the part of the column they were drawn for. Both
      * follow the hands once they stop rather than every frame: a render started mid-gesture is
      * thrown away before it lands, and past [WHOLE_PAGE_PX] there is no whole page to draw anyway,
@@ -337,17 +344,37 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     /**
      * Follow a link: down the document, or out of the app.
      *
-     * Either way the chrome comes up. The tap that got here has already been through
-     * [Chrome.tapped] — the toggle is on the parent and on the initial pass, so it is decided first
-     * — and a reader who has been moved somewhere new wants the bar that says where, which is the
-     * rule [Chrome.show] is already there for.
+     * The chrome is left exactly where the reader had it. This used to put it up, to undo a toggle
+     * it could not stop; now that the tap is claimed before [Chrome.tapped] is reached, a tap on a
+     * link is a link's tap and nothing else's, and somebody reading with the bar down stays that
+     * way. A bookmark still calls [Chrome.show], because dismissing the panel really is something
+     * else deciding where the reader is.
      */
     fun follow(target: LinkTarget) {
-        chrome.show()
         when (target) {
             is LinkTarget.Page -> goTo(target.page.toInt(), target.top ?: 0f)
             is LinkTarget.Uri -> leave(context, target.uri)
         }
+    }
+
+    /**
+     * Whether this tap belongs to a link rather than to the chrome.
+     *
+     * Decided here because this is where the chrome's own tap is decided and the two have to be
+     * ordered — [onTap] asks before it toggles. A tap is never during a pinch (a second finger and
+     * any movement past the slop both rule one out), so the layer under the fingers is at rest: the
+     * pages are offset by [panX] across and by what the column has scrolled down, and nothing else.
+     *
+     * A tool in hand claims nothing. The page is a canvas then, and the drawing handler on it owns
+     * every press that lands.
+     */
+    fun claimed(at: Offset): Boolean {
+        if (inHand != Tool.Read || viewport.width == 0) return false
+        val scrolled = pages.above(list, viewport.width, zoom)
+        val land = pages.on(at.x - panX, at.y + scrolled, viewport.width, zoom) ?: return false
+        val box = hit(links[land.page].orEmpty(), land.point, TAP_SLOP / land.scale) ?: return false
+        follow(box.target)
+        return true
     }
 
     // A bookmark is the same jump from further away: the panel that made it is gone by now, and
@@ -377,7 +404,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
             .fillMaxSize()
             .clipToBounds()
             .onSizeChanged { viewport = it }
-            .onTap(chrome)
+            .onTap(chrome, claimed = ::claimed)
             .pointerInput(doc, viewport) {
                 val decay = exponentialDecay<Float>()
                 panZoom(
@@ -458,7 +485,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
                         ),
                         theme = theme,
                         tool = tool,
-                        onLink = ::follow,
+                        links = links,
                     )
                 }
             }
@@ -544,6 +571,31 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
     }
 
     /**
+     * Which page a point in the column fell on, and where on it, or `null` for one that fell on no
+     * page at all — the gap between two, or past the end of the last.
+     *
+     * [x] and [y] are column pixels at [zoom], which is what a tap on the pages is once the pan and
+     * the scroll are taken off it. The answer is in the page's own points, the space the core
+     * talks about links in, and carries the scale that got it there, because that is what turns a
+     * fingertip measured in pixels into a slop measured in points.
+     */
+    fun on(x: Float, y: Float, width: Int, zoom: Float): Landing? {
+        if (y < 0f) return null
+        var left = y
+        for (i in sizes.indices) {
+            val h = height(i, width, zoom)
+            if (left < h) {
+                val scale = width * zoom / sizes[i].width
+                // The gap under a page is part of no page, and neither is a tap that lands in it.
+                if (left > sizes[i].height * scale) return null
+                return Landing(i, Point(x / scale, left / scale), scale)
+            }
+            left -= h
+        }
+        return null
+    }
+
+    /**
      * The row, and the offset into it, that put [y] points down page [index] at the top of the
      * screen — what a bookmark and an internal link both ask for.
      *
@@ -557,6 +609,9 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         return at(top(index, width, zoom) + y * (width * zoom / size.width), width, zoom)
     }
 }
+
+/** Where a point on the pages fell: which page, where on it in points, and at what scale. */
+internal data class Landing(val page: Int, val point: Point, val scale: Float)
 
 private val PAGE_GAP = 8.dp
 private const val MIN_ZOOM = 1f
@@ -624,7 +679,8 @@ private fun Page(
     window: IntRect,
     theme: Theme,
     tool: Tool,
-    onLink: (LinkTarget) -> Unit,
+    /** Where this page leaves its `/Link` boxes for the box above to hit-test against. */
+    links: MutableMap<Int, List<PdfLinkBox>>,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -649,31 +705,17 @@ private fun Page(
     // What is being drawn right now, in view pixels, before the core has it.
     val wet = remember { mutableStateListOf<Offset>() }
 
-    // The page's `/Link` boxes, and only while a finger is a pointer: with a tool in hand the page
-    // is a canvas, and a tap on a canvas is the start of a stroke.
-    var links by remember(index) { mutableStateOf(emptyList<PdfLinkBox>()) }
+    // Read here, where the page number is, and left where the box above can reach it. Only while
+    // a finger is a pointer: with a tool in hand the page is a canvas and a tap on it is a stroke.
     LaunchedEffect(index, tool) {
-        links = if (tool == Tool.Read) doc.links(index) else emptyList()
+        if (tool == Tool.Read) links[index] = doc.links(index) else links.remove(index)
     }
-    // Read from inside the gesture rather than closed over by it, so neither a pinch nor a jump to
-    // another zoom has to restart the handler to be followed correctly.
-    val perPoint by rememberUpdatedState(scale)
-    val follow by rememberUpdatedState(onLink)
+    DisposableEffect(index) { onDispose { links.remove(index) } }
 
     Box(
         Modifier
             .fillMaxWidth()
             .height(with(density) { heightPx.toDp() })
-            .pointerInput(tool, index, links) {
-                // A tap means a link only while nothing else has a claim on it. The drawing handler
-                // below owns the page whenever a tool is in hand and this one owns it whenever none
-                // is, so the two conditions are exact opposites and a tap is never both.
-                if (tool != Tool.Read || links.isEmpty()) return@pointerInput
-                awaitTaps { at ->
-                    val point = Point(at.x / perPoint, at.y / perPoint)
-                    hit(links, point, TAP_SLOP / perPoint)?.let { follow(it.target) }
-                }
-            }
             .pointerInput(tool, index, scale) {
                 if (tool == Tool.Read) return@pointerInput
                 detectDragGestures(
@@ -743,34 +785,6 @@ private fun Page(
 
 /** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
 private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
-
-/**
- * Wait for a tap on this page and say where it landed, without taking it.
- *
- * Nothing is consumed, because [panZoom] abandons a gesture the moment any change in it is: a
- * handler here that claimed the press would be one that stopped the reader panning. Watched on the
- * initial pass for the same reason the chrome's own tap is, so that a page is not a different kind
- * of surface from a note; a press that moves past the slop, gains a second finger, or is held past
- * the long-press time is not a tap.
- */
-private suspend fun PointerInputScope.awaitTaps(onTap: (Offset) -> Unit) {
-    awaitEachGesture {
-        val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-            var tap = true
-            do {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                if (event.changes.size > 1) tap = false
-                val moved = event.changes.firstOrNull { it.id == down.id }?.let {
-                    (it.position - down.position).getDistance() > viewConfiguration.touchSlop
-                }
-                if (moved == true) tap = false
-            } while (event.changes.any { it.pressed })
-            tap
-        }
-        if (tapped == true) onTap(down.position)
-    }
-}
 
 /**
  * Which link a tap landed in, or none.
