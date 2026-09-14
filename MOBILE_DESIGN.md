@@ -123,6 +123,15 @@ state for the whole screen (`ui/Common.kt`), and what scrolls tells it so.
 Two things never fade. The bar while the editor is open, because Done is the only way out of it;
 and the content, a message, or anything holding a decision.
 
+Motion is two durations and three curves (`ui/Common.kt`): 200 ms for a surface arriving, 150 ms for
+one leaving, 150 ms for one stepping sideways — Material's short-4 and short-3, the fast end of its
+own scale, because this is a reading app and a transition that has to be waited for is worse than
+none at all. What arrives decelerates into place and what leaves accelerates away, since arriving is
+watched and leaving is not. Nothing asks whether the reader wants less motion: Compose scales every
+animation by the platform's own animator duration scale, so a device with animations turned off
+already gets all of this at once, and a check of our own would be a second answer to the same
+question.
+
 ## The launcher icon
 
 The desktop logo (`data/icons/logo.svg`) as an adaptive icon: the shapes are *strokes*, not
