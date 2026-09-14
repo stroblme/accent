@@ -49,7 +49,12 @@ impl Index {
             skipped_symlinks: scan
                 .skipped
                 .iter()
-                .filter(|s| s.reason != walk::SkipReason::DependencyTree)
+                .filter(|s| {
+                    !matches!(
+                        s.reason,
+                        walk::SkipReason::DependencyTree | walk::SkipReason::GitIgnored
+                    )
+                })
                 .count(),
             scan_ms: t_scan.elapsed().as_millis() as u64,
             ..Default::default()
