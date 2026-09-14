@@ -709,8 +709,12 @@ pub fn wire_tree(app: &Rc<App>) {
                 return;
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+            // A right-click on a marked row is about the whole set; one anywhere else is the
+            // reader pointing at a single file, and forgets the marks the way a plain click does.
+            let marked = marks_under(tree, row.as_ref());
             if let Some(ops) = app.ops() {
-                let popover = fileops::context_menu(ops, tree.widget(), clicked(&row), anchor);
+                let popover =
+                    fileops::context_menu(ops, tree.widget(), clicked(&row), &marked, anchor);
                 pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
             }
         }
@@ -743,16 +747,25 @@ pub fn wire_tree(app: &Rc<App>) {
                         fileops::trash(ops, &row.rel);
                     }
                 }
+                // Escape is how the keyboard lets a Ctrl+click selection go; with nothing marked
+                // it is not ours, and whatever else answers Escape gets it.
+                gdk::Key::Escape => {
+                    if !tree.clear_marks() {
+                        return glib::Propagation::Proceed;
+                    }
+                }
                 // Nothing selected is the keyboard's version of a click on blank space, and it
                 // gets the same root-scoped menu the pointer path shows there.
                 gdk::Key::Menu => {
                     let Some(ops) = app.ops() else {
                         return glib::Propagation::Proceed;
                     };
+                    let marked = marks_under(tree, row.as_ref());
                     let popover = fileops::context_menu(
                         ops,
                         tree.widget(),
                         clicked(&row),
+                        &marked,
                         row_anchor(tree.view(), tree.widget()),
                     );
                     pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
@@ -814,6 +827,18 @@ fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
             }
         }
     ));
+}
+
+/// The marked rows a menu opened over `row` acts on: the whole set when the click landed on one
+/// of its rows, and nothing otherwise — a click anywhere else forgets them, which is what a plain
+/// left click does too.
+fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)> {
+    let marked = tree.marked();
+    if row.is_some_and(|row| marked.iter().any(|(rel, _)| *rel == row.rel)) {
+        return marked;
+    }
+    tree.clear_marks();
+    Vec::new()
 }
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays
