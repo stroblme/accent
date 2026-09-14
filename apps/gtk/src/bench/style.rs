@@ -341,8 +341,10 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
 
 /// Jump into the note at `rel` the three ways a jump arrives — a search hit's range, a tag's
 /// name, a Go to Line — and print what the reveal painted each time, then what each kind of
-/// interaction leaves of it. The find bar's query is printed beside it throughout: a jump used to
-/// hand the bar the matched text, which lit every other occurrence in the note and never expired.
+/// interaction leaves of it. The find bar's query and whether it is painting are printed beside
+/// it throughout: a jump hands the bar the matched text so `F3` steps through it, and that is all
+/// it hands over — turning the highlight on with it is what used to light every other occurrence
+/// in the note and never expire.
 ///
 /// A click is not driven here because it is the same mark move an arrow key is: GtkTextView
 /// places the caret on button-press, and the reveal comes down with the caret wherever it moves.
@@ -388,6 +390,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             .tags
             .into_iter()
             .next();
+        let tagged_name = tagged.as_ref().map(|t| t.name.clone());
         for (label, target) in [
             (
                 "open_tag",
@@ -416,6 +419,50 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 under(&ranges)
             );
         }
+
+        // A jump arriving while the bar is already open: the box has to end up saying what the tab
+        // is now searching, and the write must not come back round as a search of the reader's
+        // own — that would paint every match and step the caret off the place just revealed. The
+        // box says `search-changed` twice for one write, the second after its delay, so the same
+        // line is printed at the jump and again once that delay has passed.
+        //
+        // Before the note's text is replaced, and not after: the bar taking the keyboard is the
+        // view losing it, which is one of the two things that autosave the buffer. A drill must
+        // not write the vault it reads.
+        let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+        bench_pump();
+        let bar = app.pane().find.clone();
+        let state = |label: &str, tab: &Rc<Tab>, bar: &Rc<crate::find::Bar>| {
+            println!(
+                "bench reveal {label} query={:?} painting={} on={} at={:?}",
+                bar.query_text(),
+                tab.search_context().is_highlight(),
+                tab.reveal_highlight().0,
+                tab.buffer
+                    .selection_bounds()
+                    .map(|(s, e)| (s.offset(), e.offset()))
+            );
+        };
+        state("bar_open", &tab, &bar);
+        if let Some(name) = tagged_name {
+            tab.goto_tag(&name);
+        }
+        state("bar_jump", &tab, &bar);
+        glib::timeout_add_local_once(Duration::from_millis(300), move || {
+            state("bar_settled", &tab, &bar);
+            // The bar goes away again so the view has the keyboard back: from here on the drill
+            // edits the buffer, and nothing may take the focus off a note that is dirty.
+            bar.close();
+            bench_reveal_marks(&app, &tab);
+        });
+    });
+}
+
+/// The second half of [`bench_reveal`], over text of the drill's own: what each kind of jump
+/// paints, what each kind of interaction leaves of it, and the three match tags' priorities.
+fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
+    {
+        let (app, tab) = (app.clone(), tab.clone());
         // ASCII throughout, so the byte offset `find` gives is also the character offset the
         // buffer counts in.
         let text = "Alpha beta alpha\ngamma #focus delta\nlast line here\n";
@@ -429,12 +476,12 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         let at = |needle: &str| text.find(needle).expect("bench needle") as i32;
         let show = |label: &str| {
             let (on, tag) = tab.reveal_highlight();
+            let context = tab.search_context();
             println!(
-                "bench reveal case={label} on={on} at={:?} query={:?}",
+                "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                sourceview5::prelude::SearchSettingsExt::search_text(
-                    &tab.search_context().settings()
-                )
+                sourceview5::prelude::SearchSettingsExt::search_text(&context.settings()),
+                context.is_highlight()
             );
         };
 
@@ -449,6 +496,17 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         tab.goto_line(3, 6);
         tab.reveal_line(3);
         show("goto_line");
+
+        // `F3` straight after a jump, which is what the prefilled query is for: it steps from the
+        // match the row pointed at to the next one, wrapping, without the bar ever being opened.
+        let second = at("alpha") as usize;
+        tab.goto_range(second..second + 5);
+        tab.step(true, false);
+        let stepped = tab
+            .buffer
+            .selection_bounds()
+            .map(|(s, e)| (s.offset(), e.offset()));
+        println!("bench reveal case=step_after_jump at={stepped:?}");
 
         // Each interaction in turn, the reveal put back between them.
         for (label, act) in [
@@ -499,7 +557,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                 .unwrap_or_default()
         );
         bench_quit(&app);
-    });
+    }
 }
 
 /// The tag the find bar's search context paints with, found by its colour: gtksourceview keeps

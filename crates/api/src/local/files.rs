@@ -275,6 +275,10 @@ impl Local {
                 }
             }
         }
+        // The rewrites are on disk; the index is a worker batch behind them. The caller is the
+        // Search pane, which asks its question again the moment this returns and asks it of the
+        // index — so it returns once the index agrees rather than a moment before.
+        self.settle_index();
         Ok(report)
     }
 
@@ -470,12 +474,12 @@ mod tests {
         assert_eq!(f.read("sub/b.md"), "color\n", "case-insensitive by default");
         assert_eq!(f.read("c.md"), "nothing here\n");
 
-        assert!(
-            poll_until(
-                || f.vault.grep("colour", plain, 10, false).unwrap().1 == 0,
-                BUDGET
-            ),
-            "the rewrites must reach the index without a rescan"
+        // Not polled: the call returns once the worker has taken the rewrites in, because the
+        // Search pane asks its question again the moment it does.
+        assert_eq!(
+            f.vault.grep("colour", plain, 10, false).unwrap().1,
+            0,
+            "the rewrites must be in the index by the time replace_all returns"
         );
     }
 
