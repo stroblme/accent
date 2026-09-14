@@ -69,7 +69,7 @@ fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
 fun Color.dark(): Boolean = luminance() < 0.5f
 
 /**
- * Whether the chrome is up: the bar over a note, and the two buttons at the foot of the screen.
+ * Whether the chrome is up: the bar over a note, and the Browse button at the foot of the screen.
  *
  * The desktop fades its chrome while the reader types. A phone has almost none to fade, so the
  * rule becomes the one every reader on the platform uses — it goes when the content scrolls on and
