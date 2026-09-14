@@ -12,6 +12,7 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -21,9 +22,9 @@ import androidx.compose.ui.unit.sp
  * One accent, taken from the system, and one flat surface under everything.
  *
  * Material You answers the same question GNOME's accent does — what colour is this device — so
- * the app asks it and writes no palette of its own. What it does override is Material's tonal
- * elevation: every container tone is flattened onto the background, because a note wants a page
- * to sit on, not a stack of cards. See MOBILE_DESIGN.md.
+ * the app asks it and writes no palette of its own beyond the page it lays everything on. What it
+ * does override is Material's tonal elevation: every container tone is flattened onto that page,
+ * because a note wants paper to sit on, not a stack of cards. See MOBILE_DESIGN.md.
  */
 @Composable
 fun AccentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
@@ -35,7 +36,7 @@ fun AccentTheme(dark: Boolean = isSystemInDarkTheme(), content: @Composable () -
         else -> lightColorScheme()
     }
     MaterialTheme(
-        colorScheme = scheme.flattened(),
+        colorScheme = scheme.flattened(dark),
         shapes = AccentShapes,
         typography = AccentTypography,
         content = content,
@@ -58,18 +59,30 @@ private val AccentShapes = Shapes(
     extraLarge = RoundedCornerShape(28.dp),
 )
 
-/** Every container tone collapsed onto the surface: one background, no cards, no elevation. */
-private fun ColorScheme.flattened(): ColorScheme = copy(
-    surfaceContainerLowest = surface,
-    surfaceContainerLow = surface,
-    surfaceContainer = surface,
-    surfaceContainerHigh = surface,
-    surfaceContainerHighest = surface,
-    surfaceVariant = surface,
-    surfaceBright = surface,
-    surfaceDim = surface,
-    background = surface,
-)
+/**
+ * Every container tone collapsed onto the surface: one background, no cards, no elevation.
+ *
+ * In light mode that one surface is paper white, which is the desktop's `--view-bg-color` and the
+ * colour a page of text has always been. Material You tints its own surface towards the wallpaper
+ * and the result reads cream beside the desktop, so this is the one role the app takes off the
+ * system — the accent, the text and the inverted pill still come from it. Dark mode keeps the
+ * shade it was given: the argument for white is paper, and it does not run the other way.
+ */
+internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
+    val page = if (dark) surface else Color.White
+    return copy(
+        surface = page,
+        surfaceContainerLowest = page,
+        surfaceContainerLow = page,
+        surfaceContainer = page,
+        surfaceContainerHigh = page,
+        surfaceContainerHighest = page,
+        surfaceVariant = page,
+        surfaceBright = page,
+        surfaceDim = page,
+        background = page,
+    )
+}
 
 /**
  * Hierarchy by size and weight, not by colour or rule. The body is the system's own size, which
