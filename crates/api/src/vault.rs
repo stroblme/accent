@@ -316,6 +316,10 @@ methods! {
     /// this is the remote path only — permanent, and confirmed as such by the UI.
     io delete(rel: ref str) -> ();
     io create_dir(rel: ref str) -> ();
+    /// Copy a file or a whole directory inside the vault. It runs where the files are, so a
+    /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
+    /// the caller naming a path nothing holds yet.
+    io copy(from: ref str, to: ref str) -> ();
     any plan_rename(from: ref str, to: ref str) -> RenamePlan;
     any rename(plan: ref RenamePlan, rewrite_links: val bool) -> RenameReport;
     any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
@@ -587,6 +591,28 @@ mod tests {
             Some("Attachments/img.png")
         );
         assert_eq!(f.vault.asset("nowhere.png"), None);
+    }
+
+    /// Paste duplicates, so the copy has to take a folder as readily as a file — and the copy is
+    /// a file of its own afterwards, not a second name for the same bytes.
+    #[test]
+    fn copying_takes_a_file_and_a_whole_folder() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Note.md", "body\n");
+        f.write("Folder/inner/deep.md", "deep\n");
+
+        f.vault.copy("Note.md", "Note (copy).md").unwrap();
+        assert_eq!(f.read("Note (copy).md"), "body\n");
+        assert_eq!(f.read("Note.md"), "body\n", "the original stays");
+
+        f.vault.copy("Folder", "Folder (copy)").unwrap();
+        assert_eq!(f.read("Folder (copy)/inner/deep.md"), "deep\n");
+
+        // The two are separate files: writing one must not reach the other.
+        f.write("Note (copy).md", "edited\n");
+        assert_eq!(f.read("Note.md"), "body\n");
+
+        assert!(f.vault.copy("nowhere.md", "x.md").is_err());
     }
 
     /// A reader learns that a file is missing from the fetch itself, the way a remote vault

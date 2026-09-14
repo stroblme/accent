@@ -18,13 +18,15 @@ mod style;
 use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
-use files::{bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
+use files::{
+    bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_paths, bench_templates,
+};
 use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::bench_pdf;
-use style::{bench_follow, bench_occurrences, bench_style};
+use style::{bench_follow, bench_occurrences, bench_reveal, bench_style};
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
 /// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
@@ -78,10 +80,20 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
 ///
+/// `ACCENT_BENCH_REVEAL=<rel_note>` jumps into a note as a search hit, a tag and a Go to Line
+/// each do, and prints what the temporary reveal painted and what takes it down again, plus the
+/// three match tags' priorities.
+///
 /// `ACCENT_BENCH_CLOSE=1` opens a note, cancels a New File and an Unsaved Changes dialog, quits,
 /// and prints how many references to the vault the closed window left behind and whether either
 /// dialog outlived it; it exits 1 unless nothing did.
 ///
+/// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
+/// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
+/// of a Cut moved the file rather than copying it again.
+/// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
+/// list the way the popover's own grab does, printing which row stays highlighted while the menu
+/// is up and which once it has closed.
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -117,13 +129,18 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
+    let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let outline = std::env::var("ACCENT_BENCH_OUTLINE").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
+    let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
+    let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     if expand.is_none()
+        && clip.is_none()
+        && menu.is_none()
         && diagram.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -132,6 +149,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && pdf.is_none()
         && tabs.is_none()
         && occur.is_none()
+        && reveal.is_none()
         && follow.is_none()
         && outline.is_none()
         && layout.is_none()
@@ -168,6 +186,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = pdf {
             return bench_pdf(&app, &rel);
         }
+        if let Some(rel) = clip {
+            return bench_clip(&app, &rel);
+        }
+        if let Some(rel) = menu {
+            return bench_menu(&app, &rel);
+        }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);
         }
@@ -176,6 +200,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = occur {
             return bench_occurrences(&app, &rel);
+        }
+        if let Some(rel) = reveal {
+            return bench_reveal(&app, &rel);
         }
         if let Some(rel) = follow {
             return bench_follow(&app, &rel);

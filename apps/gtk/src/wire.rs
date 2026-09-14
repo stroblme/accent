@@ -112,7 +112,15 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     pane.tabs.connect_setup_menu(glib::clone!(
         #[weak]
         app,
-        move |_, page| *app.menu_page.borrow_mut() = page.cloned()
+        move |tabs, page| {
+            *app.menu_page.borrow_mut() = page.cloned();
+            // Filled for the page that is about to show it: a `GtkPopoverMenu` follows the model
+            // it was built from, so this is what puts Rename and Move to Trash on a vault file's
+            // tab and on no other. One model per pane, which is the one asked for here.
+            if let Some(menu) = tabs.menu_model().and_downcast::<gio::Menu>() {
+                actions::fill_tab_menu(&menu, app.menu_file().is_some());
+            }
+        }
     ));
     pane.tabs.connect_selected_page_notify(glib::clone!(
         #[weak]
@@ -672,7 +680,8 @@ pub fn wire_tree(app: &Rc<App>) {
             };
             let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
             if let Some(ops) = app.ops() {
-                fileops::context_menu(ops, tree.widget(), clicked(&row), anchor);
+                let popover = fileops::context_menu(ops, tree.widget(), clicked(&row), anchor);
+                pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
             }
         }
     ));
@@ -710,12 +719,13 @@ pub fn wire_tree(app: &Rc<App>) {
                     let Some(ops) = app.ops() else {
                         return glib::Propagation::Proceed;
                     };
-                    fileops::context_menu(
+                    let popover = fileops::context_menu(
                         ops,
                         tree.widget(),
                         clicked(&row),
                         row_anchor(tree.view(), tree.widget()),
                     );
+                    pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
                 }
                 _ => return glib::Propagation::Proceed,
             }
@@ -753,6 +763,27 @@ pub fn written_at(rel: &str, etag: &Etag) -> String {
         Ok(when) => format!("{rel} · {when}"),
         Err(_) => rel.to_string(),
     }
+}
+
+/// Hold the tree's row highlight on the row `popover` was opened over, and let it go when the
+/// menu closes.
+///
+/// The list selects rows on hover, and a popover taking the pointer is a leave as far as the list
+/// is concerned, so without this the highlight went back to the open file the moment the menu
+/// appeared and the menu was left pointing at a row nothing lit. `None` is the blank area below
+/// the last row, which pins nothing: there is no row there to hold it on.
+fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
+    let Some(tree) = app.tree.get() else { return };
+    tree.pin(rel);
+    popover.connect_closed(glib::clone!(
+        #[weak]
+        app,
+        move |_| {
+            if let Some(tree) = app.tree.get() {
+                tree.pin(None);
+            }
+        }
+    ));
 }
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays

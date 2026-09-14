@@ -10,10 +10,12 @@
 //! good); buttons and titles use header capitalisation, and an item takes an ellipsis only where
 //! it needs more input before it can act (Upload Files…, Download…).
 
+pub(crate) mod clipboard;
 mod menu;
 mod paths;
 mod transfer;
 
+pub use clipboard::Clip;
 pub use menu::{context_menu, item, popup, row_dir};
 pub use paths::move_dest;
 pub use transfer::{download, upload};
@@ -91,6 +93,13 @@ pub struct Ops {
     /// Add a directory to the vault's `[search] exclude` list, save it and refresh what search
     /// leaves out. Offered on directory rows alone.
     pub exclude: Box<dyn Fn(&str)>,
+    /// Dim these tree rows and undim the rest: what a Cut is waiting to move. Cleared with an
+    /// empty slice by the paste that answers it.
+    pub cut: Box<dyn Fn(&[String])>,
+    /// What the last Cut or Copy in this window left. A local vault writes the real clipboard as
+    /// well and reads a paste back off it, so this is a remote vault's whole clipboard and a
+    /// local one's memory of which rows are dimmed. See [`clipboard`].
+    pub clip: RefCell<Option<Clip>>,
 }
 
 // --------------------------------------------------------------------------------- creating

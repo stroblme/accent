@@ -6,7 +6,7 @@
 //! it is out, so a newer one simply supersedes it: each carries the number it was asked under,
 //! and an answer arriving under a newer number is dropped rather than painted.
 
-use super::OnOpen;
+use super::{OnOpen, Target};
 use crate::dialogs::{alert, choose};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
@@ -634,7 +634,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 .and_downcast::<glib::BoxedAnyObject>()
             {
                 let row = boxed.borrow::<Row>();
-                on_open(&row.rel_path, row.at.clone());
+                on_open(&row.rel_path, row.at.clone().map(Target::Range));
             }
         }
     });

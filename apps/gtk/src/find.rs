@@ -488,6 +488,9 @@ impl Bar {
             false => {
                 if let Some(tab) = self.tab() {
                     tab.goto_line(line, column);
+                    // The whole line, because the line is the place that was asked for: a column
+                    // narrows where the caret lands, not what the reader was looking for.
+                    tab.reveal_line(line);
                 }
             }
         }

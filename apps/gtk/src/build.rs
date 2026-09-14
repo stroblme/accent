@@ -621,7 +621,7 @@ fn adopt_sidebar(
         glib::clone!(
             #[weak]
             app,
-            move |rel: &str, at: Option<Range<usize>>| app.open_note_at(rel, at)
+            move |rel: &str, at: Option<sidebar::Target>| app.open_note_at(rel, at)
         ),
         glib::clone!(
             #[weak]
@@ -694,6 +694,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let close = Rc::downgrade(app);
     let reconciled = Rc::downgrade(app);
     let exclude = Rc::downgrade(app);
+    let cut = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -752,6 +753,13 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             app.config_changed();
             app.toast(&format!("Left {dir} out of search"));
         }),
+        cut: Box::new(move |rels| {
+            let Some(app) = cut.upgrade() else { return };
+            if let Some(tree) = app.tree.get() {
+                tree.set_cut(rels.iter().cloned().collect());
+            }
+        }),
+        clip: std::cell::RefCell::new(None),
         close: Box::new(move |rel| {
             let Some(app) = close.upgrade() else { return };
             // A folder in the trash takes everything under it, so every document at or below the

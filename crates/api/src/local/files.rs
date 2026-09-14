@@ -127,6 +127,26 @@ impl Local {
         Ok(())
     }
 
+    /// Copy a file, or a whole directory, from one place in the vault to another.
+    ///
+    /// Vault-relative on both ends, so on a remote vault this runs where the files are and an
+    /// in-vault paste costs no bytes over the link. It never overwrites: the caller picks a name
+    /// nothing holds yet, which is what makes a paste beside its source a "(copy)".
+    pub fn copy(&self, from: &str, to: &str) -> io::Result<()> {
+        let (src, dest) = (self.resolve(from)?, self.resolve(to)?);
+        match src.is_dir() {
+            true => copy_tree(&src, &dest)?,
+            false => {
+                std::fs::copy(&src, &dest)?;
+            }
+        }
+        self.post(Msg::Update {
+            rel: to.to_string(),
+            own: true,
+        });
+        Ok(())
+    }
+
     /// What a rename would touch, so the UI can show it before anything is written.
     ///
     /// `rewrites` is empty for a directory, and for a pure move: a wikilink resolves by basename,
@@ -374,6 +394,23 @@ impl Local {
             .filter(|t| matches!(self.template_target(t), Ok(Some(_))))
             .collect())
     }
+}
+
+/// `cp -r`: `std::fs` copies one file, and a pasted folder is the one caller that needs the rest.
+/// Follows a symlink rather than recreating it, which is what copying its contents means.
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let (src, dest) = (entry.path(), to.join(entry.file_name()));
+        match entry.file_type()?.is_dir() {
+            true => copy_tree(&src, &dest)?,
+            false => {
+                std::fs::copy(&src, &dest)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
