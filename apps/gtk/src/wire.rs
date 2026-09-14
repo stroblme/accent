@@ -112,7 +112,15 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     pane.tabs.connect_setup_menu(glib::clone!(
         #[weak]
         app,
-        move |_, page| *app.menu_page.borrow_mut() = page.cloned()
+        move |tabs, page| {
+            *app.menu_page.borrow_mut() = page.cloned();
+            // Filled for the page that is about to show it: a `GtkPopoverMenu` follows the model
+            // it was built from, so this is what puts Rename and Move to Trash on a vault file's
+            // tab and on no other. One model per pane, which is the one asked for here.
+            if let Some(menu) = tabs.menu_model().and_downcast::<gio::Menu>() {
+                actions::fill_tab_menu(&menu, app.menu_file().is_some());
+            }
+        }
     ));
     pane.tabs.connect_selected_page_notify(glib::clone!(
         #[weak]
