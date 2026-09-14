@@ -18,7 +18,9 @@ mod style;
 use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_pads};
 use diagram::bench_diagram;
-use files::{bench_clip, bench_close, bench_expand, bench_hidden, bench_paths, bench_templates};
+use files::{
+    bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_paths, bench_templates,
+};
 use git::{bench_git, bench_git_init, bench_git_press};
 use keys::{bench_keys, bench_list, bench_shell_keys};
 use outline::bench_outline;
@@ -85,6 +87,9 @@ use style::{bench_follow, bench_occurrences, bench_style};
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
 /// of a Cut moved the file rather than copying it again.
+/// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
+/// list the way the popover's own grab does, printing which row stays highlighted while the menu
+/// is up and which once it has closed.
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
 ///
@@ -127,8 +132,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
+    let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     if expand.is_none()
         && clip.is_none()
+        && menu.is_none()
         && diagram.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -175,6 +182,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = clip {
             return bench_clip(&app, &rel);
+        }
+        if let Some(rel) = menu {
+            return bench_menu(&app, &rel);
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);

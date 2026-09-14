@@ -236,6 +236,58 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// Open a tree row's context menu and then take the pointer away from the list, which is what the
+/// popover itself does: the highlight has to stay on the row the menu is pointing at.
+///
+/// The leave is emitted on the list's own motion controller, found among its controllers, because
+/// under Xvfb nothing moves a pointer. That is the event the popover's grab really sends, so this
+/// drives the mechanism the bug was in; what it does not show is the menu on screen over the lit
+/// row, which wants eyes.
+pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
+    let Some(ops) = app.ops().cloned() else {
+        return bench_quit(app);
+    };
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        tree.reveal(&rel);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        println!("bench menu_row {:?}", tree.selected().map(|row| row.rel));
+
+        let at = gdk::Rectangle::new(0, 0, 1, 1);
+        let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), at);
+        // What `wire_tree` does with the popover it was handed.
+        tree.pin(Some(&rel));
+        leave(tree.view());
+        println!(
+            "bench menu_open selected={:?}",
+            tree.selected().map(|row| row.rel)
+        );
+
+        popover.popdown();
+        tree.pin(None);
+        leave(tree.view());
+        println!(
+            "bench menu_closed selected={:?}",
+            tree.selected().map(|row| row.rel)
+        );
+        bench_quit(&app);
+    });
+}
+
+/// The pointer leaving the list, as the popover's own grab sends it.
+fn leave(view: &gtk::ListView) {
+    let controllers = view.observe_controllers();
+    for i in 0..controllers.n_items() {
+        if let Some(motion) = controllers
+            .item(i)
+            .and_downcast::<gtk::EventControllerMotion>()
+        {
+            motion.emit_by_name::<()>("leave", &[]);
+        }
+    }
+}
+
 /// Every row the list has a widget bound to, as its path and whether its label is dimmed.
 fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
     let mut rows = Vec::new();

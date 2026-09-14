@@ -30,7 +30,7 @@ pub fn context_menu(
     host: &gtk::Widget,
     row: Option<(&str, bool)>,
     anchor: gdk::Rectangle,
-) {
+) -> gtk::PopoverMenu {
     // On the host, not the list: an action resolves up the widget tree from the popover's parent.
     // Re-inserted per menu: the group holds a clone of `ops` and nothing else, and replacing it
     // costs a handful of small objects, which is less than remembering whether it is already there.
@@ -93,7 +93,7 @@ pub fn context_menu(
     danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
     menu.append_section(None, &listing());
-    popup(host, &menu, anchor, None);
+    popup(host, &menu, anchor, None)
 }
 
 /// Cut, Copy and Paste. `row` is the file the first two act on, `None` on a menu opened over
@@ -144,7 +144,15 @@ pub fn row_dir(row: Option<(&str, bool)>) -> &str {
 
 /// Hang the menu off `host` and show it. `class` is a style class for the popover, for a host
 /// that gives it no background of its own.
-pub fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle, class: Option<&str>) {
+///
+/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
+/// long as its menu is up (`tree::Tree::pin`).
+pub fn popup(
+    host: &gtk::Widget,
+    menu: &gio::Menu,
+    anchor: gdk::Rectangle,
+    class: Option<&str>,
+) -> gtk::PopoverMenu {
     let popover = gtk::PopoverMenu::from_model(Some(menu));
     if let Some(class) = class {
         popover.add_css_class(class);
@@ -163,6 +171,7 @@ pub fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle, class
         glib::idle_add_local_once(move || p.unparent());
     });
     popover.popup();
+    popover
 }
 
 /// One menu item of `group` carrying its target as a `String` rather than in a detailed-action
