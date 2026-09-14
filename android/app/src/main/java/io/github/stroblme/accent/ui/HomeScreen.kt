@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -85,8 +87,16 @@ fun HomeScreen(model: VaultModel) {
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
 
-            when (screen) {
-                Screen.Browse -> BrowseScreen(
+            // Browse comes up from the foot of the screen, where its field and its chips are, and
+            // goes back down the way a pull sends it: the gesture and the transition say the same
+            // thing. It fades as it travels, so the note it is covering is briefly visible through
+            // it and the panel reads as being over the note rather than instead of it.
+            AnimatedVisibility(
+                visible = screen == Screen.Browse,
+                enter = slideInVertically(arriving()) { it } + fadeIn(arriving()),
+                exit = slideOutVertically(leaving()) { it } + fadeOut(leaving()),
+            ) {
+                BrowseScreen(
                     model = model,
                     children = state.children,
                     expanded = state.expanded,
@@ -97,7 +107,6 @@ fun HomeScreen(model: VaultModel) {
                     },
                     onClose = { screen = Screen.Home },
                 )
-                Screen.Home -> Unit
             }
         }
     }

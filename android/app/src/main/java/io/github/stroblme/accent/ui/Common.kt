@@ -5,7 +5,12 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
@@ -62,6 +67,26 @@ val Gutter: Dp = 16.dp
  */
 val DocumentGap: Dp = 8.dp
 
+/**
+ * The motion a surface arrives with, leaves with, and steps sideways with.
+ *
+ * Two durations and three curves. 200 ms for something arriving and 150 ms for something leaving
+ * or moving across — Material's short-4 and short-3, the fast end of its own scale, because this
+ * is a reading app and a transition that has to be waited for is worse than no transition at all.
+ * What arrives decelerates into place and what leaves accelerates away, which is Material's
+ * asymmetry and its reason: arriving is watched, leaving is not. A step sideways does both, since
+ * it is one surface travelling rather than a new one showing up.
+ *
+ * Nothing here asks about reduced motion and nothing needs to: Compose scales every animation by
+ * the platform's animator duration scale, so a device with animations turned off gets all of this
+ * at once.
+ */
+fun <T> arriving(): FiniteAnimationSpec<T> = tween(200, easing = LinearOutSlowInEasing)
+
+fun <T> leaving(): FiniteAnimationSpec<T> = tween(150, easing = FastOutLinearInEasing)
+
+fun <T> stepping(): FiniteAnimationSpec<T> = tween(150, easing = FastOutSlowInEasing)
+
 /** A colour as `0xRRGGBB`, which is how both the core and a stylesheet want one. */
 fun Color.rgb(): UInt = (0xFFFFFF and toArgb()).toUInt()
 
@@ -113,21 +138,28 @@ class Chrome {
  * `WebView` consumes what its own scrolling used, and a consumed change is one no gesture on the
  * main pass can read. Nothing is consumed here either, so the tap still reaches whatever it was
  * aimed at.
+ *
+ * A tap and nothing else. A press held past the platform's long-press time belongs to whatever is
+ * under the finger — a selection in the rendered note — so the wait for the fingers to come up is
+ * given exactly that long and the chrome stays where it was.
  */
 fun Modifier.onTap(chrome: Chrome): Modifier = pointerInput(chrome) {
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        var tap = true
-        do {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            // A second finger is a pinch, and anything past the slop is a scroll.
-            if (event.changes.size > 1) tap = false
-            val moved = event.changes.firstOrNull { it.id == down.id }?.let {
-                (it.position - down.position).getDistance() > viewConfiguration.touchSlop
-            }
-            if (moved == true) tap = false
-        } while (event.changes.any { it.pressed })
-        if (tap) chrome.tapped()
+        val tapped = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
+            var tap = true
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                // A second finger is a pinch, and anything past the slop is a scroll.
+                if (event.changes.size > 1) tap = false
+                val moved = event.changes.firstOrNull { it.id == down.id }?.let {
+                    (it.position - down.position).getDistance() > viewConfiguration.touchSlop
+                }
+                if (moved == true) tap = false
+            } while (event.changes.any { it.pressed })
+            tap
+        }
+        if (tapped == true) chrome.tapped()
     }
 }
 
@@ -209,6 +241,18 @@ fun ScreenBar(title: String) {
 private val PullToClose: Dp = 96.dp
 
 /**
+ * Where a pointer event stops.
+ *
+ * A panel lies over what is being read rather than replacing it, and a background is paint rather
+ * than a target: with no gesture of its own the blank half of the panel is never hit at all and
+ * the press reaches the document below it, so a tap beside a file row toggles the note's chrome.
+ * Nothing is consumed, so the rows, the chips and the field still get their own.
+ */
+private fun Modifier.stopsHere(): Modifier = pointerInput(Unit) {
+    awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
+}
+
+/**
  * A panel over the document that goes when it is pulled down.
  *
  * What is inside it scrolls first: only a drag the list cannot use — one with nothing left above
@@ -274,6 +318,7 @@ fun PullDownPanel(onClose: () -> Unit, content: @Composable ColumnScope.() -> Un
             .offset { IntOffset(0, pulled.roundToInt()) }
             // A ground of its own: this lies over whatever is being read, which stays composed.
             .background(MaterialTheme.colorScheme.surface)
+            .stopsHere()
             .nestedScroll(nested),
     ) {
         Handle(
