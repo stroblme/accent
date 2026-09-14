@@ -15,6 +15,9 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 rusqlite = { version = "0.38", features = ["bundled", "functions"] }
+# fzf's matching algorithm, for everything that narrows a list by a typed query: the palette,
+# the Android file switcher and the note completion popup all score through `fuzzy`.
+nucleo-matcher = "0.3"
 ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.6"

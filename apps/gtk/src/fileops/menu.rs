@@ -1,6 +1,7 @@
 //! The file tree's context menu: what it offers over a row, over a folder and over nothing, and
 //! the action group its items resolve through.
 
+use super::clipboard::{self, can_paste};
 use super::{Ops, download, new_file, new_folder, rename, trash, upload};
 use super::{copy_absolute_path, copy_name, copy_relative_path, show_in_files};
 use accent_core::path::parent_dir;
@@ -29,7 +30,7 @@ pub fn context_menu(
     host: &gtk::Widget,
     row: Option<(&str, bool)>,
     anchor: gdk::Rectangle,
-) {
+) -> gtk::PopoverMenu {
     // On the host, not the list: an action resolves up the widget tree from the popover's parent.
     // Re-inserted per menu: the group holds a clone of `ops` and nothing else, and replacing it
     // costs a handful of small objects, which is less than remembering whether it is already there.
@@ -53,6 +54,9 @@ pub fn context_menu(
     // blank space. Splitting is not here at all: it opens a note beside the active tab, which is
     // what the tab's own menu and `win.split-*` are for, not something done to a path.
     let Some((rel, is_dir)) = row else {
+        // Nothing else names a path, but Paste names the folder it puts things in, and here that
+        // is the vault root — the same target New File has just been given.
+        menu.append_section(None, &clip_section(ops, None, dir));
         menu.append_section(None, &listing());
         return popup(host, &menu, anchor, None);
     };
@@ -66,6 +70,9 @@ pub fn context_menu(
     if is_dir {
         menu.append_item(&item(GROUP, "Leave Out of Search", "exclude", rel));
     }
+    // A file manager's own three, in a section of their own between what changes the file and
+    // what reads its name out.
+    menu.append_section(None, &clip_section(ops, Some((rel, is_dir)), dir));
     // Reading the name or the path out and leaving the app are neither edits nor deletions, so
     // they get a section of their own between the two. The name first: it is the shortest of the
     // three answers to "what is this file called", and the one a note's own prose wants.
@@ -86,7 +93,31 @@ pub fn context_menu(
     danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
     menu.append_section(None, &listing());
-    popup(host, &menu, anchor, None);
+    popup(host, &menu, anchor, None)
+}
+
+/// Cut, Copy and Paste. `row` is the file the first two act on, `None` on a menu opened over
+/// nothing; `dir` is where a Paste puts what it holds, which is [`row_dir`]'s answer either way,
+/// so pasting and dropping and New File all agree on where "here" is.
+///
+/// Paste is drawn only where there is something to paste. The clipboard says what it holds
+/// without a read, so the question costs nothing and an item that could do nothing is never on
+/// the menu (DESIGN.md, Principle 1). Cut and Copy need a folder's own action, as Rename does:
+/// where a `(copy)` mark goes depends on whether the name has an extension to keep.
+fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Menu {
+    let section = gio::Menu::new();
+    if let Some((rel, is_dir)) = row {
+        let folder = match is_dir {
+            true => "-folder",
+            false => "",
+        };
+        section.append_item(&item(GROUP, "Cut", &format!("cut{folder}"), rel));
+        section.append_item(&item(GROUP, "Copy", &format!("copy{folder}"), rel));
+    }
+    if can_paste(ops) {
+        section.append_item(&item(GROUP, "Paste", "paste", dir));
+    }
+    section
 }
 
 /// The section every tree menu ends with, blank area included, as GTK's own file chooser has it:
@@ -113,7 +144,15 @@ pub fn row_dir(row: Option<(&str, bool)>) -> &str {
 
 /// Hang the menu off `host` and show it. `class` is a style class for the popover, for a host
 /// that gives it no background of its own.
-pub fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle, class: Option<&str>) {
+///
+/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
+/// long as its menu is up (`tree::Tree::pin`).
+pub fn popup(
+    host: &gtk::Widget,
+    menu: &gio::Menu,
+    anchor: gdk::Rectangle,
+    class: Option<&str>,
+) -> gtk::PopoverMenu {
     let popover = gtk::PopoverMenu::from_model(Some(menu));
     if let Some(class) = class {
         popover.add_css_class(class);
@@ -132,6 +171,7 @@ pub fn popup(host: &gtk::Widget, menu: &gio::Menu, anchor: gdk::Rectangle, class
         glib::idle_add_local_once(move || p.unparent());
     });
     popover.popup();
+    popover
 }
 
 /// One menu item of `group` carrying its target as a `String` rather than in a detailed-action
@@ -167,6 +207,20 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("new-folder", Box::new(new_folder));
     add("rename", Box::new(|ops, rel| rename(ops, rel, false)));
     add("rename-folder", Box::new(|ops, rel| rename(ops, rel, true)));
+    add("cut", Box::new(|ops, rel| clipboard::cut(ops, rel, false)));
+    add(
+        "cut-folder",
+        Box::new(|ops, rel| clipboard::cut(ops, rel, true)),
+    );
+    add(
+        "copy",
+        Box::new(|ops, rel| clipboard::copy(ops, rel, false)),
+    );
+    add(
+        "copy-folder",
+        Box::new(|ops, rel| clipboard::copy(ops, rel, true)),
+    );
+    add("paste", Box::new(clipboard::paste));
     add("copy-name", Box::new(copy_name));
     add("copy-rel", Box::new(copy_relative_path));
     add("copy-abs", Box::new(copy_absolute_path));

@@ -373,6 +373,19 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
                 "bench find_chord_back_on_note {}",
                 app.pane().find.is_open()
             );
+            // What the tab menu offers over each kind of tab open right now: Rename and Move to
+            // Trash are a vault file's alone, so a shell's menu is two sections shorter.
+            for doc in app.docs() {
+                println!(
+                    "bench tab_menu {} items={}",
+                    doc.key(),
+                    bench_tab_menu_items(&app, Some(doc.page()))
+                );
+            }
+            println!(
+                "bench tab_menu_closed items={}",
+                bench_tab_menu_items(&app, None)
+            );
             app.open_path(&pdf);
             // Long enough for the render thread to open the document: an outline read before that
             // says "Opening…" whatever else is wrong.
@@ -388,6 +401,17 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
             });
         });
     });
+}
+
+/// How many items a pane's tab menu holds once it has been told which page is about to show it.
+///
+/// `setup-menu` is emitted by hand: there is no pointer headless, so this runs the handler
+/// `wire_pane` connected without `AdwTabBar`'s own popup around it. `None` is what the bar sends
+/// once the menu has closed again.
+fn bench_tab_menu_items(app: &Rc<App>, page: Option<&adw::TabPage>) -> i32 {
+    let tabs = &app.pane().tabs;
+    tabs.emit_by_name::<()>("setup-menu", &[&page]);
+    tabs.menu_model().map_or(0, |menu| menu.n_items())
 }
 
 /// A tab as its bar draws it: the title, and what the indicator slot holds and says.

@@ -57,6 +57,42 @@ pub(super) fn child_path(dir: &str, name: &str) -> String {
     }
 }
 
+/// Where a paste of `name` lands in `dir`, given what is already there.
+///
+/// The name itself while nothing holds it, and otherwise GNOME's own mark, carried by the stem so
+/// the extension still says what the file is: `notes.md`, `notes (copy).md`, `notes (copy 2).md`.
+/// A folder takes it at the end — the dot in `Archive.2024` starts no extension, which is the rule
+/// Rename's selection already follows.
+///
+/// Takes the lookup rather than the vault, so the arithmetic is testable and so the caller can
+/// keep every `stat` it costs on the worker thread: each one is a round trip on a remote vault.
+pub(super) fn free_path(
+    dir: &str,
+    name: &str,
+    is_dir: bool,
+    taken: impl Fn(&str) -> bool,
+) -> String {
+    let first = child_path(dir, name);
+    if !taken(&first) {
+        return first;
+    }
+    let (stem, ext) = match is_dir {
+        true => (name, ""),
+        false => split_ext(name),
+    };
+    // Counts up until a name is free, which it must be: the folder holds finitely many.
+    for n in 1.. {
+        let candidate = match n {
+            1 => child_path(dir, &format!("{stem} (copy){ext}")),
+            n => child_path(dir, &format!("{stem} (copy {n}){ext}")),
+        };
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("a folder cannot hold every name")
+}
+
 /// `rel` moved into `dest_dir`, keeping its name.
 pub(super) fn moved_path(rel: &str, dest_dir: &str) -> String {
     child_path(dest_dir, basename(rel))
@@ -179,6 +215,34 @@ mod tests {
         assert_eq!(split_ext("archive.tar.gz"), ("archive.tar", ".gz"));
         assert_eq!(split_ext("README"), ("README", ""));
         assert_eq!(split_ext(".gitignore"), (".gitignore", ""));
+    }
+
+    #[test]
+    fn free_path_marks_a_copy_and_keeps_the_extension() {
+        let free = |_: &str| false;
+        assert_eq!(free_path("Notes", "a.md", false, free), "Notes/a.md");
+        // "" is the vault root, and must not become a leading slash.
+        assert_eq!(free_path("", "a.md", false, free), "a.md");
+
+        // A paste beside its source always collides with it, which is what makes it a "(copy)".
+        let held = |rel: &str| rel == "Notes/a.md";
+        assert_eq!(free_path("Notes", "a.md", false, held), "Notes/a (copy).md");
+        let two = |rel: &str| matches!(rel, "Notes/a.md" | "Notes/a (copy).md");
+        assert_eq!(
+            free_path("Notes", "a.md", false, two),
+            "Notes/a (copy 2).md"
+        );
+
+        // A folder has no extension to keep, however many dots are in its name.
+        let dotted = |rel: &str| rel == "Archive.2024";
+        assert_eq!(
+            free_path("", "Archive.2024", true, dotted),
+            "Archive.2024 (copy)"
+        );
+        assert_eq!(
+            free_path("", "Archive.2024", false, dotted),
+            "Archive (copy).2024"
+        );
     }
 
     #[test]

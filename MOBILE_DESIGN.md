@@ -29,12 +29,11 @@ build with. This says what to build.
 | Surface | What it is |
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
-| Browse | A panel over what is being read. The tree, or the results when there is a query, with the search field at the *foot* of the screen. The desktop's eight sidebar panes collapse into this one |
+| Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their chip is tapped. The desktop's eight sidebar panes and its palette collapse into this one |
 | Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
-| Launch | The switcher, the same shape: rows from the bottom up so the best match is nearest the thumb, then the Notes / Commands chips, then the query field at the foot. The keyboard is up when it opens |
-| Both panels | A handle at the top, and a pull down anywhere in them closes them. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
+| The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
 ## Spacing and type
@@ -57,7 +56,7 @@ of them must also exist as a visible control.
 
 | Gesture | What it does | Its visible twin |
 |---|---|---|
-| Pull a panel down | Closes Browse or Launch | The handle at its top |
+| Pull the panel down | Closes Browse | The handle at its top |
 | Tap the content | Puts the chrome up or takes it down | — |
 | Scroll on | Takes the chrome down; scrolling back brings it up | — |
 | Pinch on a page | Zooms a PDF, 1× to 6×, around the point between the fingers | — |
@@ -75,10 +74,12 @@ something a reader does on the way to the first of them, and it must not also be
 takes the files away — so closing is a second pull, from a standstill. The rule is the one every
 sheet on the platform follows, and the reason it is felt rather than noticed.
 
-Browse and Launch are buttons, not gestures. They were an edge swipe and a pull from the top, and
-neither had the visible twin this table asks for — a gesture nothing announces is a gesture nobody
-finds. They float at the foot of whatever is being read, go with the rest of the chrome, and go
-outright while the keyboard is up.
+Browse is a button, not a gesture. The files were an edge swipe and the switcher a pull from the
+top, and neither had the visible twin this table asks for — a gesture nothing announces is a
+gesture nobody finds. One button now, because two pills at the foot of the screen are a choice
+made before the reader knows which one they want; the chips ask the same question inside, where
+the answer is already on the screen. It floats at the foot of whatever is being read, goes with
+the rest of the chrome, and goes outright while the keyboard is up.
 
 A document is one surface, not a vertical scroller with a horizontal one wrapped around it. Two
 scroll containers each own an axis and each claims a drag the moment it looks like theirs, which
@@ -136,9 +137,9 @@ the one accent and it is used for exactly what the desktop uses it for — links
 selected tool, an ink stroke's default. Everything else is `surface`, `onSurface` and
 `onSurfaceVariant`. The app ships one colour of its own, the launcher icon's background.
 
-The Browse and Launch buttons are the exception: `inverseSurface`, so they are dark on a light
-theme and light on a dark one. They are the one thing on the screen that is not the document, and
-a pale pill on a pale page is a pill nobody sees. Contrast rather than colour, so the accent still
+The Browse button is the exception: `inverseSurface`, so it is dark on a light theme and light on
+a dark one. It is the one thing on the screen that is not the document, and a pale pill on a pale
+page is a pill nobody sees. Contrast rather than colour, so the accent still
 means only one thing.
 
 A PDF is recoloured in a dark theme the way the desktop does it: the document's paper lands on the

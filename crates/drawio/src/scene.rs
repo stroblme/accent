@@ -244,6 +244,10 @@ const BASE_SPACING_BOTTOM: f64 = 1.0;
 /// every vertex 12 and every edge 11, so this is for a style that skips it (a leading `;`).
 const DEFAULT_FONTSIZE: f64 = 11.0;
 
+/// `mxConstants.DEFAULT_FONTFAMILY`, likewise for a style that skips the stylesheet, which gives
+/// every cell Helvetica. Pango reads the comma as CSS does: Arial first, Helvetica after it.
+const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
+
 struct Builder<'a> {
     page: &'a Page,
     /// The page has `math="1"`: `\(…\)` in labels is a formula.
@@ -681,7 +685,10 @@ impl<'a> Builder<'a> {
             rotation,
             font: Font {
                 size: style.num("fontSize", DEFAULT_FONTSIZE),
-                family: style.get("fontFamily").unwrap_or("Helvetica").to_string(),
+                family: style
+                    .get("fontFamily")
+                    .unwrap_or(DEFAULT_FONTFAMILY)
+                    .to_string(),
                 color: style.color("fontColor").unwrap_or(Color::BLACK),
                 bold: bits & 1 != 0,
                 italic: bits & 2 != 0,
@@ -886,14 +893,26 @@ mod tests {
     }
 
     #[test]
-    fn a_label_whose_style_has_no_font_size_takes_draw_ios_default() {
-        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
-        let p = page(vec![Cell::new_vertex("a", "1", r, ";", "A")]);
-        let size = scene(&p).prims.iter().find_map(|prim| match prim {
-            Prim::Text { font, .. } => Some(font.size),
-            _ => None,
-        });
-        assert_eq!(size, Some(11.0));
+    fn a_label_whose_style_skips_the_stylesheet_takes_draw_ios_own_defaults() {
+        let font = |style: &str| {
+            let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+            let p = page(vec![Cell::new_vertex("a", "1", r, style, "A")]);
+            scene(&p)
+                .prims
+                .iter()
+                .find_map(|prim| match prim {
+                    Prim::Text { font, .. } => Some(font.clone()),
+                    _ => None,
+                })
+                .expect("a label")
+        };
+        let bare = font(";");
+        assert_eq!(
+            (bare.size, bare.family.as_str()),
+            (DEFAULT_FONTSIZE, DEFAULT_FONTFAMILY)
+        );
+        let sheet = font("rounded=1;");
+        assert_eq!((sheet.size, sheet.family.as_str()), (12.0, "Helvetica"));
     }
 
     #[test]

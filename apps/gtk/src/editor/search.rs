@@ -42,6 +42,29 @@ pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     tag.set_background_rgba(Some(&colour));
 }
 
+/// Paint `tag` in the scheme's own `search-match` colour at full weight, for the reveal a jump
+/// leaves behind: being sent somewhere and finding a match there are the same thing to a reader,
+/// so they are the same colour. Derived rather than named, so it follows a theme switch.
+pub(super) fn matched(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
+    if let Some(colour) = search_match_colour(buffer) {
+        tag.set_background_rgba(Some(&colour));
+    }
+}
+
+/// Where in `text` the first `#name` is written, as the byte range including the marker, or
+/// `None` for a tag the note does not carry. The note is parsed rather than searched, so a `#tag`
+/// inside a code span or a URL is not one, and a tag listed in the frontmatter is.
+///
+/// Matched exactly, because that is how the index groups the names the Tags pane lists: a note
+/// writing both `#Rust` and `#rust` offers the pane two rows, and each opens onto its own.
+fn tag_range(text: &str, name: &str) -> Option<Range<usize>> {
+    let found = markdown::analyze(text)
+        .tags
+        .into_iter()
+        .find(|t| t.name == name)?;
+    Some(found.range)
+}
+
 impl Tab {
     // The widgets live in `find.rs`, one bar per window. What stays here is what belongs to one
     // buffer: its `SearchContext`, and the caret and scroll moves that follow a match.
@@ -288,12 +311,13 @@ impl Tab {
         }
     }
 
-    /// Jump to a character range and mark it the way the find bar marks a match it found: the
-    /// range itself is selected, and the text inside it becomes this tab's search query with the
-    /// highlight on, so every other occurrence in the note is marked too.
+    /// Jump to a character range, select it and reveal it: what a search result and a tag row
+    /// open a note onto.
     ///
-    /// Nothing here expires. The marks are the find bar's own and go the way they always do — a
-    /// new query replaces them, an edit moves them, closing the bar clears them.
+    /// The reveal is what the reader is shown, not the find bar. Handing the bar the matched text
+    /// as its query used to be how this was marked, and it marked too much for too long: every
+    /// other occurrence in the note lit up as well, and none of it went away until the bar was
+    /// opened and closed again.
     pub fn goto_range(&self, chars: Range<usize>) {
         let last = self.buffer.char_count();
         let start = self
@@ -307,8 +331,66 @@ impl Tab {
             return;
         }
         self.buffer.select_range(&start, &end);
-        self.set_query(&self.buffer.text(&start, &end, false));
-        self.set_highlight(true);
+        // After the caret and the selection have moved: both are mark moves, and a mark move is
+        // one of the interactions that takes the reveal back down again.
+        self.reveal_range(&start, &end);
+    }
+
+    /// Put the caret on the first place the note writes `#name` and reveal it: what a row under a
+    /// tag in the Tags pane opens onto, the way a search result opens onto its match. A note that
+    /// no longer carries the tag leaves the caret where it was.
+    pub fn goto_tag(&self, name: &str) {
+        let text = self.text();
+        let found = tag_range(&text, name).and_then(|at| crate::references::char_range(&text, at));
+        if let Some(chars) = found {
+            self.goto_range(chars);
+        }
+    }
+
+    /// Mark where a jump landed, until the document is touched.
+    ///
+    /// The tag joins the table after the muted occurrence tag and before the find bar's search
+    /// context, so the three coexist by priority rather than by luck: a revealed match is never
+    /// dimmed by the hint that may cover the same word, and where a find-bar match covers it the
+    /// bar's tag wins — which paints the same `search-match` colour, so an overlap reads the same
+    /// either way. Only the reveal expires; the other two are as long-lived as what they answer.
+    pub fn reveal_range(&self, start: &gtk::TextIter, end: &gtk::TextIter) {
+        self.clear_reveal();
+        if start.offset() == end.offset() {
+            return;
+        }
+        self.buffer.apply_tag(&self.reveal_tag, start, end);
+        self.revealed.set(true);
+    }
+
+    /// Reveal the whole of a 1-based line: what Go to Line lands on, where the place asked for is
+    /// the line rather than anything on it. An empty line has no text to paint and shows nothing.
+    pub fn reveal_line(&self, line: i32) {
+        let end = line_end(&self.buffer, line - 1);
+        let mut start = end;
+        start.set_line_offset(0);
+        self.reveal_range(&start, &end);
+    }
+
+    /// Take the reveal down, which the first keystroke, click or caret move in the document does.
+    ///
+    /// No timer and no fade: the highlight answers "where was I sent?", and the reader is the one
+    /// who knows when that has been answered. A timer either goes while they are still looking or
+    /// outstays the question.
+    pub fn clear_reveal(&self) {
+        if !self.revealed.replace(false) {
+            return;
+        }
+        self.buffer.remove_tag(
+            &self.reveal_tag,
+            &self.buffer.start_iter(),
+            &self.buffer.end_iter(),
+        );
+    }
+
+    /// Whether the reveal is up, and the tag it paints with. Only `ACCENT_BENCH_REVEAL` reads it.
+    pub fn reveal_highlight(&self) -> (bool, gtk::TextTag) {
+        (self.revealed.get(), self.reveal_tag.clone())
     }
 
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
@@ -325,5 +407,26 @@ impl Tab {
         let mut iter = end;
         iter.set_line_offset((column - 1).clamp(0, end.line_offset()));
         iter
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tag_range;
+
+    #[test]
+    fn a_tag_is_found_where_the_note_writes_it() {
+        let text = "---\ntags: [draft]\n---\n\nSee #rust and `#rust` and #rust again.\n";
+        let at = tag_range(text, "rust").expect("the note writes the tag");
+        assert_eq!(
+            &text[at.clone()],
+            "#rust",
+            "the marker is part of the range"
+        );
+        assert_eq!(at.start, text.find("#rust").unwrap(), "the first one");
+        // The frontmatter is where a tag listed there is, so that is where the jump lands.
+        let front = tag_range(text, "draft").expect("the frontmatter lists it");
+        assert!(front.start < text.find("See").unwrap());
+        assert_eq!(tag_range(text, "python"), None);
     }
 }

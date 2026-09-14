@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 /// Biggest non-markdown file whose text goes into the index.
 ///
@@ -70,17 +70,66 @@ CREATE VIRTUAL TABLE notes_fts USING fts5(
     body, title, content='notes', content_rowid='file_id',
     tokenize="unicode61 remove_diacritics 2", prefix='1 2 3'
 );
+
+-- The other half of that query. A term index answers "starts with", and no number of prefixes
+-- makes it answer "contains": `oggle split` is not a term `notes_fts` holds, so the ranked path
+-- found nothing where `toggle split` found the note. The trigram tokenizer indexes every
+-- three-character window instead, which is what turns `LIKE '%…%'` into an index lookup rather
+-- than a pass over every stored body (`Index::infix`).
+--
+-- `detail='none', columnsize=0` is what makes it affordable, and it costs nothing that is read:
+-- FTS5 verifies a `LIKE` against the content row itself, so the token positions and per-column
+-- sizes a phrase query would need are dead weight — and the snippet is cut in Rust here anyway,
+-- as it is for `notes_fts`. Three candidates, sized on the testvault this comment already
+-- measures, now 41 684 entries and 21 360 bodies over 110 MB of text (2026-09-13):
+--
+--     trigram, detail='none'                   +17.4 MiB   what shipped
+--     trigram, detail='full'                  +214.8 MiB   positions nobody reads
+--     reversed-token column, prefix='1 2 3'    +75.4 MiB   suffixes only
+--
+-- The reversed column was the entry's other candidate and the measurement is what dropped it: at
+-- four times the size it buys suffix matching alone — `oggle` would find `toggle`, `ggle` would
+-- find nothing — so the cheaper index is also the more general one.
+--
+-- What the vault pays for it, before against after over four interleaved runs on a warm page
+-- cache; the ranked path is what the sidebar takes on every keystroke, and it had to stay put:
+--
+--     index file                                  241.0 → 258.5 MiB
+--     first index, whole vault                     13.6 → 31.3 s
+--     reconcile with nothing changed                172 → 187 ms
+--     ranked query, 1 / 2 / 5 characters        38/30/32 → 38/30/34 ms
+--     ranked query, two words                        62 → 61 ms
+--     mid-word query, 20 hits                         — → 65 ms
+--     mid-word query, a needle in 331 bodies          — → 142 ms
+--     a query nothing holds at all                    0 → 2 ms
+--
+-- The 18 s is the whole of the price and it is CPU, not IO: 110 MB of body tokenized a second
+-- time, three characters at a step. It is not the transaction size (500 files a batch measures
+-- the same as 250) and not the page cache (64 MiB of it measures the same as the 2 MiB default),
+-- so there is no knob left to turn — only the vault the walk decides to read. Growth is bounded
+-- by the text and not by the vocabulary, which is why the index grows 7% where a term index of
+-- the same bodies grows 30%.
+CREATE VIRTUAL TABLE notes_tri USING fts5(
+    body, title, content='notes', content_rowid='file_id',
+    tokenize='trigram', detail='none', columnsize=0
+);
 CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
     INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
+    INSERT INTO notes_tri(rowid, body, title) VALUES (new.file_id, new.body, new.title);
 END;
 CREATE TRIGGER notes_ad AFTER DELETE ON notes BEGIN
     INSERT INTO notes_fts(notes_fts, rowid, body, title)
+    VALUES ('delete', old.file_id, old.body, old.title);
+    INSERT INTO notes_tri(notes_tri, rowid, body, title)
     VALUES ('delete', old.file_id, old.body, old.title);
 END;
 CREATE TRIGGER notes_au AFTER UPDATE ON notes BEGIN
     INSERT INTO notes_fts(notes_fts, rowid, body, title)
     VALUES ('delete', old.file_id, old.body, old.title);
+    INSERT INTO notes_tri(notes_tri, rowid, body, title)
+    VALUES ('delete', old.file_id, old.body, old.title);
     INSERT INTO notes_fts(rowid, body, title) VALUES (new.file_id, new.body, new.title);
+    INSERT INTO notes_tri(rowid, body, title) VALUES (new.file_id, new.body, new.title);
 END;
 
 CREATE INDEX idx_links_key      ON links(key);
@@ -102,6 +151,7 @@ DROP TRIGGER IF EXISTS notes_ai;
 DROP TRIGGER IF EXISTS notes_ad;
 DROP TRIGGER IF EXISTS notes_au;
 DROP TABLE IF EXISTS notes_fts;
+DROP TABLE IF EXISTS notes_tri;
 DROP TABLE IF EXISTS notes;
 DROP TABLE IF EXISTS headings;
 DROP TABLE IF EXISTS tags;

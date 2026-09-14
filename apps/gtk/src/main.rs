@@ -1059,6 +1059,18 @@ impl App {
             .map(|d| d.key())
     }
 
+    /// The vault file the tab context menu is over, where there is one for Rename and Move to
+    /// Trash to act on.
+    ///
+    /// `None` when no tab menu is up — which is what leaves those two on the tree's selection
+    /// where they came from a chord or the palette — and for the tabs neither can reach: a shell
+    /// and a comparison are no file at all, and a loose one is outside the vault they act in.
+    fn menu_file(&self) -> Option<String> {
+        let page = self.menu_page.borrow().clone()?;
+        let doc = self.doc_for_page(&page)?;
+        (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())
+    }
+
     /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
     fn reveal_in_sidebar(&self) {
         let Some(rel) = self.menu_rel() else { return };

@@ -44,7 +44,7 @@ pub(crate) use lines::{
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{font_css, install_font, next_view_name, set_margins};
-use search::mute;
+use search::{matched, mute};
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -279,6 +279,11 @@ pub struct Tab {
     occurrence_tag: gtk::TextTag,
     /// What that tag is showing, so a caret move that changes nothing re-tags nothing.
     occurrence_query: RefCell<Option<String>>,
+    /// Where the jump that opened this note landed, in the scheme's own match colour. See
+    /// [`Tab::reveal_range`].
+    reveal_tag: gtk::TextTag,
+    /// Whether that tag is painting anything, so an ordinary keystroke costs no tag walk.
+    revealed: Cell<bool>,
     spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     /// The note's links, each with the character range it covers. Characters and not the bytes
     /// the parse reports them in: the pointer asks which link it is over on every motion event
@@ -304,9 +309,10 @@ pub struct Tab {
     monitor: RefCell<Option<gio::FileMonitor>>,
     /// Set while we replace the buffer text ourselves, so `changed` does not mark it dirty.
     loading: Cell<bool>,
-    /// Whether the completion popup is up. Read by every step of [`keys`]'s chain: while the
-    /// popup is showing it owns the keyboard, and nothing else in the view may answer a key.
-    pub(crate) popup_shown: Cell<bool>,
+    /// Whether the completion popup is up, as its `show` and `hide` said last. Read through
+    /// [`Tab::popup_shown`], never straight: while the popup is showing it owns the keyboard and
+    /// nothing else in the view may answer a key, so a stale `true` would silence the lot.
+    popup: Cell<bool>,
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
@@ -526,6 +532,11 @@ pub fn open(
     let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
     buffer.tag_table().add(&occurrence_tag);
     mute(&buffer, &occurrence_tag);
+    // After the muted hint and before the search context, which is the order the three paint in:
+    // see [`Tab::reveal_range`].
+    let reveal_tag = gtk::TextTag::new(Some("reveal"));
+    buffer.tag_table().add(&reveal_tag);
+    matched(&buffer, &reveal_tag);
     // No colour of its own: the word keeps whatever the style scheme paints it, and gains the
     // underline that says a Ctrl+click would land somewhere.
     let follow_tag = gtk::TextTag::new(Some("follow"));
@@ -575,6 +586,8 @@ pub fn open(
         context,
         occurrence_tag,
         occurrence_query: RefCell::new(None),
+        reveal_tag,
+        revealed: Cell::new(false),
         spell: RefCell::new(None),
         links: RefCell::new(Vec::new()),
         follow_tag,
@@ -586,7 +599,7 @@ pub fn open(
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
-        popup_shown: Cell::new(false),
+        popup: Cell::new(false),
         snippet: RefCell::new(None),
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
@@ -690,6 +703,9 @@ pub fn open(
         move |_, _, mark| {
             let moved = mark.name();
             if matches!(moved.as_deref(), Some("insert" | "selection_bound")) {
+                // A caret move is the reader answering the jump that put the reveal up — by a
+                // click, an arrow key or a keystroke — so it is what takes the reveal back down.
+                tab.clear_reveal();
                 tab.highlight_occurrences();
             }
         }
@@ -1006,8 +1022,9 @@ impl Tab {
     pub fn restyle(&self) {
         // The scheme is what recolours code, and it is also what a note's own tags sit on.
         sync_scheme(&self.buffer);
-        // Derived from the scheme that just changed, so it has to be derived again.
+        // Derived from the scheme that just changed, so both have to be derived again.
         mute(&self.buffer, &self.occurrence_tag);
+        matched(&self.buffer, &self.reveal_tag);
         match self.flavour {
             Flavour::Note => {
                 highlight::restyle(&self.buffer, &self.view);
@@ -1206,6 +1223,16 @@ impl Tab {
         *self.snippet.borrow_mut() = Some(snippet.clone());
     }
 
+    /// Whether the completion popup is on screen. The cell it is remembered in mirrors two
+    /// signals, and a `hide` that never arrives would leave every key to the view for the rest of
+    /// this tab's life — so a `true` is checked against the widgets before it is believed, and a
+    /// stale one is dropped here. The check only runs while the cell says a popup is up.
+    pub(crate) fn popup_shown(&self) -> bool {
+        let up = self.popup.get() && keys::popup_visible(&self.view);
+        self.popup.set(up);
+        up
+    }
+
     /// Whether a template's stops are still being walked. A snippet lets its buffer go when it
     /// finishes, which is the only thing GtkSourceView 5.20 says about it from the outside.
     pub(crate) fn snippet_active(&self) -> bool {
@@ -1302,6 +1329,9 @@ impl Tab {
         if self.loading.get() {
             return;
         }
+        // The other half of the rule above: an edit that leaves the caret where it was — Delete,
+        // or a replacement over a selection — still answers the jump.
+        self.clear_reveal();
         self.save.edits.set(self.save.edits.get() + 1);
         if !self.save.modified.replace(true) {
             self.page.set_title(&self.tab_title());

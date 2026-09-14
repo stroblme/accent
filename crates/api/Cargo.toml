@@ -11,7 +11,7 @@ default = []
 pdf = ["accent-core/pdf"]
 # The uniffi bindings Android calls this crate through. Off for every desktop build, so
 # `cargo build` never compiles uniffi and the façade stays what it was.
-android = ["pdf", "dep:uniffi", "dep:nucleo-matcher", "dep:thiserror"]
+android = ["pdf", "dep:uniffi", "dep:thiserror"]
 
 [dependencies]
 accent-core.workspace = true
@@ -32,8 +32,6 @@ blake3 = "1"
 # the cdylib that carries them is `android/ffi`, which a desktop build never touches.
 uniffi = { version = "0.32", optional = true }
 thiserror = { workspace = true, optional = true }
-# The file switcher's ranking, the same matcher the desktop palette uses.
-nucleo-matcher = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

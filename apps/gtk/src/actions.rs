@@ -208,6 +208,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.fold-all", "Fold All", &[]),
     ("win.unfold-all", "Unfold All", &[]),
     ("win.rename", "Rename", &["F2"]),
+    // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
+    // a chord that reaches a focused editor is the last thing a delete should have.
+    ("win.trash", "Move to Trash", &[]),
     (
         "win.new-from-template",
         "New from Template…",
@@ -475,13 +478,28 @@ impl App {
             "unfold" => self.with_active(Tab::unfold_at_caret),
             "fold-all" => self.with_active(Tab::fold_all),
             "unfold-all" => self.with_active(Tab::unfold_all),
+            // The tab menu names its own page; F2 and the palette mean the tree's selection, and
+            // the tab in front where the tree has none.
             "rename" => {
                 let target = self
-                    .selected_row()
-                    .map(|row| (row.is_dir(), row.rel))
+                    .menu_file()
+                    .map(|rel| (false, rel))
+                    .or_else(|| self.selected_row().map(|row| (row.is_dir(), row.rel)))
                     .or_else(|| self.active().map(|tab| (false, tab.rel())));
                 if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
                     fileops::rename(ops, &rel, is_dir);
+                }
+            }
+            // The same three targets, in the same order. A trash goes to the system's, so it is
+            // the one delete that can be taken back and needs no question of its own.
+            "trash" => {
+                let target = self
+                    .menu_file()
+                    .or_else(|| self.selected_row().map(|row| row.rel))
+                    .or_else(|| self.active().map(|tab| tab.rel()));
+                if let (Some(rel), Some(ops)) = (target, self.need_ops("move a file to the trash"))
+                {
+                    fileops::trash(ops, &rel);
                 }
             }
             "new-from-template" => {
@@ -803,11 +821,28 @@ pub fn menu_button() -> gtk::MenuButton {
         .build()
 }
 
+/// The tab's own context menu, as a pane is built with it: nothing yet known about which page
+/// will show it, so without the two items that name a file.
+pub fn tab_menu() -> gio::Menu {
+    let menu = gio::Menu::new();
+    fill_tab_menu(&menu, false);
+    menu
+}
+
 /// The tab's own context menu: what can be done with the file behind a tab without touching it.
 /// Splitting leads, because it opens rather than copies; Reveal sits in a section of its own
 /// because it moves the sidebar rather than the clipboard.
-pub fn tab_menu() -> gio::Menu {
-    let menu = gio::Menu::new();
+///
+/// `file` says whether the tab about to show this holds a file of this vault, which is what
+/// Rename and Move to Trash need and nothing else here does: a shell and a comparison are no
+/// file, and a loose one is outside the vault those two act in. On such a tab the two are not on
+/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1).
+///
+/// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
+/// `GtkPopoverMenu` follows the model it was made from: the page about to show the menu is what
+/// decides what it says (`wire::wire_pane`, `setup-menu`).
+pub fn fill_tab_menu(menu: &gio::Menu, file: bool) {
+    menu.remove_all();
     let split = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
         let action = format!("win.split-{}", side.action());
@@ -834,7 +869,16 @@ pub fn tab_menu() -> gio::Menu {
         Some("win.reveal-in-sidebar"),
     );
     menu.append_section(None, &reveal);
-    menu
+    if file {
+        // The tree's own arrangement, which is what "tree rows and tabs share the shape" means:
+        // the name first, and the one destructive item alone at the end so it is never next to
+        // Rename by accident (DESIGN.md, Context menus).
+        for action in ["win.rename", "win.trash"] {
+            let section = gio::Menu::new();
+            section.append(Some(label_of(action)), Some(action));
+            menu.append_section(None, &section);
+        }
+    }
 }
 
 /// Where `pane` sits in the window, for [`panes::neighbour`]. A pane that has not been allocated
@@ -938,6 +982,25 @@ mod tests {
                 );
             }
         }
+        for action in ["win.rename", "win.trash"] {
+            assert!(
+                ACTIONS.iter().any(|(name, _, _)| *name == action),
+                "{action} is on the tab menu but not in ACTIONS"
+            );
+        }
+    }
+
+    /// The two items a shell or a comparison must not be offered, and that a pane built before
+    /// any page exists does not carry either.
+    #[test]
+    fn the_tab_menu_names_a_file_only_where_there_is_one() {
+        let sections = |file| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(&menu, file);
+            menu.n_items()
+        };
+        assert_eq!(sections(true), sections(false) + 2);
+        assert_eq!(tab_menu().n_items(), sections(false));
     }
 
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one

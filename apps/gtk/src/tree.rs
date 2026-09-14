@@ -230,10 +230,15 @@ pub struct Tree {
     /// What git ignores, shared with the row factory so binding a row is still two setters and a
     /// set lookup rather than a question for the index.
     ignored: Rc<RefCell<Ignored>>,
+    /// The rows a Cut is waiting to move, shared with the factory the same way.
+    cut: Rc<RefCell<HashSet<String>>>,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
     active: Rc<RefCell<Option<String>>>,
+    /// The row a context menu is open over, which outranks [`active`](Self::active) for as long
+    /// as it is. See [`pin`](Self::pin).
+    pinned: Rc<RefCell<Option<String>>>,
 }
 
 impl Tree {
@@ -248,6 +253,22 @@ impl Tree {
             return;
         }
         *self.ignored.borrow_mut() = ignored;
+        let factory = self.view.factory();
+        self.view.set_factory(None::<&gtk::ListItemFactory>);
+        self.view.set_factory(factory.as_ref());
+    }
+
+    /// Dim the rows a Cut is waiting on, and undim the rest. The same `dim-label` an ignored row
+    /// takes: "this is on its way somewhere" and "search does not reach this" look alike, and one
+    /// signal per row is enough to read (`connect_bind`).
+    ///
+    /// Reset the same way [`set_ignored`](Self::set_ignored) is, and for the same reason: a splice
+    /// would collapse every folder the reader had opened.
+    pub fn set_cut(&self, cut: HashSet<String>) {
+        if *self.cut.borrow() == cut {
+            return;
+        }
+        *self.cut.borrow_mut() = cut;
         let factory = self.view.factory();
         self.view.set_factory(None::<&gtk::ListItemFactory>);
         self.view.set_factory(factory.as_ref());
@@ -370,7 +391,26 @@ impl Tree {
     /// under the reader — Reveal in Sidebar is the gesture that does.
     pub fn set_active(&self, rel: Option<&str>) {
         *self.active.borrow_mut() = rel.map(str::to_string);
-        select(&self.view, rel);
+        // Remembered but not applied while a menu holds the highlight: a note opening behind the
+        // popover must not take the lit row out from under it either.
+        if self.pinned.borrow().is_none() {
+            select(&self.view, rel);
+        }
+    }
+
+    /// Hold the highlight on `rel`, the row a context menu has just been opened over, or let it
+    /// go again with `None`, which puts it back on the open file.
+    ///
+    /// The list selects rows on hover (`single-click-activate`, see [`build`]), and the popover
+    /// taking the pointer is a *leave* as far as the list is concerned — so without this the
+    /// highlight slid back onto whatever file was open the moment the menu appeared, leaving the
+    /// menu pointing at one row while another was lit.
+    pub fn pin(&self, rel: Option<&str>) {
+        *self.pinned.borrow_mut() = rel.map(str::to_string);
+        let row = rel
+            .map(str::to_string)
+            .or_else(|| self.active.borrow().clone());
+        select(&self.view, row.as_deref());
     }
 
     /// Expand everything above `rel`, then select it and scroll it into view. False when the path
@@ -641,6 +681,7 @@ pub fn build(
     let asked = Asked::default();
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
+    let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden) = (
             vault.clone(),
@@ -666,6 +707,7 @@ pub fn build(
     vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
     let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
+    let bind_cut = cut.clone();
     let row_moves = moves.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
@@ -773,8 +815,12 @@ pub fn build(
         // Both branches, always: row widgets are recycled, so a row that stops being ignored has
         // to have the class taken off it again. A row the index does not hold is dimmed by the
         // same rule and for the same reason the ignored ones are: search does not reach it. A
-        // dot-named row is dimmed so that it still reads as hidden while it is shown.
-        let dim = !item.indexed || dot_named(&item.rel) || bind_ignored.borrow().has(&item.rel);
+        // dot-named row is dimmed so that it still reads as hidden while it is shown, and a cut
+        // one so that it reads as already on its way out.
+        let dim = !item.indexed
+            || dot_named(&item.rel)
+            || bind_ignored.borrow().has(&item.rel)
+            || bind_cut.borrow().contains(&item.rel);
         for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
             set_class(widget, "dim-label", dim);
         }
@@ -810,14 +856,24 @@ pub fn build(
     // the highlight that says which file is open. The two are the same thing, so the open file's
     // row is put back the moment the pointer goes away, instead of a row nobody chose staying lit.
     let active = Rc::new(RefCell::new(None::<String>));
+    let pinned = Rc::new(RefCell::new(None::<String>));
+    // Where the highlight belongs when nothing is pointing at a row: the row a context menu is
+    // open over while there is one, and otherwise the open file.
+    let highlight = {
+        let (active, pinned) = (active.clone(), pinned.clone());
+        move |view: &gtk::ListView| {
+            let row = pinned.borrow().clone().or_else(|| active.borrow().clone());
+            select(view, row.as_deref());
+        }
+    };
     let motion = gtk::EventControllerMotion::new();
     motion.connect_leave({
-        let active = active.clone();
+        let highlight = highlight.clone();
         move |controller| {
             let Some(view) = controller.widget().and_downcast::<gtk::ListView>() else {
                 return;
             };
-            select(&view, active.borrow().as_deref());
+            highlight(&view);
         }
     });
     // The listing lands from a worker thread and expanding a folder inserts rows, so the open
@@ -826,7 +882,7 @@ pub fn build(
     // the hover highlight too, and a reindex must not pull it out from under the row being
     // pointed at.
     model.connect_items_changed({
-        let (active, motion) = (active.clone(), motion.clone());
+        let motion = motion.clone();
         move |_, _, _, _| {
             if motion.contains_pointer() {
                 return;
@@ -834,7 +890,7 @@ pub fn build(
             let Some(view) = motion.widget().and_downcast::<gtk::ListView>() else {
                 return;
             };
-            select(&view, active.borrow().as_deref());
+            highlight(&view);
         }
     });
     view.add_controller(motion);
@@ -927,7 +983,9 @@ pub fn build(
         show_hidden,
         landed,
         ignored,
+        cut,
         active,
+        pinned,
     }
 }
 

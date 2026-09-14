@@ -14,6 +14,11 @@ const CLIP_BEFORE: usize = 40;
 
 const CLIP_AFTER: usize = 200;
 
+/// Shortest mid-word query [`Index::infix`] asks the trigram index for. Below three characters
+/// there is no trigram to look up, and FTS5 answers a `LIKE` by reading every body instead — the
+/// one thing the second index exists to avoid.
+const MIN_INFIX: usize = 3;
+
 /// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
 /// shared by every file the query reaches — and by the three passes the sidebar makes over them —
 /// so without this one file can be the whole answer.
@@ -58,6 +63,9 @@ impl Index {
     /// match positions from the term index, which for a prefix term means merging the doclist of
     /// every term that starts with those letters, per row — 19 ms a row for `t*`. Finding the
     /// same window over the body the index already stores costs a tenth of that.
+    ///
+    /// A query that starts mid-word — `oggle split` — is not a term the index holds, so this
+    /// ranked path comes back empty and [`infix`](Self::infix) answers it instead.
     pub fn search(
         &self,
         query: &str,
@@ -92,24 +100,59 @@ impl Index {
                 include_ignored,
                 FileKind::Markdown.as_i64(),
             ],
-            |r| {
-                let window: String = r.get(2)?;
-                let start: Option<i64> = r.get(3)?;
-                Ok(SearchHit {
-                    rel_path: r.get(0)?,
-                    title: r.get(1)?,
-                    // The window holds the same first occurrence `phrase_start` found — it starts
-                    // [`SNIPPET_LEAD`] characters ahead of it — so the phrase's length is measured
-                    // over those few hundred characters rather than over the note a second time.
-                    // Folding can make it differ from the needle's, which is why it is measured.
-                    at: start.map(|s| {
-                        let s = s as usize;
-                        let len = folded_find(&window, &phrase).map_or(phrase.len(), |(_, n)| n);
-                        s..s + len
-                    }),
-                    snippet: mark_phrase(&window, &phrase),
-                })
-            },
+            |r| hit(r, &phrase),
+        )?;
+        let hits: Vec<SearchHit> = rows.collect::<rusqlite::Result<_>>()?;
+        match hits.is_empty() {
+            true => self.infix(query, limit, include_ignored),
+            false => Ok(hits),
+        }
+    }
+
+    /// The notes a mid-word query finds, which the ranked path cannot: `notes_fts` indexes terms
+    /// and the prefixes of terms, and `oggle split` is neither however finely the prefixes are
+    /// cut. `notes_tri` indexes every three-character window of the same bodies, which is what
+    /// lets a substring be an index lookup rather than a pass over every note.
+    ///
+    /// It runs only where [`search`](Self::search) came back empty, which is what keeps the path
+    /// the sidebar takes on every keystroke exactly as fast as it was: a query that matches a
+    /// word never reaches this at all, and one that matches nothing pays a single index probe.
+    ///
+    /// The match is a literal, case-insensitive substring of the body or the title. Two
+    /// consequences of that, both from FTS5 answering the `LIKE` by verifying it against the
+    /// stored text: diacritics are not folded the way the ranked path folds them, and `%` and `_`
+    /// keep their `LIKE` meaning — escaping them needs an `ESCAPE` clause, which FTS5 does not
+    /// recognise and which would turn the query into a scan of all of the bodies.
+    ///
+    /// With no term statistics to rank by — `detail='none'` keeps none — the order is a title
+    /// that holds the needle first, then the shortest file, which is the length normalisation
+    /// bm25 would have applied.
+    fn infix(&self, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
+        let needle = terms(query).join(" ");
+        if needle.chars().count() < MIN_INFIX {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare_cached(
+            "SELECT f.rel_path, f.title, snippet_window(n.body, ?2), phrase_start(n.body, ?2)
+             FROM notes n JOIN files f ON f.id = n.file_id
+             WHERE n.file_id IN (
+                 SELECT t.rowid FROM notes_tri t JOIN files g ON g.id = t.rowid
+                  WHERE (t.body LIKE ?1 OR t.title LIKE ?1)
+                    AND (?4 OR g.git_ignored = 0 OR g.kind = ?5)
+                  ORDER BY ifnull(g.title, '') LIKE ?1 DESC, g.size
+                  LIMIT ?3)
+             ORDER BY ifnull(f.title, '') LIKE ?1 DESC, f.size",
+        )?;
+        let phrase = fold(&needle);
+        let rows = st.query_map(
+            params![
+                format!("%{needle}%"),
+                &phrase,
+                limit as i64,
+                include_ignored,
+                FileKind::Markdown.as_i64(),
+            ],
+            |r| hit(r, &phrase),
         )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -288,6 +331,28 @@ fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
     // `start` is never past the match, so the shift back onto the clipped text cannot underflow.
     let at = |i: usize| i - start + lead.len();
     (text, at(range.start)..at(range.end))
+}
+
+/// One row of either search: `rel_path, title, snippet_window(body, phrase), phrase_start(body,
+/// phrase)`, turned into the hit the sidebar paints. `phrase` arrives folded, the way both SQL
+/// functions read it.
+fn hit(r: &rusqlite::Row<'_>, phrase: &str) -> rusqlite::Result<SearchHit> {
+    let window: String = r.get(2)?;
+    let start: Option<i64> = r.get(3)?;
+    Ok(SearchHit {
+        rel_path: r.get(0)?,
+        title: r.get(1)?,
+        // The window holds the same first occurrence `phrase_start` found — it starts
+        // [`SNIPPET_LEAD`] characters ahead of it — so the phrase's length is measured over those
+        // few hundred characters rather than over the note a second time. Folding can make it
+        // differ from the needle's, which is why it is measured.
+        at: start.map(|s| {
+            let s = s as usize;
+            let len = folded_find(&window, phrase).map_or(phrase.len(), |(_, n)| n);
+            s..s + len
+        }),
+        snippet: mark_phrase(&window, phrase),
+    })
 }
 
 /// The query's words: the tokens [`fts_query`] runs into one phrase, and — joined by a single
@@ -663,12 +728,14 @@ mod tests {
     }
 
     /// Two notes for the ranking tests: the query is `target.md`'s title, and also a phrase
-    /// `spam.md` repeats. Ranking on the body alone sorts these the wrong way round.
+    /// `spam.md` repeats. Ranking on the body alone sorts these the wrong way round. `target.md`
+    /// also carries the one phrase only the trigram index can find the middle of.
     fn ranking_vault() -> (tempfile::TempDir, tempfile::TempDir) {
         let vault = tempfile::tempdir().unwrap();
         fs::write(
             vault.path().join("target.md"),
-            "# Quantum Coherence Ledger\nA short paragraph on where the numbers come from.\n",
+            "# Quantum Coherence Ledger\nA short paragraph on where the numbers come from.\n\
+             The toggle split view keeps both panes in step.\n",
         )
         .unwrap();
         // A long note that says the words a handful of times, which is what beat the note the
@@ -711,6 +778,34 @@ mod tests {
         assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
     }
 
+    /// The `notes_tri` half of the schema: a term index answers "starts with", so `oggle split`
+    /// found nothing where `toggle split` found the note.
+    #[test]
+    fn a_query_that_starts_mid_word_finds_the_note_a_whole_word_finds() {
+        let (vault, db) = ranking_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let word = ix.search("toggle split", 10, false).unwrap();
+        assert_eq!(word.len(), 1, "{word:?}");
+        let mid = ix.search("oggle split", 10, false).unwrap();
+        assert_eq!(mid.len(), 1, "{mid:?}");
+        assert_eq!(mid[0].rel_path, word[0].rel_path);
+        // Trigrams reach inside a word from either end, which a reversed-token column would not.
+        assert_eq!(ix.search("ggle spl", 10, false).unwrap().len(), 1);
+
+        // The hit is still a hit: the snippet marks what was found and the row opens on it.
+        assert!(mid[0].snippet.contains('\u{ab}'), "{:?}", mid[0].snippet);
+        let body = fs::read_to_string(vault.path().join("target.md")).unwrap();
+        let at = mid[0].at.clone().expect("the body holds it");
+        assert_eq!(&body[at], "oggle split");
+
+        // A vault that does not hold the words is still no result, and nothing shorter than a
+        // trigram is asked of the index at all.
+        assert!(ix.search("zqxjv split", 10, false).unwrap().is_empty());
+        assert!(ix.search("gg", 10, false).unwrap().is_empty());
+    }
+
     /// The delete half of the FTS triggers, which is the half that fails silently: a stale title
     /// row would keep answering searches for a name the note no longer has.
     #[test]
@@ -739,12 +834,21 @@ mod tests {
             ["spam.md"],
             "the old title is still in the index"
         );
-        ix.conn
-            .execute(
-                "INSERT INTO notes_fts(notes_fts) VALUES('integrity-check')",
-                [],
-            )
-            .unwrap();
+        // And no stale trigram either, which is what would answer the old title mid-word.
+        let mid = ix.search("oherence Ledger", 10, false).unwrap();
+        assert_eq!(
+            mid.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            ["spam.md"],
+            "the old title is still in the trigram index"
+        );
+        for t in ["notes_fts", "notes_tri"] {
+            ix.conn
+                .execute(
+                    &format!("INSERT INTO {t}({t}) VALUES('integrity-check')"),
+                    [],
+                )
+                .unwrap();
+        }
     }
 
     #[test]
@@ -775,5 +879,11 @@ mod tests {
         );
         // And a hit the body does not hold names no place to open at, so it opens at the top.
         assert_eq!(hits[0].at, None);
+
+        // The trigram index carries the title column as well, so the same title is reachable
+        // from its middle — the body it would otherwise be found through never spells it.
+        let hits = ix.search("ryptonite Ledg", 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].rel_path, "Kryptonite Ledger.md");
     }
 }

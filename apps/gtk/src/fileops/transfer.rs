@@ -3,7 +3,7 @@
 //! when it is over.
 
 use super::Ops;
-use super::paths::child_path;
+use super::paths::{child_path, free_path};
 use crate::dialogs::{alert, choose};
 use accent_core::path::basename;
 use adw::prelude::*;
@@ -148,7 +148,7 @@ fn replace_body(existing: &[String]) -> String {
 /// Send the chosen files, off the main thread, and report once.
 fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
-    let busy = uploading(&chosen);
+    let busy = busy_line("Uploading", &chosen);
     (ops.transferring)(&busy, true);
     glib::spawn_future_local(async move {
         let done = gio::spawn_blocking(move || {
@@ -175,14 +175,80 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     });
 }
 
-/// What the status bar says while an upload runs: the file by name when there is one, otherwise
-/// how many.
-fn uploading(chosen: &[PathBuf]) -> String {
+/// Carry files from this machine into `dir`, each under a name nothing there holds yet, and take
+/// the originals away where they were cut.
+///
+/// What a paste of files the vault does not hold does, on a local vault as much as on a remote
+/// one: a file outside the vault has to be copied in either way. It never replaces, where Upload
+/// Files… asks about it — an upload has a chooser to ask in and a paste has nowhere to ask, so a
+/// name that is taken gets the same `(copy)` mark an in-vault paste gets.
+pub(super) fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
+    let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
+    let busy = busy_line("Copying", &files);
+    (ops.transferring)(&busy, true);
+    glib::spawn_future_local(async move {
+        let done = gio::spawn_blocking(move || {
+            let (mut copied, mut refused) = (0, Vec::new());
+            for file in &files {
+                let Some(name) = local_name(file) else {
+                    continue;
+                };
+                // A folder from out there would be a walk of this disk and a transfer per file in
+                // it. `Vault::copy` takes one inside the vault; this side takes files, which is
+                // what Upload Files… takes too.
+                if file.is_dir() {
+                    refused.push(name);
+                    continue;
+                }
+                let to = free_path(&dir, &name, false, |rel| vault.exists(rel));
+                match vault.upload(file, &to) {
+                    // Cut means the file leaves where it was, and it is here now. A source that
+                    // will not go is logged rather than toasted: the paste itself did land.
+                    Ok(()) => {
+                        copied += 1;
+                        if cut && let Err(e) = std::fs::remove_file(file) {
+                            tracing::warn!("{} stayed where it was: {e}", file.display());
+                        }
+                    }
+                    Err(_) => refused.push(name),
+                }
+            }
+            (copied, refused)
+        })
+        .await;
+        (ops.transferring)(&busy, false);
+        (ops.toast)(&match done {
+            Ok((copied, refused)) => import_message(copied, &refused),
+            Err(_) => "Cannot paste".to_string(),
+        });
+    });
+}
+
+/// What the toast says after a paste from outside the vault: how many landed, then the ones that
+/// did not, by name — a folder among them being the likeliest reason.
+fn import_message(copied: usize, refused: &[String]) -> String {
+    if refused.is_empty() {
+        return format!("Pasted {}", file_count(copied));
+    }
+    match copied {
+        0 => format!("Cannot paste {}", listed_names(refused)),
+        n => format!(
+            "Pasted {}, but not {}",
+            file_count(n),
+            listed_names(refused)
+        ),
+    }
+}
+
+/// What the status bar says while a transfer runs: the file by name when there is one, otherwise
+/// how many. The verb is the caller's — Upload Files… uploads, and a paste of files from outside
+/// the vault copies them in, which on a local vault never leaves this machine.
+fn busy_line(verb: &str, chosen: &[PathBuf]) -> String {
     let what = match chosen {
         [one] => local_name(one).unwrap_or_else(|| file_count(1)),
         many => file_count(many.len()),
     };
-    format!("Uploading {what}…")
+    format!("{verb} {what}…")
 }
 
 /// What the toast says after an upload: how many landed, then the ones that did not, by name.
@@ -240,13 +306,23 @@ mod tests {
     }
 
     #[test]
-    fn a_running_upload_names_one_file_and_counts_several() {
+    fn a_running_transfer_names_one_file_and_counts_several() {
         assert_eq!(
-            uploading(&[PathBuf::from("/tmp/a.png")]),
+            busy_line("Uploading", &[PathBuf::from("/tmp/a.png")]),
             "Uploading a.png…"
         );
         let two = [PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")];
-        assert_eq!(uploading(&two), "Uploading 2 files…");
+        assert_eq!(busy_line("Copying", &two), "Copying 2 files…");
+    }
+
+    #[test]
+    fn import_message_counts_what_landed_and_names_what_did_not() {
+        assert_eq!(import_message(2, &[]), "Pasted 2 files");
+        assert_eq!(
+            import_message(1, &["Folder".into()]),
+            "Pasted 1 file, but not Folder"
+        );
+        assert_eq!(import_message(0, &["Folder".into()]), "Cannot paste Folder");
     }
 
     #[test]
