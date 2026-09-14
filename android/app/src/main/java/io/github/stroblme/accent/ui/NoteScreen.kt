@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldBuffer
 import androidx.compose.foundation.text.input.OutputTransformation
-import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.*
@@ -35,8 +34,6 @@ import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.Style
 import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import java.io.File
 import java.net.URLDecoder
 
@@ -70,7 +67,7 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
         }
         if (open.changedOnDisk) ChangedBanner(onReload = { model.reload() })
         Box(Modifier.weight(1f).padding(vertical = DocumentGap)) {
-            if (editing) Editor(model, open) else Rendered(model, open, root, chrome)
+            if (editing) Editor(model) else Rendered(model, open, root, chrome)
         }
     }
 }
@@ -125,11 +122,14 @@ private fun ChangedBanner(onReload: () -> Unit) {
 @Composable
 private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome) {
     val colors = MaterialTheme.colorScheme
-    // The whole page, rebuilt only when the note or the palette changes. Everything else that
-    // recomposes this screen — indexing progress, a snackbar, a search — must not reload the
-    // WebView: a reload is a scroll back to the top and a fling cut off mid-throw.
-    val html = remember(open.text, colors) {
-        page(toHtml(open.text), colors.onSurface, colors.surface, colors.primary)
+    // Rendered from the same buffer the editor writes into rather than from what the vault last
+    // read, so Done shows what was typed instead of what was saved a second ago. The whole page is
+    // rebuilt only when the text or the palette changes; everything else that recomposes this
+    // screen — indexing progress, a snackbar, a search — must not reload the WebView, because a
+    // reload is a scroll back to the top and a fling cut off mid-throw.
+    val text = model.buffer.text
+    val html = remember(text, colors) {
+        page(toHtml(text.toString()), colors.onSurface, colors.surface, colors.primary)
     }
     // The view, and the page it has finished loading. Both are held here rather than read from
     // inside the client, which is built once and would keep whichever note was open then.
@@ -331,44 +331,24 @@ private fun Color.css(): String = String.format("#%06X", 0xFFFFFF and toArgb())
  *
  * The markup stays visible and is dimmed rather than hidden — Apostrophe's rule, and the
  * desktop's — because a phone keyboard has no way to put back a character it cannot see.
- * Saving is on a pause in the typing, the same second the desktop waits.
+ *
+ * The text is the model's ([VaultModel.buffer]) and so is the writing of it: what is typed here
+ * is what the rendered view draws and what autosave writes out, and nothing about either is keyed
+ * on which note this is. The editor is the field and its styling, and nothing else.
  */
 @Composable
-private fun Editor(model: VaultModel, open: Open) {
-    val field = rememberTextFieldState(open.text)
+private fun Editor(model: VaultModel) {
     val colors = MaterialTheme.colorScheme
     val styling = remember(colors) { Styling(colors.onSurface, colors.primary, colors.onSurfaceVariant) }
 
-    // A pause in the typing, not a queue of them: `collectLatest` drops the wait the moment the
-    // next keystroke lands. What the text is compared against is read now rather than captured
-    // when the effect started, so typing a word and taking it back again still saves.
-    LaunchedEffect(open.rel) {
-        snapshotFlow { field.text.toString() }.collectLatest { text ->
-            if (text == model.state.value.open?.text) return@collectLatest
-            delay(SAVE_AFTER_MS)
-            model.save(text)
-        }
-    }
-
-    // Leaving the editor inside that second would otherwise drop what it was waiting on.
-    DisposableEffect(open.rel) {
-        onDispose {
-            val text = field.text.toString()
-            if (text != model.state.value.open?.text) model.save(text)
-        }
-    }
-
     BasicTextField(
-        state = field,
+        state = model.buffer,
         modifier = Modifier.fillMaxSize().padding(horizontal = Gutter).verticalScroll(rememberScrollState()),
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
         cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.primary),
         outputTransformation = styling,
     )
 }
-
-/** How long a pause in the typing is worth a write. The same second the desktop waits. */
-private const val SAVE_AFTER_MS = 1000L
 
 /** Applies the core's spans to the field's output; nothing it does reaches the saved text. */
 private class Styling(
