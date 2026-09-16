@@ -15,7 +15,6 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.VaultModel
-import io.github.stroblme.accent.ffi.Phase
 
 /**
  * Which of the two the screen is showing.
@@ -77,7 +76,7 @@ fun HomeScreen(model: VaultModel) {
                 else -> Empty(
                     indexing = state.indexing,
                     scanned = state.scanned,
-                    listing = state.phase == Phase.SCAN,
+                    ready = state.ready,
                     onCloseVault = { model.closeVault() },
                 )
             }
@@ -85,7 +84,15 @@ fun HomeScreen(model: VaultModel) {
                 // Not while the note's own find is open: that bar has the foot of the screen, and
                 // a pill over it would offer the vault's search to a reader already searching the
                 // page in front.
-                visible = screen == Screen.Home && chrome.shown && open?.finding != true,
+                //
+                // And not until there is something to browse. A button that would open an empty
+                // tree, an empty switcher and a search with nothing to search is a control that
+                // can do nothing, which is never shown (DESIGN.md Principle 1) — greyed out least
+                // of all, since the line above it is already saying what the vault is doing. It
+                // reads [VaultState.ready], which is the same state that line reads, so the two
+                // cannot disagree about whether the reader may start.
+                visible = screen == Screen.Home && chrome.shown && open?.finding != true &&
+                    state.ready,
                 onBrowse = { screen = Screen.Browse },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
@@ -158,7 +165,7 @@ private val ProgressHeight: Dp = 4.dp
 private fun Empty(
     indexing: Boolean,
     scanned: Long,
-    listing: Boolean,
+    ready: Boolean,
     onCloseVault: () -> Unit,
 ) {
     Column(
@@ -175,10 +182,12 @@ private fun Empty(
             when {
                 // A first walk of a large vault takes minutes over shared storage, so it says how
                 // far it has got. Nothing can be opened while it is still finding the files;
-                // once it starts reading them, what it has read is already there to open.
-                listing && scanned > 0 -> "Found %,d files so far.".format(scanned)
-                listing -> "Looking through your files."
+                // once it starts reading them, what it has read is already there to open — which
+                // is [ready], and is the same moment the Browse button turns up.
+                !ready && scanned > 0 -> "Found %,d files so far.".format(scanned)
+                !ready -> "Looking through your files."
                 indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
+                // A walk over an index that already has files: the rescan a resume starts.
                 indexing -> "Reading what it found."
                 else -> "Browse your files, or search straight to a note."
             },
@@ -189,7 +198,7 @@ private fun Empty(
         // The space is kept whether or not there is a bar in it, so the lines above stay where
         // they are when the walk ends rather than settling half its height downwards.
         Box(Modifier.height(ProgressHeight), contentAlignment = Alignment.Center) {
-            if (indexing || listing) LinearProgressIndicator(Modifier.width(ProgressWidth))
+            if (indexing) LinearProgressIndicator(Modifier.width(ProgressWidth))
         }
         Spacer(Modifier.height(24.dp))
         TextButton(onClick = onCloseVault) { Text("Close vault") }
