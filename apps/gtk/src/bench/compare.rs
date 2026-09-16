@@ -230,16 +230,6 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
     });
 }
 
-/// What a toast standing over the window reads, which is how a drill sees one: libadwaita gives
-/// no way to ask the overlay what it is showing.
-fn bench_said(app: &Rc<App>) -> Option<String> {
-    let label = find_widget(app.window.upcast_ref(), &|w| {
-        w.downcast_ref::<gtk::Label>()
-            .is_some_and(|l| l.label().starts_with("Cannot "))
-    })?;
-    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
-}
-
 /// Whether the paragraph at `at` carries alignment padding above it, which is what GTK lays the
 /// line out with and what a character typed at the line's start must not take away.
 fn is_padded(tab: &Rc<Tab>, at: &gtk::TextIter) -> bool {

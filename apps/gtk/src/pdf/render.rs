@@ -131,7 +131,7 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 /// matches of the pages it had reached and no more.
 fn render_loop(
     mut doc: PdfDoc,
-    path: PathBuf,
+    mut path: PathBuf,
     rx: std::sync::mpsc::Receiver<Request>,
     view: glib::SendWeakRef<PdfView>,
 ) {
@@ -468,6 +468,17 @@ fn render_loop(
                         }
                         Err(e) => tracing::debug!("reloading {}: {e:#}", path.display()),
                     }
+                }
+                Request::Retarget(moved) => {
+                    // Only where the bytes live moves. The open document is the same document
+                    // and every tile of it is still of that document, so re-opening would throw
+                    // away the cache and the ink ledger for a change of name.
+                    //
+                    // The etag comes from the new name: a local rename carries it over intact,
+                    // and on a remote vault the copy under the new name may not have been
+                    // fetched yet, which leaves `None` and lets the next save write it.
+                    etag = accent_core::fs::Etag::of(&moved).ok();
+                    path = moved;
                 }
             }
         }

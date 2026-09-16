@@ -81,6 +81,16 @@ pub struct PdfTab {
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
     /// A save is already scheduled, so a burst of strokes costs one write.
     pub(super) save_pending: Cell<bool>,
+    /// A write of this document is on its way somewhere else — the ssh upload of a remote
+    /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
+    pub(super) uploading: Cell<bool>,
+    pub(super) upload_again: Cell<bool>,
+    /// The far end refused the last upload and the reader has been told so once: the strokes
+    /// after it are refused for the same reason and say nothing. See [`PdfTab::told_conflict`].
+    pub(super) conflict_told: Cell<bool>,
+    /// The conflict copy that refusal left beside the document, for the next one to write again
+    /// rather than leaving one numbered copy per stroke.
+    pub(super) conflict_copy: RefCell<Option<String>>,
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
@@ -113,6 +123,9 @@ pub struct PdfTab {
     pub(super) on_note: NoteHook,
     pub(super) on_export: ExportHook,
     pub(super) on_save_failed: FailHook,
+    /// Fired once the file on this machine holds what was drawn, for a vault whose real copy is
+    /// somewhere else.
+    pub(super) on_saved: Hook,
     pub(super) on_choice: ChoiceHook,
 }
 
@@ -185,6 +198,10 @@ pub fn open(
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
         save_pending: Cell::new(false),
+        uploading: Cell::new(false),
+        upload_again: Cell::new(false),
+        conflict_told: Cell::new(false),
+        conflict_copy: RefCell::new(None),
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
@@ -204,6 +221,7 @@ pub fn open(
         on_note: RefCell::new(None),
         on_export: RefCell::new(None),
         on_save_failed: RefCell::new(None),
+        on_saved: RefCell::new(None),
         on_choice: RefCell::new(None),
     });
 
@@ -276,11 +294,18 @@ impl PdfTab {
 
     /// A rename landed: follow the file without losing where the reader is.
     pub fn retarget(&self, root: &Path, key: &str) {
+        let moved = tree_of(&self.path(), &self.key())
+            .unwrap_or_else(|| root.to_path_buf())
+            .join(key);
         *self.key.borrow_mut() = key.to_string();
-        *self.path.borrow_mut() = root.join(key);
+        *self.path.borrow_mut() = moved.clone();
         self.page.set_title(crate::doc::file_name(key));
         self.page
             .set_tooltip(&crate::fileops::display_path(root, key));
+        // The render thread owns the document and the path it reads and writes; without this it
+        // keeps the old name, a reload re-opens a file that is gone, and the pen's next save
+        // fails with "file vanished before save".
+        self.ask(Request::Retarget(moved));
     }
 
     /// Follow the system's light/dark choice, unless this document has been inverted by hand.
@@ -619,6 +644,52 @@ impl PdfTab {
     /// Called when a drawing could not be written out, with the reason to say.
     pub fn connect_save_failed(&self, f: impl Fn(&Rc<PdfTab>, String) + 'static) {
         *self.on_save_failed.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Called once a write has landed in the file this tab reads, which on a remote vault is the
+    /// cached copy and not the document itself.
+    pub fn connect_saved(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_saved.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Take the right to start sending the written-out file somewhere. `false` when one is
+    /// already on its way: that one is marked to go again rather than a second starting beside
+    /// it, so a burst of strokes costs two transfers and the far end is never more than one
+    /// behind.
+    pub fn claim_upload(&self) -> bool {
+        if self.uploading.replace(true) {
+            self.upload_again.set(true);
+            return false;
+        }
+        true
+    }
+
+    /// The transfer came back: `true` when a save landed while it was out and the file has to go
+    /// once more.
+    pub fn upload_done(&self) -> bool {
+        self.uploading.set(false);
+        self.upload_again.replace(false)
+    }
+
+    /// The far end refused this document and left what was written at `copy`, if it could put it
+    /// anywhere. `true` the first time, which is the one the reader is told about: a reader who
+    /// keeps drawing writes once a second and every one of those is refused for the same reason,
+    /// so the rest go quietly into the same copy.
+    pub fn told_conflict(&self, copy: Option<String>) -> bool {
+        *self.conflict_copy.borrow_mut() = copy;
+        !self.conflict_told.replace(true)
+    }
+
+    /// Where the last refusal put what was written, for the next one to write again.
+    pub fn conflict_copy(&self) -> Option<String> {
+        self.conflict_copy.borrow().clone()
+    }
+
+    /// The conflict is over — an upload landed, or the document was re-read from what the far end
+    /// now holds — so the next refusal is news again and takes a name of its own.
+    pub fn clear_conflict(&self) {
+        self.conflict_told.set(false);
+        *self.conflict_copy.borrow_mut() = None;
     }
 
     /// The bookmarks, for the Outline pane.
@@ -1159,7 +1230,13 @@ impl PdfTab {
                 self.history.set((undo, redo));
                 self.emit(&self.on_history);
             }
-            Reply::Saved(etag) => self.saved.set(Some(etag)),
+            Reply::Saved(etag) => {
+                self.saved.set(Some(etag));
+                let hook = self.on_saved.borrow().clone();
+                if let Some(f) = hook {
+                    f(self);
+                }
+            }
             Reply::SaveFailed(why) => {
                 let hook = self.on_save_failed.borrow().clone();
                 if let Some(f) = hook {
@@ -1176,6 +1253,9 @@ impl PdfTab {
                 self.goto_page(last);
             }
             Reply::Reloaded(sizes) => {
+                // Whatever the far end had that we did not is in hand now, so a refusal after
+                // this is a new conflict and worth saying again.
+                self.clear_conflict();
                 // The anchor is taken now rather than when the reload was asked for: the reader
                 // may have moved while the file was being re-read.
                 let anchor = self.view.anchor().clamped(sizes.len());
@@ -1219,5 +1299,43 @@ pub(super) fn theme_of(dark: bool) -> pdf::Theme {
     match crate::theme::pdf_colours(dark) {
         Some((paper, ink)) => pdf::Theme::Recolour { paper, ink },
         None => pdf::Theme::Plain,
+    }
+}
+
+/// The tree `path` reads `key` out of: `path` with `key`'s own components taken off the end.
+///
+/// A PDF is always read from a file on this machine, which is the vault's own on a local vault
+/// and the ssh cache's copy on a remote one. Both mirror the vault, so a rename moves the key on
+/// the end of whichever tree this tab was opened from — `root.join(key)` would point a remote
+/// tab at the host's path, where there is nothing here to read.
+fn tree_of(path: &Path, key: &str) -> Option<PathBuf> {
+    let mut tree = path.to_path_buf();
+    for _ in Path::new(key).components() {
+        if !tree.pop() {
+            return None;
+        }
+    }
+    Some(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rename_moves_the_key_on_the_end_of_the_tree_the_tab_reads_from() {
+        let tree = |path: &str, key: &str| tree_of(Path::new(path), key);
+        // A local vault: the tree is the vault root.
+        assert_eq!(
+            tree("/vault/papers/a.pdf", "papers/a.pdf"),
+            Some(PathBuf::from("/vault"))
+        );
+        // A remote one: the same key under the ssh cache's mirror of the vault.
+        assert_eq!(
+            tree("/cache/host/papers/a.pdf", "papers/a.pdf"),
+            Some(PathBuf::from("/cache/host"))
+        );
+        // Nothing sensible to say when the key is longer than the path it was read from.
+        assert_eq!(tree("/a.pdf", "deep/nest/a.pdf"), None);
     }
 }
