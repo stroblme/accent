@@ -11,12 +11,9 @@ use super::*;
 /// that did not change or a page count that did not grow. The append is followed all the way to
 /// the file: the document is re-opened from disk at the end, which is what a second reader sees.
 pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
-    app.open_path(rel);
-    let app = app.clone();
-    // The pages are measured on the render thread, so nothing about the layout is known until it
-    // has reported back.
-    glib::timeout_add_local_once(Duration::from_millis(600), move || {
-        let Some(pdf) = app.active_pdf() else {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
             println!("bench pdf no_tab");
             return bench_quit(&app);
         };
@@ -35,24 +32,53 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
             pdf.zoom_label()
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
-        // Longer than the tab's own save timer, so what is printed is the file and not the plan.
-        glib::timeout_add_local_once(Duration::from_millis(1400), move || {
-            let Some(pdf) = app.active_pdf() else {
-                println!("bench pdf no_tab");
-                return bench_quit(&app);
-            };
-            let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
-                .and_then(|doc| doc.page_sizes())
-                .unwrap_or_default();
-            println!(
-                "bench pdf added pages={} at={} on_disk={:?}",
-                pdf.page_count(),
-                pdf.place().page,
-                sizes
-            );
-            bench_pdf_renamed(&app);
-        });
+        written(&app).await;
+        let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
+            .and_then(|doc| doc.page_sizes())
+            .unwrap_or_default();
+        println!(
+            "bench pdf added pages={} at={} on_disk={:?}",
+            pdf.page_count(),
+            pdf.place().page,
+            sizes
+        );
+        // What the vault itself holds. On a remote one that is the host's document rather than
+        // the cached copy the render thread writes into, so a page that grew here and not there
+        // is an upload that never happened.
+        println!("bench pdf added in_vault {}", vault_pages(&app, &pdf.key()));
+        bench_pdf_renamed(&app).await;
     });
+}
+
+/// Open `rel` and hand back the tab once its pages are known.
+///
+/// Both halves wait: a remote window is up and taking commands well before its host has answered,
+/// and the pages are measured on the render thread after a fetch that takes as long as the link
+/// does. A local vault passes straight through both.
+async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<pdftab::PdfTab>> {
+    for _ in 0..150 {
+        if !app.offline() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    app.open_path(rel);
+    for _ in 0..150 {
+        if let Some(pdf) = app.active_pdf().filter(|pdf| pdf.page_count() > 0) {
+            return Some(pdf);
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    None
+}
+
+/// Long enough for the tab's own save timer, and then for the upload a remote vault answers it
+/// with, so what the drill reads back is the file and not the plan.
+async fn written(app: &Rc<App>) {
+    glib::timeout_future(Duration::from_millis(1400)).await;
+    if app.vault().is_some_and(|v| v.is_remote()) {
+        glib::timeout_future(Duration::from_millis(2000)).await;
+    }
 }
 
 /// The same document under a new name: rename it the way a dropped row does, then append another
@@ -61,7 +87,7 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
 /// The render thread owns the path it reloads from and saves to, so a rename it was never told
 /// about shows up here as a page count on disk that did not grow — the save going to a name that
 /// is no longer there.
-fn bench_pdf_renamed(app: &Rc<App>) {
+async fn bench_pdf_renamed(app: &Rc<App>) {
     let (Some(pdf), Some(ops)) = (app.active_pdf(), app.ops().cloned()) else {
         println!("bench pdf no_tab");
         return bench_quit(app);
@@ -73,31 +99,87 @@ fn bench_pdf_renamed(app: &Rc<App>) {
     };
     let (to, was) = (format!("{stem}-renamed.pdf"), pdf.path());
     crate::fileops::move_dropped(&ops, &from, &to);
-    let app = app.clone();
     // The rename runs on a worker and the watcher's event lands a turn after it.
-    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
-        let Some(pdf) = app.active_pdf() else {
-            println!("bench pdf no_tab");
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    let Some(pdf) = app.active_pdf() else {
+        println!("bench pdf no_tab");
+        return bench_quit(app);
+    };
+    println!(
+        "bench pdf renamed key={:?} reads={:?} old_gone={}",
+        pdf.key(),
+        pdf.path().file_name().map(|n| n.to_string_lossy()),
+        !was.exists()
+    );
+    let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+    written(app).await;
+    let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
+        .and_then(|doc| doc.page_sizes())
+        .unwrap_or_default();
+    println!(
+        "bench pdf renamed_added pages={} on_disk={} in_vault {}",
+        pdf.page_count(),
+        sizes.len(),
+        vault_pages(app, &pdf.key())
+    );
+    bench_quit(app);
+}
+
+/// What the vault's own copy of `key` holds, fetched past the cache the reader is drawing on.
+fn vault_pages(app: &Rc<App>, key: &str) -> String {
+    let Some(vault) = app.vault() else {
+        return "no_vault".to_string();
+    };
+    let dest = std::env::temp_dir().join(format!("accent-bench-{}.pdf", std::process::id()));
+    match vault.download(key, &dest) {
+        Ok(()) => match accent_core::pdf::PdfDoc::open(&dest).and_then(|d| d.page_sizes()) {
+            Ok(sizes) => format!("pages={}", sizes.len()),
+            Err(e) => format!("unreadable={e}"),
+        },
+        Err(e) => format!("download_failed={e}"),
+    }
+}
+
+/// The etag gate on the way back to a host: a page appended to a document whose host copy has
+/// moved since it was fetched must not overwrite it, and the ink must not be dropped either.
+///
+/// The move is made by stamping the cached copy with an etag the host never had, rather than by
+/// really writing on the host: a host-side write is reported by its own watcher, and the refetch
+/// that follows wins the race against the save under test every time. What `push` compares is
+/// the stamp against the host, so this is the same input from where it stands.
+pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(pdf), Some(vault)) = (opened(&app, &rel).await, app.vault().cloned()) else {
+            println!("bench pdf stale no_tab");
             return bench_quit(&app);
         };
+        let (key, Some(remote)) = (pdf.key(), vault.remote()) else {
+            println!("bench pdf stale not_remote");
+            return bench_quit(&app);
+        };
+        let stamp = accent_api::ssh::stamp_path(remote.url(), &key);
+        // An `Etag` as the stamp file spells one, written by hand because the app does not link
+        // serde_json: what matters is only that it is not the one the host will report.
+        let moved = stamp
+            .as_ref()
+            .map(|stamp| std::fs::write(stamp, br#"{"mtime_ns":1,"size":1,"ino":1}"#));
         println!(
-            "bench pdf renamed key={:?} reads={:?} old_gone={}",
-            pdf.key(),
-            pdf.path().file_name().map(|n| n.to_string_lossy()),
-            !was.exists()
+            "bench pdf stale opened pages={} in_vault {} moved={moved:?}",
+            pdf.page_count(),
+            vault_pages(&app, &key)
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
-        glib::timeout_add_local_once(Duration::from_millis(1400), move || {
-            let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
-                .and_then(|doc| doc.page_sizes())
-                .unwrap_or_default();
-            println!(
-                "bench pdf renamed_added pages={} on_disk={}",
-                pdf.page_count(),
-                sizes.len()
-            );
-            bench_quit(&app);
-        });
+        written(&app).await;
+        let kept = pdf.path().with_extension("kept.pdf");
+        println!(
+            "bench pdf stale refused pages={} in_vault {} kept={}",
+            pdf.page_count(),
+            vault_pages(&app, &key),
+            kept.exists()
+        );
+        let _ = std::fs::remove_file(&kept);
+        bench_quit(&app);
     });
 }
 

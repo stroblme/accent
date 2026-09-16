@@ -31,7 +31,7 @@ use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
-use pdf::{bench_drawing, bench_pdf};
+use pdf::{bench_drawing, bench_pdf, bench_pdf_stale};
 use replace::bench_replace;
 use search::bench_search;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
@@ -77,10 +77,14 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
-/// the save has run. It then renames the file the way a dropped row does and appends another page
-/// to it, which is the render thread following the new name. It writes to the document and moves
-/// it, so point it at a scratch copy; and point it at a document of several pages, since a
-/// one-page PDF is wholly on screen whatever the scroll offset was.
+/// the save has run, and what the vault itself then holds — on a remote vault the host's own copy,
+/// which is the only witness that the write was uploaded. It then renames the file the way a
+/// dropped row does and appends another page to it, which is the render thread following the new
+/// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
+/// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
+/// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
+/// etag the host never had, appends a page and prints whether the upload refused, whether the
+/// host's copy is untouched and whether the ink was kept.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -242,7 +246,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = pdf {
-            return bench_pdf(&app, &rel);
+            return match rel.strip_prefix("stale:") {
+                Some(rel) => bench_pdf_stale(&app, rel),
+                None => bench_pdf(&app, &rel),
+            };
         }
         if drawing {
             return bench_drawing(&app);

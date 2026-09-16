@@ -67,6 +67,24 @@ impl From<&str> for Failure {
     }
 }
 
+/// What [`Remote::push`] made of a cached copy that has been written to.
+pub enum Pushed {
+    /// The bytes are on the host, and the copy is stamped with what the host says now.
+    Sent,
+    /// The host's file moved on since the copy was fetched, so nothing was sent and the host's
+    /// own version stands. The copy, with whatever was written into it, is kept at this path.
+    Stale(PathBuf),
+}
+
+/// Where a cached copy is put when the host will not take it: beside itself, under a name no
+/// fetch writes over, keeping the extension so it still opens in whatever reads that kind.
+fn kept_path(dest: &Path) -> PathBuf {
+    match dest.extension() {
+        Some(ext) => dest.with_extension(format!("kept.{}", ext.to_string_lossy())),
+        None => dest.with_extension("kept"),
+    }
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -362,6 +380,43 @@ impl Remote {
         std::fs::write(&dest, out)?;
         let _ = std::fs::write(&stamp, serde_json::to_vec(&current).unwrap_or_default());
         Ok(dest)
+    }
+
+    /// Put a cached copy back on the host: the other half of [`fetch`](Self::fetch), for the
+    /// readers that write into the file they were handed rather than through the vault — the PDF
+    /// pen, Add Page, Export Highlights.
+    ///
+    /// The host's etag is checked against the one the copy was fetched at, because the copy was
+    /// drawn on without the host knowing: a file that moved under it is a conflict for the reader
+    /// to settle, not one to overwrite. On a match the copy goes up and the stamp is written
+    /// again from what the host says afterwards, so the fetch that follows the host's own watcher
+    /// event does not pull our bytes back over a page that is still being drawn on.
+    pub fn push(&self, rel: &str) -> std::io::Result<Pushed> {
+        let (Some(dest), Some(stamp)) = (
+            ssh::cache_path(&self.url, rel),
+            ssh::stamp_path(&self.url, rel),
+        ) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{rel} is outside the vault"),
+            ));
+        };
+        let current: Option<crate::Etag> = self
+            .call("stat", json!([rel]))
+            .map_err(RpcError::io_error)?;
+        let fetched = std::fs::read(&stamp)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
+        if current != fetched {
+            let kept = kept_path(&dest);
+            std::fs::copy(&dest, &kept)?;
+            return Ok(Pushed::Stale(kept));
+        }
+        self.upload(&dest, rel)?;
+        if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
+            let _ = std::fs::write(&stamp, serde_json::to_vec(&now).unwrap_or_default());
+        }
+        Ok(Pushed::Sent)
     }
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
@@ -767,4 +822,19 @@ fn drain(stream: impl Read + Send + 'static) {
 
 fn mb(bytes: usize) -> String {
     format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kept_path;
+    use std::path::Path;
+
+    /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind
+    /// of file still opens it, and it never lands on the name a fetch writes.
+    #[test]
+    fn a_kept_copy_is_named_beside_the_one_it_came_from() {
+        assert_eq!(kept_path(Path::new("/c/a.pdf")), Path::new("/c/a.kept.pdf"));
+        assert_eq!(kept_path(Path::new("/c/a")), Path::new("/c/a.kept"));
+        assert_ne!(kept_path(Path::new("/c/a.pdf")), Path::new("/c/a.pdf"));
+    }
 }

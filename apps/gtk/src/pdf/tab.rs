@@ -81,6 +81,10 @@ pub struct PdfTab {
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
     /// A save is already scheduled, so a burst of strokes costs one write.
     pub(super) save_pending: Cell<bool>,
+    /// A write of this document is on its way somewhere else — the ssh upload of a remote
+    /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
+    pub(super) uploading: Cell<bool>,
+    pub(super) upload_again: Cell<bool>,
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
@@ -113,6 +117,9 @@ pub struct PdfTab {
     pub(super) on_note: NoteHook,
     pub(super) on_export: ExportHook,
     pub(super) on_save_failed: FailHook,
+    /// Fired once the file on this machine holds what was drawn, for a vault whose real copy is
+    /// somewhere else.
+    pub(super) on_saved: Hook,
     pub(super) on_choice: ChoiceHook,
 }
 
@@ -185,6 +192,8 @@ pub fn open(
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
         save_pending: Cell::new(false),
+        uploading: Cell::new(false),
+        upload_again: Cell::new(false),
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
@@ -204,6 +213,7 @@ pub fn open(
         on_note: RefCell::new(None),
         on_export: RefCell::new(None),
         on_save_failed: RefCell::new(None),
+        on_saved: RefCell::new(None),
         on_choice: RefCell::new(None),
     });
 
@@ -626,6 +636,31 @@ impl PdfTab {
     /// Called when a drawing could not be written out, with the reason to say.
     pub fn connect_save_failed(&self, f: impl Fn(&Rc<PdfTab>, String) + 'static) {
         *self.on_save_failed.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Called once a write has landed in the file this tab reads, which on a remote vault is the
+    /// cached copy and not the document itself.
+    pub fn connect_saved(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        *self.on_saved.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Take the right to start sending the written-out file somewhere. `false` when one is
+    /// already on its way: that one is marked to go again rather than a second starting beside
+    /// it, so a burst of strokes costs two transfers and the far end is never more than one
+    /// behind.
+    pub fn claim_upload(&self) -> bool {
+        if self.uploading.replace(true) {
+            self.upload_again.set(true);
+            return false;
+        }
+        true
+    }
+
+    /// The transfer came back: `true` when a save landed while it was out and the file has to go
+    /// once more.
+    pub fn upload_done(&self) -> bool {
+        self.uploading.set(false);
+        self.upload_again.replace(false)
     }
 
     /// The bookmarks, for the Outline pane.
@@ -1166,7 +1201,13 @@ impl PdfTab {
                 self.history.set((undo, redo));
                 self.emit(&self.on_history);
             }
-            Reply::Saved(etag) => self.saved.set(Some(etag)),
+            Reply::Saved(etag) => {
+                self.saved.set(Some(etag));
+                let hook = self.on_saved.borrow().clone();
+                if let Some(f) = hook {
+                    f(self);
+                }
+            }
             Reply::SaveFailed(why) => {
                 let hook = self.on_save_failed.borrow().clone();
                 if let Some(f) = hook {
