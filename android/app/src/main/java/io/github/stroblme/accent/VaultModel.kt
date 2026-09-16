@@ -82,6 +82,16 @@ data class VaultState(
      * show and the app has to say so rather than invite a reader in.
      */
     val phase: Phase? = null,
+    /**
+     * Whether the index has anything in it yet: what the start screen's status line says in
+     * words, and the one thing the Browse button is allowed to depend on.
+     *
+     * A latch, because [indexing] is about work running and not about the index being empty. It
+     * is false for exactly one stretch of a vault's life — its first walk, until the first batch
+     * of files has been read — and a walk over an index that already has files (the rescan every
+     * resume starts) leaves it alone, those files still being there to browse.
+     */
+    val ready: Boolean = false,
     /** The directories whose children have been listed, so the tree redraws in place. */
     val children: Map<String, List<FileRow>> = emptyMap(),
     val expanded: Set<String> = setOf(""),
@@ -183,7 +193,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             is Event.Progress -> seen = event.progress
         }
         if (reindexed) {
-            _state.update { it.copy(indexing = false, scanned = 0, phase = null) }
+            // The walk is over, so whatever the vault holds is in the index.
+            _state.update { it.copy(indexing = false, scanned = 0, phase = null, ready = true) }
             corpus = emptyList()
             relist(_state.value.expanded)
         } else if (touched.isNotEmpty()) {
@@ -202,7 +213,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * between a tree that appears when the walk ends and one that is usable from the start.
      */
     private suspend fun walking(p: Progress) {
-        _state.update { it.copy(indexing = true, scanned = p.done.toLong(), phase = p.phase) }
+        // Out of [Phase.SCAN] with files behind it is the moment there is something to open, and
+        // it is the moment the status line says so.
+        val read = p.phase != Phase.SCAN && p.done > 0uL
+        _state.update {
+            it.copy(
+                indexing = true,
+                scanned = p.done.toLong(),
+                phase = p.phase,
+                ready = it.ready || read,
+            )
+        }
         // Nothing has been written yet while the walk is still finding files.
         if (p.phase == Phase.SCAN) return
         val now = System.currentTimeMillis()
