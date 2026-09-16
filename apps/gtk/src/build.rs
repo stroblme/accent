@@ -2,13 +2,15 @@
 //! display-wide font, icons and CSS every window shares.
 
 use super::*;
+use crate::shell::{Loose, WindowKey};
 
 pub fn build_window(
     gtk_app: &adw::Application,
     shell: &Rc<Shell>,
-    root: Option<PathBuf>,
+    key: &WindowKey,
     note: Option<String>,
 ) -> Option<Rc<App>> {
+    let root = key.vault().map(Path::to_path_buf);
     install_document_font();
     install_icons();
     install_chrome_css();
@@ -45,12 +47,15 @@ pub fn build_window(
         shell.config.borrow_mut().touch_recent(root);
     }
 
-    let vault_name = match &root {
-        Some(root) => root
+    // A window with no vault is named for what it holds rather than for a folder it has not got:
+    // the shells' window says so, the documents window carries the application's name.
+    let vault_name = match key {
+        WindowKey::Vault(root) => root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string()),
-        None => "Accent".to_string(),
+        WindowKey::Loose(Loose::Terminal) => "Terminal".to_string(),
+        WindowKey::Loose(Loose::Documents) => "Accent".to_string(),
     };
     // A remote window says which machine it is on, under the vault's name. Nothing else in the
     // chrome differs: it is the same vault, and the point is that it behaves like one.

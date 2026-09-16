@@ -60,6 +60,20 @@ impl Term {
         self.key.clone()
     }
 
+    /// What the header says under the window's name. VTE reports `user@host:dir` a moment after
+    /// the shell has started and again on every `cd`; until the first of those, where the shell
+    /// was started is the closest thing to the same answer.
+    pub fn subtitle(&self) -> String {
+        self.view
+            .window_title()
+            .map(|t| t.to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| match &self.shell {
+                Shell::Local(cwd) => cwd.display().to_string(),
+                Shell::Remote { host, .. } => host.clone(),
+            })
+    }
+
     /// Start the shell a dropped link ended again, in the same tab: what was on screen stays above
     /// it, and the new one lands at the vault root. Nothing to do for a shell that is still running.
     pub fn reopen(&self) {
@@ -228,6 +242,17 @@ fn spawn(view: &vte4::Terminal, shell: &Shell) {
 /// Except a remote shell whose link went. Its tab stays, saying so, and [`Term::reopen`] starts
 /// the shell again when the vault is back; closing the tab meanwhile is what gives up on it. A
 /// local command's 255 is an ordinary exit.
+/// Run `changed` whenever VTE reports a title of its own: once a moment after the shell has
+/// started, and again on every `cd`. Weak, for the reason [`on_exit`] is.
+pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
+    let weak = Rc::downgrade(term);
+    term.view.connect_window_title_changed(move |_| {
+        if let Some(term) = weak.upgrade() {
+            changed(&term);
+        }
+    });
+}
+
 pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
     term.view.connect_child_exited(move |view, status| {

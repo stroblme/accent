@@ -26,7 +26,7 @@ use files::{
     bench_templates,
 };
 use git::{bench_git, bench_git_init, bench_git_press};
-use keys::{bench_keys, bench_list, bench_shell_keys};
+use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::{bench_drawing, bench_pdf};
@@ -65,6 +65,9 @@ use tags::bench_tags;
 /// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
 /// long paragraphs in a repository it makes itself and types at the start of the two lines whose
 /// padding tag does not begin at the newline before them.
+/// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
+/// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
+/// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
@@ -161,6 +164,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let paths = std::env::var("ACCENT_BENCH_PATHS").is_ok();
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
+    let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
@@ -205,6 +209,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !templates
         && !paths
         && !shell_keys
+        && !term
         && !close
         && !hidden
     {
@@ -276,6 +281,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if shell_keys {
             return bench_shell_keys(&app);
+        }
+        if term {
+            return bench_term(&app);
         }
         if close {
             return bench_close(&app);

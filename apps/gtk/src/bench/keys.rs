@@ -717,3 +717,38 @@ pub(super) fn bench_shell_keys(app: &Rc<App>) {
         });
     });
 }
+
+/// `ACCENT_BENCH_TERM=1` against `accent --terminal`: what the vault-less shell window calls
+/// itself. VTE reports its own title some milliseconds after the shell has started, so the state
+/// is printed every 100 ms while it is still changing rather than once.
+pub(super) fn bench_term(app: &Rc<App>) {
+    // A vault window has no shell of its own; opening one here is the same drill over the tab
+    // case, and the state printed right after it is the one before VTE has reported anything.
+    if app.terminals().is_empty() {
+        app.open_terminal();
+    }
+    let app = app.clone();
+    let (mut said, mut left) = (String::new(), 20);
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let shows = format!(
+            "window={:?} title={:?} subtitle={:?} page={:?}",
+            app.window.title().unwrap_or_default(),
+            app.title.title(),
+            app.title.subtitle(),
+            app.terminals()
+                .first()
+                .map(|t| t.page.title())
+                .unwrap_or_default(),
+        );
+        if shows != said {
+            println!("bench term {shows}");
+            said = shows;
+        }
+        left -= 1;
+        if left > 0 {
+            return glib::ControlFlow::Continue;
+        }
+        bench_quit(&app);
+        glib::ControlFlow::Break
+    });
+}

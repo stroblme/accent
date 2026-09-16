@@ -43,7 +43,7 @@ pub enum WindowKey {
 
 impl WindowKey {
     /// The vault's key, or `None` for a window with no vault.
-    fn vault(&self) -> Option<&Path> {
+    pub fn vault(&self) -> Option<&Path> {
         match self {
             WindowKey::Vault(root) => Some(root),
             WindowKey::Loose(_) => None,
@@ -532,7 +532,7 @@ impl Shell {
         key: WindowKey,
         note: Option<String>,
     ) -> Option<Rc<App>> {
-        let app = build_window(gtk_app, self, key.vault().map(Path::to_path_buf), note)?;
+        let app = build_window(gtk_app, self, &key, note)?;
         // A second `close-request` handler. `wire_window`'s is connected first and can still stop
         // the close (an unsaved buffer that will not write), and GTK stops emitting as soon as one
         // handler does, so this one only ever sees a close that is really happening.

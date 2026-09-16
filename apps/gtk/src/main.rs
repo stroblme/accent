@@ -571,9 +571,13 @@ impl App {
         };
         let key = doc.key();
         // A diff is not a file: it is no note anyone opened, and its key names a comparison
-        // rather than a path, so the subtitle says what the tab is called instead.
+        // rather than a path, so the subtitle says what the tab is called instead. A shell says
+        // where it is running, which is VTE's own answer rather than the tab's label.
         match doc.is_transient() {
-            true => self.title.set_subtitle(&doc.page().title()),
+            true => self.title.set_subtitle(&match doc.terminal() {
+                Some(term) => term.subtitle(),
+                None => doc.page().title().to_string(),
+            }),
             false => {
                 self.note_used(&key);
                 let where_ = match doc.is_loose() {
@@ -878,6 +882,21 @@ impl App {
                 move |out, _| {
                     term.set_zoom(stepped_zoom(term.zoom(), out));
                     app.refresh_zoom();
+                }
+            ),
+        );
+        // The subtitle is taken when a tab comes to the front, and VTE has not reported a title
+        // by then: the shell is still starting. So the header hears about each one as it lands,
+        // which is also what follows a `cd` into another directory.
+        terminal::on_title(
+            &term,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |term: &Rc<terminal::Term>| {
+                    if app.active_doc().is_some_and(|doc| doc.page() == &term.page) {
+                        app.title.set_subtitle(&term.subtitle());
+                    }
                 }
             ),
         );
