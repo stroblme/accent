@@ -32,7 +32,7 @@ build with. This says what to build.
 | Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands. The desktop's eight sidebar panes and its palette collapse into this one |
 | Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it and, while a find is open, the find bar below it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
-| PDF | A column of pages, under the same bar a note has and in the same rectangle. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
+| PDF | A column of pages with the same bar a note has drawn over the top of them rather than above them: a page is read at a zoom and an offset the reader chose, and chrome that takes space in the layout moves both every time it comes and goes. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
 | The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
@@ -104,6 +104,14 @@ A note and a PDF are one surface with two kinds of content in it, so they are bu
 same `DocumentBar` — the file's name, and the one thing that can be done to it — over the same
 `DocumentGap` of clear space, with the content in the rectangle that leaves (`ui/Common.kt`).
 Moving between a note and a PDF should not move what is being read.
+
+The one difference is where the bar sits. A note's takes its space from the layout, because it
+cannot fade while the editor is open and a bar across the line being typed is worse than a note
+that shifts once. A PDF's lies over the pages: a document is read at a zoom and a scroll offset,
+and a bar that is sometimes in the layout gives the column two heights and so two positions for
+the page — tapping for the bar would move the very thing the tap was aimed at. The cost is the
+head of page one, which the bar covers while it is up and which cannot be scrolled clear, the
+column being at its top already; the way to it is the same tap, which takes the bar away again.
 
 The bar's button is a note's Edit and Done. A PDF's is the same button, disabled, for as long as
 there is nothing to edit: a gap where a control belongs is worse than a control that says it is not

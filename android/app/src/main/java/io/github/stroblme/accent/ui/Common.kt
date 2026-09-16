@@ -266,8 +266,11 @@ private val PullToClose: Dp = 96.dp
  * than a target: with no gesture of its own the blank half of the panel is never hit at all and
  * the press reaches the document below it, so a tap beside a file row toggles the note's chrome.
  * Nothing is consumed, so the rows, the chips and the field still get their own.
+ *
+ * The other use is a bar lying over a document: there the point is the opposite one — what is
+ * underneath must *not* get the press, or a tap on the title would be read as a tap on the page.
  */
-private fun Modifier.stopsHere(): Modifier = pointerInput(Unit) {
+fun Modifier.stopsHere(): Modifier = pointerInput(Unit) {
     awaitEachGesture { awaitFirstDown(requireUnconsumed = false) }
 }
 

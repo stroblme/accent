@@ -8,6 +8,7 @@ import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -161,11 +162,42 @@ private fun Reader(
         snackbarHost = { SnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
     ) { padding ->
-        // The same shape a note has: one bar that fades, then the document under it in the same
-        // rectangle, so that moving between the two does not move what is being read.
+        // The bar lies over the page rather than above it. A bar that takes its space from the
+        // layout gives the column a different height every time it comes and goes, and a column
+        // laid out again is a page that moves — which is the one thing the reader who tapped for
+        // the bar did not ask for. The page keeps the whole rectangle whether the bar is up or
+        // not, so the only thing a tap changes is what is drawn on top. A note still stacks: its
+        // bar cannot fade while the editor is open, and a bar over the line being typed is worse
+        // than a note that shifts once.
+        //
+        // What that costs is the head of the first page, which the bar covers while it is up and
+        // which cannot be scrolled out from under it, the column being at its top already. The
+        // way to it is the tap that raised the bar, since the same tap takes it away. The
+        // alternative — a strip of the bar's height reserved at the top of the document — buys
+        // those lines with a permanent gap above page one on a screen whose chrome is down most
+        // of the time, and that is the worse trade for a reader.
         Box(Modifier.fillMaxSize().padding(padding)) {
-            Column(Modifier.fillMaxSize()) {
-                FadingBar(visible = chrome.shown) {
+            Box(Modifier.fillMaxSize().padding(vertical = DocumentGap)) {
+                Pages(doc, tool, chrome, wanted) { wanted = null }
+                if (ANNOTATIONS) {
+                    PdfToolbar(
+                        tool = tool,
+                        // Tapping the tool in hand puts it down, the only way back to reading.
+                        onTool = { tool = if (it == tool) Tool.Read else it },
+                        canUndo = doc.canUndo,
+                        canRedo = doc.canRedo,
+                        onUndo = { scope.launch { doc.undo() } },
+                        onRedo = { scope.launch { doc.redo() } },
+                        modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
+                    )
+                }
+            }
+            FadingBar(visible = chrome.shown) {
+                // Opaque, and where a pointer stops: over a page the bar needs a ground of its
+                // own to be read off, and a press it let through would be a press the page reads
+                // at the point it landed — a link hidden behind the title would be followed by a
+                // tap on the title.
+                Box(Modifier.background(MaterialTheme.colorScheme.surface).stopsHere()) {
                     // The bar has one action, and Contents is now what a PDF puts in it: it says
                     // so even on a file carrying no outline, the way it used to say Edit. Where
                     // the annotation tools go is still open ([ANNOTATIONS]) and is not this slot.
@@ -175,21 +207,6 @@ private fun Reader(
                         enabled = marks.isNotEmpty(),
                         onAction = { contents = true },
                     )
-                }
-                Box(Modifier.weight(1f).padding(vertical = DocumentGap)) {
-                    Pages(doc, tool, chrome, wanted) { wanted = null }
-                    if (ANNOTATIONS) {
-                        PdfToolbar(
-                            tool = tool,
-                            // Tapping the tool in hand puts it down, the only way back to reading.
-                            onTool = { tool = if (it == tool) Tool.Read else it },
-                            canUndo = doc.canUndo,
-                            canRedo = doc.canRedo,
-                            onUndo = { scope.launch { doc.undo() } },
-                            onRedo = { scope.launch { doc.redo() } },
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(Gutter),
-                        )
-                    }
                 }
             }
             // Over the document rather than beside it, which is what makes Back and a pull the
