@@ -211,6 +211,9 @@ struct App {
     active_pane: RefCell<Rc<Pane>>,
     title: adw::WindowTitle,
     toasts: adw::ToastOverlay,
+    /// How many toasts this window has put up. For the drills: libadwaita will not say what the
+    /// overlay is showing, and "it says so once rather than once a save" is a count.
+    toasted: Cell<usize>,
     /// Raised across the window when a remote vault stops answering, with a way back. A banner
     /// rather than a toast because it is a state that persists and needs a decision, and one
     /// across the window rather than per tab because it is every tab that is affected.
@@ -383,6 +386,7 @@ impl App {
     }
 
     fn toast(&self, text: &str) {
+        self.toasted.set(self.toasted.get() + 1);
         self.toasts.add_toast(adw::Toast::new(text));
     }
 

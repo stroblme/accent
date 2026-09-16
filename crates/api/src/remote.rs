@@ -71,17 +71,51 @@ impl From<&str> for Failure {
 pub enum Pushed {
     /// The bytes are on the host, and the copy is stamped with what the host says now.
     Sent,
-    /// The host's file moved on since the copy was fetched, so nothing was sent and the host's
-    /// own version stands. The copy, with whatever was written into it, is kept at this path.
-    Stale(PathBuf),
+    /// The host's file moved on since the copy was fetched, so it was left as it is and what had
+    /// been written went up *beside* it under this name in the vault: a conflict copy the tree
+    /// lists, the reader opens and either of the two can be deleted.
+    Conflict(String),
+    /// Neither could go to the host, so what was written is only on this machine — at this path,
+    /// for this reason.
+    Kept(PathBuf, String),
 }
 
-/// Where a cached copy is put when the host will not take it: beside itself, under a name no
-/// fetch writes over, keeping the extension so it still opens in whatever reads that kind.
+/// How many `(drawn)` copies of one document the host may already hold before a refusal gives up
+/// and keeps the bytes here instead. Each one costs a `stat` round trip to rule out, and twenty
+/// unread copies of the same document is a reader with a different problem.
+const DRAWN_COPIES: usize = 20;
+
+/// `notes/doc.pdf` -> `notes/doc (drawn).pdf`, and `notes/doc (drawn 2).pdf` for the next one:
+/// where a copy the host would not take over the original goes instead.
+pub fn drawn_name(rel: &str, nth: usize) -> String {
+    let (stem, ext) = match rel.rsplit_once('.') {
+        // A dot in a directory's name is not this file's extension.
+        Some((stem, ext)) if !ext.contains('/') => (stem, format!(".{ext}")),
+        _ => (rel, String::new()),
+    };
+    match nth {
+        1 => format!("{stem} (drawn){ext}"),
+        n => format!("{stem} (drawn {n}){ext}"),
+    }
+}
+
+/// Where a cached copy is put when the host will not take it anywhere: beside itself, under a
+/// name no fetch writes over, keeping the extension so it still opens in whatever reads that
+/// kind. The last resort only — a refusal the host accepts a copy of lands in the vault, where
+/// the reader can reach it.
 fn kept_path(dest: &Path) -> PathBuf {
     match dest.extension() {
         Some(ext) => dest.with_extension(format!("kept.{}", ext.to_string_lossy())),
         None => dest.with_extension("kept"),
+    }
+}
+
+/// Copy the written-on cache file somewhere no fetch overwrites, and say why it had to stay here.
+fn keep(dest: &Path, why: String) -> Pushed {
+    match std::fs::copy(dest, kept_path(dest)) {
+        Ok(_) => Pushed::Kept(kept_path(dest), why),
+        // Nowhere left to put it: the cached copy itself holds the bytes until the next fetch.
+        Err(e) => Pushed::Kept(dest.to_path_buf(), format!("{why}; {e}")),
     }
 }
 
@@ -390,8 +424,13 @@ impl Remote {
     /// drawn on without the host knowing: a file that moved under it is a conflict for the reader
     /// to settle, not one to overwrite. On a match the copy goes up and the stamp is written
     /// again from what the host says afterwards, so the fetch that follows the host's own watcher
-    /// event does not pull our bytes back over a page that is still being drawn on.
-    pub fn push(&self, rel: &str) -> std::io::Result<Pushed> {
+    /// event does not pull our bytes back over a page that is still being drawn on. On a mismatch
+    /// it goes [beside](Self::push_beside) the original instead.
+    ///
+    /// `drawn` is the copy an earlier refusal of this same document already left on the host, so
+    /// that a reader who keeps drawing writes that one again rather than a numbered copy per
+    /// stroke.
+    pub fn push(&self, rel: &str, drawn: Option<&str>) -> std::io::Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -408,15 +447,51 @@ impl Remote {
             .ok()
             .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
         if current != fetched {
-            let kept = kept_path(&dest);
-            std::fs::copy(&dest, &kept)?;
-            return Ok(Pushed::Stale(kept));
+            return Ok(self.push_beside(&dest, rel, drawn));
         }
         self.upload(&dest, rel)?;
         if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
             let _ = std::fs::write(&stamp, serde_json::to_vec(&now).unwrap_or_default());
         }
         Ok(Pushed::Sent)
+    }
+
+    /// The refusal's other half: the written-on copy goes up as `<name> (drawn).pdf` in the same
+    /// folder, the way a note's conflict copy lands in the vault, and the original is not touched.
+    /// It is then a file like any other — the tree lists it, it opens and it syncs — so the reader
+    /// can hold the two against each other and delete one, where a copy left in the ssh cache was
+    /// reachable only through the text of a toast.
+    ///
+    /// A second conflict on the same document takes the next free number rather than writing over
+    /// `(drawn)`, whose ink nobody has looked at yet; only the refusals of one conflict, which
+    /// carry `drawn`, write the same copy again. If not even the copy can go up, the bytes stay
+    /// here — the one place a `.kept.pdf` still appears — and the toast says so.
+    fn push_beside(&self, dest: &Path, rel: &str, drawn: Option<&str>) -> Pushed {
+        let named = match drawn {
+            Some(name) => Ok(name.to_string()),
+            None => self.free_drawn_name(rel),
+        };
+        match named.and_then(|name| self.upload(dest, &name).map(|()| name)) {
+            Ok(name) => Pushed::Conflict(name),
+            Err(e) => keep(dest, e.to_string()),
+        }
+    }
+
+    /// The first of `<name> (drawn).pdf`, `<name> (drawn 2).pdf`, … the host does not hold.
+    fn free_drawn_name(&self, rel: &str) -> std::io::Result<String> {
+        for nth in 1..=DRAWN_COPIES {
+            let name = drawn_name(rel, nth);
+            let held: Option<crate::Etag> = self
+                .call("stat", json!([&name]))
+                .map_err(RpcError::io_error)?;
+            if held.is_none() {
+                return Ok(name);
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!("{DRAWN_COPIES} drawn copies of it are already there"),
+        ))
     }
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
@@ -826,7 +901,7 @@ fn mb(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::kept_path;
+    use super::{drawn_name, kept_path};
     use std::path::Path;
 
     /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind
@@ -836,5 +911,16 @@ mod tests {
         assert_eq!(kept_path(Path::new("/c/a.pdf")), Path::new("/c/a.kept.pdf"));
         assert_eq!(kept_path(Path::new("/c/a")), Path::new("/c/a.kept"));
         assert_ne!(kept_path(Path::new("/c/a.pdf")), Path::new("/c/a.pdf"));
+    }
+
+    /// The conflict copy sits in the original's folder, under the original's extension, so the
+    /// tree lists it beside what it came from and it opens in the same reader.
+    #[test]
+    fn a_drawn_copy_is_named_beside_the_original() {
+        assert_eq!(drawn_name("a/doc.pdf", 1), "a/doc (drawn).pdf");
+        assert_eq!(drawn_name("a/doc.pdf", 2), "a/doc (drawn 2).pdf");
+        assert_eq!(drawn_name("doc", 1), "doc (drawn)");
+        // A dot in a folder's name is not the file's extension.
+        assert_eq!(drawn_name("a.d/doc", 1), "a.d/doc (drawn)");
     }
 }

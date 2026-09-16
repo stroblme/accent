@@ -141,12 +141,16 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 }
 
 /// The etag gate on the way back to a host: a page appended to a document whose host copy has
-/// moved since it was fetched must not overwrite it, and the ink must not be dropped either.
+/// moved since it was fetched must not overwrite it, and the ink must not be dropped either — it
+/// goes beside the original in the vault, as `<name> (drawn).pdf`.
 ///
 /// The move is made by stamping the cached copy with an etag the host never had, rather than by
 /// really writing on the host: a host-side write is reported by its own watcher, and the refetch
 /// that follows wins the race against the save under test every time. What `push` compares is
 /// the stamp against the host, so this is the same input from where it stands.
+///
+/// A second page is appended after the first refusal, which is the reader who keeps drawing: it
+/// must write the same copy again rather than a numbered one, and it must not toast again.
 pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -169,14 +173,31 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
             pdf.page_count(),
             vault_pages(&app, &key)
         );
+        let kept = pdf.path().with_extension("kept.pdf");
+        let (first, second) = (
+            accent_api::remote::drawn_name(&key, 1),
+            accent_api::remote::drawn_name(&key, 2),
+        );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
         written(&app).await;
-        let kept = pdf.path().with_extension("kept.pdf");
         println!(
-            "bench pdf stale refused pages={} in_vault {} kept={}",
+            "bench pdf stale refused pages={} in_vault {} drawn {} said={} {:?} kept={}",
             pdf.page_count(),
             vault_pages(&app, &key),
+            vault_pages(&app, &first),
+            app.toasted.get(),
+            bench_said(&app),
             kept.exists()
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+        written(&app).await;
+        println!(
+            "bench pdf stale again pages={} in_vault {} drawn {} said={} numbered={}",
+            pdf.page_count(),
+            vault_pages(&app, &key),
+            vault_pages(&app, &first),
+            app.toasted.get(),
+            vault.exists(&second)
         );
         let _ = std::fs::remove_file(&kept);
         bench_quit(&app);

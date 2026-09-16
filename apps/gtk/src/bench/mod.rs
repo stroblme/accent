@@ -83,8 +83,10 @@ use tags::bench_tags;
 /// name. It writes to the document and moves it, so point it at a scratch copy; and point it at a
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
-/// etag the host never had, appends a page and prints whether the upload refused, whether the
-/// host's copy is untouched and whether the ink was kept.
+/// etag the host never had, appends a page and prints whether the host's copy is untouched and
+/// what `<name> (drawn).pdf` beside it holds, then appends another and prints the same again —
+/// the second refusal must write that same copy rather than a numbered one, and must leave the
+/// toast count where the first put it.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -384,6 +386,16 @@ fn find_search_entry(w: &gtk::Widget) -> Option<gtk::SearchEntry> {
         child = c.next_sibling();
     }
     None
+}
+
+/// What a toast standing over the window reads, which is how a drill sees one: libadwaita gives
+/// no way to ask the overlay what it is showing.
+fn bench_said(app: &Rc<App>) -> Option<String> {
+    let label = find_widget(app.window.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| l.label().starts_with("Cannot "))
+    })?;
+    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
 }
 
 /// The first widget in `root`'s subtree, `root` included, that `found` accepts.

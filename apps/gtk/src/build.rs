@@ -268,6 +268,7 @@ pub fn build_window(
         active_pane: RefCell::new(first.clone()),
         title,
         toasts,
+        toasted: Cell::new(0),
         connection,
         retry: Default::default(),
         connect,

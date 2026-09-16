@@ -85,6 +85,12 @@ pub struct PdfTab {
     /// vault's copy — and whether another save landed while it was. See [`PdfTab::claim_upload`].
     pub(super) uploading: Cell<bool>,
     pub(super) upload_again: Cell<bool>,
+    /// The far end refused the last upload and the reader has been told so once: the strokes
+    /// after it are refused for the same reason and say nothing. See [`PdfTab::told_conflict`].
+    pub(super) conflict_told: Cell<bool>,
+    /// The conflict copy that refusal left beside the document, for the next one to write again
+    /// rather than leaving one numbered copy per stroke.
+    pub(super) conflict_copy: RefCell<Option<String>>,
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
@@ -194,6 +200,8 @@ pub fn open(
         save_pending: Cell::new(false),
         uploading: Cell::new(false),
         upload_again: Cell::new(false),
+        conflict_told: Cell::new(false),
+        conflict_copy: RefCell::new(None),
         saved: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
@@ -661,6 +669,27 @@ impl PdfTab {
     pub fn upload_done(&self) -> bool {
         self.uploading.set(false);
         self.upload_again.replace(false)
+    }
+
+    /// The far end refused this document and left what was written at `copy`, if it could put it
+    /// anywhere. `true` the first time, which is the one the reader is told about: a reader who
+    /// keeps drawing writes once a second and every one of those is refused for the same reason,
+    /// so the rest go quietly into the same copy.
+    pub fn told_conflict(&self, copy: Option<String>) -> bool {
+        *self.conflict_copy.borrow_mut() = copy;
+        !self.conflict_told.replace(true)
+    }
+
+    /// Where the last refusal put what was written, for the next one to write again.
+    pub fn conflict_copy(&self) -> Option<String> {
+        self.conflict_copy.borrow().clone()
+    }
+
+    /// The conflict is over — an upload landed, or the document was re-read from what the far end
+    /// now holds — so the next refusal is news again and takes a name of its own.
+    pub fn clear_conflict(&self) {
+        self.conflict_told.set(false);
+        *self.conflict_copy.borrow_mut() = None;
     }
 
     /// The bookmarks, for the Outline pane.
@@ -1224,6 +1253,9 @@ impl PdfTab {
                 self.goto_page(last);
             }
             Reply::Reloaded(sizes) => {
+                // Whatever the far end had that we did not is in hand now, so a refusal after
+                // this is a new conflict and worth saying again.
+                self.clear_conflict();
                 // The anchor is taken now rather than when the reload was asked for: the reader
                 // may have moved while the file was being re-read.
                 let anchor = self.view.anchor().clamped(sizes.len());
