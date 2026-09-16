@@ -277,6 +277,11 @@ impl App {
                 app.cannot(&format!("save {name}"), why);
             }
         ));
+        pdf.connect_saved(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf| app.push_pdf(pdf)
+        ));
         pdf.connect_export(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -327,13 +332,75 @@ impl App {
         self.active_doc()?.pdf().cloned()
     }
 
-    /// Whether a PDF tab's file is one this machine may write to.
+    /// A PDF that has just been written out goes back to the host, on a remote vault.
     ///
-    /// On a remote vault `PdfTab::path()` is the ssh cache copy, and writing annotations there
-    /// would change a scratch file nobody reads. A loose tab is an absolute path here, so it is
-    /// writable whatever vault the window is on.
-    fn pdf_is_writable(&self, pdf: &Rc<pdftab::PdfTab>) -> bool {
-        doc::is_loose_key(&pdf.key()) || !self.vault().is_some_and(|v| v.is_remote())
+    /// The render thread saves into the file it was handed, which there is the ssh cache copy:
+    /// until this runs the document on the host has none of the ink. Blocking ssh I/O, so it is a
+    /// worker like every other remote call, and one at a time per tab — the strokes that land
+    /// while it is out collapse into one more upload after it.
+    fn push_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
+        let key = pdf.key();
+        let Some(remote) = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(&key))
+            .and_then(|v| v.remote())
+            .cloned()
+        else {
+            return;
+        };
+        if !pdf.claim_upload() {
+            return;
+        }
+        let (weak_app, weak_pdf) = (Rc::downgrade(self), Rc::downgrade(pdf));
+        let drawn = pdf.conflict_copy();
+        glib::spawn_future_local(async move {
+            let asked = key.clone();
+            let sent = gio::spawn_blocking(move || remote.push(&asked, drawn.as_deref())).await;
+            let (Some(app), Some(pdf)) = (weak_app.upgrade(), weak_pdf.upgrade()) else {
+                return;
+            };
+            let what = format!("save {}", doc::file_name(&key));
+            match sent {
+                Ok(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
+                // The host's copy moved while this one was being drawn on. Overwriting it would
+                // lose whatever moved it, so the drawing went beside it in the vault instead and
+                // the reader is told what it is called — once, however long they keep drawing.
+                Ok(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
+                    if pdf.told_conflict(Some(copy.clone())) {
+                        app.cannot(
+                            &what,
+                            format!(
+                                "it changed on {}; the drawing is saved as {}",
+                                app.host(),
+                                doc::file_name(&copy)
+                            ),
+                        );
+                    }
+                }
+                // Not even the copy would go up. The drawing is on this machine only, so say
+                // where before anything else writes over it.
+                Ok(Ok(accent_api::remote::Pushed::Kept(at, why))) => {
+                    if pdf.told_conflict(None) {
+                        app.cannot(
+                            &what,
+                            format!(
+                                "it changed on {} and the copy beside it would not go either \
+                                 ({why}); the drawing is kept at {}",
+                                app.host(),
+                                at.display()
+                            ),
+                        );
+                    }
+                }
+                Ok(Err(e)) => app.cannot(&what, e),
+                Err(_) => app.cannot(&what, "the upload panicked"),
+            }
+            // Drawn on while it was out, and still the same file: once more, however many saves
+            // landed meanwhile.
+            if pdf.upload_done() && pdf.key() == key {
+                app.push_pdf(&pdf);
+            }
+        });
     }
 
     /// Insert Template…: a template's text at the caret of the active note, whose stem is what
@@ -432,9 +499,6 @@ impl App {
     /// invented as a gesture rather than observed. See NOTEPAD.
     pub fn pdf_add_page(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
-        if !self.pdf_is_writable(&pdf) {
-            return self.needs_vault("add a page");
-        }
         pdf.add_page();
     }
 
@@ -451,10 +515,6 @@ impl App {
             return self.sync_status();
         }
         let Some(pdf) = self.active_pdf() else { return };
-        if showing && !self.pdf_is_writable(&pdf) {
-            self.drawing_button.set_active(false);
-            return self.needs_vault("draw on a PDF");
-        }
         self.drawing.set(showing);
         self.drawing_button.set_active(showing);
         // Putting the tools away puts the pen down with them; taking them out arms the last tool.
@@ -470,9 +530,6 @@ impl App {
     /// Pick up one of the tools. The same one twice goes back to reading, the tools staying out.
     pub fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
         let Some(pdf) = self.active_pdf() else { return };
-        if !self.pdf_is_writable(&pdf) {
-            return self.needs_vault("draw on a PDF");
-        }
         let wanted = match pdf.mode() == mode {
             true => pdfview::Mode::Select,
             false => mode,
@@ -561,9 +618,6 @@ impl App {
     /// Write the note links that highlight the open PDF into the file, as real annotations.
     pub fn export_highlights(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
-        if !self.pdf_is_writable(&pdf) {
-            return self.needs_vault("export highlights");
-        }
         pdf.export_highlights(theme::accent_rgb());
     }
 
@@ -618,9 +672,7 @@ impl App {
     /// links to, the command greys out in the page's menu and in the palette rather than being
     /// offered and answering "Nothing new to export".
     pub fn sync_export(&self) {
-        let offered = self
-            .active_pdf()
-            .is_some_and(|pdf| pdf.has_note_links() && self.pdf_is_writable(&pdf));
+        let offered = self.active_pdf().is_some_and(|pdf| pdf.has_note_links());
         if let Some(action) = self
             .window
             .lookup_action("pdf-export-highlights")

@@ -150,13 +150,22 @@ impl App {
                     // Re-point the picture at the same file: the texture it holds is of the old
                     // contents, so redrawing alone would show them again. The file is found as
                     // opening it was, which on a remote vault fetches a fresh copy.
-                    Doc::Image(_) => {
+                    Doc::Image(image) => {
                         let picture = picture_of(doc.page()).map(|p| p.downgrade());
+                        let image = Rc::downgrade(image);
                         self.local_copy(&rel, &self.root().join(&rel), move |app, copy| {
                             match (picture.and_then(|p| p.upgrade()), copy) {
                                 (Some(picture), Ok(copy)) => {
                                     picture.set_file(gio::File::NONE);
                                     picture.set_filename(Some(copy));
+                                    // The size a zoomed picture asks for was worked out from the
+                                    // paintable that has just gone, so a file of another size was
+                                    // drawn at its own while the readout kept saying the old
+                                    // percentage. Asked again from the new one, so the zoom means
+                                    // the same thing either side of a reload.
+                                    if let Some(image) = image.upgrade() {
+                                        zoom::set_image_zoom(&picture, image.zoom.get());
+                                    }
                                 }
                                 (Some(_), Err(e)) => app.cannot("reload", e),
                                 (None, _) => {}

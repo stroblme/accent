@@ -102,7 +102,7 @@ pub fn image_zoom_label(image: &doc::Viewer) -> String {
 ///
 /// A zoomed picture is centred and asks for its exact size, so the scroller scrolls it once it
 /// is larger than the viewport and does not stretch it while it is smaller.
-fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
+pub fn set_image_zoom(picture: &gtk::Picture, zoom: Option<f64>) {
     let size = zoom.and_then(|zoom| {
         let paintable = picture.paintable()?;
         let (w, h) = (paintable.intrinsic_width(), paintable.intrinsic_height());
