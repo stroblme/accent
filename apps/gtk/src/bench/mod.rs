@@ -9,6 +9,7 @@ mod compare;
 mod diagram;
 mod files;
 mod git;
+mod image;
 mod keys;
 mod outline;
 mod panes;
@@ -26,6 +27,7 @@ use files::{
     bench_templates,
 };
 use git::{bench_git, bench_git_init, bench_git_press};
+use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
@@ -65,6 +67,8 @@ use tags::bench_tags;
 /// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
 /// long paragraphs in a repository it makes itself and types at the start of the two lines whose
 /// padding tag does not begin at the newline before them.
+/// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
+/// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
 /// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
@@ -166,6 +170,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
+    let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").is_ok();
@@ -211,6 +216,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !paths
         && !shell_keys
         && !term
+        && picture.is_none()
         && !close
         && !hidden
     {
@@ -285,6 +291,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if term {
             return bench_term(&app);
+        }
+        if let Some(arg) = picture {
+            return bench_image(&app, &arg);
         }
         if close {
             return bench_close(&app);
