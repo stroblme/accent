@@ -73,9 +73,10 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
-/// the save has run. It writes to the document, so point it at a scratch copy; and point it at a
-/// document of several pages, since a one-page PDF is wholly on screen whatever the scroll
-/// offset was.
+/// the save has run. It then renames the file the way a dropped row does and appends another page
+/// to it, which is the render thread following the new name. It writes to the document and moves
+/// it, so point it at a scratch copy; and point it at a document of several pages, since a
+/// one-page PDF is wholly on screen whatever the scroll offset was.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.

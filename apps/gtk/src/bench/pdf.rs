@@ -50,6 +50,52 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
                 pdf.place().page,
                 sizes
             );
+            bench_pdf_renamed(&app);
+        });
+    });
+}
+
+/// The same document under a new name: rename it the way a dropped row does, then append another
+/// page and read the file back.
+///
+/// The render thread owns the path it reloads from and saves to, so a rename it was never told
+/// about shows up here as a page count on disk that did not grow — the save going to a name that
+/// is no longer there.
+fn bench_pdf_renamed(app: &Rc<App>) {
+    let (Some(pdf), Some(ops)) = (app.active_pdf(), app.ops().cloned()) else {
+        println!("bench pdf no_tab");
+        return bench_quit(app);
+    };
+    let from = pdf.key();
+    let Some(stem) = from.strip_suffix(".pdf") else {
+        println!("bench pdf not_a_pdf {from}");
+        return bench_quit(app);
+    };
+    let (to, was) = (format!("{stem}-renamed.pdf"), pdf.path());
+    crate::fileops::move_dropped(&ops, &from, &to);
+    let app = app.clone();
+    // The rename runs on a worker and the watcher's event lands a turn after it.
+    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        let Some(pdf) = app.active_pdf() else {
+            println!("bench pdf no_tab");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench pdf renamed key={:?} reads={:?} old_gone={}",
+            pdf.key(),
+            pdf.path().file_name().map(|n| n.to_string_lossy()),
+            !was.exists()
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
+        glib::timeout_add_local_once(Duration::from_millis(1400), move || {
+            let sizes = accent_core::pdf::PdfDoc::open(pdf.path())
+                .and_then(|doc| doc.page_sizes())
+                .unwrap_or_default();
+            println!(
+                "bench pdf renamed_added pages={} on_disk={}",
+                pdf.page_count(),
+                sizes.len()
+            );
             bench_quit(&app);
         });
     });

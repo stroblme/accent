@@ -276,11 +276,18 @@ impl PdfTab {
 
     /// A rename landed: follow the file without losing where the reader is.
     pub fn retarget(&self, root: &Path, key: &str) {
+        let moved = tree_of(&self.path(), &self.key())
+            .unwrap_or_else(|| root.to_path_buf())
+            .join(key);
         *self.key.borrow_mut() = key.to_string();
-        *self.path.borrow_mut() = root.join(key);
+        *self.path.borrow_mut() = moved.clone();
         self.page.set_title(crate::doc::file_name(key));
         self.page
             .set_tooltip(&crate::fileops::display_path(root, key));
+        // The render thread owns the document and the path it reads and writes; without this it
+        // keeps the old name, a reload re-opens a file that is gone, and the pen's next save
+        // fails with "file vanished before save".
+        self.ask(Request::Retarget(moved));
     }
 
     /// Follow the system's light/dark choice, unless this document has been inverted by hand.
@@ -1219,5 +1226,43 @@ pub(super) fn theme_of(dark: bool) -> pdf::Theme {
     match crate::theme::pdf_colours(dark) {
         Some((paper, ink)) => pdf::Theme::Recolour { paper, ink },
         None => pdf::Theme::Plain,
+    }
+}
+
+/// The tree `path` reads `key` out of: `path` with `key`'s own components taken off the end.
+///
+/// A PDF is always read from a file on this machine, which is the vault's own on a local vault
+/// and the ssh cache's copy on a remote one. Both mirror the vault, so a rename moves the key on
+/// the end of whichever tree this tab was opened from — `root.join(key)` would point a remote
+/// tab at the host's path, where there is nothing here to read.
+fn tree_of(path: &Path, key: &str) -> Option<PathBuf> {
+    let mut tree = path.to_path_buf();
+    for _ in Path::new(key).components() {
+        if !tree.pop() {
+            return None;
+        }
+    }
+    Some(tree)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rename_moves_the_key_on_the_end_of_the_tree_the_tab_reads_from() {
+        let tree = |path: &str, key: &str| tree_of(Path::new(path), key);
+        // A local vault: the tree is the vault root.
+        assert_eq!(
+            tree("/vault/papers/a.pdf", "papers/a.pdf"),
+            Some(PathBuf::from("/vault"))
+        );
+        // A remote one: the same key under the ssh cache's mirror of the vault.
+        assert_eq!(
+            tree("/cache/host/papers/a.pdf", "papers/a.pdf"),
+            Some(PathBuf::from("/cache/host"))
+        );
+        // Nothing sensible to say when the key is longer than the path it was read from.
+        assert_eq!(tree("/a.pdf", "deep/nest/a.pdf"), None);
     }
 }

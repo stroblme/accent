@@ -1,6 +1,7 @@
 //! What crosses the channel between the tab and the thread that renders its document.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 use accent_api::PdfLink;
@@ -151,4 +152,7 @@ pub enum Request {
     /// where there is one, is told when that is done — which is what the window close waits on.
     Save(Option<Sender<()>>),
     Reload,
+    /// A rename landed: read and write this path from now on. The document itself is untouched —
+    /// a rename moves no bytes — so nothing is re-opened and no tile is thrown away.
+    Retarget(PathBuf),
 }
