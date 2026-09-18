@@ -58,7 +58,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
 /// `=insert:<rel_note>` puts each template that has a stop at the caret of that note, as Insert
 /// Template does: at its end, half way down, at its end with every block folded, and at its end
 /// followed by a Backspace, which ends the snippet through GtkSourceView's own scroll. Prints the
-/// view's vertical adjustment and top line before, after, and after a scroll back to the top.
+/// view's vertical adjustment and top line before, after, and after a scroll back to the top; the
+/// folded case has to come out with the template on screen, the fold it landed in open. Before
+/// them, a Go to Line into the note with every block folded, which has to come out on its line.
 fn bench_template_insert(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -80,6 +82,15 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                 tab.cursor_line(),
             );
         };
+        // First the jump an insertion's reveal copies: Go to Line into a note with every block
+        // folded, which has to land on the line once the fold it opens is measured.
+        tab.fold_all();
+        let line = tab.buffer.line_count() * 9 / 10;
+        tab.goto_line(line, 1);
+        measured().await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        say("goto", &format!("line_{line}"), "folded");
+        tab.unfold_all();
         for template in vault.templates().unwrap_or_default() {
             let Ok((text, stops)) = vault.render_template(&template, "Bench") else {
                 continue;
@@ -100,7 +111,7 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                     _ => tab.buffer.end_iter(),
                 };
                 tab.buffer.place_cursor(&at);
-                tab.scroll_to_caret(0.5);
+                tab.scroll_to_caret(0.5, false);
                 glib::timeout_future(Duration::from_millis(500)).await;
                 say(&template, case, "before");
                 tab.insert_stops(&text, &stops);
@@ -108,6 +119,7 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                     let mut at = editor::caret(&tab.buffer);
                     tab.buffer.backspace(&mut at, true, true);
                 }
+                measured().await;
                 glib::timeout_future(Duration::from_millis(600)).await;
                 say(&template, case, "after");
                 adj.set_value(0.0);
@@ -117,6 +129,17 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// Until GTK has measured every line of the views: its measuring idle outranks a default idle, so
+/// one of those running is the sign. A fold the insertion opened can take seconds in a debug build.
+async fn measured() {
+    let done = Rc::new(Cell::new(false));
+    let flag = done.clone();
+    glib::idle_add_local_once(move || flag.set(true));
+    while !done.get() {
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
 }
 
 /// `=walk:<rel_note>` puts the first template with two stops or more at the end of that note,

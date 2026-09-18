@@ -635,17 +635,23 @@ impl Tab {
                 self.analyse();
                 // The snippet put the caret on the first stop; a tab still opening scrolls there
                 // once it is laid out, as a jump does.
-                self.scroll_to_caret(0.3);
+                self.scroll_to_caret(0.3, false);
             }
         }
     }
 
-    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk.
+    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk. A fold the
+    /// text would land in is opened first, or the text would be folded away with it.
     pub fn insert_stops(&self, text: &str, stops: &[usize]) {
+        let opened = crate::fold::reveal_insertion(self.text_buffer(), &caret(&self.buffer));
         let mut at = caret(&self.buffer);
         match stops.is_empty() {
             true => self.buffer.insert(&mut at, text),
             false => self.push_snippet(&snippet(text, stops), &mut at),
+        }
+        // The snippet scrolled to the caret already, short of it if the fold held many lines.
+        if opened {
+            self.scroll_to_caret(0.3, true);
         }
     }
 }
