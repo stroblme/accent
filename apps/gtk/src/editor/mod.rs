@@ -1069,11 +1069,7 @@ impl Tab {
     /// What the server says can be folded. Whatever is hidden stays hidden if its header survived
     /// the re-analysis, at wherever the line has moved to.
     pub fn set_folds(&self, folds: Vec<Fold>) {
-        // Taken rather than borrowed across the call: `resync` folds, folding moves the caret off
-        // a line it is hiding, and a `mark-set` handler is one hook away from asking this tab what
-        // its folds are.
-        let old = self.folds.take();
-        fold::resync(self.text_buffer(), &old, &folds);
+        fold::resync(self.text_buffer(), &folds);
         self.fold_renderer
             .set_starts(folds.iter().map(|f| f.start_line as i32).collect());
         *self.folds.borrow_mut() = folds;
