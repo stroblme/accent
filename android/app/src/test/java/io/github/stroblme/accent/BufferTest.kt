@@ -37,4 +37,16 @@ class BufferTest {
         buffer.load("second note")
         assertFalse("undo must not reach the note before", buffer.undoState.canUndo)
     }
+
+    /** Leaving a note asks only when going would lose something nothing else can write. */
+    @Test
+    fun `an exit asks only over edits saving was paused on`() {
+        val changed = Open("a.md", text = "on disk", changedOnDisk = true)
+        assertTrue(changed.wouldLose("on disk and typed"))
+        assertFalse("nothing was typed", changed.wouldLose("on disk"))
+        assertFalse(
+            "saving runs, so the exit writes them",
+            changed.copy(changedOnDisk = false).wouldLose("on disk and typed"),
+        )
+    }
 }

@@ -41,9 +41,9 @@ fun HomeScreen(model: VaultModel) {
     // Whatever opens arrives with its chrome up, however the last thing read was left.
     LaunchedEffect(state.open?.rel, state.pdf) { chrome.show() }
 
-    // Back undoes the last thing that opened, in the order it opened: the screen over the note,
-    // then the note. Only with nothing left does it leave the app.
-    BackHandler(enabled = screen != Screen.Home) { screen = Screen.Home }
+    // Back undoes the last thing that opened, in the order it opened: the screen over the note
+    // (Browse's handler is its own, below), then the note. Only with nothing left does it leave
+    // the app.
     BackHandler(enabled = screen == Screen.Home && (state.open != null || state.pdf != null)) {
         model.close()
     }
@@ -106,6 +106,10 @@ fun HomeScreen(model: VaultModel) {
                 enter = slideInVertically(arriving()) { it } + fadeIn(arriving()),
                 exit = slideOutVertically(leaving()) { it } + fadeOut(leaving()),
             ) {
+                // Composed with the panel rather than up top: the handler composed last is asked
+                // first, and a PDF composes one of its own (Back through its links) after this
+                // screen has.
+                BackHandler(enabled = screen == Screen.Browse) { screen = Screen.Home }
                 BrowseScreen(
                     model = model,
                     children = state.children,

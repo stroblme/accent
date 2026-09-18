@@ -46,6 +46,22 @@ class NavigationTest {
         assertEquals(0, pages.to(0, 0f, width, 1f).second)
     }
 
+    /**
+     * Back after a jump: the place left is kept on the paper, so a pinch at the destination does
+     * not send the reader back to the right row at the wrong height.
+     */
+    @Test
+    fun `a place left at one zoom is found again at another`() {
+        val (page, top) = pages.place(pages.top(2, width, 1f) + 182f, width, 1f)
+        assertEquals(2, page)
+        assertEquals(100f, top, 1f)
+
+        val (row, into) = pages.to(page, top, width, 8f)
+        assertEquals(2, row)
+        // The column counts whole pixels, and half of one at fit width is four at 8×.
+        assertEquals(1452f, into.toFloat(), 5f)
+    }
+
     /** A destination past the end of its own page is an overrun, and falls through like one. */
     @Test
     fun `a destination past the end of a page falls onto the next`() {
