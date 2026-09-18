@@ -39,6 +39,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Paste in Terminal",
         &["<Control><Shift>v"],
     ),
+    // A paste that never makes a link of a URL over a selection. Unbound: `Ctrl+Shift+V` is
+    // Paste in Terminal's chord, which a text tab in front answers with this.
+    ("win.paste-plain", "Paste as Plain Text", &[]),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
     ("win.split-right", "Split Right", &["<Control>backslash"]),
@@ -272,18 +275,20 @@ impl App {
                 }
             }
             "terminal" => self.open_terminal(),
-            // Nothing to do over any other tab: the editor and the PDF have their own copy, and a
-            // paste into a document is GtkTextView's.
+            // Nothing to do over any other tab: the editor and the PDF have their own copy.
             "terminal-copy" => {
                 if let Some(Doc::Terminal(term)) = self.active_doc() {
                     term.copy();
                 }
             }
-            "terminal-paste" => {
-                if let Some(Doc::Terminal(term)) = self.active_doc() {
-                    term.paste();
-                }
-            }
+            // `Ctrl+Shift+V` over a text tab is Paste as Plain Text: an application accelerator
+            // is dispatched at the window, so the editor cannot claim the chord for itself.
+            "terminal-paste" => match self.active_doc() {
+                Some(Doc::Terminal(term)) => term.paste(),
+                Some(Doc::Text(tab)) => tab.paste_verbatim(),
+                _ => {}
+            },
+            "paste-plain" => self.with_active(Tab::paste_verbatim),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);

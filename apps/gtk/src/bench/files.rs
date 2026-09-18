@@ -3,7 +3,8 @@
 use super::*;
 
 /// What New from Template would list: every template, and the destination each one names today.
-/// `=open` then makes each one's note as Create does, and prints whether its caret is on screen.
+/// `=open` then makes each one's note as Create does, and prints whether its caret is on screen;
+/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]).
 ///
 /// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
 /// `accent-target:` directive and the rendered target end to end without a widget.
@@ -18,7 +19,11 @@ pub(super) fn bench_templates(app: &Rc<App>) {
             println!("bench template_target {rel} {target}");
         }
     }
-    if std::env::var("ACCENT_BENCH_TEMPLATE").as_deref() != Ok("open") {
+    let arg = std::env::var("ACCENT_BENCH_TEMPLATE").unwrap_or_default();
+    if let Some(rel) = arg.strip_prefix("insert:") {
+        return bench_template_insert(app, rel);
+    }
+    if arg != "open" {
         return bench_quit(app);
     }
     let (app, vault) = (app.clone(), vault.clone());
@@ -41,6 +46,70 @@ pub(super) fn bench_templates(app: &Rc<App>) {
             let on =
                 seen.y() <= caret.y() && caret.y() + caret.height() <= seen.y() + seen.height();
             println!("bench template_caret {rel} on_screen={on}");
+        }
+        bench_quit(&app);
+    });
+}
+
+/// `=insert:<rel_note>` puts each template that has a stop at the caret of that note, as Insert
+/// Template does: at its end, half way down, at its end with every block folded, and at its end
+/// followed by a Backspace, which ends the snippet through GtkSourceView's own scroll. Prints the
+/// view's vertical adjustment and top line before, after, and after a scroll back to the top.
+fn bench_template_insert(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let (Some(vault), Some(tab)) = (app.vault(), app.tab_for(&rel)) else {
+            return bench_quit(&app);
+        };
+        let adj = tab.view.vadjustment().expect("bench adjustment");
+        let original = tab.text();
+        let say = |template: &str, case: &str, when: &str| {
+            let (top, _) = tab.view.line_at_y(tab.view.visible_rect().y());
+            println!(
+                "bench template_insert {template} {case} {when} value={:.0} upper={:.0} page={:.0} top_line={} caret_line={}",
+                adj.value(),
+                adj.upper(),
+                adj.page_size(),
+                top.line(),
+                tab.cursor_line(),
+            );
+        };
+        for template in vault.templates().unwrap_or_default() {
+            let Ok((text, stops)) = vault.render_template(&template, "Bench") else {
+                continue;
+            };
+            if stops.is_empty() {
+                continue;
+            }
+            for case in ["end", "middle", "folded", "backspace"] {
+                tab.set_text(&original);
+                tab.unfold_all();
+                // The analysis debounce is what knows the note's folds.
+                glib::timeout_future(Duration::from_millis(500)).await;
+                if case == "folded" {
+                    tab.fold_all();
+                }
+                let at = match case {
+                    "middle" => tab.buffer.iter_at_offset(tab.buffer.char_count() / 2),
+                    _ => tab.buffer.end_iter(),
+                };
+                tab.buffer.place_cursor(&at);
+                tab.scroll_to_caret(0.5);
+                glib::timeout_future(Duration::from_millis(500)).await;
+                say(&template, case, "before");
+                tab.insert_stops(&text, &stops);
+                if case == "backspace" {
+                    let mut at = editor::caret(&tab.buffer);
+                    tab.buffer.backspace(&mut at, true, true);
+                }
+                glib::timeout_future(Duration::from_millis(600)).await;
+                say(&template, case, "after");
+                adj.set_value(0.0);
+                glib::timeout_future(Duration::from_millis(600)).await;
+                say(&template, case, "top");
+            }
         }
         bench_quit(&app);
     });

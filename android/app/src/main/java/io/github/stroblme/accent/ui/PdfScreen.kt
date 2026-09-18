@@ -305,6 +305,12 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      * away takes its entry with it.
      */
     val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
+    /**
+     * Where each jump in this document was taken from, the latest last: what Back retraces before
+     * it leaves. Kept as a page and points down it rather than the row and offset the column was
+     * at, which are pixels at one zoom and would be wrong after a pinch between the jump and Back.
+     */
+    val back = remember(doc) { mutableStateListOf<Pair<Int, Float>>() }
     // [onTap] captures its predicate once, so what the predicate reads has to be state it can read
     // again. The zoom, the pan, the viewport and the map above all are; the tool in hand is not.
     val inHand by rememberUpdatedState(tool)
@@ -340,6 +346,16 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     }
 
     /**
+     * [goTo], remembering where the reader was so Back returns there. Only jumps come here: a
+     * link and a bookmark, as on the desktop. Scrolling is reading, and a history of every page
+     * passed would have nothing left to go back to.
+     */
+    fun jump(index: Int, top: Float) {
+        back += pages.place(pages.above(list, viewport.width, zoom), viewport.width, zoom)
+        goTo(index, top)
+    }
+
+    /**
      * Follow a link: down the document, or out of the app.
      *
      * The chrome is left exactly where the reader had it. This used to put it up, to undo a toggle
@@ -350,7 +366,7 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      */
     fun follow(target: LinkTarget) {
         when (target) {
-            is LinkTarget.Page -> goTo(target.page.toInt(), target.top ?: 0f)
+            is LinkTarget.Page -> jump(target.page.toInt(), target.top ?: 0f)
             is LinkTarget.Uri -> leave(context, target.uri)
         }
     }
@@ -380,8 +396,15 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     LaunchedEffect(wanted, viewport) {
         val page = wanted ?: return@LaunchedEffect
         if (viewport.width == 0) return@LaunchedEffect
-        goTo(page, 0f)
+        jump(page, 0f)
         onWent()
+    }
+
+    // Composed before the Contents panel's handler, so an open panel is still what Back closes
+    // first; with nothing left to retrace, Back falls through and leaves the document.
+    BackHandler(enabled = back.isNotEmpty()) {
+        val (page, top) = back.removeAt(back.lastIndex)
+        goTo(page, top)
     }
 
     /** Take what the fingers did to the layer and lay the column out that way. */
@@ -605,6 +628,16 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
     fun to(index: Int, y: Float, width: Int, zoom: Float): Pair<Int, Int> {
         val size = sizes.getOrNull(index) ?: return index to 0
         return at(top(index, width, zoom) + y * (width * zoom / size.width), width, zoom)
+    }
+
+    /**
+     * The page, and the points down it, that [y] pixels from the start lands on at [zoom]: the
+     * inverse of [to], and the form a place is kept in so that [to] can find it again at any zoom.
+     */
+    fun place(y: Float, width: Int, zoom: Float): Pair<Int, Float> {
+        val (index, into) = at(y, width, zoom)
+        val size = sizes.getOrNull(index) ?: return index to 0f
+        return index to into / (width * zoom / size.width)
     }
 }
 

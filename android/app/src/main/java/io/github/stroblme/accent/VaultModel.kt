@@ -69,7 +69,23 @@ data class Open(
      * types into. It belongs to the note in front, so opening another puts it away.
      */
     val finding: Boolean = false,
-)
+    /**
+     * The reader is on the way out of the note — closing it, closing the vault, opening another —
+     * over edits saving was paused on, and has been asked which version to keep
+     * ([VaultModel.answer]).
+     */
+    val leaving: Boolean = false,
+) {
+    /** Whether [typed] holds anything the vault does not have: what a write would put there. */
+    fun dirty(typed: CharSequence): Boolean = typed.toString() != text
+
+    /**
+     * Whether taking [typed] away would lose edits: saving is paused while the file has moved
+     * under the note, so no exit can write them. A banner over a note nobody typed into has
+     * nothing to lose.
+     */
+    fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
+}
 
 data class VaultState(
     val root: String? = null,
@@ -102,6 +118,20 @@ data class VaultState(
 )
 
 /**
+ * What the switcher ranks: every file, then every note a link names that is not there yet, by the
+ * path creating it would give it.
+ *
+ * One list, so the two rank together, and the files first: the ranking is stable, so a file that
+ * is there leads a note only linked to at the same score.
+ */
+class Corpus(files: List<String>, missing: List<String>) {
+    val paths = files + missing
+
+    /** The notes in [paths] that are not there yet: a pick writes one rather than opens it. */
+    val unwritten = missing.toHashSet()
+}
+
+/**
  * The vault, its events, and the one note in front of the reader.
  *
  * Every call into the core is blocking and goes on [Dispatchers.IO]; nothing here touches the
@@ -127,8 +157,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private var vault: Vault? = null
 
-    /** Every file in the vault, for the switcher. See [corpus]. */
-    private var corpus: List<String> = emptyList()
+    /** The exit [leave] is holding while the reader answers, if there is one. */
+    private var held: (suspend () -> Unit)? = null
+
+    /** The switcher's files. See [corpus]. */
+    private var corpus: Corpus? = null
 
     /** How far the batch being applied said the walk had got, and when the tree last caught up. */
     private var seen: Progress? = null
@@ -195,7 +228,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         if (reindexed) {
             // The walk is over, so whatever the vault holds is in the index.
             _state.update { it.copy(indexing = false, scanned = 0, phase = null, ready = true) }
-            corpus = emptyList()
+            corpus = null
             relist(_state.value.expanded)
         } else if (touched.isNotEmpty()) {
             relist(touched.intersect(_state.value.children.keys))
@@ -232,16 +265,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         relist(_state.value.expanded)
     }
 
-    /** The switcher's corpus: every file in the vault, fetched the first time it is asked for. */
-    suspend fun corpus(): List<String> {
-        corpus.takeIf { it.isNotEmpty() }?.let { return it }
-        val v = vault ?: return emptyList()
+    /** The switcher's corpus, fetched the first time it is asked for. */
+    suspend fun corpus(): Corpus {
+        corpus?.takeIf { it.paths.isNotEmpty() }?.let { return it }
+        val v = vault ?: return Corpus(emptyList(), emptyList())
         // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
         // the only thing that wants them, rather than after every reconcile.
-        corpus = withContext(Dispatchers.IO) {
-            runCatching { v.filePaths(false) }.getOrDefault(emptyList())
+        val read = withContext(Dispatchers.IO) {
+            Corpus(
+                runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
+                runCatching { v.missingNotes() }.getOrDefault(emptyList()),
+            )
         }
-        return corpus
+        corpus = read
+        return read
     }
 
     /** List every directory the tree has open again. */
@@ -283,17 +320,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openFile(rel: String, find: String? = null) {
         val v = vault ?: return
-        recents.touch(Recents.Kind.Notes, rel)
-        viewModelScope.launch {
-            // What is in the buffer belongs to the note it was typed into, and the buffer is about
-            // to hold another note's text: a write left pending across the swap would put these
-            // words in that file.
-            flush()
+        // What is in the buffer belongs to the note it was typed into, and the buffer is about to
+        // hold another note's text: a write left pending across the swap would put these words in
+        // that file.
+        leave {
+            recents.touch(Recents.Kind.Notes, rel)
             if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
                 path.onSuccess { p -> _state.update { it.copy(pdf = p, open = null) } }
                     .onFailure { fail("Cannot open this file", it) }
-                return@launch
+                return@leave
             }
             val read = withContext(Dispatchers.IO) {
                 runCatching { v.read(rel) to v.conflictsOf(rel) }
@@ -313,10 +349,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Put the note down, writing anything the pause was still holding. */
-    fun close() = viewModelScope.launch {
-        flush()
-        _state.update { it.copy(open = null, pdf = null) }
-    }
+    fun close() = leave { _state.update { it.copy(open = null, pdf = null) } }
 
     /**
      * Put the vault down and go back to the picker.
@@ -328,13 +361,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * counts the calls in flight and frees the object behind the last of them, and the next one
      * throws, which that loop already treats as the end.
      */
-    fun closeVault() = viewModelScope.launch {
-        // Before the handle, because the write goes through it: the buffer is the only copy of
-        // whatever was typed in the last second.
-        flush()
+    fun closeVault() = leave {
+        // After the buffer is written rather than before, because the write goes through the
+        // handle: the buffer is the only copy of whatever was typed in the last second.
         vault?.close()
         vault = null
-        corpus = emptyList()
+        corpus = null
         _state.value = VaultState()
     }
 
@@ -359,18 +391,25 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Write the note back, refusing rather than resolving when the file has moved under it.
      *
      * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
-     * both the edits and the answer nobody has given yet. Same rule as the desktop.
+     * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
+     * that answer given as Keep mine, and writes over whatever is on disk: a save that expects no
+     * particular version is the core's forced write, the desktop's Overwrite.
      */
-    private suspend fun write(text: String) {
+    private suspend fun write(text: String, force: Boolean = false) {
         val v = vault ?: return
         val open = _state.value.open ?: return
-        if (open.changedOnDisk) return
+        if (open.changedOnDisk && !force) return
         val written = withContext(Dispatchers.IO) {
-            runCatching { v.save(open.rel, text, open.etag) }
+            runCatching { v.save(open.rel, text, if (force) null else open.etag) }
         }
         written.onSuccess { etag ->
+            // What was just written is what is on disk, so there is nothing left to choose between.
             _state.update {
-                if (it.open?.rel != open.rel) it else it.copy(open = it.open.copy(text = text, etag = etag))
+                if (it.open?.rel != open.rel) {
+                    it
+                } else {
+                    it.copy(open = it.open.copy(text = text, etag = etag, changedOnDisk = false))
+                }
             }
         }.onFailure { e ->
             when (e) {
@@ -394,6 +433,45 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         if (text != _state.value.open?.text) write(text)
     }
 
+    /**
+     * Take the buffer away — for another note, for none, or with the vault — once [flush] has
+     * written it.
+     *
+     * Edits saving was paused on are what [flush] cannot write, and going anyway would drop them
+     * with nothing said. So the exit is held instead and the reader asked which version to keep
+     * ([Open.leaving]); [answer] lets it go or drops it.
+     */
+    private fun leave(then: suspend () -> Unit) = viewModelScope.launch {
+        if (_state.value.open?.wouldLose(buffer.text) == true) {
+            held = then
+            _state.update { it.copy(open = it.open?.copy(leaving = true)) }
+            return@launch
+        }
+        flush()
+        then()
+    }
+
+    /**
+     * The reader's answer to the exit [leave] is holding: `true` keeps their edits over the
+     * version on disk and goes, `false` goes without them — saving is still paused, so nothing
+     * writes them — and `null` stays, edits and banner as they were.
+     */
+    fun answer(keep: Boolean?) = viewModelScope.launch {
+        val then = held ?: return@launch
+        held = null
+        _state.update { it.copy(open = it.open?.copy(leaving = false)) }
+        if (keep == null) return@launch
+        if (keep) {
+            overwrite().join()
+            // A write that failed has said so, and the edits are still only in the buffer: stay.
+            if (_state.value.open?.wouldLose(buffer.text) == true) return@launch
+        }
+        then()
+    }
+
+    /** Keep mine: write the buffer over the version on disk. */
+    fun overwrite() = viewModelScope.launch { write(buffer.text.toString(), force = true) }
+
     /** Take what is on disk, dropping the edits in the buffer. */
     fun reload() {
         // The banner goes first, so the read that follows is allowed to replace the buffer.
@@ -404,7 +482,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun newNote(rel: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val made = withContext(Dispatchers.IO) { runCatching { v.createNote(rel, null) } }
-        made.onSuccess { openFile(rel) }.onFailure { fail("Cannot create this note", it) }
+        made.onSuccess {
+            // The switcher reads its files again next time, so the note is one of them there.
+            corpus = null
+            openFile(rel)
+        }.onFailure { fail("Cannot create this note", it) }
+    }
+
+    /**
+     * Write a note a link names, and open it: a "Not created" row in the switcher.
+     *
+     * The rows are kept from one walk to the next, so the note may have been written since they
+     * were read — by Syncthing, or by this row before the index caught up — and is then opened.
+     */
+    fun create(rel: String) = viewModelScope.launch {
+        val v = vault ?: return@launch
+        if (withContext(Dispatchers.IO) { v.exists(rel) }) openFile(rel) else newNote(rel)
     }
 
     // ----------------------------------------------------------------------- sync conflicts
@@ -465,7 +558,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------------------ helpers
 
-    /** Someone else wrote a file. Only the open note needs to know. */
+    /**
+     * Someone else wrote a file. Only the open note needs to know.
+     *
+     * A note holding nothing the vault does not have takes the new text as it stands, as the
+     * desktop reloads a clean tab; one holding edits raises the banner, since which of the two to
+     * keep is the reader's call.
+     */
     private fun onChanged(rel: String) {
         val open = _state.value.open ?: return
         if (open.rel != rel) return
@@ -474,13 +573,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val v = vault ?: return@launch
             val read = withContext(Dispatchers.IO) { runCatching { v.read(rel) } }
             val note = read.getOrNull() ?: return@launch
+            val cur = _state.value.open?.takeIf { it.rel == rel } ?: return@launch
+            // Nothing was typed here, so taking the new text loses nothing. The buffer and the
+            // state in one step, as a note is opened.
+            val take = cur.text != note.text && !cur.dirty(buffer.text)
+            if (take) buffer.load(note.text)
             _state.update { s ->
-                val cur = s.open ?: return@update s
-                when {
-                    // Nothing was typed here, so taking the new text loses nothing.
-                    cur.etag != null && cur.text == note.text -> s.copy(open = cur.copy(etag = note.etag))
-                    else -> s.copy(open = cur.copy(changedOnDisk = true))
-                }
+                val now = s.open?.takeIf { it.rel == rel } ?: return@update s
+                s.copy(
+                    open = when {
+                        // Only touched: the text is the one already here.
+                        now.etag != null && now.text == note.text -> now.copy(etag = note.etag)
+                        take -> now.copy(text = note.text, etag = note.etag, changedOnDisk = false)
+                        else -> now.copy(changedOnDisk = true)
+                    },
+                )
             }
         }
     }

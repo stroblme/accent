@@ -29,6 +29,7 @@ mod follow;
 mod keys;
 mod lines;
 mod page;
+mod paste;
 mod search;
 mod text;
 
@@ -312,6 +313,8 @@ pub struct Tab {
     /// The last template pushed into the view, kept only to ask whether its stops are still being
     /// walked: a snippet drops its buffer when it finishes, so that is the question's answer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
+    /// The paste that makes a URL over a selection a link, which `Ctrl+Shift+V` holds back.
+    paste_link: glib::SignalHandlerId,
     debounce: RefCell<Option<glib::SourceId>>,
     autosave: RefCell<Option<glib::SourceId>>,
     cursor: RefCell<Option<glib::SourceId>>,
@@ -449,6 +452,7 @@ pub fn open(
     // first.
     line_clipboard(&view);
     primary_paste(&view);
+    let paste_link = paste::link_paste(&view, flavour);
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
     // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
@@ -596,6 +600,7 @@ pub fn open(
         monitor: RefCell::new(None),
         loading: Cell::new(false),
         snippet: RefCell::new(None),
+        paste_link,
         debounce: RefCell::new(None),
         autosave: RefCell::new(None),
         cursor: RefCell::new(None),

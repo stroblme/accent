@@ -178,6 +178,12 @@ impl Vault {
         Ok(self.inner.file_paths(include_ignored)?)
     }
 
+    /// The notes links name that are not there yet, by the path creating each would give it:
+    /// what the switcher lists after the files.
+    pub fn missing_notes(&self) -> Answer<Vec<String>> {
+        Ok(self.inner.missing_notes()?)
+    }
+
     /// What a link target resolves to, or `None` when nothing in the vault answers to it.
     pub fn resolve_link(&self, target: String) -> Answer<Option<String>> {
         Ok(self.inner.resolve_link(&target)?)
