@@ -39,6 +39,8 @@ pub enum Item {
     /// A file to open, by vault-relative path. Any file, not only a note: a source file
     /// has to be reachable by name too.
     File(String),
+    /// A note a link names that is not there yet, by the path New File would create it at.
+    Missing(String),
     /// A `GAction` on the window, with the label and accelerator to show.
     Command {
         action: String,
@@ -60,7 +62,7 @@ impl Item {
     /// The text the palette matches against and shows first in the row.
     fn text(&self) -> &str {
         match self {
-            Item::File(rel) => rel,
+            Item::File(rel) | Item::Missing(rel) => rel,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
             Item::Vault(key) => key,
@@ -78,7 +80,9 @@ pub struct Sources {
     /// it holds nothing but the user's own moves.
     pub mru: Vec<String>,
     /// Every file and every tag in the vault: the window's own lists, shared rather than copied.
+    /// The files are followed by the notes links name that are not there yet, from `real` on.
     pub files: Rc<Vec<String>>,
+    pub real: usize,
     pub commands: Vec<Item>,
     pub tags: Rc<Vec<String>>,
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
@@ -328,7 +332,7 @@ fn row_factory(
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         // Only a file has an icon: the Files tree's, so a row reads the same in both places.
-        icon.set_visible(matches!(&*entry, Item::File(_)));
+        icon.set_visible(matches!(&*entry, Item::File(_) | Item::Missing(_)));
         match &*entry {
             // A note row reads as basename first, directory after: a vault full of `index.md`
             // files is unreadable the other way round.
@@ -336,6 +340,18 @@ fn row_factory(
                 icon.set_icon_name(Some(crate::doc::icon_for(rel)));
                 name.set_text(basename(rel));
                 dir.set_text(parent_dir(rel));
+            }
+            // The same row, and at its end, where a command keeps its shortcut, what it is not.
+            Item::Missing(rel) => {
+                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
+                name.set_text(basename(rel));
+                dir.set_text(parent_dir(rel));
+                slot.append(
+                    &gtk::Label::builder()
+                        .label("Not created")
+                        .css_classes(["dim-label"])
+                        .build(),
+                );
             }
             Item::Command {
                 action,
@@ -462,6 +478,7 @@ pub fn present(
         recent,
         mru,
         files,
+        real,
         commands,
         tags,
         vaults,
@@ -590,7 +607,10 @@ pub fn present(
                         let used = note_recent.get_or_init(|| places(&files, &mru));
                         rank(&files, used, query, Corpus::Paths)
                             .into_iter()
-                            .map(|i| Rc::new(Item::File(files[i].clone())))
+                            .map(|i| match i < real {
+                                true => Rc::new(Item::File(files[i].clone())),
+                                false => Rc::new(Item::Missing(files[i].clone())),
+                            })
                             .collect()
                     }
                     // Labels and tags are not paths, so they score better under the plain config.

@@ -21,15 +21,14 @@ pub use paths::move_dest;
 pub use transfer::{download, upload};
 
 use self::paths::{
-    already_exists, is_markdown, levels, linked_path, renamed_part, renamed_path, split_typed,
-    typed_path, verb,
+    already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
 };
 use crate::dialogs::{
     CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
 };
 use crate::pathfield::{completions, look_again, path_field};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
-use accent_core::path::{basename, parent_dir};
+use accent_core::path::{basename, linked_path, parent_dir};
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;

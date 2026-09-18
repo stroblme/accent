@@ -147,6 +147,19 @@ pub fn relative(dir: &str, rel: &str) -> String {
     parts.join("/")
 }
 
+/// The file a link that resolves to nothing would create: the target exactly as the link spells
+/// it from the vault root, with `.md` added when it names no extension of its own.
+///
+/// `[[Notes/Foo]]` is `Notes/Foo.md` and `[[Foo]]` is `Foo.md` at the root — not in the linking
+/// note's folder, which is not what the link says. A target that names an extension keeps it,
+/// markdown or not: `[[data.csv]]` asks for a `data.csv`.
+pub fn linked_path(target: &str) -> String {
+    match basename(target).rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => target.to_string(),
+        _ => format!("{target}.md"),
+    }
+}
+
 /// The half-open `rel_path` range that is exactly the descendants of `rel`: `[rel/, rel0)`,
 /// because `'0'` is the byte after `'/'`. Keeps a subtree query on the `rel_path` index where a
 /// `LIKE` would fall back to a scan.
@@ -218,6 +231,18 @@ mod tests {
         assert!(stays_inside("sub", "./x/../../a.md"));
         assert!(!stays_inside("sub", "../../a.md"));
         assert!(!stays_inside("sub", "/a.md"));
+    }
+
+    #[test]
+    fn linked_path_is_what_the_link_says_plus_md_when_it_names_no_extension() {
+        assert_eq!(linked_path("Foo"), "Foo.md");
+        assert_eq!(linked_path("Notes/Foo"), "Notes/Foo.md");
+        // An extension it already carries is kept, whether or not it is markdown.
+        assert_eq!(linked_path("Notes/Foo.md"), "Notes/Foo.md");
+        assert_eq!(linked_path("data.csv"), "data.csv");
+        // A leading dot is part of the name, and a dot in a folder is not the file's.
+        assert_eq!(linked_path(".hidden"), ".hidden.md");
+        assert_eq!(linked_path("v1.2/Notes"), "v1.2/Notes.md");
     }
 
     #[test]

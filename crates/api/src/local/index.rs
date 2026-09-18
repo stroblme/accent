@@ -239,6 +239,11 @@ impl Local {
         self.index().resolve_target(target)
     }
 
+    /// The notes links name that are not there yet, by the path New File would create each at.
+    pub fn missing_notes(&self) -> Result<Vec<String>> {
+        self.index().missing_notes()
+    }
+
     /// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.
     /// A copy of a note that has since been deleted is nothing the resolve UI can act on.
     pub fn conflicts(&self) -> Result<Vec<(String, String)>> {

@@ -30,7 +30,7 @@ build with. This says what to build.
 |---|---|
 | Vault picker | A centred column: the name, one line of explanation, the permission if it is missing, one button, then the recent vaults as plain rows |
 | Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands. The desktop's eight sidebar panes and its palette collapse into this one |
-| Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar above it and, while a find is open, the find bar below it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
+| Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar lying over the top of it and, while a find is open, the find bar below it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages with the same bar a note has drawn over the top of them rather than above them: a page is read at a zoom and an offset the reader chose, and chrome that takes space in the layout moves both every time it comes and goes. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
 | The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
@@ -105,13 +105,19 @@ same `DocumentBar` — the file's name, and the one thing that can be done to it
 `DocumentGap` of clear space, with the content in the rectangle that leaves (`ui/Common.kt`).
 Moving between a note and a PDF should not move what is being read.
 
-The one difference is where the bar sits. A note's takes its space from the layout, because it
-cannot fade while the editor is open and a bar across the line being typed is worse than a note
-that shifts once. A PDF's lies over the pages: a document is read at a zoom and a scroll offset,
-and a bar that is sometimes in the layout gives the column two heights and so two positions for
-the page — tapping for the bar would move the very thing the tap was aimed at. The cost is the
-head of page one, which the bar covers while it is up and which cannot be scrolled clear, the
-column being at its top already; the way to it is the same tap, which takes the bar away again.
+On both, the bar lies over the content rather than above it (`DocumentFrame`). A document is read
+at a scroll offset, and a PDF at a zoom as well, and a bar that is sometimes in the layout gives
+the document two heights and so two positions for what is on it — tapping for the bar would move
+the very thing the tap was aimed at. The cost is the head of the document, which the bar covers
+while it is up and which cannot be scrolled clear, the document being at its top already: on a
+PDF mostly page margin, on a note its first line, and every document opens with its bar up. The
+way to it is the same tap, which takes the bar away again. A strip of the bar's height reserved
+at the top would be a permanent gap on a screen whose chrome is down most of the time.
+
+The editor is the exception. Its bar never fades, so there is nothing to move, and a bar across
+the line being typed would be a cost with nothing bought: the editor keeps clear of it by the
+bar's measured height, outside its scroll. A banner holding a decision goes above the bar rather
+than under it, where the bar would cover it; coming and going, it moves the note once.
 
 The bar's button is a note's Edit and Done. A PDF's is the same button, disabled, for as long as
 there is nothing to edit: a gap where a control belongs is worse than a control that says it is not
@@ -124,7 +130,7 @@ such screen, and it keeps them itself. Applying them twice is a bar that sits lo
 ## Chrome
 
 The desktop fades its chrome while the reader types. A phone has almost none to fade, so the rule
-becomes: the bar above a note and the two buttons go when the content scrolls on, and come back
+becomes: the bar over a note and the two buttons go when the content scrolls on, and come back
 when it scrolls back or is tapped; the keyboard hides the buttons outright. One `Chrome` holds that
 state for the whole screen (`ui/Common.kt`), and what scrolls tells it so.
 

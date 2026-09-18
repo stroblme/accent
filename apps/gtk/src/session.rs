@@ -16,7 +16,11 @@ const SESSION: Duration = Duration::from_secs(1);
 /// What the palette lists, kept warm so the dialog never waits on the vault.
 #[derive(Default)]
 pub struct Corpus {
+    /// Every file, then every note a link names that is not there yet: one list, so Go to File
+    /// ranks them together and a file that is there leads at the same score. `real` is where the
+    /// files end.
     files: Rc<Vec<String>>,
+    real: usize,
     tags: Rc<Vec<String>>,
     /// The index's recently changed notes, up to [`RECENT_NOTES`]: one refresh behind at worst,
     /// which a list of what changed lately can afford.
@@ -33,10 +37,15 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let loaded = gio::spawn_blocking(move || {
+                // Never widened: Go to File has no All toggle, and the tree is where an ignored
+                // file is reached, dimmed but listed.
+                let mut files = vault.file_paths(false).unwrap_or_default();
+                let real = files.len();
+                // A host whose `accent-cli serve` predates the method answers "no such method",
+                // which leaves the files alone.
+                files.extend(vault.missing_notes().unwrap_or_default());
                 (
-                    // Never widened: Go to File has no All toggle, and the tree is where an
-                    // ignored file is reached, dimmed but listed.
-                    vault.file_paths(false).unwrap_or_default(),
+                    (files, real),
                     vault
                         .tags()
                         .unwrap_or_default()
@@ -47,9 +56,10 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Ok((files, tags, recent))) = (weak.upgrade(), loaded) {
+            if let (Some(app), Ok(((files, real), tags, recent))) = (weak.upgrade(), loaded) {
                 *app.corpus.borrow_mut() = Corpus {
                     files: Rc::new(files),
+                    real,
                     tags: Rc::new(tags),
                     recent: Rc::new(recent),
                 };
@@ -78,6 +88,7 @@ impl App {
             mru,
             // Every file, not only the notes: a source file has to be reachable by name too.
             files: self.corpus.borrow().files.clone(),
+            real: self.corpus.borrow().real,
             commands: ACTIONS
                 .iter()
                 .map(|(action, label, _)| palette::Item::Command {
@@ -128,6 +139,9 @@ impl App {
                 self,
                 move |item: &palette::Item| match item {
                     palette::Item::File(rel) => app.open_path(rel),
+                    // Followed as the link would be: New File, unless the note has been written
+                    // since the list was read.
+                    palette::Item::Missing(rel) => app.open_target(rel),
                     palette::Item::Command { action, .. } => {
                         let _ = WidgetExt::activate_action(&app.window, action, None);
                     }

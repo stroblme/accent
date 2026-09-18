@@ -2,6 +2,8 @@
 //! note or a PDF at a location the index or a language server named.
 
 use super::*;
+use accent_core::markdown::Link;
+use accent_core::path::{parent_dir, resolve};
 
 /// DESIGN.md, Motion: the References pane follows the caret by 300 ms.
 const REFERENCES: Duration = Duration::from_millis(300);
@@ -63,22 +65,24 @@ impl App {
 
     /// Go to Definition: the chord, `F12` and a Ctrl+click in the view all end up here.
     ///
-    /// An external link under the caret is followed as a link, because that is what the reader
-    /// pointed at; everything else is a question for the language server, whether the tab holds
-    /// a note or a source file.
+    /// A link under the caret is followed as a link, because that is what the reader pointed at:
+    /// an external one in the browser, one into the vault through [`App::open_target`], as a click
+    /// in the preview is — which is what offers New File where nothing answers to it. Everything
+    /// else is a question for the language server, whether the tab holds a note or a source file.
     pub fn go_to_definition(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return;
         };
-        if let Some(link) = tab
-            .link_at_cursor()
-            .filter(|link| link.kind == LinkKind::External)
-        {
+        let link = tab.link_at_cursor();
+        if let Some(link) = link.as_ref().filter(|l| l.kind == LinkKind::External) {
             return self.launch(&link.target);
         }
         let Some(vault) = tab.lang.vault() else {
             return self.needs_vault("go to a definition");
         };
+        if let Some(link) = link {
+            return self.open_target(&followed(&tab.rel(), &link));
+        }
         // Said once per tab: a file whose server is not installed would otherwise toast on every
         // Ctrl+click, and the answer does not change while the tab is open. And not said at all
         // while the Outline pane is on screen saying it — the claim is left unspent there, so
@@ -130,6 +134,21 @@ impl App {
             return self.show_pdf_anchor(&key, anchor);
         }
         self.with_tab(&key, how, "go to", move |_, tab| tab.goto_pos(at));
+    }
+}
+
+/// What following `link` in the note `rel` hands [`App::open_target`]: the target from the vault
+/// root, anchor and all, which is what the preview hands it for a click. A markdown link is
+/// written from the note's own folder; a wikilink names its target from the root already, and a
+/// bare `#anchor` of either kind is a place in the note itself.
+fn followed(rel: &str, link: &Link) -> String {
+    let target = match link.kind {
+        LinkKind::Markdown if !link.target.is_empty() => resolve(parent_dir(rel), &link.target),
+        _ => link.target.clone(),
+    };
+    match &link.anchor {
+        Some(anchor) => format!("{target}#{anchor}"),
+        None => target,
     }
 }
 
@@ -257,6 +276,28 @@ mod tests {
         assert!(reference_target("no-line-here").is_none());
         // The icon is the file's, not the line number's.
         assert_eq!(reference_icon("notes/a.md:3"), crate::doc::icon_for("a.md"));
+    }
+
+    /// Every way a note spells a link reaches `open_target` as the vault path the preview would
+    /// hand it, so a missing note is offered at the same place whichever of the two followed it.
+    #[test]
+    fn a_link_is_followed_by_its_path_from_the_vault_root() {
+        let followed_in = |rel: &str, text: &str| {
+            let links = accent_core::markdown::analyze(text).links;
+            followed(rel, &links[0])
+        };
+        let note = "Notes/Sub/a.md";
+        assert_eq!(followed_in(note, "[[Foo]]"), "Foo");
+        assert_eq!(followed_in(note, "[[Folder/Foo]]"), "Folder/Foo");
+        assert_eq!(followed_in(note, "[[Foo#Part|there]]"), "Foo#Part");
+        assert_eq!(followed_in(note, "[[#Part]]"), "#Part");
+        assert_eq!(followed_in(note, "[t](Foo.md)"), "Notes/Sub/Foo.md");
+        assert_eq!(followed_in(note, "[t](Foo)"), "Notes/Sub/Foo");
+        assert_eq!(
+            followed_in(note, "[t](../Foo%20Bar.md#Part)"),
+            "Notes/Foo Bar.md#Part"
+        );
+        assert_eq!(followed_in(note, "[t](#part)"), "#part");
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 use super::{Backlink, Index, PdfLink};
 use crate::markdown;
+use crate::path::{FileType, file_type, linked_path};
 use anyhow::Result;
 use rusqlite::OptionalExtension;
+use std::collections::HashSet;
 
 /// Obsidian's rule as one subquery: of the files answering to a link's key, the shortest
 /// `rel_path` wins, and the older row breaks a tie. Correlated on `links.key`, so it is what an
@@ -141,6 +143,32 @@ impl Index {
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// Every note a link names that nothing in the vault answers to, once each, by the path New
+    /// File would create it at ([`linked_path`]): what Go to File and `[[` completion offer to
+    /// write. The stored targets are vault paths already — a markdown link's was resolved from its
+    /// note's folder when it was indexed — so `[[Foo]]` and `[t](Foo.md)` from the root are one
+    /// row, and so are two spellings that differ only in case.
+    ///
+    /// A target that is a folder is not a note waiting to be written: an in-note `[t](#anchor)`
+    /// is stored as its note's folder. Nor is a missing image or PDF, which New File cannot make.
+    pub fn missing_notes(&self) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT l.target FROM links l
+             WHERE l.resolved_file IS NULL AND l.kind <> 3 AND l.target <> ''
+               AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rel_path = l.target)
+             ORDER BY l.target",
+        )?;
+        let targets = st
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut seen = HashSet::new();
+        Ok(targets
+            .iter()
+            .map(|target| linked_path(target))
+            .filter(|rel| file_type(rel) == FileType::Note && seen.insert(markdown::link_key(rel)))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -268,6 +296,32 @@ mod tests {
         );
         assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
         assert!(ix.unresolved_links().unwrap().is_empty());
+    }
+
+    /// A note linked to before it is written is offered once, by the path New File would make,
+    /// however the links spell it; writing it takes it off the list.
+    #[test]
+    fn a_dangling_link_is_a_missing_note_until_the_note_is_written() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("d.md"),
+            "[[Nowhere/Other Note#Part|there]] [t](Nowhere/other%20note.md) [[pic.png]] [[Beta]]\n",
+        )
+        .unwrap();
+        fs::write(vault.path().join("sub/e.md"), "[t](#anchor) [u](Later)\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        // Not the image, the note that is there, or the folder an in-note anchor names.
+        assert_eq!(
+            ix.missing_notes().unwrap(),
+            ["Nowhere/Other Note.md", "sub/Later.md"]
+        );
+
+        fs::create_dir(vault.path().join("Nowhere")).unwrap();
+        fs::write(vault.path().join("Nowhere/Other Note.md"), "# Other\n").unwrap();
+        ix.update_file(vault.path(), "Nowhere/Other Note.md")
+            .unwrap();
+        assert_eq!(ix.missing_notes().unwrap(), ["sub/Later.md"]);
     }
 
     #[test]

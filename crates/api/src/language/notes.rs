@@ -407,13 +407,31 @@ impl Notes {
                 }
 
                 let index = locked(&self.index);
-                let paths = match trigger {
-                    Trigger::Wiki => index.note_and_pdf_paths()?,
-                    _ => index.file_paths(false)?,
+                let (mut paths, missing) = match trigger {
+                    Trigger::Wiki => (index.note_and_pdf_paths()?, index.missing_notes()?),
+                    _ => (index.file_paths(false)?, Vec::new()),
                 };
+                // Behind the files, so one that is there leads a note only linked to at the same
+                // rank: the ranking is stable.
+                paths.extend(missing.iter().cloned());
                 let (hits, more) = path_candidates(&paths, prefix);
                 let mut items = Vec::with_capacity(hits.len());
                 for hit in hits {
+                    // A second link to a note not written yet, spelled from the root the way
+                    // New File will place it, so both reach it once it is.
+                    if missing.contains(&hit) {
+                        let path = markdown::strip_ext(&hit);
+                        items.push(Completion {
+                            insert: format!("[[{path}]]"),
+                            detail: Some(format!("{hit}, not created")),
+                            filter: Some(format!("[[{path}")),
+                            label: stem(&hit),
+                            kind: Kind::File,
+                            replace,
+                            ..empty_item()
+                        });
+                        continue;
+                    }
                     let (name, path) = link_names(&hit);
                     // The bare name only while it reaches this file: where a shorter path
                     // answers to it first, the link has to spell the path out.
@@ -936,6 +954,44 @@ mod tests {
         assert_eq!(items[1].filter.as_deref(), Some("[[paper.pdf#Method"));
         // The anchor is the one the reader lands by: page 5 as written is index 4.
         assert_eq!(markdown::pdf_anchor("page=5"), Some((4, None)));
+    }
+
+    /// A second `[[` to a note that is only linked to so far offers it, spelled the way the first
+    /// link will reach it once it is written, behind the note that is there.
+    #[test]
+    fn a_wikilink_completes_to_a_note_not_written_yet() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Other.md"), "# Other\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Nowhere/Other]]\n[[Oth\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let caret = Pos {
+            line: 1,
+            character: 5,
+        };
+        let items = notes.completion("a.md", caret).unwrap().items;
+
+        let rows: Vec<(&str, Option<&str>)> = items
+            .iter()
+            .map(|i| (i.insert.as_str(), i.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("[[Other]]", None),
+                ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
+            ]
+        );
     }
 
     /// The whole `[[paper.pdf#` path: the index resolves the name, pdfium reads the outline, and
