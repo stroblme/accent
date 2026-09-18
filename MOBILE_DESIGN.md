@@ -32,7 +32,7 @@ build with. This says what to build.
 | Browse | A panel over what is being read, with the Search / Files / Command chips and the query field at the *foot* of the screen. Search is the default: the tree until there is a query, then what the notes say. Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands. The desktop's eight sidebar panes and its palette collapse into this one |
 | Note, reading | The rendered note in a WebView, 16 dp side gutters, one thin bar lying over the top of it and, while a find is open, the find bar below it. The page is loaded when the note or the palette changes and at no other time: a WebView told to load again is a reader sent back to the top |
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
-| PDF | A column of pages with the same bar a note has drawn over the top of them rather than above them: a page is read at a zoom and an offset the reader chose, and chrome that takes space in the layout moves both every time it comes and goes. Leaving the document is Back. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked, the bar's Edit is disabled, and a finger only ever moves the page |
+| PDF | A column of pages with the same bar a note has drawn over the top of them rather than above them: a page is read at a zoom and an offset the reader chose, and chrome that takes space in the layout moves both every time it comes and goes. Back first retraces the jumps taken inside the document — a link followed, a bookmark picked — the latest first, as the desktop's history does; with none left, it leaves the document. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked and a finger only ever moves the page |
 | The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
 | Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
 
@@ -119,9 +119,9 @@ the line being typed would be a cost with nothing bought: the editor keeps clear
 bar's measured height, outside its scroll. A banner holding a decision goes above the bar rather
 than under it, where the bar would cover it; coming and going, it moves the note once.
 
-The bar's button is a note's Edit and Done. A PDF's is the same button, disabled, for as long as
-there is nothing to edit: a gap where a control belongs is worse than a control that says it is not
-available yet.
+The bar's button is a note's Edit and Done. A PDF's is Contents, the document's bookmarks, and on a
+file that carries none it is there and disabled: a gap where a control belongs is worse than a
+control that says it has nothing to offer.
 
 Only one screen may keep window insets. A PDF inside a vault is already inside a screen that holds
 itself clear of the status bar, so its own scaffold takes none; opened from another app there is no
