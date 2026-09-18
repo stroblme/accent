@@ -14,10 +14,10 @@
 
 use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 use std::rc::{Rc, Weak};
 
 use crate::editor::{self, Flavour};
@@ -71,51 +71,15 @@ const CHANGE_ALPHA: f32 = 0.16;
 const EMPH_ALPHA: f32 = 0.35;
 
 /// Which of the two texts a pane shows: `Old` is the left column.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Side {
-    Old,
-    New,
-}
+pub use accent_core::diff::Side;
 
-impl Side {
-    fn idx(self) -> usize {
-        match self {
-            Side::Old => 0,
-            Side::New => 1,
-        }
-    }
-
-    pub fn other(self) -> Side {
-        match self {
-            Side::Old => Side::New,
-            Side::New => Side::Old,
-        }
-    }
-
-    /// The index into the diff of the line this row shows on this side.
-    fn of(self, row: &Row) -> Option<usize> {
-        match self {
-            Side::Old => row.old,
-            Side::New => row.new,
-        }
-    }
-
-    /// The 1-based line number of `line` in this side's text.
-    fn number(self, line: &DiffLine) -> Option<usize> {
-        match self {
-            Side::Old => line.old_line,
-            Side::New => line.new_line,
-        }
-    }
-
-    /// The row and word-emphasis tags a changed line gets on this side, or `None` for an
-    /// unchanged one. `align` never puts an insertion on the old side, nor a deletion on the new.
-    fn tag(self, op: Op) -> Option<(&'static str, &'static str)> {
-        match (self, op) {
-            (Side::Old, Op::Delete) => Some((TAG_REMOVED, TAG_REMOVED_EMPH)),
-            (Side::New, Op::Insert) => Some((TAG_ADDED, TAG_ADDED_EMPH)),
-            _ => None,
-        }
+/// The row and word-emphasis tags a changed line gets on `side`, or `None` for an unchanged one.
+/// `align` never puts an insertion on the old side, nor a deletion on the new.
+fn tags(side: Side, op: Op) -> Option<(&'static str, &'static str)> {
+    match (side, op) {
+        (Side::Old, Op::Delete) => Some((TAG_REMOVED, TAG_REMOVED_EMPH)),
+        (Side::New, Op::Insert) => Some((TAG_ADDED, TAG_ADDED_EMPH)),
+        _ => None,
     }
 }
 
@@ -358,6 +322,14 @@ fn line_starts(text: &str) -> Vec<i32> {
     }
     starts.push(at - 1);
     starts
+}
+
+/// The lines, 1-based and inclusive, a selection of the characters `from..to` covers, `starts`
+/// being [`line_starts`]: the one it begins in to the one holding its last character, so a
+/// selection taken to the start of the next line does not take that line too.
+fn lines_between(starts: &[i32], from: i32, to: i32) -> RangeInclusive<usize> {
+    let line = |at: i32| starts[..starts.len() - 1].partition_point(|&s| s <= at);
+    line(from)..=line((to - 1).max(from))
 }
 
 /// Where the first change starts on `side`, in characters: its first line of the first hunk, or,
@@ -691,6 +663,9 @@ pub struct Compare {
     /// after that where the view sits is the reader's business.
     first_view: Cell<bool>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
+    /// Each pane's context menu as [`Compare::offer`] left it, and the one it replaced, to put
+    /// back when the comparison goes. Empty until something is offered.
+    offered: RefCell<Vec<(gio::Menu, Option<gio::MenuModel>)>>,
 }
 
 impl Compare {
@@ -746,6 +721,7 @@ impl Compare {
             settling: Cell::new(0),
             first_view: Cell::new(true),
             handlers: RefCell::new(Vec::new()),
+            offered: RefCell::new(Vec::new()),
         });
 
         // Weak throughout: every handler below is connected to something the comparison owns or
@@ -847,6 +823,63 @@ impl Compare {
         self.lay(false);
     }
 
+    /// Put `label` on both panes' context menus, there while the pane has a selection. `act` is
+    /// handed that pane's side, the lines of its text the selection covers (1-based, inclusive)
+    /// and both texts as they stand. Once per comparison: [`Compare::leave`] takes it off again.
+    ///
+    /// The entry joins whatever menu the view had, which on the editor is the spell checker's
+    /// suggestions, and hides rather than greys out: `hidden-when` follows the action, and the
+    /// action follows the selection, so a menu opened from the keyboard is right too.
+    pub fn offer(
+        &self,
+        label: &str,
+        act: impl Fn(Side, RangeInclusive<usize>, &str, &str) + 'static,
+    ) {
+        if !self.offered.borrow().is_empty() {
+            return;
+        }
+        let act = Rc::new(act);
+        for side in [Side::Old, Side::New] {
+            let pane = self.pane(side);
+            let action = gio::SimpleAction::new("selection", None);
+            action.set_enabled(pane.buffer.has_selection());
+            let (weak, act) = (self.weak.clone(), act.clone());
+            action.connect_activate(move |_, _| {
+                let Some(compare) = weak.upgrade() else {
+                    return;
+                };
+                let texts = [compare.text(Side::Old), compare.text(Side::New)];
+                if let Some((from, to)) = compare.pane(side).buffer.selection_bounds() {
+                    let lines =
+                        lines_between(&line_starts(&texts[side.idx()]), from.offset(), to.offset());
+                    act(side, lines, &texts[0], &texts[1]);
+                }
+            });
+            let group = gio::SimpleActionGroup::new();
+            group.add_action(&action);
+            pane.view.insert_action_group("diff", Some(&group));
+            let id = pane
+                .buffer
+                .connect_has_selection_notify(move |b| action.set_enabled(b.has_selection()));
+            self.handlers
+                .borrow_mut()
+                .push((pane.buffer.clone().upcast(), id));
+
+            let item = gio::MenuItem::new(Some(label), Some("diff.selection"));
+            item.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+            let section = gio::Menu::new();
+            section.append_item(&item);
+            let menu = gio::Menu::new();
+            menu.append_section(None, &section);
+            let previous = pane.view.extra_menu();
+            if let Some(previous) = &previous {
+                menu.append_section(None, previous);
+            }
+            pane.view.set_extra_menu(Some(&menu));
+            self.offered.borrow_mut().push((menu, previous));
+        }
+    }
+
     /// [`Compare::refresh`], and with `opening`, the one [`Compare::new`] makes: that one also
     /// puts the editor's caret on the first change, so the comparison opens on what changed
     /// with every unchanged run folded, the one the caret was in included.
@@ -866,7 +899,7 @@ impl Compare {
                 let Some(line) = side.of(row).map(|i| &lines[i]) else {
                     continue;
                 };
-                let Some((row_tag, emph_tag)) = side.tag(line.op) else {
+                let Some((row_tag, emph_tag)) = tags(side, line.op) else {
                     continue;
                 };
                 let n = side.number(line).unwrap_or(1);
@@ -1068,6 +1101,16 @@ impl Compare {
         }
         for (object, id) in self.handlers.borrow_mut().drain(..) {
             object.disconnect(id);
+        }
+        for (side, (menu, previous)) in [Side::Old, Side::New].into_iter().zip(self.offered.take())
+        {
+            let view = &self.pane(side).view;
+            view.insert_action_group("diff", None::<&gio::ActionGroup>);
+            // Unless a menu of someone else's has replaced it since: a spell checker switched on
+            // for the first time mid-comparison.
+            if view.extra_menu().as_ref() == Some(menu.upcast_ref()) {
+                view.set_extra_menu(previous.as_ref());
+            }
         }
     }
 
@@ -1502,6 +1545,15 @@ mod tests {
             vec![0, 0],
             "an empty text still has an end"
         );
+    }
+
+    #[test]
+    fn a_selection_covers_the_lines_it_has_characters_in() {
+        let starts = line_starts("one\ntwo\nthree\n");
+        assert_eq!(lines_between(&starts, 5, 6), 2..=2, "inside two");
+        assert_eq!(lines_between(&starts, 0, 8), 1..=2, "to the start of three");
+        assert_eq!(lines_between(&starts, 2, 9), 1..=3);
+        assert_eq!(lines_between(&starts, 8, 14), 3..=3, "to the end");
     }
 
     #[test]

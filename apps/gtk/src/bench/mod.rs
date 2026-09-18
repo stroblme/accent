@@ -20,7 +20,7 @@ mod style;
 mod tags;
 
 use chrome::bench_chrome;
-use compare::{bench_compare, bench_compare_pads};
+use compare::{bench_compare, bench_compare_lines, bench_compare_pads};
 use diagram::bench_diagram;
 use files::{
     bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
@@ -66,7 +66,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
 /// long paragraphs in a repository it makes itself and types at the start of the two lines whose
-/// padding tag does not begin at the newline before them.
+/// padding tag does not begin at the newline before them, and `=lines:<rel_path>` stages and
+/// unstages one line of a note it commits in a repository of its own.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
@@ -243,6 +244,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_layout(&app, &arg);
         }
         if let Some(rel) = compare {
+            if let Some(rel) = rel.strip_prefix("lines:") {
+                return bench_compare_lines(&app, rel);
+            }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
                 None => bench_compare(&app, &rel),

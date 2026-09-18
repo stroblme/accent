@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
@@ -73,6 +73,17 @@ pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
 /// `iter_inline_changes` re-diffs each hunk word by word under a 500 ms budget, and a change bar
 /// three pixels wide has nowhere to put the answer.
 pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
+    let mut lines = changes(old, new);
+    for line in &mut lines {
+        line.text
+            .truncate(line.text.trim_end_matches(['\r', '\n']).len());
+    }
+    lines
+}
+
+/// [`line_ops`] with each line's text as its own text has it, line ending included: what
+/// [`apply_lines`] puts back together.
+fn changes(old: &str, new: &str) -> Vec<DiffLine> {
     TextDiff::from_lines(old, new)
         .iter_all_changes()
         .map(|c| DiffLine {
@@ -83,7 +94,7 @@ pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
             },
             old_line: c.old_index().map(|i| i + 1),
             new_line: c.new_index().map(|i| i + 1),
-            text: c.value().trim_end_matches(['\r', '\n']).to_string(),
+            text: c.value().to_string(),
             emphasis: Vec::new(),
         })
         .collect()
@@ -95,6 +106,46 @@ pub fn line_ops(old: &str, new: &str) -> Vec<DiffLine> {
 pub struct Row {
     pub old: Option<usize>,
     pub new: Option<usize>,
+}
+
+/// Which of the two texts: `Old` is the left column of a side-by-side view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Old,
+    New,
+}
+
+impl Side {
+    pub fn other(self) -> Side {
+        match self {
+            Side::Old => Side::New,
+            Side::New => Side::Old,
+        }
+    }
+
+    /// Where this side sits in an `[old, new]` pair.
+    pub fn idx(self) -> usize {
+        match self {
+            Side::Old => 0,
+            Side::New => 1,
+        }
+    }
+
+    /// The index into the diff of the line this row shows on this side.
+    pub fn of(self, row: &Row) -> Option<usize> {
+        match self {
+            Side::Old => row.old,
+            Side::New => row.new,
+        }
+    }
+
+    /// The 1-based line number of `line` in this side's text.
+    pub fn number(self, line: &DiffLine) -> Option<usize> {
+        match self {
+            Side::Old => line.old_line,
+            Side::New => line.new_line,
+        }
+    }
 }
 
 /// Turn the flat diff into rows: an `Equal` line sits on both sides, a run of `Delete`s is paired
@@ -196,6 +247,77 @@ pub fn gaps(lines: &[DiffLine], rows: &[Row], context: usize) -> Vec<Range<usize
         out.push(last.end + context..rows.len());
     }
     out
+}
+
+/// `old` with the changes `new` makes on `side`'s lines `picked` (1-based, inclusive), and no
+/// others: Stage Selected Lines, `old` being the index and `new` the working tree. Both texts
+/// have `\n` line endings, as a buffer holds them.
+///
+/// A selection is read the way the side-by-side view shows it ([`align`]): it covers the rows
+/// its first and last lines are on and every row between, so a changed line goes together with
+/// the line beside it. A row with no line on `side` — lines deleted, seen from the new side —
+/// cannot be selected there, so it goes with the line above it: a rewrite selected whole takes
+/// the lines it lost as well, and a deletion is taken with the line before the gap it left.
+pub fn apply_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usize>) -> String {
+    mix(old, new, side, &picked, true)
+}
+
+/// `new` with the changes it makes on `side`'s lines `picked` undone, and no others: Unstage
+/// Selected Lines, `old` being HEAD and `new` the index. The selection is read as
+/// [`apply_lines`] reads it.
+pub fn revert_lines(old: &str, new: &str, side: Side, picked: RangeInclusive<usize>) -> String {
+    mix(old, new, side, &picked, false)
+}
+
+/// Put a text back together row by row: a row the selection covers gives its new side's line
+/// when `apply`ing and its old side's when reverting, and every other row the opposite. An
+/// unchanged row is the same line on both.
+fn mix(old: &str, new: &str, side: Side, picked: &RangeInclusive<usize>, apply: bool) -> String {
+    let lines = changes(old, new);
+    let rows = align(&lines);
+    let covered = covered(&lines, &rows, side, picked);
+    let mut out = String::with_capacity(old.len().max(new.len()));
+    for (r, row) in rows.iter().enumerate() {
+        let from = match covered.contains(&r) == apply {
+            true => Side::New,
+            false => Side::Old,
+        };
+        let Some(i) = from.of(row) else {
+            continue;
+        };
+        // A last line with no newline is last no longer.
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&lines[i].text);
+    }
+    out
+}
+
+/// The rows a selection of `side`'s lines `picked` covers, as a range into `rows`: see
+/// [`apply_lines`].
+fn covered(
+    lines: &[DiffLine],
+    rows: &[Row],
+    side: Side,
+    picked: &RangeInclusive<usize>,
+) -> Range<usize> {
+    let selected = |row: &Row| {
+        side.of(row)
+            .and_then(|i| side.number(&lines[i]))
+            .is_some_and(|n| picked.contains(&n))
+    };
+    let (Some(first), Some(last)) = (
+        rows.iter().position(selected),
+        rows.iter().rposition(selected),
+    ) else {
+        return 0..0;
+    };
+    let end = rows[last + 1..]
+        .iter()
+        .position(|row| side.of(row).is_some())
+        .map_or(rows.len(), |n| last + 1 + n);
+    first..end
 }
 
 #[cfg(test)]
@@ -392,5 +514,67 @@ mod tests {
         let d = lines("a\nb\nc\nd\n", "a\nB\nc\nD\nE\n");
         let rows = align(&d);
         assert_eq!(gaps(&d, &rows, 0), vec![0..1, 2..3]);
+    }
+
+    #[test]
+    fn applying_lines_takes_the_added_ones_selected_and_no_others() {
+        assert_eq!(
+            apply_lines("a\nb\n", "a\nx\ny\nb\n", Side::New, 3..=3),
+            "a\ny\nb\n"
+        );
+    }
+
+    #[test]
+    fn applying_lines_takes_a_deletion_from_either_side() {
+        let (old, new) = ("a\nb\nc\nd\n", "a\nd\n");
+        assert_eq!(
+            apply_lines(old, new, Side::Old, 2..=2),
+            "a\nc\nd\n",
+            "b selected where it still is"
+        );
+        assert_eq!(
+            apply_lines(old, new, Side::New, 1..=1),
+            "a\nd\n",
+            "where the new side has no line, the deletion goes with the line above it"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_partly_selected_takes_the_rows_the_selection_is_on() {
+        let (old, new) = ("a\nb\nc\nd\n", "a\nB\nC\nX\nd\n");
+        assert_eq!(apply_lines(old, new, Side::New, 2..=2), "a\nB\nc\nd\n");
+        assert_eq!(
+            apply_lines("a\nb\nc\nd\n", "a\nB\nd\n", Side::New, 2..=2),
+            "a\nB\nd\n",
+            "a paragraph rewritten shorter, selected whole, is taken whole"
+        );
+    }
+
+    #[test]
+    fn a_selection_across_two_hunks_takes_both_and_leaves_the_third() {
+        let (old, new) = ("1\n2\n3\n4\n5\n6\n7\n", "1\nA\n3\nB\n5\nC\n7\n");
+        assert_eq!(
+            apply_lines(old, new, Side::New, 2..=4),
+            "1\nA\n3\nB\n5\n6\n7\n"
+        );
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_gets_one_only_when_something_follows_it() {
+        assert_eq!(apply_lines("a\nb", "a\nb\nc", Side::New, 3..=3), "a\nb\nc");
+        assert_eq!(apply_lines("a\nb\n", "a\nB", Side::New, 2..=2), "a\nB");
+        assert_eq!(
+            apply_lines("a\nb\nc\n", "a\nX", Side::Old, 2..=2),
+            "a\nX\nc\n",
+            "the c left alone follows what is now the last line"
+        );
+    }
+
+    #[test]
+    fn reverting_lines_undoes_the_selected_changes_and_keeps_the_rest() {
+        assert_eq!(
+            revert_lines("a\nb\nc\n", "a\nB\nc\nd\n", Side::New, 2..=2),
+            "a\nb\nc\nd\n"
+        );
     }
 }

@@ -256,9 +256,9 @@ impl Tab {
     /// Every jump goes through here — an outline row, a search hit, a go-to line, a definition —
     /// so none of them can land inside a folded block and leave the window looking unchanged.
     pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
-        fold::reveal(self.text_buffer(), iter);
+        let opened = fold::reveal(self.text_buffer(), iter);
         self.buffer.place_cursor(iter);
-        self.scroll_to_caret(align);
+        self.scroll_to_caret(align, opened);
         self.view.grab_focus();
     }
 
@@ -271,11 +271,15 @@ impl Tab {
     /// jump into a tab that is still opening waits for a frame in which the view has a size, then
     /// for a default idle, which GLib runs only once GTK's measuring idle
     /// (`GTK_TEXT_VIEW_PRIORITY_VALIDATE`, a higher priority) has measured every line.
-    pub(crate) fn scroll_to_caret(&self, align: f64) {
+    ///
+    /// `measuring` is the same wait for a view that does have a size: a fold just opened, whose
+    /// lines had no height until GTK measures them, and the caret below them sits as high up as
+    /// the fold was.
+    pub(crate) fn scroll_to_caret(&self, align: f64, measuring: bool) {
         let scroll = move |view: &sourceview5::View| {
             view.scroll_to_mark(&view.buffer().get_insert(), 0.0, true, 0.0, align)
         };
-        if self.view.height() > 0 {
+        if self.view.height() > 0 && !measuring {
             return scroll(&self.view);
         }
         self.view.add_tick_callback(move |view, _| {

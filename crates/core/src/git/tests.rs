@@ -714,6 +714,44 @@ fn stage_unstage_commit_round_trip() {
 }
 
 #[test]
+fn stage_text_puts_selected_lines_in_the_index_and_leaves_the_file_alone() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    // The user's own `core.autocrlf` would otherwise decide what the CRLF file below becomes.
+    ok(dir, &["config", "core.autocrlf", "false"]);
+    write_file(dir, "a.md", "one\ntwo\nthree\n");
+    write_file(dir, "dos.md", "x\r\ny\r\n");
+    commit_all(dir, "root");
+    let repo = open(dir);
+
+    let worktree = "one\nTWO\nthree\nfour\n";
+    write_file(dir, "a.md", worktree);
+    let index = show(&repo, "", "a.md").unwrap().unwrap();
+    let text = crate::diff::apply_lines(index.text(), worktree, crate::diff::Side::New, 2..=2);
+    stage_text(&repo, "a.md", &text).unwrap();
+    assert_eq!(
+        show(&repo, "", "a.md").unwrap(),
+        Some(Blob::Text("one\nTWO\nthree\n".into()))
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("a.md")).unwrap(), worktree);
+    let st = status(&repo).unwrap();
+    assert_eq!(paths(st.staged()), ["a.md"]);
+    assert_eq!(paths(st.changes()), ["a.md"], "four is still to stage");
+
+    // The text comes with `\n` endings, as a buffer holds it; the file's own go back on.
+    write_file(dir, "dos.md", "x\r\nY\r\n");
+    stage_text(&repo, "dos.md", "x\nY\n").unwrap();
+    assert_eq!(
+        show(&repo, "", "dos.md").unwrap(),
+        Some(Blob::Text("x\r\nY\r\n".into()))
+    );
+}
+
+#[test]
 fn unstage_without_a_commit_takes_the_file_back_out_of_the_index() {
     if !have_git() {
         return;

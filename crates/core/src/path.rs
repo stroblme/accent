@@ -148,15 +148,20 @@ pub fn relative(dir: &str, rel: &str) -> String {
 }
 
 /// The file a link that resolves to nothing would create: the target exactly as the link spells
-/// it from the vault root, with `.md` added when it names no extension of its own.
+/// it from the vault root, with `.md` added unless it names an extension [`file_type`] knows.
 ///
 /// `[[Notes/Foo]]` is `Notes/Foo.md` and `[[Foo]]` is `Foo.md` at the root — not in the linking
-/// note's folder, which is not what the link says. A target that names an extension keeps it,
-/// markdown or not: `[[data.csv]]` asks for a `data.csv`.
+/// note's folder, which is not what the link says. A known extension is kept, markdown or not:
+/// `[[data.csv]]` asks for a `data.csv`. Any other dot is part of the name, as
+/// `markdown::as_written` reads it: `[[Rev 1.2 notes]]` is `Rev 1.2 notes.md`, and `[[foo.xyz]]`
+/// `foo.xyz.md`, which is also the note both links resolve to once it is written.
 pub fn linked_path(target: &str) -> String {
-    match basename(target).rsplit_once('.') {
-        Some((stem, _)) if !stem.is_empty() => target.to_string(),
-        _ => format!("{target}.md"),
+    let named = basename(target)
+        .rsplit_once('.')
+        .is_some_and(|(stem, _)| !stem.is_empty());
+    match named && file_type(target) != FileType::Other {
+        true => target.to_string(),
+        false => format!("{target}.md"),
     }
 }
 
@@ -239,7 +244,12 @@ mod tests {
         assert_eq!(linked_path("Notes/Foo"), "Notes/Foo.md");
         // An extension it already carries is kept, whether or not it is markdown.
         assert_eq!(linked_path("Notes/Foo.md"), "Notes/Foo.md");
+        assert_eq!(linked_path("foo.md"), "foo.md");
+        assert_eq!(linked_path("foo.pdf"), "foo.pdf");
         assert_eq!(linked_path("data.csv"), "data.csv");
+        // Any other dot is part of the name, as `markdown::as_written` reads it.
+        assert_eq!(linked_path("Rev 1.2 notes"), "Rev 1.2 notes.md");
+        assert_eq!(linked_path("foo.xyz"), "foo.xyz.md");
         // A leading dot is part of the name, and a dot in a folder is not the file's.
         assert_eq!(linked_path(".hidden"), ".hidden.md");
         assert_eq!(linked_path("v1.2/Notes"), "v1.2/Notes.md");

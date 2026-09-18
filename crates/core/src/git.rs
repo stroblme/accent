@@ -1052,6 +1052,57 @@ pub fn discard(repo: &Repo, paths: &[&str]) -> Result<(), Error> {
     write(repo, &["restore", "--worktree"], paths)
 }
 
+/// Make `text` what the index holds for `path`, the file itself untouched: Stage Selected Lines
+/// and Unstage Selected Lines, whose text is the index's with some lines of the other side's
+/// taken over (`diff::apply_lines`).
+///
+/// A new blob and an index entry pointing at it, as VS Code stages a range, rather than a patch
+/// for `git apply --cached`: the text is already worked out, and a patch would only have git work
+/// it out again from hunk headers that must agree with the index to the line. `text` has `\n`
+/// endings, as a buffer holds it, so the file's own go back on first; `--path` then runs the
+/// attributes' clean filters and line-ending conversion over it, which is what `git add` does to
+/// the file itself. The entry keeps its mode, and a path the index does not hold yet becomes a
+/// plain file. A conflicted path is refused: writing it would resolve the conflict with whatever
+/// the text holds.
+///
+/// Bounded like the commit, and for the same reason: a clean filter is one of the user's own
+/// programs.
+pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
+    // `<mode> <oid> <stage>\t<path>`, a line per stage; `:(literal)` keeps a `[` in a name from
+    // matching other files.
+    let spec = format!(":(literal){path}");
+    let entry = run(&repo.root, &["ls-files", "--stage", "--", &spec], true)?;
+    let entry = String::from_utf8_lossy(&entry);
+    let mut fields = entry.split_whitespace();
+    let (mode, stage) = (
+        fields.next().unwrap_or("100644"),
+        fields.nth(1).unwrap_or("0"),
+    );
+    if stage != "0" {
+        return Err(Error::Git(format!("{path} has a merge conflict")));
+    }
+    let crlf =
+        std::fs::read(repo.root.join(path)).is_ok_and(|b| b.windows(2).any(|w| w == b"\r\n"));
+    let text = match crlf {
+        true => text.replace('\n', "\r\n"),
+        false => text.to_string(),
+    };
+    let cmd = command(
+        &repo.root,
+        &["hash-object", "-w", "--stdin", &format!("--path={path}")],
+        false,
+    );
+    let out = bounded(cmd, Some(text.as_bytes()), TRANSFER_TIMEOUT, "stage")?;
+    let oid = String::from_utf8_lossy(&out.stdout);
+    let info = format!("{mode},{},{path}", oid.trim());
+    run(
+        &repo.root,
+        &["update-index", "--add", "--cacheinfo", &info],
+        false,
+    )?;
+    Ok(())
+}
+
 /// `--` keeps a note called `-f`, or one whose name matches a branch, from being read as an option.
 fn write(repo: &Repo, verb: &[&str], paths: &[&str]) -> Result<(), Error> {
     let args = [verb, &["--"][..], paths].concat();

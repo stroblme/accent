@@ -1,6 +1,7 @@
 //! The comparisons a row opens, and keeping the open ones current.
 
 use super::*;
+use accent_core::diff;
 
 impl Panel {
     /// Open the comparison a row stands for. Both sides are read in one worker hop, because two
@@ -50,6 +51,9 @@ impl Panel {
                 let (panel, key) = (Rc::downgrade(self), what.key.clone());
                 let register = move |compare: Weak<Compare>| {
                     if let Some(panel) = panel.upgrade() {
+                        if let Some(compare) = compare.upgrade() {
+                            panel.offer_lines(&compare, &what);
+                        }
                         panel.watch(what, Target::Tab(compare));
                     }
                 };
@@ -66,16 +70,49 @@ impl Panel {
                 );
                 // A commit never changes; the index does.
                 if let (Some(tab), Sides::Staged | Sides::Deleted) = (tab, &what.sides) {
+                    self.offer_lines(tab.comparison(), &what);
                     self.watch(what, Target::Diff(Rc::downgrade(&tab)));
                 }
             }
         }
     }
 
+    /// Stage Selected Lines on a comparison of the working tree with the index, Unstage Selected
+    /// Lines on one of the index with HEAD, and nothing on the rest. What is written either way
+    /// is the index's text with the selected changes made or undone, worked out from the two
+    /// texts on screen, which are what the selection was made in.
+    fn offer_lines(self: &Rc<Self>, compare: &Compare, what: &What) {
+        let (label, unstage) = match what.sides {
+            Sides::Worktree => ("Stage Selected Lines", false),
+            Sides::Staged => ("Unstage Selected Lines", true),
+            Sides::Deleted | Sides::Commit { .. } => return,
+        };
+        let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
+        compare.offer(label, move |side, lines, old, new| {
+            let Some(panel) = panel.upgrade() else {
+                return;
+            };
+            // The index is the left side of the one and the right side of the other.
+            let (text, index) = match unstage {
+                false => (diff::apply_lines(old, new, side, lines), old),
+                true => (diff::revert_lines(old, new, side, lines), new),
+            };
+            if text == index {
+                return (panel.hooks.toast)("No changes in the selection");
+            }
+            panel.stage_text(repo.clone(), rel.clone(), text, unstage);
+        });
+    }
+
     /// The working-tree comparison of `key`, for the bench: the vault root is the repository,
     /// so the key is the path git knows.
     pub fn compare_worktree(self: &Rc<Self>, key: &str) {
         self.compare(key, key, Sides::Worktree);
+    }
+
+    /// The staged comparison of `key`, HEAD against the index, likewise.
+    pub fn compare_staged(self: &Rc<Self>, key: &str) {
+        self.compare(key, key, Sides::Staged);
     }
 
     /// One watch per comparison: asking for the same one again replaces the old entry.

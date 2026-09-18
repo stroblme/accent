@@ -4,7 +4,8 @@ use super::*;
 
 /// What New from Template would list: every template, and the destination each one names today.
 /// `=open` then makes each one's note as Create does, and prints whether its caret is on screen;
-/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]).
+/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]), and
+/// `=walk:<rel_note>` stays up for its stops to be typed into ([`bench_template_walk`]).
 ///
 /// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
 /// `accent-target:` directive and the rendered target end to end without a widget.
@@ -22,6 +23,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
     let arg = std::env::var("ACCENT_BENCH_TEMPLATE").unwrap_or_default();
     if let Some(rel) = arg.strip_prefix("insert:") {
         return bench_template_insert(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("walk:") {
+        return bench_template_walk(app, rel);
     }
     if arg != "open" {
         return bench_quit(app);
@@ -54,7 +58,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
 /// `=insert:<rel_note>` puts each template that has a stop at the caret of that note, as Insert
 /// Template does: at its end, half way down, at its end with every block folded, and at its end
 /// followed by a Backspace, which ends the snippet through GtkSourceView's own scroll. Prints the
-/// view's vertical adjustment and top line before, after, and after a scroll back to the top.
+/// view's vertical adjustment and top line before, after, and after a scroll back to the top; the
+/// folded case has to come out with the template on screen, the fold it landed in open. Before
+/// them, a Go to Line into the note with every block folded, which has to come out on its line.
 fn bench_template_insert(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -76,6 +82,15 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                 tab.cursor_line(),
             );
         };
+        // First the jump an insertion's reveal copies: Go to Line into a note with every block
+        // folded, which has to land on the line once the fold it opens is measured.
+        tab.fold_all();
+        let line = tab.buffer.line_count() * 9 / 10;
+        tab.goto_line(line, 1);
+        measured().await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        say("goto", &format!("line_{line}"), "folded");
+        tab.unfold_all();
         for template in vault.templates().unwrap_or_default() {
             let Ok((text, stops)) = vault.render_template(&template, "Bench") else {
                 continue;
@@ -96,7 +111,7 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                     _ => tab.buffer.end_iter(),
                 };
                 tab.buffer.place_cursor(&at);
-                tab.scroll_to_caret(0.5);
+                tab.scroll_to_caret(0.5, false);
                 glib::timeout_future(Duration::from_millis(500)).await;
                 say(&template, case, "before");
                 tab.insert_stops(&text, &stops);
@@ -104,6 +119,7 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                     let mut at = editor::caret(&tab.buffer);
                     tab.buffer.backspace(&mut at, true, true);
                 }
+                measured().await;
                 glib::timeout_future(Duration::from_millis(600)).await;
                 say(&template, case, "after");
                 adj.set_value(0.0);
@@ -111,6 +127,63 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                 say(&template, case, "top");
             }
         }
+        bench_quit(&app);
+    });
+}
+
+/// Until GTK has measured every line of the views: its measuring idle outranks a default idle, so
+/// one of those running is the sign. A fold the insertion opened can take seconds in a debug build.
+async fn measured() {
+    let done = Rc::new(Cell::new(false));
+    let flag = done.clone();
+    glib::idle_add_local_once(move || flag.set(true));
+    while !done.get() {
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+}
+
+/// `=walk:<rel_note>` puts the first template with two stops or more at the end of that note,
+/// gives the view the keyboard and stays up for XTEST to type into its stops, which only a real
+/// key press can walk: `build-aux/xtest.py :<display> "move 700 450; focus; type abc; key Tab;
+/// type def; key Tab; type ghi; key Tab"`. Prints how many folders GtkSourceView looks for snippet
+/// files in, then what the template became and whether its stops are still being walked, eight
+/// seconds after `template_walk ready`.
+fn bench_template_walk(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let (Some(vault), Some(tab)) = (app.vault(), app.tab_for(&rel)) else {
+            return bench_quit(&app);
+        };
+        let walkable = vault
+            .templates()
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|t| {
+                vault
+                    .render_template(&t, "Bench")
+                    .ok()
+                    .filter(|(_, stops)| stops.len() > 1)
+            });
+        let Some((text, stops)) = walkable else {
+            println!("bench template_walk no template with two stops");
+            return bench_quit(&app);
+        };
+        let from = tab.buffer.char_count();
+        tab.buffer.place_cursor(&tab.buffer.end_iter());
+        tab.view.grab_focus();
+        tab.insert_stops(&text, &stops);
+        // Nowhere for GtkSourceView to find snippets of its own, so only the template's react.
+        let dirs = sourceview5::SnippetManager::default().search_path().len();
+        println!("bench template_walk ready snippet_dirs={dirs}");
+        glib::timeout_future(Duration::from_secs(8)).await;
+        let (start, end) = (tab.buffer.iter_at_offset(from), tab.buffer.end_iter());
+        println!(
+            "bench template_walk {:?} walking={}",
+            tab.buffer.text(&start, &end, true),
+            tab.snippet_active()
+        );
         bench_quit(&app);
     });
 }

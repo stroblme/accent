@@ -9,8 +9,8 @@
 //!
 //! 1. **the completion popup**, which owns every key while it is up;
 //! 2. **the signature popover**, which owns Escape while it is showing;
-//! 3. **a template's Tab stops**, because a snippet the user is walking outranks both a
-//!    suggestion and a list item's indent;
+//! 3. **a template's Tab stops** (Tab, and Escape to stop walking them), because a snippet the
+//!    user is walking outranks both a suggestion and a list item's indent;
 //! 4. **ghost text** (Tab, Escape, `Ctrl+Right`), while a suggestion is painted;
 //! 5. **the extra carets**, which replay what they understand at every caret;
 //! 6. **the markdown typing helpers** in a note (Return, Backspace, a delimiter, Tab on a list
@@ -91,8 +91,14 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
     }
     // A template's stops are what Tab means while one is being walked, so neither the suggestion
     // nor a list item's indent is even asked: `push_snippet` is the only thing that can be in the
-    // middle of a template.
-    let stepping_a_template = key == gdk::Key::Tab && tab.snippet_active();
+    // middle of a template. The view walks them, Shift+Tab back included; Escape ends the walk
+    // and leaves the rest of the stops where they are.
+    let walking = tab.snippet_active();
+    if walking && key == gdk::Key::Escape {
+        tab.end_snippet();
+        return glib::Propagation::Stop;
+    }
+    let stepping_a_template = walking && matches!(key, gdk::Key::Tab | gdk::Key::KP_Tab);
     if !stepping_a_template && let Some(answer) = ghost::on_key(tab, key, state) {
         return answer;
     }

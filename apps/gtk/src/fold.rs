@@ -111,8 +111,11 @@ pub fn is_folded(buffer: &gtk::TextBuffer, line: i32) -> bool {
 /// Two things hide text in this window: the editor's own fold, and the run a comparison collapses
 /// between two hunks. A hit inside either used to land in invisible text, so both are opened here
 /// — and a comparison keeps its run open by itself for as long as the caret is in it.
-pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) {
+///
+/// Says whether it opened anything: lines that had no height, which GTK has yet to measure.
+pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
     let hiding = [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)];
+    let mut opened = false;
     for tag in hiding.into_iter().flatten() {
         if !iter.has_tag(&tag) {
             continue;
@@ -121,7 +124,23 @@ pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) {
         start.backward_to_tag_toggle(Some(&tag));
         end.forward_to_tag_toggle(Some(&tag));
         buffer.remove_tag(&tag, &start, &end);
+        opened = true;
     }
+    opened
+}
+
+/// Open every fold that text put at `at` would join: the hidden run `at` is in or ends at, and
+/// the one under the header line `at` is on. Text added there becomes part of that block, and the
+/// re-fold after the next analysis ([`resync`]) lays the shut block over its new extent, the new
+/// text included, so an insertion is revealed first, as a jump is. Says whether it opened any.
+pub fn reveal_insertion(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
+    let mut before = *at;
+    before.backward_char();
+    let mut opened = false;
+    for iter in [before, *at, line_start(buffer, at.line() + 1)] {
+        opened |= reveal(buffer, &iter);
+    }
+    opened
 }
 
 /// Show everything.
