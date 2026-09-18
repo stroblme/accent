@@ -76,12 +76,15 @@ data class Open(
      */
     val leaving: Boolean = false,
 ) {
+    /** Whether [typed] holds anything the vault does not have: what a write would put there. */
+    fun dirty(typed: CharSequence): Boolean = typed.toString() != text
+
     /**
      * Whether taking [typed] away would lose edits: saving is paused while the file has moved
      * under the note, so no exit can write them. A banner over a note nobody typed into has
      * nothing to lose.
      */
-    fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && typed.toString() != text
+    fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
 }
 
 data class VaultState(
@@ -555,7 +558,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------------------------ helpers
 
-    /** Someone else wrote a file. Only the open note needs to know. */
+    /**
+     * Someone else wrote a file. Only the open note needs to know.
+     *
+     * A note holding nothing the vault does not have takes the new text as it stands, as the
+     * desktop reloads a clean tab; one holding edits raises the banner, since which of the two to
+     * keep is the reader's call.
+     */
     private fun onChanged(rel: String) {
         val open = _state.value.open ?: return
         if (open.rel != rel) return
@@ -564,13 +573,21 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val v = vault ?: return@launch
             val read = withContext(Dispatchers.IO) { runCatching { v.read(rel) } }
             val note = read.getOrNull() ?: return@launch
+            val cur = _state.value.open?.takeIf { it.rel == rel } ?: return@launch
+            // Nothing was typed here, so taking the new text loses nothing. The buffer and the
+            // state in one step, as a note is opened.
+            val take = cur.text != note.text && !cur.dirty(buffer.text)
+            if (take) buffer.load(note.text)
             _state.update { s ->
-                val cur = s.open ?: return@update s
-                when {
-                    // Nothing was typed here, so taking the new text loses nothing.
-                    cur.etag != null && cur.text == note.text -> s.copy(open = cur.copy(etag = note.etag))
-                    else -> s.copy(open = cur.copy(changedOnDisk = true))
-                }
+                val now = s.open?.takeIf { it.rel == rel } ?: return@update s
+                s.copy(
+                    open = when {
+                        // Only touched: the text is the one already here.
+                        now.etag != null && now.text == note.text -> now.copy(etag = note.etag)
+                        take -> now.copy(text = note.text, etag = note.etag, changedOnDisk = false)
+                        else -> now.copy(changedOnDisk = true)
+                    },
+                )
             }
         }
     }

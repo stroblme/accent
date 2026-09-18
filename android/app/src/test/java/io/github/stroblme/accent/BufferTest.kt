@@ -38,6 +38,14 @@ class BufferTest {
         assertFalse("undo must not reach the note before", buffer.undoState.canUndo)
     }
 
+    /** A file changed under a note is taken as it stands only while nothing was typed into it. */
+    @Test
+    fun `a note nobody typed into is clean`() {
+        val open = Open("a.md", text = "on disk")
+        assertFalse(open.dirty("on disk"))
+        assertTrue(open.dirty("on disk and typed"))
+    }
+
     /** Leaving a note asks only when going would lose something nothing else can write. */
     @Test
     fun `an exit asks only over edits saving was paused on`() {
