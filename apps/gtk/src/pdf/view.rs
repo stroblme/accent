@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::cache::{Cache, TILE, TileKey, Want, texture, tiles_across};
 use super::geometry::{
-    Anchor, Layout, PT_TO_PX, PdfZoom, Span, anchor_at, clamp_scale, fit_scale, layout, offset_of,
-    page_at, resume_at, stepped,
+    Anchor, Layout, MAX_SCALE, MIN_SCALE, PT_TO_PX, PdfZoom, Span, anchor_at, clamp_scale,
+    fit_scale, layout, offset_of, page_at, resume_at, stepped,
 };
 use super::protocol::{Highlights, NamedInk, Pass, Reply, fresh_id};
 use super::tools::{
@@ -103,13 +103,18 @@ impl PdfView {
 
     /// Zoom one step, keeping whatever is under `at` (a widget coordinate) where it is.
     pub fn zoom_step(&self, out: bool, at: Option<(f64, f64)>) {
-        let from = match self.imp().zoom.get() {
+        self.zoom_around(stepped(self.zoom_factor(), out), at);
+    }
+
+    /// The zoom as a multiple of the page's natural size, whatever the mode: what a step or a
+    /// pinch starts from.
+    fn zoom_factor(&self) -> f64 {
+        match self.imp().zoom.get() {
             // Exact, so a step never has to be read back out of the laid-out `f32` scale.
             PdfZoom::Scale(zoom) => zoom,
             // A fit mode has no percentage of its own: step from wherever it left the page.
             _ => f64::from(self.imp().layout.borrow().scale) / f64::from(PT_TO_PX),
-        };
-        self.zoom_around(stepped(from, out), at);
+        }
     }
 
     fn zoom_around(&self, zoom: PdfZoom, at: Option<(f64, f64)>) {
@@ -1170,18 +1175,26 @@ mod imp {
             obj.set_hexpand(true);
             obj.set_vexpand(true);
 
-            let zoom = gtk::GestureZoom::new();
-            zoom.connect_scale_changed(glib::clone!(
-                #[weak]
-                obj,
-                move |gesture, scale| {
-                    // Only past a threshold, or the smallest tremor on a touchpad re-renders.
-                    if !(0.9..1.1).contains(&scale) {
-                        obj.zoom_step(scale < 1.0, gesture.bounding_box_center());
+            crate::zoom::zoom_on_pinch(
+                &obj,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    1.0,
+                    move || obj.zoom_factor()
+                ),
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    move |zoom, at| {
+                        let zoom = PdfZoom::Scale(zoom.clamp(MIN_SCALE, MAX_SCALE));
+                        if obj.zoom() != zoom {
+                            obj.zoom_around(zoom, Some(at));
+                        }
                     }
-                }
-            ));
-            obj.add_controller(zoom);
+                ),
+            );
 
             let motion = gtk::EventControllerMotion::new();
             motion.connect_motion(glib::clone!(
