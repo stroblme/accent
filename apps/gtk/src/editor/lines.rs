@@ -552,6 +552,10 @@ fn snippet(text: &str, stops: &[usize]) -> sourceview5::Snippet {
 /// The text between the stops, then each stop as an empty chunk numbered from one; plain text
 /// carries -1, which is what GtkSourceView reads as "not a stop". A stop off a character
 /// boundary, which the renderer never produces, is skipped rather than trusted.
+///
+/// Last, an empty chunk numbered 0 at the end, which is where Tab past the last stop goes.
+/// Without one GtkSourceView 5.20 moves the caret there itself with no chunk current, and its own
+/// caret handler then fails an assertion (`_gtk_source_snippet_insert_set`).
 fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     let mut out = Vec::new();
     let mut byte = 0;
@@ -570,6 +574,7 @@ fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     if byte < text.len() {
         out.push((&text[byte..], -1));
     }
+    out.push(("", 0));
     out
 }
 
@@ -630,17 +635,23 @@ impl Tab {
                 self.analyse();
                 // The snippet put the caret on the first stop; a tab still opening scrolls there
                 // once it is laid out, as a jump does.
-                self.scroll_to_caret(0.3);
+                self.scroll_to_caret(0.3, false);
             }
         }
     }
 
-    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk.
+    /// A template's text at the caret, with its `{{cursor}}` stops for Tab to walk. A fold the
+    /// text would land in is opened first, or the text would be folded away with it.
     pub fn insert_stops(&self, text: &str, stops: &[usize]) {
+        let opened = crate::fold::reveal_insertion(self.text_buffer(), &caret(&self.buffer));
         let mut at = caret(&self.buffer);
         match stops.is_empty() {
             true => self.buffer.insert(&mut at, text),
             false => self.push_snippet(&snippet(text, stops), &mut at),
+        }
+        // The snippet scrolled to the caret already, short of it if the fold held many lines.
+        if opened {
+            self.scroll_to_caret(0.3, true);
         }
     }
 }
@@ -653,11 +664,21 @@ mod tests {
     fn chunks_split_the_text_at_its_stops_in_order() {
         assert_eq!(
             chunks("ab: \ncd: \n", &[4, 9]),
-            [("ab: ", -1), ("", 1), ("\ncd: ", -1), ("", 2), ("\n", -1)]
+            [
+                ("ab: ", -1),
+                ("", 1),
+                ("\ncd: ", -1),
+                ("", 2),
+                ("\n", -1),
+                ("", 0)
+            ]
         );
-        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1)]);
-        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1)]);
-        assert_eq!(chunks("ab", &[0, 0]), [("", 1), ("", 2), ("ab", -1)]);
+        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1), ("", 0)]);
+        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1), ("", 0)]);
+        assert_eq!(
+            chunks("ab", &[0, 0]),
+            [("", 1), ("", 2), ("ab", -1), ("", 0)]
+        );
     }
 
     #[test]

@@ -386,6 +386,12 @@ fn build(
     // screen and out of the way of the eye, which is worse than a folded line. `Alt+Z` unwraps
     // the odd generated file where the columns really do mean something.
     view.set_wrap_mode(gtk::WrapMode::WordChar);
+    // Tab walks a template's `{{cursor}}` stops and a completion's placeholders
+    // (`Tab::push_snippet`): GtkSourceView hands a key to its snippets only with this on. With it
+    // on, Tab after a word would also expand whatever snippet files GtkSourceView finds, so the
+    // process's one manager is given nowhere to look, before the first Tab ever asks it.
+    view.set_enable_snippets(true);
+    sourceview5::SnippetManager::default().set_search_path(&[]);
     view.set_show_line_numbers(false);
     if !flavour.is_note() {
         view.set_auto_indent(true);
@@ -1241,6 +1247,13 @@ impl Tab {
             .borrow()
             .as_ref()
             .is_some_and(|snippet| snippet.buffer().is_some())
+    }
+
+    /// Stop walking the template's stops, leaving the rest where they are. GtkSourceView 5.20 has
+    /// no call for it but turning `enable-snippets` off, which ends every snippet in the view.
+    pub(crate) fn end_snippet(&self) {
+        self.view.set_enable_snippets(false);
+        self.view.set_enable_snippets(true);
     }
 
     /// The view as the subclass that paints ghost text and holds the extra carets.
