@@ -260,6 +260,141 @@ fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
     tab.banner.button_label().filter(|label| !label.is_empty())
 }
 
+/// Stage Selected Lines and Unstage Selected Lines, end to end. It makes a repository in the
+/// vault root and commits the note as twelve lines, so point it at a throwaway vault. The tab then
+/// rewrites line 3 and adds a line under line 9, and the working tree is compared with the index;
+/// line 3 is selected in the editor and staged, then selected in the Index pane of the staged
+/// comparison and unstaged. It prints the entry each pane's menu offers and what the index holds
+/// after each step, then leaves line 3 selected in the working-tree comparison for eight seconds,
+/// for `build-aux/xtest.py` to open the menu on with a secondary click (`hold` says when).
+pub(super) fn bench_compare_lines(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let base: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+        tab.set_text(&base);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_lines write_failed {e}");
+            return bench_quit(&app);
+        }
+        let root = app.root();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=bench",
+                    "-c",
+                    "user.email=bench@accent.invalid",
+                ])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        git(&["init", "-q"]);
+        git(&["add", "--", &rel]);
+        git(&["commit", "-qm", "base"]);
+        // The watcher's debounce and a repository discovery that runs git per directory.
+        wait(4000).await;
+        let Some(panel) = app.git.get().filter(|git| git.has_repos()).cloned() else {
+            println!("bench compare_lines no_repo");
+            return bench_quit(&app);
+        };
+        let edited = base
+            .replace("line 3\n", "line three\n")
+            .replace("line 9\n", "line 9\nline 9b\n");
+        tab.set_text(&edited);
+        panel.compare_worktree(&rel);
+        wait(800).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_lines none");
+            return bench_quit(&app);
+        };
+        let index = format!(":{rel}");
+        println!(
+            "bench compare_lines worktree menus={:?} {}",
+            [
+                pane_view(compare.widget(), false),
+                Some(tab.view.clone().upcast())
+            ]
+            .map(|v| v.and_then(label)),
+            bench_compare_line(&compare)
+        );
+        select_line(&tab.buffer, 2);
+        let _ = tab.view.activate_action("diff.selection", None);
+        wait(1500).await;
+        println!(
+            "bench compare_lines staged index={:?} {}",
+            git(&["show", &index]),
+            bench_compare_line(&compare)
+        );
+
+        panel.compare_staged(&rel);
+        wait(800).await;
+        let Some(Doc::Diff(staged)) = app.doc_for(&format!("diff:index:{rel}")) else {
+            println!("bench compare_lines no_staged_tab");
+            return bench_quit(&app);
+        };
+        let views = [false, true].map(|end| pane_view(staged.comparison().widget(), end));
+        println!(
+            "bench compare_lines staged_tab menus={:?} {}",
+            views.clone().map(|v| v.and_then(label)),
+            bench_compare_line(staged.comparison())
+        );
+        if let [_, Some(view)] = views {
+            select_line(&view.buffer(), 2);
+            let _ = view.activate_action("diff.selection", None);
+        }
+        wait(1500).await;
+        println!(
+            "bench compare_lines unstaged index={:?} {}",
+            git(&["show", &index]),
+            bench_compare_line(staged.comparison())
+        );
+
+        app.reveal_page(&tab.page);
+        select_line(&tab.buffer, 2);
+        println!("bench compare_lines hold");
+        wait(8000).await;
+        bench_quit(&app);
+    });
+}
+
+/// The view of one pane of a comparison: the left one, or the right with `end`.
+fn pane_view(paned: &gtk::Widget, end: bool) -> Option<gtk::TextView> {
+    let paned = paned.downcast_ref::<gtk::Paned>()?;
+    let pane = match end {
+        true => paned.end_child(),
+        false => paned.start_child(),
+    }?;
+    find_widget(&pane, &|w| w.is::<gtk::TextView>())?
+        .downcast()
+        .ok()
+}
+
+/// The first entry of the context menu a view adds to GTK's own, which is in a section.
+fn label(view: gtk::TextView) -> Option<String> {
+    view.extra_menu()?
+        .item_link(0, "section")?
+        .item_attribute_value(0, "label", None)?
+        .get::<String>()
+}
+
+/// Select line `n` (from 0) whole, its newline included.
+fn select_line(buffer: &impl IsA<gtk::TextBuffer>, n: i32) {
+    let buffer = buffer.as_ref();
+    if let (Some(start), Some(end)) = (buffer.iter_at_line(n), buffer.iter_at_line(n + 1)) {
+        buffer.select_range(&start, &end);
+    }
+}
+
 fn bench_compare_line(compare: &diff::Compare) -> String {
     let (rows, hunks, hidden, buttons) = compare.counts();
     format!(

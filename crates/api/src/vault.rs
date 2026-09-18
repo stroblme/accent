@@ -402,6 +402,10 @@ methods! {
     git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge,
         bounded by git::TRANSFER_TIMEOUT;
     git git_merge_abort = merge_abort(repo: ref Repo) -> ();
+    /// What Stage and Unstage Selected Lines write. A host whose `accent-cli serve` predates it
+    /// answers "no such method".
+    git git_stage_text = stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),
+        bounded by git::TRANSFER_TIMEOUT;
     git git_commit = commit(repo: ref Repo, message: ref str, all: val bool) -> String,
         bounded by git::TRANSFER_TIMEOUT;
     /// A pull and then a push, each under its own bound.
