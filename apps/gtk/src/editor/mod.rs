@@ -548,9 +548,13 @@ pub fn open(
     let follow_tag = gtk::TextTag::new(Some("follow"));
     follow_tag.set_underline(pango::Underline::Single);
     buffer.tag_table().add(&follow_tag);
+    // Folded text included, as VS Code finds into folds: GtkSourceView skips invisible text by
+    // default, so a match in a shut block was never stepped to, counted or replaced. Stepping to
+    // one opens its fold (`Tab::step`).
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
+        .visible_only(false)
         .build();
     let context = sourceview5::SearchContext::new(&buffer, Some(&settings));
 

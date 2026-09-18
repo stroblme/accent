@@ -195,8 +195,7 @@ impl Tab {
         };
         if let Some((s, e, _)) = found {
             // A match inside a folded block opens it, or the selection is invisible.
-            let opened = fold::reveal(self.text_buffer(), &s);
-            self.buffer.select_range(&s, &e);
+            let opened = self.reveal_select(&s, &e);
             self.when_measured(opened, |view| {
                 view.scroll_to_mark(&view.buffer().get_insert(), 0.1, false, 0.0, 0.5)
             });
@@ -206,23 +205,42 @@ impl Tab {
     pub fn replace_current(&self, with: &str) {
         if let Some((mut s, mut e)) = self.buffer.selection_bounds() {
             // Fails when the selection is not itself a match, which is the "nothing to do" case.
-            let _ = self.context.replace(&mut s, &mut e, with);
+            let _ = self.replace_match(&mut s, &mut e, with);
         }
         self.step(true, false);
     }
 
-    /// sourceview5 0.11 exposes no `replace_all` binding, so this walks the matches. Each pass
-    /// resumes after the text just inserted, so a replacement containing the query terminates.
+    /// This walks the matches rather than calling sourceview5 0.11's `replace_all`, whose binding
+    /// asserts on the count it returns and so panics when nothing matched. Each pass resumes after
+    /// the text just inserted, and the walk ends where it wraps, so a replacement containing the
+    /// query terminates: the settings wrap around, and the first replacement matches again.
     pub fn replace_all(&self, with: &str) {
         let mut from = self.buffer.start_iter();
         self.buffer.begin_user_action();
-        while let Some((mut s, mut e, _)) = self.context.forward(&from) {
-            if self.context.replace(&mut s, &mut e, with).is_err() {
+        while let Some((mut s, mut e, false)) = self.context.forward(&from) {
+            if self.replace_match(&mut s, &mut e, with).is_err() {
                 break;
             }
             from = e;
         }
         self.buffer.end_user_action();
+    }
+
+    /// Replace one match, leaving `s` and `e` round the replacement. A match in a shut block stays
+    /// shut: GTK puts text inserted where a hidden run begins outside the run, so a replacement at
+    /// the top of a fold would otherwise show on its own under the header.
+    fn replace_match(
+        &self,
+        s: &mut gtk::TextIter,
+        e: &mut gtk::TextIter,
+        with: &str,
+    ) -> Result<(), glib::Error> {
+        let hidden = fold::hiding(self.text_buffer(), s);
+        self.context.replace(s, e, with)?;
+        for tag in hidden {
+            self.buffer.apply_tag(&tag, s, e);
+        }
+        Ok(())
     }
 
     /// "n of m", the way every find bar says it. Blank while GtkSourceView is still counting.
@@ -257,10 +275,22 @@ impl Tab {
     /// Every jump goes through here — an outline row, a search hit, a go-to line, a definition —
     /// so none of them can land inside a folded block and leave the window looking unchanged.
     pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
-        let opened = fold::reveal(self.text_buffer(), iter);
-        self.buffer.place_cursor(iter);
+        let opened = self.reveal_select(iter, iter);
         self.scroll_to_caret(align, opened);
         self.view.grab_focus();
+    }
+
+    /// Select `start..end`, opening whatever hides it first, and say whether anything opened:
+    /// lines GTK has yet to measure. A comparison is laid over the text again once the caret is
+    /// there, since it keeps the run the caret is in open on both sides, where `fold::reveal`
+    /// opened it on the editor's side alone, under the other side's "unchanged lines" button.
+    fn reveal_select(&self, start: &gtk::TextIter, end: &gtk::TextIter) -> bool {
+        let opened = fold::reveal(self.text_buffer(), start);
+        self.buffer.select_range(start, end);
+        if let (true, Some(compare)) = (opened, self.comparison()) {
+            compare.refresh();
+        }
+        opened
     }
 
     /// Scroll the caret to `align` down the view, once the view can say where the caret is.
