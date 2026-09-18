@@ -978,8 +978,8 @@ impl App {
 
     /// A link target as written, resolved the way a wikilink resolves: by name, shortest path.
     /// No name is the note on screen, as `[[#Heading]]` writes it. A name nothing in the vault
-    /// answers to offers New File with that very path typed in, which is how a note gets written
-    /// by being linked to first.
+    /// answers to, in the index or on disk (`Vault::follow`), offers New File with that very path
+    /// typed in, which is how a note gets written by being linked to first.
     pub fn open_target(self: &Rc<Self>, target: &str) {
         let Some(vault) = self.vault() else {
             return self.needs_vault("follow a link");
@@ -1002,7 +1002,7 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let asked = target.clone();
-            let resolved = gio::spawn_blocking(move || vault.resolve_link(&asked)).await;
+            let resolved = gio::spawn_blocking(move || vault.follow(&asked)).await;
             let Some(app) = weak.upgrade() else { return };
             match resolved {
                 Ok(Ok(Some(rel))) => app.land_on(&rel, &anchor),

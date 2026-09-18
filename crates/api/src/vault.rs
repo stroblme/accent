@@ -13,6 +13,7 @@ use std::sync::mpsc::{Receiver, channel};
 use anyhow::Result;
 use serde_json::json;
 
+use accent_core::path::linked_path;
 use accent_core::search;
 
 use crate::local::Local;
@@ -553,6 +554,21 @@ impl Vault {
         self.resolve_link(rel).ok().flatten()
     }
 
+    /// Which vault file following a link to `target` opens, or `None` when nothing is there and
+    /// the UI can offer to write it.
+    ///
+    /// The index answers first. A file in a tree it does not hold — a gitignored `build/` it has
+    /// not walked, a `node_modules` it never enters — is still there to open, so the file New
+    /// File would write for the link ([`linked_path`]) is looked for on disk before it is offered:
+    /// one `stat`, and only for a link the index could not place.
+    pub fn follow(&self, target: &str) -> Result<Option<String>> {
+        if let Some(rel) = self.resolve_link(target)? {
+            return Ok(Some(rel));
+        }
+        let rel = linked_path(target);
+        Ok(self.exists(&rel).then_some(rel))
+    }
+
     /// The repositories the vault touches. A failure is the caller's to see: offline used to read
     /// as "no repositories", which is what emptied the git pane on a dropped connection.
     pub fn repos(&self) -> Result<Vec<Repo>> {
@@ -632,6 +648,38 @@ mod tests {
             Some("Attachments/img.png")
         );
         assert_eq!(f.vault.asset("nowhere.png"), None);
+    }
+
+    /// A link into a tree the walk never enters still opens the file there, which is the one New
+    /// File would have offered to write. Only a real miss is `None`.
+    #[test]
+    fn a_link_into_an_unwalked_tree_follows_to_the_file_on_disk() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("node_modules/pkg/doc.pdf", "not really a pdf");
+        f.write("node_modules/pkg/Guide.md", "# Guide\n");
+        f.write("Note.md", "body\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        for unwalked in ["node_modules/pkg/doc.pdf", "node_modules/pkg/Guide"] {
+            assert_eq!(f.vault.resolve_link(unwalked).unwrap(), None, "{unwalked}");
+        }
+        assert_eq!(
+            f.vault
+                .follow("node_modules/pkg/doc.pdf")
+                .unwrap()
+                .as_deref(),
+            Some("node_modules/pkg/doc.pdf")
+        );
+        // A note is named without its extension, as New File would write it.
+        assert_eq!(
+            f.vault.follow("node_modules/pkg/Guide").unwrap().as_deref(),
+            Some("node_modules/pkg/Guide.md")
+        );
+        assert_eq!(f.vault.follow("note").unwrap().as_deref(), Some("Note.md"));
+        // A folder is not a file to open, and nothing at all is what New File is offered for.
+        assert_eq!(f.vault.follow("node_modules/pkg").unwrap(), None);
+        assert_eq!(f.vault.follow("nowhere.pdf").unwrap(), None);
     }
 
     /// Paste duplicates, so the copy has to take a folder as readily as a file — and the copy is
