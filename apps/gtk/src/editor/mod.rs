@@ -548,9 +548,13 @@ pub fn open(
     let follow_tag = gtk::TextTag::new(Some("follow"));
     follow_tag.set_underline(pango::Underline::Single);
     buffer.tag_table().add(&follow_tag);
+    // Folded text included, as VS Code finds into folds: GtkSourceView skips invisible text by
+    // default, so a match in a shut block was never stepped to, counted or replaced. Stepping to
+    // one opens its fold (`Tab::step`).
     let settings = sourceview5::SearchSettings::builder()
         .wrap_around(true)
         .case_sensitive(false)
+        .visible_only(false)
         .build();
     let context = sourceview5::SearchContext::new(&buffer, Some(&settings));
 
@@ -1069,11 +1073,7 @@ impl Tab {
     /// What the server says can be folded. Whatever is hidden stays hidden if its header survived
     /// the re-analysis, at wherever the line has moved to.
     pub fn set_folds(&self, folds: Vec<Fold>) {
-        // Taken rather than borrowed across the call: `resync` folds, folding moves the caret off
-        // a line it is hiding, and a `mark-set` handler is one hook away from asking this tab what
-        // its folds are.
-        let old = self.folds.take();
-        fold::resync(self.text_buffer(), &old, &folds);
+        fold::resync(self.text_buffer(), &folds);
         self.fold_renderer
             .set_starts(folds.iter().map(|f| f.start_line as i32).collect());
         *self.folds.borrow_mut() = folds;

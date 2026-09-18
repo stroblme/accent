@@ -31,6 +31,8 @@ pub struct Analysis {
     pub headings: Vec<Heading>,
     /// First H1, else frontmatter `title:`, else None (caller falls back to file stem).
     pub title: Option<String>,
+    /// Frontmatter `aliases:` (or `alias:`): the other names Obsidian finds the note by.
+    pub aliases: Vec<String>,
     /// Raw YAML frontmatter body (without the `---` fences), if present.
     pub frontmatter: Option<String>,
 }

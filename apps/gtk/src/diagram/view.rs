@@ -865,17 +865,26 @@ mod imp {
             obj.set_hexpand(true);
             obj.set_vexpand(true);
 
-            let pinch = gtk::GestureZoom::new();
-            pinch.connect_scale_changed(glib::clone!(
-                #[weak]
-                obj,
-                move |gesture, scale| {
-                    if !(0.9..1.1).contains(&scale) {
-                        obj.zoom_step(scale < 1.0, gesture.bounding_box_center());
+            crate::zoom::zoom_on_pinch(
+                &obj,
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    #[upgrade_or]
+                    1.0,
+                    move || obj.scale()
+                ),
+                glib::clone!(
+                    #[weak]
+                    obj,
+                    move |zoom, at| {
+                        let zoom = Zoom::Scale(geometry::clamp_scale(zoom));
+                        if obj.zoom() != zoom {
+                            obj.zoom_around(zoom, Some(at));
+                        }
                     }
-                }
-            ));
-            obj.add_controller(pinch);
+                ),
+            );
 
             let motion = gtk::EventControllerMotion::new();
             motion.connect_motion(glib::clone!(

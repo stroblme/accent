@@ -474,6 +474,10 @@ fn upsert(
             )?
             .execute(params![id, h.level as i64, h.text, h.range.start as i64])?;
         }
+        for name in &a.aliases {
+            tx.prepare_cached("INSERT INTO note_aliases(file_id, name) VALUES(?1,?2)")?
+                .execute(params![id, name])?;
+        }
     }
     if let Some(body) = text.as_ref() {
         tx.prepare_cached("INSERT INTO notes(file_id, body, title) VALUES(?1,?2,?3)")?
@@ -493,6 +497,8 @@ fn clear_derived(tx: &rusqlite::Transaction<'_>, id: i64) -> Result<()> {
     tx.prepare_cached("DELETE FROM tags WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM headings WHERE file_id = ?1")?
+        .execute([id])?;
+    tx.prepare_cached("DELETE FROM note_aliases WHERE file_id = ?1")?
         .execute([id])?;
     tx.prepare_cached("DELETE FROM notes WHERE file_id = ?1")?
         .execute([id])?;

@@ -580,11 +580,14 @@ fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
 ///
 /// A words provider gives the tab a popup of its own to raise, so what is read is a real
 /// `GtkSourceCompletion` popup and not a stand-in. Prints the view's children either side of it —
-/// the widgets the check reads, each `visible/mapped` — and stages the two ways the old cell was
-/// stranded: the view taken off screen with the popup still up and no `hide` emitted, which is a
-/// tab switched away from, and the completion's own `show` forged with nothing on screen. Neither
-/// may say yes, and Return must still continue a list after both. On a scratch vault:
-/// `popup_up true … GtkSourceCompletionList=true/true`, `popup_unmapped false …=false/false`,
+/// the widgets the check reads, each `visible/mapped` — then Return at the end of a list item
+/// under it, once with no row selected, which is the list's and ends the popup, and once with a
+/// row selected, which is the popup's. Then it stages the two ways the old cell was stranded: the
+/// view taken off screen with the popup still up and no `hide` emitted, which is a tab switched
+/// away from, and the completion's own `show` forged with nothing on screen. Neither may say yes,
+/// and Return must still continue a list after both. On a scratch vault:
+/// `popup_up true … GtkSourceCompletionList=true/true`, `popup_return Stop "- " up=false`,
+/// `popup_selected_return Proceed "- comp" up=true`, `popup_unmapped false …=false/false`,
 /// `popup_stale false` and `popup_stale_return "- "`.
 ///
 /// `GtkSourceCompletion` refuses to show while the view has no input focus, and under Xvfb no
@@ -599,7 +602,8 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     words.register(&tab.buffer);
     completion.add_provider(&words);
     // `set_text` is not an edit, so nothing here arms the autosave that would write it out.
-    tab.set_text("completion\n- item\ncomp");
+    let staged = "completion\n- comp";
+    tab.set_text(staged);
 
     let (app, tab) = (app.clone(), tab.clone());
     glib::timeout_add_local_once(Duration::from_millis(600), move || {
@@ -616,35 +620,55 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
                 children(&tab)
             );
             let answer = editor::press(&tab, gdk::Key::Return, none);
-            println!("bench popup_return {answer:?} {:?}", caret_prefix(&tab));
-
-            // The popup still up and the view taken off screen under it: GTK takes the popover
-            // with it, but the completion's own `hide` is never emitted, so this is the shape
-            // that used to strand the cached answer.
-            tab.view.set_visible(false);
             println!(
-                "bench popup_unmapped {} {:?}",
-                tab.popup_shown(),
-                children(&tab)
+                "bench popup_return {answer:?} {:?} up={}",
+                caret_prefix(&tab),
+                tab.popup_shown()
             );
-            tab.view.set_visible(true);
 
-            // The popup gone, and then its `show` forged as a missed `hide` would have left it.
-            completion.hide();
-            completion.remove_provider(&words);
-            words.unregister(&tab.buffer);
-            println!(
-                "bench popup_down {} {:?}",
-                tab.popup_shown(),
-                children(&tab)
-            );
-            completion.emit_show();
-            println!("bench popup_stale {}", tab.popup_shown());
-            tab.buffer.place_cursor(&editor::line_end(&tab.buffer, 1));
-            editor::press(&tab, gdk::Key::Return, none);
-            println!("bench popup_stale_return {:?}", caret_prefix(&tab));
+            // The popup again, with its first row selected, as an arrow key would leave it. The
+            // list paints the row selected on the next frame, which the wait covers.
+            tab.set_text(staged);
+            tab.buffer.place_cursor(&tab.buffer.end_iter());
+            completion.set_select_on_show(true);
+            completion.show();
+            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                let answer = editor::press(&tab, gdk::Key::Return, none);
+                println!(
+                    "bench popup_selected_return {answer:?} {:?} up={}",
+                    caret_prefix(&tab),
+                    tab.popup_shown()
+                );
+                completion.set_select_on_show(false);
 
-            bench_lines_of(&app, &tab, original);
+                // The popup still up and the view taken off screen under it: GTK takes the
+                // popover with it, but the completion's own `hide` is never emitted, so this is
+                // the shape that used to strand the cached answer.
+                tab.view.set_visible(false);
+                println!(
+                    "bench popup_unmapped {} {:?}",
+                    tab.popup_shown(),
+                    children(&tab)
+                );
+                tab.view.set_visible(true);
+
+                // The popup gone, and then its `show` forged as a missed `hide` would have left it.
+                completion.hide();
+                completion.remove_provider(&words);
+                words.unregister(&tab.buffer);
+                println!(
+                    "bench popup_down {} {:?}",
+                    tab.popup_shown(),
+                    children(&tab)
+                );
+                completion.emit_show();
+                println!("bench popup_stale {}", tab.popup_shown());
+                tab.buffer.place_cursor(&editor::line_end(&tab.buffer, 1));
+                editor::press(&tab, gdk::Key::Return, none);
+                println!("bench popup_stale_return {:?}", caret_prefix(&tab));
+
+                bench_lines_of(&app, &tab, original);
+            });
         });
     });
 }

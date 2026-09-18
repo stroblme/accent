@@ -176,27 +176,31 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
 /// was complete while handing back twenty of several hundred paths, so the popup narrowed those
 /// twenty client-side and everything else stayed unreachable however much was typed.
 pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bool) {
+    let (hits, more) = ranked_paths(paths, query);
+    (hits.into_iter().map(|i| paths[i].clone()).collect(), more)
+}
+
+/// [`path_candidates`] by index into `paths`, for a caller whose list holds more than paths.
+fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
     let mut matcher = fuzzy::Query::new(query, fuzzy::Corpus::Paths);
     let query = query.to_lowercase();
-    let mut hits: Vec<(bool, Reverse<u32>, usize, &String)> = paths
+    let mut hits: Vec<(bool, Reverse<u32>, usize, usize)> = paths
         .iter()
-        .filter_map(|rel| {
+        .enumerate()
+        .filter_map(|(i, rel)| {
             let score = matcher.score(rel)?;
             // Lowercased only for what matched: it is an allocation per path otherwise. The whole
             // name, so that `logo.p` still opens `logo.png`.
             let low = rel.to_lowercase();
             let opens = basename(&low).starts_with(&query) || low.starts_with(&query);
-            Some((!opens, Reverse(score), rel.len(), rel))
+            Some((!opens, Reverse(score), rel.len(), i))
         })
         .collect();
     // Stable, so paths of equal rank and length keep the index's alphabetical order.
     hits.sort_by_key(|(later, score, len, _)| (*later, *score, *len));
     let more = hits.len() > COMPLETIONS;
     hits.truncate(COMPLETIONS);
-    (
-        hits.into_iter().map(|(_, _, _, rel)| rel.clone()).collect(),
-        more,
-    )
+    (hits.into_iter().map(|(_, _, _, i)| i).collect(), more)
 }
 
 /// Tags matching what has been typed, in the order the index hands them over: most used first.
@@ -407,16 +411,43 @@ impl Notes {
                 }
 
                 let index = locked(&self.index);
-                let (mut paths, missing) = match trigger {
-                    Trigger::Wiki => (index.note_and_pdf_paths()?, index.missing_notes()?),
-                    _ => (index.file_paths(false)?, Vec::new()),
+                let (mut paths, missing, aliases) = match trigger {
+                    Trigger::Wiki => (
+                        index.note_and_pdf_paths()?,
+                        index.missing_notes()?,
+                        index.note_aliases()?,
+                    ),
+                    _ => (index.file_paths(false)?, Vec::new(), Vec::new()),
                 };
                 // Behind the files, so one that is there leads a note only linked to at the same
                 // rank: the ranking is stable.
                 paths.extend(missing.iter().cloned());
-                let (hits, more) = path_candidates(&paths, prefix);
-                let mut items = Vec::with_capacity(hits.len());
-                for hit in hits {
+                // The aliases last, ranked by their own names, and told apart by where they sit.
+                let named = paths.len();
+                paths.extend(aliases.iter().map(|(alias, _)| alias.clone()));
+                let (ranked, more) = ranked_paths(&paths, prefix);
+                let mut items = Vec::with_capacity(ranked.len());
+                for i in ranked {
+                    // The link names the file, as any other row writes it, and reads as the
+                    // alias: an alias is a name to find a note by, never a link target.
+                    if let Some((alias, rel)) = i.checked_sub(named).map(|j| &aliases[j]) {
+                        let (name, path) = link_names(rel);
+                        let target = match index.resolve_target(&name)?.as_ref() == Some(rel) {
+                            true => name,
+                            false => path,
+                        };
+                        items.push(Completion {
+                            insert: format!("[[{target}|{alias}]]"),
+                            detail: Some(rel.clone()),
+                            filter: Some(format!("[[{alias}")),
+                            label: alias.clone(),
+                            kind: Kind::File,
+                            replace,
+                            ..empty_item()
+                        });
+                        continue;
+                    }
+                    let hit = paths[i].clone();
                     // A second link to a note not written yet, spelled from the root the way
                     // New File will place it, so both reach it once it is.
                     if missing.contains(&hit) {
@@ -991,6 +1022,50 @@ mod tests {
                 ("[[Other]]", None),
                 ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
             ]
+        );
+    }
+
+    /// A front matter alias is offered by its own name and writes a link to the file, spelled as
+    /// any `[[` completion spells it, that reads as the alias: an alias is never a link target.
+    #[test]
+    fn a_wikilink_completes_an_alias_to_its_note() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir(vault.path().join("sub")).unwrap();
+        std::fs::write(
+            vault.path().join("sub/Real Name.md"),
+            "---\naliases: [Nickname]\n---\n",
+        )
+        .unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Nick\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let caret = Pos {
+            line: 0,
+            character: 6,
+        };
+        let items = notes.completion("a.md", caret).unwrap().items;
+
+        let rows: Vec<(&str, &str, Option<&str>)> = items
+            .iter()
+            .map(|i| (i.label.as_str(), i.insert.as_str(), i.detail.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [(
+                "Nickname",
+                "[[Real Name|Nickname]]",
+                Some("sub/Real Name.md")
+            )]
         );
     }
 

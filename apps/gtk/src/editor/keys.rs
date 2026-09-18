@@ -7,7 +7,8 @@
 //!
 //! This is the order, written down once:
 //!
-//! 1. **the completion popup**, which owns every key while it is up;
+//! 1. **the completion popup**, which owns every key while it is up, except Return and Tab while
+//!    no row in it is selected;
 //! 2. **the signature popover**, which owns Escape while it is showing;
 //! 3. **a template's Tab stops** (Tab, and Escape to stop walking them), because a snippet the
 //!    user is walking outranks both a suggestion and a list item's indent;
@@ -83,9 +84,32 @@ pub(crate) fn press(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> g
 
 /// One key press, offered to each step of the chain in turn.
 fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-    if tab.popup_shown() {
+    let Some(popup) = popup(&tab.view) else {
+        return beneath_popup(tab, key, state);
+    };
+    // The popup takes Return and Tab only to accept its selected row (`activate_nth_cb` in
+    // `gtksourcecompletionlistbox.c`); with none selected it lets them through to the view bare,
+    // past the list helpers below, so a list item lost its marker and Tab typed a tab after it.
+    // With no row selected they are the editor's, as in VS Code and Obsidian, and the popup goes.
+    let editors = matches!(
+        key,
+        gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab | gdk::Key::KP_Tab
+    );
+    if !editors || row_selected(&popup) {
         return glib::Propagation::Proceed;
     }
+    // Blocking cancels the popup, and holding the block over the edit keeps that edit from
+    // bringing it straight back: a one-character insert with a word before the caret, the tab a
+    // tab-indented item gets, would otherwise start a new completion.
+    let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
+    completion.block_interactive();
+    let answer = beneath_popup(tab, key, state);
+    completion.unblock_interactive();
+    answer
+}
+
+/// The chain below the popup: everything a press means when no popup takes it.
+fn beneath_popup(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
     if let Some(answer) = signature::on_key(tab, key) {
         return answer;
     }
@@ -141,12 +165,32 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
 /// of that — so this is only the one of them that cannot be left behind. A handful of widgets,
 /// walked once per press, and the cheap flag is read before the type name.
 pub(super) fn popup_visible(view: &sourceview5::View) -> bool {
-    let mut child = view.first_child();
-    while let Some(widget) = child {
-        if widget.is_mapped() && widget.type_().name().starts_with("GtkSourceCompletion") {
-            return true;
-        }
-        child = widget.next_sibling();
+    popup(view).is_some()
+}
+
+/// The completion popup, while it is on screen: see [`popup_visible`].
+fn popup(view: &sourceview5::View) -> Option<gtk::Widget> {
+    children(view.upcast_ref())
+        .find(|w| w.is_mapped() && w.type_().name().starts_with("GtkSourceCompletion"))
+}
+
+/// Whether `popup` shows a row selected, which is what Return and Tab accept. None is until an
+/// arrow key or the pointer picks one (`select-on-show` is off). The popup has no getter for it,
+/// and its list's `proposal` property raises a critical when nothing is selected (5.20 reads the
+/// item at -1), so it is read off the row the list paints selected: the list sets that state from
+/// its selection on the next frame, which is sooner than a second key press.
+fn row_selected(popup: &gtk::Widget) -> bool {
+    fn any_selected(widget: &gtk::Widget) -> bool {
+        children(widget).any(|w| {
+            (w.type_().name() == "GtkSourceCompletionListBoxRow"
+                && w.state_flags().contains(gtk::StateFlags::SELECTED))
+                || any_selected(&w)
+        })
     }
-    false
+    any_selected(popup)
+}
+
+/// A widget's children, internal ones included.
+fn children(widget: &gtk::Widget) -> impl Iterator<Item = gtk::Widget> {
+    std::iter::successors(widget.first_child(), |w| w.next_sibling())
 }

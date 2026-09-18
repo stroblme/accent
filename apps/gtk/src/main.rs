@@ -39,6 +39,7 @@ mod panes;
 mod pathfield;
 mod pdf;
 mod preview;
+mod recall;
 mod reconnect;
 mod references;
 mod ring;

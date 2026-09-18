@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 9;
+pub(super) const SCHEMA_VERSION: i64 = 10;
 
 /// Biggest non-markdown file whose text goes into the index.
 ///
@@ -56,6 +56,9 @@ CREATE TABLE links(
 );
 CREATE TABLE tags(file_id INTEGER NOT NULL, name TEXT NOT NULL, byte_start INTEGER NOT NULL);
 CREATE TABLE headings(file_id INTEGER NOT NULL, level INTEGER NOT NULL, text TEXT NOT NULL, byte_start INTEGER NOT NULL);
+-- A note's frontmatter `aliases:`, the names Go to File and `[[` completion find it by. Not the
+-- `aliases` table above, which is the filesystem's: a second path to the same file.
+CREATE TABLE note_aliases(file_id INTEGER NOT NULL, name TEXT NOT NULL);
 CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT NOT NULL);
 
 -- `body` stays column 0 so `snippet(notes_fts, 0, ...)` keeps quoting the note text, and so the
@@ -140,6 +143,7 @@ CREATE INDEX idx_links_src      ON links(src_file);
 CREATE INDEX idx_tags_name      ON tags(name);
 CREATE INDEX idx_tags_file      ON tags(file_id);
 CREATE INDEX idx_headings_file  ON headings(file_id);
+CREATE INDEX idx_note_aliases_file ON note_aliases(file_id);
 CREATE INDEX idx_files_devino   ON files(dev, ino);
 CREATE INDEX idx_files_parent   ON files(parent_dir);
 CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
@@ -154,6 +158,7 @@ DROP TABLE IF EXISTS notes_fts;
 DROP TABLE IF EXISTS notes_tri;
 DROP TABLE IF EXISTS notes;
 DROP TABLE IF EXISTS headings;
+DROP TABLE IF EXISTS note_aliases;
 DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS links;
 DROP TABLE IF EXISTS file_keys;

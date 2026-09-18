@@ -21,6 +21,8 @@ pub struct Corpus {
     /// files end.
     files: Rc<Vec<String>>,
     real: usize,
+    /// `(alias, note)` for every frontmatter alias, which Go to File also finds a note by.
+    aliases: Rc<Vec<(String, String)>>,
     tags: Rc<Vec<String>>,
     /// The index's recently changed notes, up to [`RECENT_NOTES`]: one refresh behind at worst,
     /// which a list of what changed lately can afford.
@@ -34,6 +36,14 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
+        // A file from outside the vault has no path in it to ask about.
+        let opened: Vec<String> = self
+            .recent_notes
+            .borrow()
+            .iter()
+            .filter(|rel| !doc::is_loose_key(rel))
+            .cloned()
+            .collect();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let loaded = gio::spawn_blocking(move || {
@@ -41,11 +51,24 @@ impl App {
                 // file is reached, dimmed but listed.
                 let mut files = vault.file_paths(false).unwrap_or_default();
                 let real = files.len();
+                // What this window opened and is gone since: deleted, or renamed where no event
+                // said so. A typed query ranks the history with the files, so a gone one would
+                // be offered again. Only the files the index does not list are asked about, and
+                // only an answer of "nothing there" drops one: a link that is down says nothing.
+                let gone: Vec<String> = {
+                    let listed: HashSet<&str> = files.iter().map(String::as_str).collect();
+                    opened
+                        .into_iter()
+                        .filter(|rel| !listed.contains(rel.as_str()))
+                        .filter(|rel| matches!(vault.stat(rel), Ok(None)))
+                        .collect()
+                };
                 // A host whose `accent-cli serve` predates the method answers "no such method",
-                // which leaves the files alone.
+                // which leaves the files alone. The same goes for the aliases.
                 files.extend(vault.missing_notes().unwrap_or_default());
+                let aliases = vault.note_aliases().unwrap_or_default();
                 (
-                    (files, real),
+                    (files, real, gone, aliases),
                     vault
                         .tags()
                         .unwrap_or_default()
@@ -56,10 +79,16 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Ok(((files, real), tags, recent))) = (weak.upgrade(), loaded) {
+            if let (Some(app), Ok(((files, real, gone, aliases), tags, recent))) =
+                (weak.upgrade(), loaded)
+            {
+                app.recent_notes
+                    .borrow_mut()
+                    .retain(|rel| !gone.contains(rel));
                 *app.corpus.borrow_mut() = Corpus {
                     files: Rc::new(files),
                     real,
+                    aliases: Rc::new(aliases),
                     tags: Rc::new(tags),
                     recent: Rc::new(recent),
                 };
@@ -89,6 +118,7 @@ impl App {
             // Every file, not only the notes: a source file has to be reachable by name too.
             files: self.corpus.borrow().files.clone(),
             real: self.corpus.borrow().real,
+            aliases: self.corpus.borrow().aliases.clone(),
             commands: ACTIONS
                 .iter()
                 .map(|(action, label, _)| palette::Item::Command {
@@ -138,7 +168,9 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |item: &palette::Item| match item {
-                    palette::Item::File(rel) => app.open_path(rel),
+                    palette::Item::File(rel) | palette::Item::Alias { rel, .. } => {
+                        app.open_path(rel)
+                    }
                     // Followed as the link would be: New File, unless the note has been written
                     // since the list was read.
                     palette::Item::Missing(rel) => app.open_target(rel),

@@ -6,9 +6,10 @@ use super::*;
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
 /// hunks, hidden runs, buttons, how many rows GTK lays out at a height other than the one the
 /// alignment asked for, and how much lower one column starts than the other (0 and 0 are the
-/// claim) — before the first hunk is taken from Theirs, the hidden run is opened, and the same
-/// is read again, with the button of the changed-on-disk banner that stands over it (none while
-/// the comparison is up, Compare once it has gone). Then two blobs in a tab of their own, at a
+/// claim) — before a Find Next into the hidden run, which has to open it on both sides, the first
+/// hunk is taken from Theirs, the hidden run is opened, and the same is read again, with the
+/// button of the changed-on-disk banner that stands over it (none while the comparison is up,
+/// Compare once it has gone). Then two blobs in a tab of their own, at a
 /// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under
 /// git, last, the working tree against the index in the note's tab: whether it opened with the run
 /// before the first change folded and the caret on that change, and then a character typed into
@@ -55,6 +56,17 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                 "bench compare {} banner_button={:?}",
                 bench_compare_line(&compare),
                 bench_banner_button(&tab)
+            );
+            // Find Next into the run the comparison collapsed, which has to open on both sides
+            // rather than on the editor's alone, under the button still standing on Theirs.
+            tab.buffer.place_cursor(&tab.buffer.start_iter());
+            tab.set_query("line 25");
+            tab.step(true, false);
+            println!(
+                "bench compare_find caret_line={} label={:?} {}",
+                tab.cursor_line(),
+                tab.matches_label(),
+                bench_compare_line(&compare)
             );
             compare.take_hunk(0, false);
             compare.open_gap(0);
