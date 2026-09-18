@@ -376,6 +376,9 @@ methods! {
     any set_excluded(entries: ref [String]) -> ();
     any recent_notes(limit: val usize) -> Vec<String>;
     any resolve_link(target: ref str) -> Option<String>;
+    /// What Go to File and `[[` completion offer to write. A host whose `accent-cli serve`
+    /// predates it answers "no such method", which the palette takes as none.
+    any missing_notes() -> Vec<String>;
     any conflicts() -> Vec<(String, String)>;
     any conflicts_of(rel: ref str) -> Vec<String>;
 

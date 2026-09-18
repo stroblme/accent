@@ -27,19 +27,6 @@ pub(super) fn split_ext(name: &str) -> (&str, &str) {
     }
 }
 
-/// The file a wikilink that resolves to nothing would create: the target exactly as the link
-/// spells it, from the vault root, with `.md` added when it names no extension of its own.
-///
-/// `[[Notes/Foo]]` is `Notes/Foo.md` and `[[Foo]]` is `Foo.md` at the root — not in the linking
-/// note's folder, which is not what the link says. A target that names an extension keeps it,
-/// markdown or not: `[[data.csv]]` asks for a `data.csv`.
-pub(super) fn linked_path(target: &str) -> String {
-    match split_ext(basename(target)).1.is_empty() {
-        true => format!("{target}.md"),
-        false => target.to_string(),
-    }
-}
-
 /// The part of a name Rename selects, so typing replaces it: a file's stem, keeping the
 /// extension, and a folder's whole name, since the dot in `Archive.2024` starts no extension.
 pub(super) fn renamed_part(name: &str, is_dir: bool) -> &str {
@@ -198,15 +185,6 @@ mod tests {
         assert!(!is_markdown("note"));
         assert!(!is_markdown("chart.pdf"));
         assert!(!is_markdown("Notes"));
-    }
-
-    #[test]
-    fn linked_path_is_what_the_link_says_plus_md_when_it_names_no_extension() {
-        assert_eq!(linked_path("Foo"), "Foo.md");
-        assert_eq!(linked_path("Notes/Foo"), "Notes/Foo.md");
-        // An extension it already carries is kept, whether or not it is markdown.
-        assert_eq!(linked_path("Notes/Foo.md"), "Notes/Foo.md");
-        assert_eq!(linked_path("data.csv"), "data.csv");
     }
 
     #[test]
