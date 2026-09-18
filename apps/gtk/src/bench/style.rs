@@ -204,7 +204,7 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         // ASCII throughout, so `find` gives the character offset the buffer counts in.
-        let text = "See [[Other Note]] and a plain word here.\n";
+        let text = "See [[Other Note]] and a plain word here.\n[[Nowhere/Other Note#Part|there]]\n";
         tab.set_text(text);
         // The link table is filled by the analysis debounce, not by the edit.
         glib::timeout_add_local_once(Duration::from_millis(400), move || {
@@ -227,16 +227,19 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             probe("wikilink_again", "Other", true);
             // Ctrl up over the same link takes it off again.
             probe("ctrl_released", "Other", false);
+            let caret = tab.buffer.iter_at_offset(at("Nowhere"));
+            tab.buffer.place_cursor(&caret);
             glib::spawn_future_local(bench_dangling(app));
         });
     });
 }
 
-/// Follow a link nothing in the vault answers to: New File comes up with the path the link spells
-/// already typed in. Both the resolve and the vault's templates arrive from a worker, so the
-/// dialog is waited for rather than assumed. Cancelling it is [`bench_close`]'s drill.
+/// Follow the link under the caret, which nothing in the vault answers to, the way F12, the
+/// chord and a Ctrl+click do: New File comes up with the path the link spells already typed in,
+/// its anchor and alias left out. Both the resolve and the vault's templates arrive from a worker,
+/// so the dialog is waited for rather than assumed. Cancelling it is [`bench_close`]'s drill.
 async fn bench_dangling(app: Rc<App>) {
-    app.open_target("Nowhere/Other Note");
+    app.go_to_definition();
     for _ in 0..40 {
         if app.window.visible_dialog().is_some() {
             break;
