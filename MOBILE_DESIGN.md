@@ -34,7 +34,7 @@ build with. This says what to build.
 | Note, editing | The same text with the same styling spans, markup visible and dimmed |
 | PDF | A column of pages with the same bar a note has drawn over the top of them rather than above them: a page is read at a zoom and an offset the reader chose, and chrome that takes space in the layout moves both every time it comes and goes. Back first retraces the jumps taken inside the document — a link followed, a bookmark picked — the latest first, as the desktop's history does; with none left, it leaves the document. The annotation toolbar is off (`PdfScreen.ANNOTATIONS`) until its design settles; while it is off no tool can be picked and a finger only ever moves the page |
 | The panel | A handle at the top, and a pull down anywhere in it closes it. No Close button: Back already did that, and a second way out that costs a corner of the screen is a corner spent twice |
-| Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog |
+| Message | `Snackbar`. A state that needs a decision is an inline row above the content, not a dialog — except on the way out, where the row would go with the content: leaving a note over edits saving was paused on asks the row's question in an `AlertDialog` |
 
 ## Spacing and type
 

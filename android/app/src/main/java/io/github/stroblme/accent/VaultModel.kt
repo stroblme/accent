@@ -69,7 +69,20 @@ data class Open(
      * types into. It belongs to the note in front, so opening another puts it away.
      */
     val finding: Boolean = false,
-)
+    /**
+     * The reader is on the way out of the note — closing it, closing the vault, opening another —
+     * over edits saving was paused on, and has been asked which version to keep
+     * ([VaultModel.answer]).
+     */
+    val leaving: Boolean = false,
+) {
+    /**
+     * Whether taking [typed] away would lose edits: saving is paused while the file has moved
+     * under the note, so no exit can write them. A banner over a note nobody typed into has
+     * nothing to lose.
+     */
+    fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && typed.toString() != text
+}
 
 data class VaultState(
     val root: String? = null,
@@ -126,6 +139,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     val buffer = TextFieldState()
 
     private var vault: Vault? = null
+
+    /** The exit [leave] is holding while the reader answers, if there is one. */
+    private var held: (suspend () -> Unit)? = null
 
     /** Every file in the vault, for the switcher. See [corpus]. */
     private var corpus: List<String> = emptyList()
@@ -283,17 +299,16 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openFile(rel: String, find: String? = null) {
         val v = vault ?: return
-        recents.touch(Recents.Kind.Notes, rel)
-        viewModelScope.launch {
-            // What is in the buffer belongs to the note it was typed into, and the buffer is about
-            // to hold another note's text: a write left pending across the swap would put these
-            // words in that file.
-            flush()
+        // What is in the buffer belongs to the note it was typed into, and the buffer is about to
+        // hold another note's text: a write left pending across the swap would put these words in
+        // that file.
+        leave {
+            recents.touch(Recents.Kind.Notes, rel)
             if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
                 path.onSuccess { p -> _state.update { it.copy(pdf = p, open = null) } }
                     .onFailure { fail("Cannot open this file", it) }
-                return@launch
+                return@leave
             }
             val read = withContext(Dispatchers.IO) {
                 runCatching { v.read(rel) to v.conflictsOf(rel) }
@@ -313,10 +328,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** Put the note down, writing anything the pause was still holding. */
-    fun close() = viewModelScope.launch {
-        flush()
-        _state.update { it.copy(open = null, pdf = null) }
-    }
+    fun close() = leave { _state.update { it.copy(open = null, pdf = null) } }
 
     /**
      * Put the vault down and go back to the picker.
@@ -328,10 +340,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * counts the calls in flight and frees the object behind the last of them, and the next one
      * throws, which that loop already treats as the end.
      */
-    fun closeVault() = viewModelScope.launch {
-        // Before the handle, because the write goes through it: the buffer is the only copy of
-        // whatever was typed in the last second.
-        flush()
+    fun closeVault() = leave {
+        // After the buffer is written rather than before, because the write goes through the
+        // handle: the buffer is the only copy of whatever was typed in the last second.
         vault?.close()
         vault = null
         corpus = emptyList()
@@ -359,18 +370,25 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Write the note back, refusing rather than resolving when the file has moved under it.
      *
      * A refusal leaves the buffer alone and raises the banner: that buffer holds the only copy of
-     * both the edits and the answer nobody has given yet. Same rule as the desktop.
+     * both the edits and the answer nobody has given yet. Same rule as the desktop. [force] is
+     * that answer given as Keep mine, and writes over whatever is on disk: a save that expects no
+     * particular version is the core's forced write, the desktop's Overwrite.
      */
-    private suspend fun write(text: String) {
+    private suspend fun write(text: String, force: Boolean = false) {
         val v = vault ?: return
         val open = _state.value.open ?: return
-        if (open.changedOnDisk) return
+        if (open.changedOnDisk && !force) return
         val written = withContext(Dispatchers.IO) {
-            runCatching { v.save(open.rel, text, open.etag) }
+            runCatching { v.save(open.rel, text, if (force) null else open.etag) }
         }
         written.onSuccess { etag ->
+            // What was just written is what is on disk, so there is nothing left to choose between.
             _state.update {
-                if (it.open?.rel != open.rel) it else it.copy(open = it.open.copy(text = text, etag = etag))
+                if (it.open?.rel != open.rel) {
+                    it
+                } else {
+                    it.copy(open = it.open.copy(text = text, etag = etag, changedOnDisk = false))
+                }
             }
         }.onFailure { e ->
             when (e) {
@@ -393,6 +411,45 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val text = buffer.text.toString()
         if (text != _state.value.open?.text) write(text)
     }
+
+    /**
+     * Take the buffer away — for another note, for none, or with the vault — once [flush] has
+     * written it.
+     *
+     * Edits saving was paused on are what [flush] cannot write, and going anyway would drop them
+     * with nothing said. So the exit is held instead and the reader asked which version to keep
+     * ([Open.leaving]); [answer] lets it go or drops it.
+     */
+    private fun leave(then: suspend () -> Unit) = viewModelScope.launch {
+        if (_state.value.open?.wouldLose(buffer.text) == true) {
+            held = then
+            _state.update { it.copy(open = it.open?.copy(leaving = true)) }
+            return@launch
+        }
+        flush()
+        then()
+    }
+
+    /**
+     * The reader's answer to the exit [leave] is holding: `true` keeps their edits over the
+     * version on disk and goes, `false` goes without them — saving is still paused, so nothing
+     * writes them — and `null` stays, edits and banner as they were.
+     */
+    fun answer(keep: Boolean?) = viewModelScope.launch {
+        val then = held ?: return@launch
+        held = null
+        _state.update { it.copy(open = it.open?.copy(leaving = false)) }
+        if (keep == null) return@launch
+        if (keep) {
+            overwrite().join()
+            // A write that failed has said so, and the edits are still only in the buffer: stay.
+            if (_state.value.open?.wouldLose(buffer.text) == true) return@launch
+        }
+        then()
+    }
+
+    /** Keep mine: write the buffer over the version on disk. */
+    fun overwrite() = viewModelScope.launch { write(buffer.text.toString(), force = true) }
 
     /** Take what is on disk, dropping the edits in the buffer. */
     fun reload() {
