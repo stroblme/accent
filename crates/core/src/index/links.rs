@@ -305,23 +305,28 @@ mod tests {
         let (vault, db) = fixture();
         fs::write(
             vault.path().join("d.md"),
-            "[[Nowhere/Other Note#Part|there]] [t](Nowhere/other%20note.md) [[pic.png]] [[Beta]]\n",
+            "[[Nowhere/Other Note#Part|there]] [t](Nowhere/other%20note.md) [[pic.png]] [[Beta]] \
+             [[Rev 1.2 notes]] [[foo.pdf]]\n",
         )
         .unwrap();
         fs::write(vault.path().join("sub/e.md"), "[t](#anchor) [u](Later)\n").unwrap();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
-        // Not the image, the note that is there, or the folder an in-note anchor names.
+        // Not the image or the PDF, the note that is there, or the folder an in-note anchor
+        // names; a dot in a name is not an extension.
         assert_eq!(
             ix.missing_notes().unwrap(),
-            ["Nowhere/Other Note.md", "sub/Later.md"]
+            ["Nowhere/Other Note.md", "Rev 1.2 notes.md", "sub/Later.md"]
         );
 
         fs::create_dir(vault.path().join("Nowhere")).unwrap();
         fs::write(vault.path().join("Nowhere/Other Note.md"), "# Other\n").unwrap();
         ix.update_file(vault.path(), "Nowhere/Other Note.md")
             .unwrap();
-        assert_eq!(ix.missing_notes().unwrap(), ["sub/Later.md"]);
+        assert_eq!(
+            ix.missing_notes().unwrap(),
+            ["Rev 1.2 notes.md", "sub/Later.md"]
+        );
     }
 
     #[test]
