@@ -49,15 +49,8 @@ import java.net.URLDecoder
 fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        // The bar goes with the rest of the chrome while reading, and never while writing: Done
-        // is the only way out of the editor, so it has to stay where it can be reached.
-        FadingBar(visible = editing || chrome.shown) {
-            DocumentBar(
-                title = File(open.rel).name.removeSuffix(".md"),
-                action = if (editing) "Done" else "Edit",
-                onAction = { editing = !editing },
-            )
-        }
+        // Above the bar rather than under it, since the bar lies over the note and would cover
+        // them. They never fade, so one coming or going moves the note once, as a decision may.
         open.conflicts.firstOrNull()?.let { conflict ->
             ConflictBanner(
                 conflict = conflict,
@@ -66,8 +59,27 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
             )
         }
         if (open.changedOnDisk) ChangedBanner(onReload = { model.reload() })
-        Box(Modifier.weight(1f).padding(vertical = DocumentGap)) {
-            if (editing) Editor(model) else Rendered(model, open, root, chrome)
+        DocumentFrame(
+            // The bar goes with the rest of the chrome while reading, and never while writing:
+            // Done is the only way out of the editor, so it has to stay where it can be reached.
+            barShown = editing || chrome.shown,
+            bar = {
+                DocumentBar(
+                    title = File(open.rel).name.removeSuffix(".md"),
+                    action = if (editing) "Done" else "Edit",
+                    onAction = { editing = !editing },
+                )
+            },
+            modifier = Modifier.weight(1f),
+        ) { bar ->
+            // A bar that never goes has nothing to move, so the editor keeps clear of it rather
+            // than have it lie across the line being typed — outside the scroll, or the caret
+            // could be brought into view underneath it.
+            if (editing) {
+                Box(Modifier.padding(top = bar)) { Editor(model) }
+            } else {
+                Rendered(model, open, root, chrome)
+            }
         }
     }
 }
