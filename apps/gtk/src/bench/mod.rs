@@ -38,7 +38,8 @@ use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_th
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
-/// that used to stall the main loop, print the numbers to stdout and quit. Both run headless under
+/// that used to stall the main loop, print the numbers to stdout and quit, the switcher with the
+/// first rows its query shows. Both run headless under
 /// Xvfb, so "expanding a big directory is still fast" stays a command anyone can re-run rather
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
@@ -369,8 +370,32 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         // Debounced, so the keystroke itself must return immediately.
         println!("bench switcher_keystroke_ms {:.1}", ms_since(t1));
         // Long enough for GtkSearchEntry's own ~150 ms delay plus our 50 ms debounce.
-        glib::timeout_add_local_once(Duration::from_millis(1500), move || bench_quit(&app));
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            bench_switcher_rows(&app);
+            bench_quit(&app)
+        });
     });
+}
+
+/// The first rows the switcher shows for the query, and whether each is a file or a note a link
+/// names that is not written yet.
+fn bench_switcher_rows(app: &Rc<App>) {
+    let list = app.window.visible_dialog().and_then(|d| {
+        find_widget(d.upcast_ref(), &|w| w.is::<gtk::ListView>()).and_downcast::<gtk::ListView>()
+    });
+    let Some(model) = list.and_then(|l| l.model()) else {
+        return;
+    };
+    for i in 0..model.n_items().min(5) {
+        let Some(boxed) = model.item(i).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        match &**boxed.borrow::<Rc<crate::palette::Item>>() {
+            crate::palette::Item::File(rel) => println!("bench switcher_row file {rel}"),
+            crate::palette::Item::Missing(rel) => println!("bench switcher_row missing {rel}"),
+            _ => {}
+        }
+    }
 }
 
 /// First `GtkSearchEntry` in `w`'s subtree, which the bench drives directly because the headless
