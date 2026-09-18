@@ -38,6 +38,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerInputScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalDensity
@@ -60,7 +61,7 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 val Gutter: Dp = 16.dp
 
 /**
- * The gap a document keeps from the bar above it and from the foot of the screen.
+ * The gap a document keeps from the top of its frame and from the foot of the screen.
  *
  * The same on a note and on a PDF, which is the whole point of it: what is being read sits in the
  * same rectangle whichever of the two it is.
@@ -230,10 +231,8 @@ fun DocumentBar(title: String, action: String, enabled: Boolean = true, onAction
 }
 
 /**
- * Chrome that goes and comes back without the content jumping.
- *
- * It takes its height with it rather than only its colour, so what is below slides up into the
- * space instead of being covered by nothing.
+ * Chrome that goes and comes back. It lies over the document ([DocumentFrame]), so nothing under
+ * it moves when it does.
  */
 @Composable
 fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
@@ -243,6 +242,53 @@ fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
         exit = fadeOut() + shrinkVertically(),
     ) {
         content()
+    }
+}
+
+/**
+ * A document, with its [bar] lying over the top of it rather than above it. A note and a PDF both.
+ *
+ * A document is read at a scroll offset, and a PDF at a zoom as well. A bar that takes its space
+ * from the layout gives the document a different height every time it comes and goes, and a
+ * document laid out again is text that moves — the one thing the reader who tapped for the bar did
+ * not ask for. Here the content keeps the whole rectangle whether the bar is up or not, so a tap
+ * changes only what is drawn on top.
+ *
+ * What that costs is the head of the document, which the bar covers while it is up and which
+ * cannot be scrolled out from under it, the document being at its top already: a PDF's page
+ * margin, but a note's first line. The way to it is the tap that raised the bar, since the same
+ * tap takes it away. A strip of the bar's height reserved at the top of the document would buy
+ * those lines with a permanent gap on a screen whose chrome is down most of the time.
+ *
+ * [content] is told how tall the bar is, for the one surface that has to keep clear of it: the
+ * editor, whose bar never goes.
+ */
+@Composable
+fun DocumentFrame(
+    barShown: Boolean,
+    bar: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable BoxScope.(bar: Dp) -> Unit,
+) {
+    val density = LocalDensity.current
+    // Kept when the bar goes: the height it had is the height it comes back with.
+    var height by remember { mutableStateOf(0.dp) }
+    Box(modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().padding(vertical = DocumentGap)) { content(height) }
+        FadingBar(visible = barShown) {
+            // Opaque, and where a pointer stops: over the document the bar needs a ground of its
+            // own to be read off, and a press it let through would be a press the document reads
+            // at the point it landed — a link hidden behind the title would be followed by a tap
+            // on the title.
+            Box(
+                Modifier
+                    .background(MaterialTheme.colorScheme.surface)
+                    .stopsHere()
+                    .onSizeChanged { height = with(density) { it.height.toDp() } },
+            ) {
+                bar()
+            }
+        }
     }
 }
 
