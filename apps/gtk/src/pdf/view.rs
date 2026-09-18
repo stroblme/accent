@@ -43,8 +43,8 @@ impl PdfView {
         let view: PdfView = glib::Object::new();
         // Ctrl+wheel zooms around the pointer, in the same step a chord takes. Bubble phase,
         // ahead of the scrolled window's own controller, which does not filter Ctrl and would
-        // scroll as well. Not on the thumbnail strip below, which fits itself to its width: a
-        // wheel there is the scroll it has always been.
+        // scroll as well. Neither it nor the pinch is on the thumbnail strip below, which fits
+        // itself to its width: a wheel there is the scroll it has always been.
         crate::zoom::zoom_on_wheel(
             &view,
             gtk::PropagationPhase::Bubble,
@@ -52,6 +52,26 @@ impl PdfView {
                 #[weak]
                 view,
                 move |out, at| view.zoom_step(out, at)
+            ),
+        );
+        crate::zoom::zoom_on_pinch(
+            &view,
+            glib::clone!(
+                #[weak]
+                view,
+                #[upgrade_or]
+                1.0,
+                move || view.zoom_factor()
+            ),
+            glib::clone!(
+                #[weak]
+                view,
+                move |zoom, at| {
+                    let zoom = PdfZoom::Scale(zoom.clamp(MIN_SCALE, MAX_SCALE));
+                    if view.zoom() != zoom {
+                        view.zoom_around(zoom, Some(at));
+                    }
+                }
             ),
         );
         view
@@ -1174,27 +1194,6 @@ mod imp {
             obj.set_focusable(true);
             obj.set_hexpand(true);
             obj.set_vexpand(true);
-
-            crate::zoom::zoom_on_pinch(
-                &obj,
-                glib::clone!(
-                    #[weak]
-                    obj,
-                    #[upgrade_or]
-                    1.0,
-                    move || obj.zoom_factor()
-                ),
-                glib::clone!(
-                    #[weak]
-                    obj,
-                    move |zoom, at| {
-                        let zoom = PdfZoom::Scale(zoom.clamp(MIN_SCALE, MAX_SCALE));
-                        if obj.zoom() != zoom {
-                            obj.zoom_around(zoom, Some(at));
-                        }
-                    }
-                ),
-            );
 
             let motion = gtk::EventControllerMotion::new();
             motion.connect_motion(glib::clone!(
