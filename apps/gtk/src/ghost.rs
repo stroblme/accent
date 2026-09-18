@@ -9,8 +9,8 @@
 //! Two rules keep it out of the way of everything else:
 //!
 //! * **The popup wins.** While the completion popup is up nothing is asked for and nothing is
-//!   painted, so Tab always means one thing: the selected row while the popup is open, the
-//!   suggestion while one is painted, and a list item's indent when neither is. Which of the two
+//!   painted, so Tab always means one thing: the popup's selected row while it has one, the
+//!   suggestion while one is painted, and a list item's indent otherwise. Which of the two
 //!   key controllers GTK reaches first is not something `typing.rs` relies on either, and for the
 //!   same reason.
 //! * **Only at the end of a line**, with no selection and no secondary carets. A suggestion

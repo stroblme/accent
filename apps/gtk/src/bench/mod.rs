@@ -52,9 +52,10 @@ use tags::bench_tags;
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
 /// plus the width one indent is worth there, then Tab on lines that already have text on them.
-/// It opens with the completion popup: whether "a popup is up" reads true against a real one and
-/// false against both a view taken off screen under one and a forged `show`, and that Return
-/// still continues a list after them. The popup wants the X input focus, which under Xvfb is
+/// It opens with the completion popup: whether "a popup is up" reads true against a real one,
+/// that Return at the end of a list item under it continues the list while no row is selected and
+/// is the popup's once one is, that "up" reads false against both a view taken off screen under
+/// one and a forged `show`, and that Return still continues a list after them. The popup wants the X input focus, which under Xvfb is
 /// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
