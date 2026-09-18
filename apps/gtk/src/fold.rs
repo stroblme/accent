@@ -114,12 +114,8 @@ pub fn is_folded(buffer: &gtk::TextBuffer, line: i32) -> bool {
 ///
 /// Says whether it opened anything: lines that had no height, which GTK has yet to measure.
 pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
-    let hiding = [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)];
     let mut opened = false;
-    for tag in hiding.into_iter().flatten() {
-        if !iter.has_tag(&tag) {
-            continue;
-        }
+    for tag in hiding(buffer, iter) {
         let (mut start, mut end) = (*iter, *iter);
         start.backward_to_tag_toggle(Some(&tag));
         end.forward_to_tag_toggle(Some(&tag));
@@ -127,6 +123,15 @@ pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
         opened = true;
     }
     opened
+}
+
+/// The tags hiding `iter`: a fold's, a comparison's collapsed run's, both or neither.
+pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTag> {
+    [tag(buffer), buffer.tag_table().lookup(crate::diff::TAG_GAP)]
+        .into_iter()
+        .flatten()
+        .filter(|tag| iter.has_tag(tag))
+        .collect()
 }
 
 /// Show everything.

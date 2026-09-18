@@ -60,8 +60,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
 /// followed by a Backspace, which ends the snippet through GtkSourceView's own scroll. Prints the
 /// view's vertical adjustment and top line before, after, and after a scroll back to the top; the
 /// folded case has to come out with the template on screen. Before them, a Go to Line and its
-/// preview into the note with every block folded, which have to come out on their line, and text
-/// typed next to a shut block, which has to stay in sight through the analysis.
+/// preview into the note with every block folded, which have to come out on their line, a Find
+/// Next into a shut block and a Replace All over the folded note, and text typed next to a shut
+/// block, which has to stay in sight through the analysis.
 fn bench_template_insert(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -104,10 +105,6 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(600)).await;
         say("show_line", &format!("line_{line}"), "folded");
         tab.unfold_all();
-        // Text typed next to a folded block, left through the analysis that folded it away: at
-        // the note's end, which the last block's fold reaches, where it has to stay in sight with
-        // every fold still shut; and on a new line under the first folded header, which opens
-        // that one fold instead.
         let hides = tab
             .buffer
             .tag_table()
@@ -120,6 +117,60 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
             }
             n
         };
+        // Find Next with every block folded, to the first hidden line with text on it from the
+        // same line down: it has to open that block and land on the match. Then Replace All over
+        // the note folded again, which has to rewrite the hidden occurrence and leave its block
+        // shut. A line a hidden run begins with (`run_start`) is the case GTK gets wrong, since
+        // text inserted there lands outside the run; and the replacement holds the query, so
+        // Replace All has to stop where it wraps rather than go round again.
+        tab.fold_all();
+        let text_of = |at: &gtk::TextIter| {
+            let mut end = *at;
+            if !end.ends_line() {
+                end.forward_to_line_end();
+            }
+            tab.buffer.text(at, &end, true).trim().to_string()
+        };
+        let mut at = tab.buffer.iter_at_line(line - 1).expect("bench line");
+        while (!at.has_tag(&hides) || text_of(&at).is_empty()) && at.forward_line() {}
+        let (query, want) = (text_of(&at), at.line() + 1);
+        let (was_hidden, run_start) = (at.has_tag(&hides), at.starts_tag(Some(&hides)));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        tab.set_query(&query);
+        tab.step(true, false);
+        measured().await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        say("find", &format!("line_{want}"), "folded");
+        println!(
+            "bench template_insert find folded was_hidden={was_hidden} run_start={run_start} hidden={} label={:?}",
+            editor::caret(&tab.buffer).has_tag(&hides),
+            tab.matches_label()
+        );
+        tab.set_text(&original);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        tab.fold_all();
+        let (shut, with) = (runs(), format!("{query} (replaced)"));
+        tab.set_query(&query);
+        tab.replace_all(&with);
+        let text = tab.text();
+        let hidden = tab
+            .buffer
+            .start_iter()
+            .forward_search(&with, gtk::TextSearchFlags::empty(), None)
+            .is_some_and(|(start, _)| start.has_tag(&hides));
+        println!(
+            "bench template_insert replace_all folded replaced={} of={} hidden={hidden} shut={shut} after={}",
+            text.matches(&with).count(),
+            original
+                .to_lowercase()
+                .matches(&query.to_lowercase())
+                .count(),
+            runs()
+        );
+        // Text typed next to a folded block, left through the analysis that folded it away: at
+        // the note's end, which the last block's fold reaches, where it has to stay in sight with
+        // every fold still shut; and on a new line under the first folded header, which opens
+        // that one fold instead.
         for (case, typed) in [
             ("end", "23 characters typed now"),
             ("header", "\n23 characters"),
