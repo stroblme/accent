@@ -475,6 +475,26 @@ impl Panel {
         });
     }
 
+    /// Make `text` what the index holds for `rel`: Stage or Unstage Selected Lines. `repo` is the
+    /// one the comparison was opened on, which need not be the one the pane shows by now.
+    pub(super) fn stage_text(
+        self: &Rc<Self>,
+        repo: Repo,
+        rel: String,
+        text: String,
+        unstage: bool,
+    ) {
+        let (what, done) = match unstage {
+            false => ("stage the selected lines", "Staged the selected lines"),
+            true => ("unstage the selected lines", "Unstaged the selected lines"),
+        };
+        self.command(what.to_string(), false, Fail::Say, move |vault, _| {
+            vault
+                .git_stage_text(&repo, &rel, &text)
+                .map(|()| done.to_string())
+        });
+    }
+
     /// [`Panel::command`] for the three that take paths, which have to outlive the borrow.
     fn write(
         self: &Rc<Self>,
