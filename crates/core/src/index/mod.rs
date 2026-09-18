@@ -332,7 +332,7 @@ mod tests {
         );
     }
 
-    /// The bump to schema 9 as a user meets it: an index the previous version wrote is dropped
+    /// The bump to schema 10 as a user meets it: an index the previous version wrote is dropped
     /// whole and built again, and the query the new schema exists for answers on what came back.
     /// A vault of 41.7k files pays this once, so the failure that matters is a half-migration —
     /// the new table missing while `user_version` says it is there.
@@ -344,14 +344,10 @@ mod tests {
             let mut ix = Index::open(&path).unwrap();
             ix.reconcile(vault.path(), |_| {}).unwrap();
         }
-        // What a schema-8 database is: everything this one holds, minus the table version 9 added.
+        // What a schema-9 database is: everything this one holds, minus the table version 10 added.
         {
             let c = Connection::open(&path).unwrap();
-            c.execute_batch(
-                "DROP TRIGGER notes_ai; DROP TRIGGER notes_ad; DROP TRIGGER notes_au;
-                 DROP TABLE notes_tri;",
-            )
-            .unwrap();
+            c.execute_batch("DROP TABLE note_aliases;").unwrap();
             c.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
                 .unwrap();
         }
@@ -363,10 +359,9 @@ mod tests {
             "the old cache must be dropped"
         );
         ix.reconcile(vault.path(), |_| {}).unwrap();
-        assert_eq!(
-            ix.search("erris", 10, false).unwrap()[0].rel_path,
-            "sub/Beta.md",
-            "the rebuilt index answers mid-word"
+        assert!(
+            ix.note_aliases().is_ok(),
+            "the rebuilt index has the aliases table"
         );
     }
 

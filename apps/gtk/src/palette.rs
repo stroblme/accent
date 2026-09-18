@@ -41,6 +41,8 @@ pub enum Item {
     File(String),
     /// A note a link names that is not there yet, by the path New File would create it at.
     Missing(String),
+    /// A note found by one of its frontmatter aliases: the alias that matched, and the note.
+    Alias { name: String, rel: String },
     /// A `GAction` on the window, with the label and accelerator to show.
     Command {
         action: String,
@@ -63,6 +65,7 @@ impl Item {
     fn text(&self) -> &str {
         match self {
             Item::File(rel) | Item::Missing(rel) => rel,
+            Item::Alias { name, .. } => name,
             Item::Command { label, .. } => label,
             Item::Tag(tag) => tag,
             Item::Vault(key) => key,
@@ -84,6 +87,8 @@ pub struct Sources {
     /// The files are followed by the notes links name that are not there yet, from `real` on.
     pub files: Rc<Vec<String>>,
     pub real: usize,
+    /// `(alias, note)` for every frontmatter alias, ranked with the files by the alias.
+    pub aliases: Rc<Vec<(String, String)>>,
     pub commands: Vec<Item>,
     pub tags: Rc<Vec<String>>,
     /// The recent vaults this window can switch to, newest first, the one it is on left out.
@@ -371,7 +376,10 @@ fn row_factory(
         }
         let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
         // Only a file has an icon: the Files tree's, so a row reads the same in both places.
-        icon.set_visible(matches!(&*entry, Item::File(_) | Item::Missing(_)));
+        icon.set_visible(matches!(
+            &*entry,
+            Item::File(_) | Item::Missing(_) | Item::Alias { .. }
+        ));
         match &*entry {
             // A note row reads as basename first, directory after: a vault full of `index.md`
             // files is unreadable the other way round.
@@ -391,6 +399,13 @@ fn row_factory(
                         .css_classes(["dim-label"])
                         .build(),
                 );
+            }
+            // The alias that matched, then the note it names, whole: the alias says nothing of
+            // where the note is.
+            Item::Alias { name: alias, rel } => {
+                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
+                name.set_text(alias);
+                dir.set_text(rel);
             }
             Item::Command {
                 action,
@@ -518,6 +533,7 @@ pub fn present(
         mru,
         files,
         real,
+        aliases,
         commands,
         tags,
         vaults,
@@ -553,9 +569,10 @@ pub fn present(
             .collect(),
     );
     let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
-    // What a typed query ranks ([`with_history`]), where its files end, and where each file sits
-    // in the window's most-recent list. Built on the first keystroke and kept: each is a pass
-    // over every path in the vault, and the corpus does not change while the dialog is up.
+    // What a typed query ranks ([`with_history`], then the aliases), where its files and its paths
+    // end, and where each file sits in the window's most-recent list. Built on the first keystroke
+    // and kept: each is a pass over every path in the vault, and the corpus does not change while
+    // the dialog is up.
     let typed = Rc::new(OnceCell::new());
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -643,17 +660,28 @@ pub fn present(
                         .map(|rel| Rc::new(Item::File(rel.clone())))
                         .collect(),
                     Mode::Files => {
-                        let (files, real, used) = typed.get_or_init(|| {
-                            let (files, real) = with_history(&files, real, &mru);
+                        let (files, real, named, used) = typed.get_or_init(|| {
+                            let (mut files, real) = with_history(&files, real, &mru);
+                            // Behind the paths, so a file leads an alias at the same score.
+                            let named = files.len();
+                            if !aliases.is_empty() {
+                                let mut all = (*files).clone();
+                                all.extend(aliases.iter().map(|(name, _)| name.clone()));
+                                files = Rc::new(all);
+                            }
                             let used = places(&files, &mru);
-                            (files, real, used)
+                            (files, real, named, used)
                         });
-                        let real = *real;
+                        let (real, named) = (*real, *named);
                         rank(files, used, query, Corpus::Paths)
                             .into_iter()
-                            .map(|i| match i < real {
-                                true => Rc::new(Item::File(files[i].clone())),
-                                false => Rc::new(Item::Missing(files[i].clone())),
+                            .map(|i| match i {
+                                i if i < real => Rc::new(Item::File(files[i].clone())),
+                                i if i < named => Rc::new(Item::Missing(files[i].clone())),
+                                i => Rc::new(Item::Alias {
+                                    name: files[i].clone(),
+                                    rel: aliases[i - named].1.clone(),
+                                }),
                             })
                             .collect()
                     }

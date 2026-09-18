@@ -1,4 +1,4 @@
-//! `#tag`s in prose and the YAML frontmatter block's `title:` and `tags:`.
+//! `#tag`s in prose and the YAML frontmatter block's `title:`, `tags:` and `aliases:`.
 
 use super::{Analysis, Span, Style, Tag, sp};
 use std::ops::Range;
@@ -49,8 +49,12 @@ pub(super) fn scan_tags(text: &str, r: &Range<usize>, tags: &mut Vec<Tag>, spans
     }
 }
 
-// ponytail: hand-rolled scan for `title:` and `tags:` only; swap in serde_yaml (or
+// ponytail: hand-rolled scan for `title:`, `tags:` and `aliases:` only; swap in serde_yaml (or
 // yaml-rust2) the day we need nested frontmatter, anchors, or multi-line scalars.
+
+/// What one item of a frontmatter list becomes: `raw` is the item as written, `base` its byte
+/// offset in the document.
+type Push = fn(&str, usize, &mut Analysis);
 
 pub(super) fn frontmatter(text: &str, r: &Range<usize>, a: &mut Analysis) -> Option<String> {
     let block = &text[r.clone()];
@@ -63,35 +67,48 @@ pub(super) fn frontmatter(text: &str, r: &Range<usize>, a: &mut Analysis) -> Opt
     a.frontmatter = Some(text[start..end].to_string());
 
     let mut title = None;
-    let mut in_tags = false;
+    // The list whose `- item` lines follow, when the key above them opened one.
+    let mut list: Option<Push> = None;
     let mut off = start;
     for chunk in text[start..end].split_inclusive('\n') {
         let line_start = off;
         off += chunk.len();
         let line = chunk.trim_end_matches(['\n', '\r']);
-        if line.starts_with([' ', '\t']) {
+        // A list's items may sit flush with its key, as a YAML dumper writes them: no key starts
+        // with `-`, so such a line is an item too.
+        if line.starts_with([' ', '\t', '-']) {
             let t = line.trim_start();
-            if in_tags && t.starts_with('-') {
+            if let Some(push) = list
+                && t.starts_with('-')
+            {
                 let base = line_start + (line.len() - t.len()) + 1;
-                push_fm_tag(&t[1..], base, a);
+                push(&t[1..], base, a);
             }
             continue;
         }
-        in_tags = false;
-        if let Some(rest) = line.strip_prefix("tags:") {
-            let base = line_start + 5;
+        list = None;
+        // Obsidian reads the singular `alias:` too, and a single string as a list of one.
+        let keyed = [
+            ("tags:", push_fm_tag as Push),
+            ("aliases:", push_alias),
+            ("alias:", push_alias),
+        ]
+        .into_iter()
+        .find_map(|(key, push)| Some((line.strip_prefix(key)?, key.len(), push)));
+        if let Some((rest, key_len, push)) = keyed {
+            let base = line_start + key_len;
             let t = rest.trim();
             if t.is_empty() {
-                in_tags = true;
+                list = Some(push);
             } else if let Some(inner) = t.strip_prefix('[') {
                 let inner = inner.strip_suffix(']').unwrap_or(inner);
                 let mut p = base + (rest.len() - rest.trim_start().len()) + 1;
                 for item in inner.split(',') {
-                    push_fm_tag(item, p, a);
+                    push(item, p, a);
                     p += item.len() + 1;
                 }
             } else {
-                push_fm_tag(rest, base, a);
+                push(rest, base, a);
             }
         } else if let Some(rest) = line.strip_prefix("title:") {
             let t = unquote(rest.trim());
@@ -109,6 +126,15 @@ fn unquote(s: &str) -> &str {
         &s[1..s.len() - 1]
     } else {
         s
+    }
+}
+
+/// One alias, by the name it gives the note. Where it sits is not kept: an alias is a name to find
+/// the note by, not a span to style.
+fn push_alias(raw: &str, _base: usize, a: &mut Analysis) {
+    let name = unquote(raw.trim());
+    if !name.is_empty() {
+        a.aliases.push(name.to_string());
     }
 }
 

@@ -244,6 +244,11 @@ impl Local {
         self.index().missing_notes()
     }
 
+    /// `(alias, note)` for every frontmatter alias in the vault.
+    pub fn note_aliases(&self) -> Result<Vec<(String, String)>> {
+        self.index().note_aliases()
+    }
+
     /// `(original, conflict copy)` for every `*.sync-conflict-*` file whose original still exists.
     /// A copy of a note that has since been deleted is nothing the resolve UI can act on.
     pub fn conflicts(&self) -> Result<Vec<(String, String)>> {
