@@ -552,6 +552,10 @@ fn snippet(text: &str, stops: &[usize]) -> sourceview5::Snippet {
 /// The text between the stops, then each stop as an empty chunk numbered from one; plain text
 /// carries -1, which is what GtkSourceView reads as "not a stop". A stop off a character
 /// boundary, which the renderer never produces, is skipped rather than trusted.
+///
+/// Last, an empty chunk numbered 0 at the end, which is where Tab past the last stop goes.
+/// Without one GtkSourceView 5.20 moves the caret there itself with no chunk current, and its own
+/// caret handler then fails an assertion (`_gtk_source_snippet_insert_set`).
 fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     let mut out = Vec::new();
     let mut byte = 0;
@@ -570,6 +574,7 @@ fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     if byte < text.len() {
         out.push((&text[byte..], -1));
     }
+    out.push(("", 0));
     out
 }
 
@@ -653,11 +658,21 @@ mod tests {
     fn chunks_split_the_text_at_its_stops_in_order() {
         assert_eq!(
             chunks("ab: \ncd: \n", &[4, 9]),
-            [("ab: ", -1), ("", 1), ("\ncd: ", -1), ("", 2), ("\n", -1)]
+            [
+                ("ab: ", -1),
+                ("", 1),
+                ("\ncd: ", -1),
+                ("", 2),
+                ("\n", -1),
+                ("", 0)
+            ]
         );
-        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1)]);
-        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1)]);
-        assert_eq!(chunks("ab", &[0, 0]), [("", 1), ("", 2), ("ab", -1)]);
+        assert_eq!(chunks("x", &[0]), [("", 1), ("x", -1), ("", 0)]);
+        assert_eq!(chunks("x", &[1]), [("x", -1), ("", 1), ("", 0)]);
+        assert_eq!(
+            chunks("ab", &[0, 0]),
+            [("", 1), ("", 2), ("ab", -1), ("", 0)]
+        );
     }
 
     #[test]

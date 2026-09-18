@@ -4,7 +4,8 @@ use super::*;
 
 /// What New from Template would list: every template, and the destination each one names today.
 /// `=open` then makes each one's note as Create does, and prints whether its caret is on screen;
-/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]).
+/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]), and
+/// `=walk:<rel_note>` stays up for its stops to be typed into ([`bench_template_walk`]).
 ///
 /// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
 /// `accent-target:` directive and the rendered target end to end without a widget.
@@ -22,6 +23,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
     let arg = std::env::var("ACCENT_BENCH_TEMPLATE").unwrap_or_default();
     if let Some(rel) = arg.strip_prefix("insert:") {
         return bench_template_insert(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("walk:") {
+        return bench_template_walk(app, rel);
     }
     if arg != "open" {
         return bench_quit(app);
@@ -111,6 +115,52 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
                 say(&template, case, "top");
             }
         }
+        bench_quit(&app);
+    });
+}
+
+/// `=walk:<rel_note>` puts the first template with two stops or more at the end of that note,
+/// gives the view the keyboard and stays up for XTEST to type into its stops, which only a real
+/// key press can walk: `build-aux/xtest.py :<display> "move 700 450; focus; type abc; key Tab;
+/// type def; key Tab; type ghi; key Tab"`. Prints how many folders GtkSourceView looks for snippet
+/// files in, then what the template became and whether its stops are still being walked, eight
+/// seconds after `template_walk ready`.
+fn bench_template_walk(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let (Some(vault), Some(tab)) = (app.vault(), app.tab_for(&rel)) else {
+            return bench_quit(&app);
+        };
+        let walkable = vault
+            .templates()
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|t| {
+                vault
+                    .render_template(&t, "Bench")
+                    .ok()
+                    .filter(|(_, stops)| stops.len() > 1)
+            });
+        let Some((text, stops)) = walkable else {
+            println!("bench template_walk no template with two stops");
+            return bench_quit(&app);
+        };
+        let from = tab.buffer.char_count();
+        tab.buffer.place_cursor(&tab.buffer.end_iter());
+        tab.view.grab_focus();
+        tab.insert_stops(&text, &stops);
+        // Nowhere for GtkSourceView to find snippets of its own, so only the template's react.
+        let dirs = sourceview5::SnippetManager::default().search_path().len();
+        println!("bench template_walk ready snippet_dirs={dirs}");
+        glib::timeout_future(Duration::from_secs(8)).await;
+        let (start, end) = (tab.buffer.iter_at_offset(from), tab.buffer.end_iter());
+        println!(
+            "bench template_walk {:?} walking={}",
+            tab.buffer.text(&start, &end, true),
+            tab.snippet_active()
+        );
         bench_quit(&app);
     });
 }
