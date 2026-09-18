@@ -166,6 +166,17 @@ impl Index {
         Ok(st.query_row([rel_path], file_row).optional()?)
     }
 
+    /// `(alias, note rel_path)` for every frontmatter alias, by alias: the names Go to File and
+    /// `[[` completion also find a note by. A link still resolves by the file's name alone.
+    pub fn note_aliases(&self) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT a.name, f.rel_path FROM note_aliases a JOIN files f ON f.id = a.file_id
+             ORDER BY a.name COLLATE NOCASE, f.rel_path",
+        )?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn tags(&self) -> Result<Vec<(String, i64)>> {
         let mut st = self.conn.prepare_cached(
             "SELECT name, COUNT(*) c FROM tags GROUP BY name ORDER BY c DESC, name",
@@ -335,6 +346,62 @@ mod tests {
         assert_eq!(
             ix.note_and_pdf_paths().unwrap(),
             vec!["a.md", "sub/Beta.md", "c.pdf"]
+        );
+    }
+
+    /// Obsidian's three spellings: a list under `aliases:`, a single string, and the singular
+    /// `alias:`, and a list flush with its key. An edit that drops an alias takes its row with it.
+    #[test]
+    fn front_matter_aliases_are_listed_with_their_note() {
+        let (vault, db) = fixture();
+        let list = "---\naliases:\n  - Ada\n  - \"Bea\"\n---\n# List\n";
+        fs::write(vault.path().join("list.md"), list).unwrap();
+        fs::write(
+            vault.path().join("flow.md"),
+            "---\naliases: [Cy, Dee]\n---\n",
+        )
+        .unwrap();
+        fs::write(vault.path().join("one.md"), "---\naliases: Eve\n---\n").unwrap();
+        fs::write(vault.path().join("old.md"), "---\nalias: 'Fay'\n---\n").unwrap();
+        fs::write(vault.path().join("flush.md"), "---\naliases:\n- Gus\n---\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let pairs = |ix: &Index| -> Vec<(String, String)> { ix.note_aliases().unwrap() };
+        let want = |rows: &[(&str, &str)]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|(a, rel)| (a.to_string(), rel.to_string()))
+                .collect()
+        };
+        assert_eq!(
+            pairs(&ix),
+            want(&[
+                ("Ada", "list.md"),
+                ("Bea", "list.md"),
+                ("Cy", "flow.md"),
+                ("Dee", "flow.md"),
+                ("Eve", "one.md"),
+                ("Fay", "old.md"),
+                ("Gus", "flush.md"),
+            ])
+        );
+
+        fs::write(
+            vault.path().join("list.md"),
+            "---\naliases:\n  - Bea\n---\n",
+        )
+        .unwrap();
+        ix.update_file(vault.path(), "list.md").unwrap();
+        assert_eq!(
+            pairs(&ix),
+            want(&[
+                ("Bea", "list.md"),
+                ("Cy", "flow.md"),
+                ("Dee", "flow.md"),
+                ("Eve", "one.md"),
+                ("Fay", "old.md"),
+                ("Gus", "flush.md"),
+            ])
         );
     }
 

@@ -379,6 +379,10 @@ methods! {
     /// What Go to File and `[[` completion offer to write. A host whose `accent-cli serve`
     /// predates it answers "no such method", which the palette takes as none.
     any missing_notes() -> Vec<String>;
+    /// `(alias, note)` for every frontmatter alias: what Go to File also finds a note by. A host
+    /// whose `accent-cli serve` predates it answers "no such method", which the palette takes as
+    /// none.
+    any note_aliases() -> Vec<(String, String)>;
     any conflicts() -> Vec<(String, String)>;
     any conflicts_of(rel: ref str) -> Vec<String>;
 

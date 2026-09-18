@@ -378,8 +378,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     });
 }
 
-/// The first rows the switcher shows for the query, and whether each is a file or a note a link
-/// names that is not written yet.
+/// The first rows the switcher shows for the query, and whether each is a file, a note a link
+/// names that is not written yet, or a note found by an alias.
 fn bench_switcher_rows(app: &Rc<App>) {
     let list = app.window.visible_dialog().and_then(|d| {
         find_widget(d.upcast_ref(), &|w| w.is::<gtk::ListView>()).and_downcast::<gtk::ListView>()
@@ -394,6 +394,9 @@ fn bench_switcher_rows(app: &Rc<App>) {
         match &**boxed.borrow::<Rc<crate::palette::Item>>() {
             crate::palette::Item::File(rel) => println!("bench switcher_row file {rel}"),
             crate::palette::Item::Missing(rel) => println!("bench switcher_row missing {rel}"),
+            crate::palette::Item::Alias { name, rel } => {
+                println!("bench switcher_row alias {name} {rel}")
+            }
             _ => {}
         }
     }
