@@ -96,7 +96,8 @@ use tags::bench_tags;
 /// eye first, and its title and indicator are printed either side of that.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
 /// held, and prints what the Ctrl+hover underline covers; then it follows a link nothing answers
-/// to and prints the dialog that offers to create it, with the name it arrives prefilled with.
+/// to from the caret, as F12 does, and prints the dialog that offers to create it, with the name
+/// it arrives prefilled with.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
