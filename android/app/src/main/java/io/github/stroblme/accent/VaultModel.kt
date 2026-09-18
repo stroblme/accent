@@ -115,6 +115,20 @@ data class VaultState(
 )
 
 /**
+ * What the switcher ranks: every file, then every note a link names that is not there yet, by the
+ * path creating it would give it.
+ *
+ * One list, so the two rank together, and the files first: the ranking is stable, so a file that
+ * is there leads a note only linked to at the same score.
+ */
+class Corpus(files: List<String>, missing: List<String>) {
+    val paths = files + missing
+
+    /** The notes in [paths] that are not there yet: a pick writes one rather than opens it. */
+    val unwritten = missing.toHashSet()
+}
+
+/**
  * The vault, its events, and the one note in front of the reader.
  *
  * Every call into the core is blocking and goes on [Dispatchers.IO]; nothing here touches the
@@ -143,8 +157,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** The exit [leave] is holding while the reader answers, if there is one. */
     private var held: (suspend () -> Unit)? = null
 
-    /** Every file in the vault, for the switcher. See [corpus]. */
-    private var corpus: List<String> = emptyList()
+    /** The switcher's files. See [corpus]. */
+    private var corpus: Corpus? = null
 
     /** How far the batch being applied said the walk had got, and when the tree last caught up. */
     private var seen: Progress? = null
@@ -211,7 +225,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         if (reindexed) {
             // The walk is over, so whatever the vault holds is in the index.
             _state.update { it.copy(indexing = false, scanned = 0, phase = null, ready = true) }
-            corpus = emptyList()
+            corpus = null
             relist(_state.value.expanded)
         } else if (touched.isNotEmpty()) {
             relist(touched.intersect(_state.value.children.keys))
@@ -248,16 +262,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         relist(_state.value.expanded)
     }
 
-    /** The switcher's corpus: every file in the vault, fetched the first time it is asked for. */
-    suspend fun corpus(): List<String> {
-        corpus.takeIf { it.isNotEmpty() }?.let { return it }
-        val v = vault ?: return emptyList()
+    /** The switcher's corpus, fetched the first time it is asked for. */
+    suspend fun corpus(): Corpus {
+        corpus?.takeIf { it.paths.isNotEmpty() }?.let { return it }
+        val v = vault ?: return Corpus(emptyList(), emptyList())
         // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
         // the only thing that wants them, rather than after every reconcile.
-        corpus = withContext(Dispatchers.IO) {
-            runCatching { v.filePaths(false) }.getOrDefault(emptyList())
+        val read = withContext(Dispatchers.IO) {
+            Corpus(
+                runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
+                runCatching { v.missingNotes() }.getOrDefault(emptyList()),
+            )
         }
-        return corpus
+        corpus = read
+        return read
     }
 
     /** List every directory the tree has open again. */
@@ -345,7 +363,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         // handle: the buffer is the only copy of whatever was typed in the last second.
         vault?.close()
         vault = null
-        corpus = emptyList()
+        corpus = null
         _state.value = VaultState()
     }
 
@@ -461,7 +479,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun newNote(rel: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val made = withContext(Dispatchers.IO) { runCatching { v.createNote(rel, null) } }
-        made.onSuccess { openFile(rel) }.onFailure { fail("Cannot create this note", it) }
+        made.onSuccess {
+            // The switcher reads its files again next time, so the note is one of them there.
+            corpus = null
+            openFile(rel)
+        }.onFailure { fail("Cannot create this note", it) }
+    }
+
+    /**
+     * Write a note a link names, and open it: a "Not created" row in the switcher.
+     *
+     * The rows are kept from one walk to the next, so the note may have been written since they
+     * were read — by Syncthing, or by this row before the index caught up — and is then opened.
+     */
+    fun create(rel: String) = viewModelScope.launch {
+        val v = vault ?: return@launch
+        if (withContext(Dispatchers.IO) { v.exists(rel) }) openFile(rel) else newNote(rel)
     }
 
     // ----------------------------------------------------------------------- sync conflicts

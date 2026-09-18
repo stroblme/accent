@@ -70,6 +70,8 @@ fun BrowseScreen(
     // The ranking and the page it was ranked for. Two pages are composed at once while one is being
     // dragged in, and a file path drawn as a command label is a row that says the wrong thing.
     var ranked by remember { mutableStateOf(Mode.Search to emptyList<String>()) }
+    // Which of the files' rows are notes a link names that nobody has written yet.
+    var unwritten by remember { mutableStateOf(emptySet<String>()) }
     val focus = remember { FocusRequester() }
 
     LaunchedEffect(query, mode) {
@@ -78,7 +80,8 @@ fun BrowseScreen(
         val kind = if (commands) Recents.Kind.Commands else Recents.Kind.Notes
         // The note corpus is fetched on demand rather than kept in step with the index, so the
         // first query in a session waits for it once.
-        val corpus = if (commands) Commands.map { it.label } else model.corpus()
+        val files = if (commands) null else model.corpus()
+        val corpus = files?.paths ?: Commands.map { it.label }
         ranked = mode to withContext(Dispatchers.Default) {
             if (query.isBlank() && !commands) {
                 model.recents.list(Recents.Kind.Notes).filter { it in corpus }.take(50)
@@ -87,6 +90,8 @@ fun BrowseScreen(
                 fuzzyRank(query, corpus, ranks).map { corpus[it.toInt()] }
             }
         }
+        // With the rows it marks, in the same frame.
+        files?.let { unwritten = it.unwritten }
     }
 
     // Reaching for a chip is reaching for the keyboard. Opening the screen is not: Search lands on
@@ -104,6 +109,7 @@ fun BrowseScreen(
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
                     tab != Mode.Search -> items(rows, key = { it }) { row ->
+                        val missing = row in unwritten
                         ListItem(
                             headlineContent = {
                                 Text(
@@ -115,14 +121,28 @@ fun BrowseScreen(
                             supportingContent = if (tab == Mode.Command) null else ({
                                 Text(row, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
                             }),
+                            // At the row's end, what the note is not: the name alone reads as a
+                            // file that is there.
+                            trailingContent = if (!missing) null else ({
+                                Text(
+                                    "Not created",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }),
                             colors = flatRow(),
                             modifier = Modifier.row {
-                                if (tab == Mode.Command) {
-                                    model.recents.touch(Recents.Kind.Commands, row)
-                                    Commands.first { it.label == row }.run(model)
-                                    onClose()
-                                } else {
-                                    onOpen(row, null)
+                                when {
+                                    tab == Mode.Command -> {
+                                        model.recents.touch(Recents.Kind.Commands, row)
+                                        Commands.first { it.label == row }.run(model)
+                                        onClose()
+                                    }
+                                    missing -> {
+                                        model.create(row)
+                                        onClose()
+                                    }
+                                    else -> onOpen(row, null)
                                 }
                             },
                         )
