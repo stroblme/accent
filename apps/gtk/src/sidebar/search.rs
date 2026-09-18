@@ -8,6 +8,7 @@
 
 use super::{OnOpen, Target};
 use crate::dialogs::{alert, choose};
+use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
 use accent_core::path::{basename, parent_dir};
@@ -439,6 +440,8 @@ impl Search {
         if self.busy() {
             return;
         }
+        recall::remember(&QUERIES, &key.text);
+        recall::remember(&REPLACEMENTS, &replacement);
         self.replacing.set(true);
         self.set_busy(true);
         self.apply.set_sensitive(false);
@@ -742,6 +745,17 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         .placeholder_text("Replace…")
         .hexpand(true)
         .build();
+    recall::attach(&entry, &QUERIES);
+    recall::attach(&replace_entry, &REPLACEMENTS);
+    // The box searches as it is typed in, so a query is taken as used once Return is pressed on
+    // it or a result it found is opened, rather than at every pause in the typing.
+    let used = |entry: &gtk::SearchEntry| recall::remember(&QUERIES, &entry.text());
+    entry.connect_activate(used);
+    view.connect_activate(glib::clone!(
+        #[weak]
+        entry,
+        move |_, _| used(&entry)
+    ));
     let apply = gtk::Button::builder()
         .label("Replace All (0)")
         .halign(gtk::Align::End)

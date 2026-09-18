@@ -14,6 +14,7 @@
 //! this file from having to know what an `App` is.
 
 use crate::editor::Tab;
+use crate::recall::{self, QUERIES, REPLACEMENTS};
 use adw::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::SearchSettingsExt;
@@ -127,6 +128,8 @@ impl Bar {
             .placeholder_text("Replace")
             .hexpand(true)
             .build();
+        recall::attach(&query, &QUERIES);
+        recall::attach(&replace, &REPLACEMENTS);
         let replace_one = gtk::Button::with_label("Replace");
         let replace_all = gtk::Button::with_label("Replace All");
 
@@ -278,6 +281,10 @@ impl Bar {
             this,
             move |widget| {
                 if !widget.is_search_mode() {
+                    // A query the bar is closed on was used, as one stepped through is.
+                    if bar.rows.visible_child_name().as_deref() == Some("find") {
+                        recall::remember(&QUERIES, &bar.query.text());
+                    }
                     bar.clear();
                 }
             }
@@ -401,6 +408,7 @@ impl Bar {
     /// Next or previous match. Works with the bar closed too, which is what F3 is for.
     pub fn step(self: &Rc<Self>, forward: bool) {
         self.mark_once();
+        recall::remember(&QUERIES, &self.query.text());
         if self.presenting() {
             return self.to_preview(match forward {
                 true => PreviewOp::Next,
@@ -476,6 +484,8 @@ impl Bar {
         }
         let Some(tab) = self.tab() else { return };
         let with = self.replace.text();
+        recall::remember(&QUERIES, &self.query.text());
+        recall::remember(&REPLACEMENTS, &with);
         self.busy.set(true);
         match all {
             true => tab.replace_all(&with),
