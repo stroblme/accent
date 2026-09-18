@@ -77,7 +77,8 @@ pub struct Sources {
     /// use order — a file a sync or a checkout touched is not a file the user opened.
     pub recent: Vec<String>,
     /// What this window opened, newest first. This is the recency a typed query is ranked by, so
-    /// it holds nothing but the user's own moves.
+    /// it holds nothing but the user's own moves, and a file in it the index does not list is
+    /// ranked with the files ([`with_history`]).
     pub mru: Vec<String>,
     /// Every file and every tag in the vault: the window's own lists, shared rather than copied.
     /// The files are followed by the notes links name that are not there yet, from `real` on.
@@ -190,6 +191,44 @@ fn places(corpus: &[String], mru: &[String]) -> Vec<Option<usize>> {
         .iter()
         .map(|rel| at.get(rel.as_str()).copied())
         .collect()
+}
+
+/// The corpus a typed query ranks, and where its files end: `files` up to `real`, then each file
+/// of `opened` the index does not list — a build output git ignores, a file in a folder the index
+/// does not walk — then the notes links name that are not written yet, less any of those. The
+/// shared list itself when the history adds nothing. A file from outside the vault is no path in
+/// it, and stays on the opening page alone.
+fn with_history(
+    files: &Rc<Vec<String>>,
+    real: usize,
+    opened: &[String],
+) -> (Rc<Vec<String>>, usize) {
+    let opened: Vec<&str> = opened
+        .iter()
+        .map(String::as_str)
+        .filter(|rel| !Path::new(rel).is_absolute())
+        .collect();
+    let wanted: HashSet<&str> = opened.iter().copied().collect();
+    let held: HashSet<&str> = files[..real]
+        .iter()
+        .map(String::as_str)
+        .filter(|rel| wanted.contains(rel))
+        .collect();
+    let added: Vec<&str> = opened
+        .into_iter()
+        .filter(|rel| !held.contains(rel))
+        .collect();
+    if added.is_empty() {
+        return (files.clone(), real);
+    }
+    let mut corpus = files[..real].to_vec();
+    corpus.extend(added.iter().map(|rel| rel.to_string()));
+    let end = corpus.len();
+    let missing = files[real..]
+        .iter()
+        .filter(|rel| !added.contains(&rel.as_str()));
+    corpus.extend(missing.cloned());
+    (Rc::new(corpus), end)
 }
 
 /// "<Control>p" -> "Ctrl+P", spelled the way this GTK build spells it.
@@ -514,10 +553,10 @@ pub fn present(
             .collect(),
     );
     let clashes = Rc::new(RefCell::new(conflicts(&commands.borrow())));
-    // Where each file sits in the window's most-recent list. Cached with the corpus it indexes:
-    // it is one pass over every path in the vault, and the corpus does not change while the
-    // dialog is up.
-    let note_recent: Rc<OnceCell<Vec<Option<usize>>>> = Rc::new(OnceCell::new());
+    // What a typed query ranks ([`with_history`]), where its files end, and where each file sits
+    // in the window's most-recent list. Built on the first keystroke and kept: each is a pass
+    // over every path in the vault, and the corpus does not change while the dialog is up.
+    let typed = Rc::new(OnceCell::new());
 
     let model = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -583,7 +622,7 @@ pub fn present(
     let refresh = Rc::new({
         let (model, selection, stack) = (model.clone(), selection.clone(), stack.clone());
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
-        let (mru, note_recent) = (mru.clone(), note_recent.clone());
+        let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
         let (commands, command_text, command_recent) = (
             commands.clone(),
@@ -604,8 +643,13 @@ pub fn present(
                         .map(|rel| Rc::new(Item::File(rel.clone())))
                         .collect(),
                     Mode::Files => {
-                        let used = note_recent.get_or_init(|| places(&files, &mru));
-                        rank(&files, used, query, Corpus::Paths)
+                        let (files, real, used) = typed.get_or_init(|| {
+                            let (files, real) = with_history(&files, real, &mru);
+                            let used = places(&files, &mru);
+                            (files, real, used)
+                        });
+                        let real = *real;
+                        rank(files, used, query, Corpus::Paths)
                             .into_iter()
                             .map(|i| match i < real {
                                 true => Rc::new(Item::File(files[i].clone())),
@@ -979,6 +1023,26 @@ mod tests {
             rank(&corpus, &[], "zzzz", Corpus::Paths),
             Vec::<usize>::new()
         );
+    }
+
+    #[test]
+    fn with_history_adds_what_the_index_does_not_hold_once() {
+        let strings = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Two files, then a note a link names that is not written yet.
+        let files = Rc::new(strings(&["a.md", "b.pdf", "later.md"]));
+        let opened = strings(&["build/main.pdf", "a.md", "/tmp/outside.txt", "later.md"]);
+        let (corpus, real) = with_history(&files, 2, &opened);
+        // The build output and the note written since join the files, the note leaving the
+        // missing ones; the file from outside the vault is no path in it.
+        assert_eq!(
+            *corpus,
+            strings(&["a.md", "b.pdf", "build/main.pdf", "later.md"])
+        );
+        assert_eq!(real, 4);
+        // Nothing new: the shared list itself, not a copy.
+        let (same, real) = with_history(&files, 2, &strings(&["b.pdf", "/tmp/outside.txt"]));
+        assert!(Rc::ptr_eq(&same, &files));
+        assert_eq!(real, 2);
     }
 
     fn command(action: &str, accels: &[&str]) -> Rc<Item> {

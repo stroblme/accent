@@ -34,6 +34,14 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
+        // A file from outside the vault has no path in it to ask about.
+        let opened: Vec<String> = self
+            .recent_notes
+            .borrow()
+            .iter()
+            .filter(|rel| !doc::is_loose_key(rel))
+            .cloned()
+            .collect();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let loaded = gio::spawn_blocking(move || {
@@ -41,11 +49,23 @@ impl App {
                 // file is reached, dimmed but listed.
                 let mut files = vault.file_paths(false).unwrap_or_default();
                 let real = files.len();
+                // What this window opened and is gone since: deleted, or renamed where no event
+                // said so. A typed query ranks the history with the files, so a gone one would
+                // be offered again. Only the files the index does not list are asked about, and
+                // only an answer of "nothing there" drops one: a link that is down says nothing.
+                let gone: Vec<String> = {
+                    let listed: HashSet<&str> = files.iter().map(String::as_str).collect();
+                    opened
+                        .into_iter()
+                        .filter(|rel| !listed.contains(rel.as_str()))
+                        .filter(|rel| matches!(vault.stat(rel), Ok(None)))
+                        .collect()
+                };
                 // A host whose `accent-cli serve` predates the method answers "no such method",
                 // which leaves the files alone.
                 files.extend(vault.missing_notes().unwrap_or_default());
                 (
-                    (files, real),
+                    (files, real, gone),
                     vault
                         .tags()
                         .unwrap_or_default()
@@ -56,7 +76,10 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Ok(((files, real), tags, recent))) = (weak.upgrade(), loaded) {
+            if let (Some(app), Ok(((files, real, gone), tags, recent))) = (weak.upgrade(), loaded) {
+                app.recent_notes
+                    .borrow_mut()
+                    .retain(|rel| !gone.contains(rel));
                 *app.corpus.borrow_mut() = Corpus {
                     files: Rc::new(files),
                     real,

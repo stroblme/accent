@@ -195,10 +195,11 @@ impl Tab {
         };
         if let Some((s, e, _)) = found {
             // A match inside a folded block opens it, or the selection is invisible.
-            fold::reveal(self.text_buffer(), &s);
+            let opened = fold::reveal(self.text_buffer(), &s);
             self.buffer.select_range(&s, &e);
-            self.view
-                .scroll_to_mark(&self.buffer.get_insert(), 0.1, false, 0.0, 0.5);
+            self.when_measured(opened, |view| {
+                view.scroll_to_mark(&view.buffer().get_insert(), 0.1, false, 0.0, 0.5)
+            });
         }
     }
 
@@ -276,9 +277,14 @@ impl Tab {
     /// lines had no height until GTK measures them, and the caret below them sits as high up as
     /// the fold was.
     pub(crate) fn scroll_to_caret(&self, align: f64, measuring: bool) {
-        let scroll = move |view: &sourceview5::View| {
+        self.when_measured(measuring, move |view| {
             view.scroll_to_mark(&view.buffer().get_insert(), 0.0, true, 0.0, align)
-        };
+        });
+    }
+
+    /// Run `scroll` now, or after the wait [`Tab::scroll_to_caret`] describes: while the view has
+    /// no size yet, or while it is `measuring` the lines a fold just showed.
+    fn when_measured(&self, measuring: bool, scroll: impl Fn(&sourceview5::View) + Copy + 'static) {
         if self.view.height() > 0 && !measuring {
             return scroll(&self.view);
         }
@@ -409,9 +415,14 @@ impl Tab {
     /// Scroll a line into view without moving the caret: what the go-to entry previews while the
     /// number is still being typed.
     pub fn show_line(&self, line: i32) {
-        let mut iter = self.line_iter(line, 1);
-        fold::reveal(self.text_buffer(), &iter);
-        self.view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.25);
+        let iter = self.line_iter(line, 1);
+        let opened = fold::reveal(self.text_buffer(), &iter);
+        let line = iter.line();
+        self.when_measured(opened, move |view| {
+            if let Some(mut iter) = view.buffer().iter_at_line(line) {
+                view.scroll_to_iter(&mut iter, 0.0, true, 0.0, 0.25);
+            }
+        });
     }
 
     /// A 1-based line and column as an iter, both clamped to what the note has.

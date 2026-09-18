@@ -389,6 +389,7 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
+    let edits = tab.save.edits.get();
     flush(tab.clone()).await;
     // First, because it is the one answer the user is waiting to see: the symbols and folds
     // behind it feed panes that are already drawn.
@@ -403,7 +404,11 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
         Err(e) => tracing::debug!("symbols for {rel}: {e:#}"),
     }
     match vault.folds(&rel).await {
-        Ok(folds) => tab.set_folds(folds),
+        // Folds laid over a text they were not worked out for hide the wrong lines, and a long
+        // note tells this layer of an edit only after the editor's debounce: an answer landing
+        // after an edit made since this refresh began is left to that edit's own refresh.
+        Ok(folds) if tab.save.edits.get() == edits => tab.set_folds(folds),
+        Ok(_) => {}
         Err(e) => tracing::debug!("folds for {rel}: {e:#}"),
     }
     let hooks = tab.lang.hooks.borrow().clone();

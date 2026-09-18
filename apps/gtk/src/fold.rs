@@ -23,7 +23,7 @@ use gtk::{gdk, glib, graphene};
 use sourceview5::subclass::prelude::*;
 
 /// The tag every folded run carries.
-const TAG: &str = "fold";
+pub const TAG: &str = "fold";
 
 /// What a click on a chevron runs. Stored behind an `Rc` so it can be cloned out of its cell
 /// before it runs, the way every hook on a tab is.
@@ -129,20 +129,6 @@ pub fn reveal(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
     opened
 }
 
-/// Open every fold that text put at `at` would join: the hidden run `at` is in or ends at, and
-/// the one under the header line `at` is on. Text added there becomes part of that block, and the
-/// re-fold after the next analysis ([`resync`]) lays the shut block over its new extent, the new
-/// text included, so an insertion is revealed first, as a jump is. Says whether it opened any.
-pub fn reveal_insertion(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
-    let mut before = *at;
-    before.backward_char();
-    let mut opened = false;
-    for iter in [before, *at, line_start(buffer, at.line() + 1)] {
-        opened |= reveal(buffer, &iter);
-    }
-    opened
-}
-
 /// Show everything.
 pub fn unfold_all(buffer: &gtk::TextBuffer) {
     if let Some(tag) = tag(buffer) {
@@ -151,30 +137,36 @@ pub fn unfold_all(buffer: &gtk::TextBuffer) {
     }
 }
 
-/// The header lines that are folded right now, among the ones `folds` knows about.
-fn folded_starts(buffer: &gtk::TextBuffer, folds: &[Fold]) -> HashSet<u32> {
-    folds
-        .iter()
-        .map(|f| f.start_line)
-        .filter(|line| is_folded(buffer, *line as i32))
-        .collect()
-}
-
-/// Re-apply what is still folded after the server has re-analysed the file.
+/// Keep what is hidden in step with the server's new analysis of the file.
 ///
-/// The old ranges are dropped whole and the surviving ones re-laid at their new line numbers: a
-/// fold whose header was deleted simply is not in `new` and so does not come back, and one that
-/// moved down three lines is re-applied where it is now. `old` is what the tab folded against.
-pub fn resync(buffer: &gtk::TextBuffer, old: &[Fold], new: &[Fold]) {
-    let shut = folded_starts(buffer, old);
-    // Nothing is hidden, so there is nothing to lift: this runs on every refresh, 300 ms after
-    // every edit, and lifting the tag is a pass over the whole buffer.
-    if shut.is_empty() {
+/// A shut block keeps to the text it hid. GTK carries a hidden run through every edit around it,
+/// wherever the lines move, and text put next to the run — typed, pasted or a template — is not
+/// part of it, so that text stays in sight although the block now reaches over it. A run is only
+/// ever cut back, to where its block ends now. One whose header line opens no block any more — the
+/// header rewritten or deleted, or a line put between the two — has nothing left to open it from,
+/// so it opens.
+pub fn resync(buffer: &gtk::TextBuffer, folds: &[Fold]) {
+    let Some(tag) = tag(buffer) else {
         return;
+    };
+    // By offset: taking a tag off is a change to the buffer, which iterators do not outlive.
+    let mut runs = Vec::new();
+    let mut at = buffer.start_iter();
+    while at.starts_tag(Some(&tag)) || at.forward_to_tag_toggle(Some(&tag)) {
+        let mut end = at;
+        end.forward_to_tag_toggle(Some(&tag));
+        runs.push((at.offset(), end.offset()));
+        at = end;
     }
-    unfold_all(buffer);
-    for f in new.iter().filter(|f| shut.contains(&f.start_line)) {
-        fold(buffer, *f);
+    for (start, end) in runs {
+        let (start, end) = (buffer.iter_at_offset(start), buffer.iter_at_offset(end));
+        let block_end = folds
+            .iter()
+            .filter(|f| start.starts_line() && f.start_line as i32 == start.line() - 1)
+            .map(|f| hidden(buffer, *f).1)
+            .max();
+        let keep = block_end.unwrap_or(start).min(end);
+        buffer.remove_tag(&tag, &keep, &end);
     }
 }
 

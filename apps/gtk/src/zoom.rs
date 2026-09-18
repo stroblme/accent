@@ -222,6 +222,48 @@ pub fn zoom_on_wheel(
     widget.add_controller(wheel);
 }
 
+/// The zoom a pinch has reached: the zoom it began at times `scale`, on the nearest tenth, the
+/// step every other zoom takes. GTK gives the scale against the fingers' spread when the pinch
+/// began, so it is the whole pinch so far and never a step to add to the last one.
+pub fn pinched_zoom(start: f64, scale: f64) -> f64 {
+    (start * scale * 10.0).round() / 10.0
+}
+
+/// Two fingers on `widget` zoom it: `from()` is read as the pinch begins, and `to(zoom, at)` is
+/// handed each new [`pinched_zoom`] with the point between the fingers, which is what stays put.
+///
+/// Nothing is handed on until the fingers reach another tenth, so a pinch re-lays the page out
+/// once a tenth rather than on every event, and fingers resting on a page fitted at 137 % leave
+/// it there rather than snapping it to 140 %.
+pub fn zoom_on_pinch(
+    widget: &impl IsA<gtk::Widget>,
+    from: impl Fn() -> f64 + 'static,
+    to: impl Fn(f64, (f64, f64)) + 'static,
+) {
+    // The zoom the pinch began at, and the last one it handed on.
+    let (start, last) = (Rc::new(Cell::new(1.0)), Rc::new(Cell::new(1.0)));
+    let pinch = gtk::GestureZoom::new();
+    pinch.connect_begin(glib::clone!(
+        #[strong]
+        start,
+        #[strong]
+        last,
+        move |_, _| {
+            start.set(from());
+            last.set(pinched_zoom(start.get(), 1.0));
+        }
+    ));
+    pinch.connect_scale_changed(move |gesture, scale| {
+        let zoom = pinched_zoom(start.get(), scale);
+        if let Some(at) = gesture.bounding_box_center()
+            && last.replace(zoom) != zoom
+        {
+            to(zoom, at);
+        }
+    });
+    widget.add_controller(pinch);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +286,18 @@ mod tests {
         assert_eq!(stepped_zoom(1.37, false), 1.4);
         assert_eq!(stepped_zoom(1.37, true), 1.3);
         assert_eq!(stepped_zoom(1.1, false), 1.2);
+    }
+
+    #[test]
+    fn a_pinch_follows_the_fingers_from_where_it_began() {
+        // The scale is the whole pinch so far, so it multiplies the zoom the pinch began at: a
+        // step taken per event instead ran off to the end of the range.
+        assert_eq!(pinched_zoom(1.0, 1.5), 1.5);
+        assert_eq!(pinched_zoom(2.0, 0.5), 1.0);
+        // On the nearest tenth, as every other zoom lands.
+        assert_eq!(pinched_zoom(1.37, 1.0), 1.4);
+        assert_eq!(pinched_zoom(1.0, 1.04), 1.0);
+        assert_eq!(pinched_zoom(1.0, 1.26), 1.3);
     }
 
     #[test]

@@ -59,8 +59,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
 /// Template does: at its end, half way down, at its end with every block folded, and at its end
 /// followed by a Backspace, which ends the snippet through GtkSourceView's own scroll. Prints the
 /// view's vertical adjustment and top line before, after, and after a scroll back to the top; the
-/// folded case has to come out with the template on screen, the fold it landed in open. Before
-/// them, a Go to Line into the note with every block folded, which has to come out on its line.
+/// folded case has to come out with the template on screen. Before them, a Go to Line and its
+/// preview into the note with every block folded, which have to come out on their line, and text
+/// typed next to a shut block, which has to stay in sight through the analysis.
 fn bench_template_insert(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -72,9 +73,13 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
         let adj = tab.view.vadjustment().expect("bench adjustment");
         let original = tab.text();
         let say = |template: &str, case: &str, when: &str| {
-            let (top, _) = tab.view.line_at_y(tab.view.visible_rect().y());
+            let seen = tab.view.visible_rect();
+            let (top, _) = tab.view.line_at_y(seen.y());
+            let caret = tab.view.iter_location(&editor::caret(&tab.buffer));
+            let on =
+                seen.y() <= caret.y() && caret.y() + caret.height() <= seen.y() + seen.height();
             println!(
-                "bench template_insert {template} {case} {when} value={:.0} upper={:.0} page={:.0} top_line={} caret_line={}",
+                "bench template_insert {template} {case} {when} value={:.0} upper={:.0} page={:.0} top_line={} caret_line={} caret_on_screen={on}",
                 adj.value(),
                 adj.upper(),
                 adj.page_size(),
@@ -91,6 +96,58 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(600)).await;
         say("goto", &format!("line_{line}"), "folded");
         tab.unfold_all();
+        // The go-to entry's preview of the same line, from the top of the note.
+        tab.fold_all();
+        adj.set_value(0.0);
+        tab.show_line(line);
+        measured().await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        say("show_line", &format!("line_{line}"), "folded");
+        tab.unfold_all();
+        // Text typed next to a folded block, left through the analysis that folded it away: at
+        // the note's end, which the last block's fold reaches, where it has to stay in sight with
+        // every fold still shut; and on a new line under the first folded header, which opens
+        // that one fold instead.
+        let hides = tab
+            .buffer
+            .tag_table()
+            .lookup(crate::fold::TAG)
+            .expect("fold tag");
+        let runs = || {
+            let (mut at, mut n) = (tab.buffer.start_iter(), 0);
+            while at.forward_to_tag_toggle(Some(&hides)) {
+                n += usize::from(at.starts_tag(Some(&hides)));
+            }
+            n
+        };
+        for (case, typed) in [
+            ("end", "23 characters typed now"),
+            ("header", "\n23 characters"),
+        ] {
+            tab.set_text(&original);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            tab.fold_all();
+            let shut = runs();
+            let mut at = tab.buffer.end_iter();
+            if case == "header" {
+                at = tab.buffer.start_iter();
+                at.forward_to_tag_toggle(Some(&hides));
+                at.backward_char();
+            }
+            let from = at.offset();
+            tab.buffer.place_cursor(&at);
+            tab.buffer.insert_interactive_at_cursor(typed, true);
+            measured().await;
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            let hidden = (from..from + typed.chars().count() as i32)
+                .filter(|at| tab.buffer.iter_at_offset(*at).has_tag(&hides))
+                .count();
+            println!(
+                "bench template_insert typed {case} hidden={hidden} of={} shut={shut} after={}",
+                typed.chars().count(),
+                runs()
+            );
+        }
         for template in vault.templates().unwrap_or_default() {
             let Ok((text, stops)) = vault.render_template(&template, "Bench") else {
                 continue;
@@ -101,8 +158,9 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
             for case in ["end", "middle", "folded", "backspace"] {
                 tab.set_text(&original);
                 tab.unfold_all();
-                // The analysis debounce is what knows the note's folds.
-                glib::timeout_future(Duration::from_millis(500)).await;
+                // The analysis debounce is what knows the note's folds: a whole refresh, since an
+                // answer landing after the next edit is dropped, and a debug build is slow at it.
+                glib::timeout_future(Duration::from_millis(1500)).await;
                 if case == "folded" {
                     tab.fold_all();
                 }
