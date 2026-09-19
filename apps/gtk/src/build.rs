@@ -730,11 +730,12 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             let Some(app) = flush.upgrade() else { return };
             // Each path is a subtree and not only a key: a folder on its way to the trash or into
             // another folder takes every note under it, and their buffers have to be written out
-            // before the file moves. `trashed_with` is the same "is under" the close path asks.
+            // before the file moves. `trashed_with` is the same "is under" the close path asks;
+            // "" is the vault root, which it refuses and which here means every tab.
             for tab in app.open_tabs() {
                 let under = rels
                     .iter()
-                    .any(|rel| fileops::trashed_with(rel, &tab.rel()));
+                    .any(|rel| rel.is_empty() || fileops::trashed_with(rel, &tab.rel()));
                 if under && tab.save.modified.get() {
                     app.save_tab_now(&tab);
                 }

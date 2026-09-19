@@ -25,9 +25,9 @@ use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
     Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
-    Severity, Signature, Support, Symbol, TextEdit,
+    Severity, Signature, Support, Symbol, TextEdit, byte_of,
 };
-use crate::{Event, Local, locked};
+use crate::{Event, FileEdits, Local, locked};
 
 /// A server that answered `-32801` was asked about a document it has already seen change. It is
 /// the ordinary state of a fast typist, not a failure.
@@ -386,6 +386,71 @@ fn diagnostics_of(items: Vec<types::Diagnostic>, text: &str, enc: Encoding) -> V
         .collect()
 }
 
+/// One of a server's `willRename` filters, compiled once: a glob over the absolute path, and
+/// whether it takes files (`Some(false)`), folders (`Some(true)`) or both.
+type RenameFilter = (globset::GlobMatcher, Option<bool>);
+
+/// The filters a server registered for `willRename`, leaving out any for a scheme other than
+/// `file` and any glob that does not compile. `*` stops at a `/` and `**` does not, as the
+/// protocol has it.
+fn rename_filters(caps: &ServerCapabilities) -> Vec<RenameFilter> {
+    let registered = caps
+        .workspace
+        .as_ref()
+        .and_then(|w| w.file_operations.as_ref())
+        .and_then(|f| f.will_rename.as_ref());
+    let Some(registered) = registered else {
+        return Vec::new();
+    };
+    registered
+        .filters
+        .iter()
+        .filter(|f| f.scheme.as_deref().is_none_or(|scheme| scheme == "file"))
+        .filter_map(|f| {
+            let glob = globset::GlobBuilder::new(&f.pattern.glob)
+                .literal_separator(true)
+                .case_insensitive(f.pattern.options.as_ref().is_some_and(|o| o.ignore_case))
+                .build()
+                .ok()?
+                .compile_matcher();
+            let is_dir = match f.pattern.matches.as_deref() {
+                Some("file") => Some(false),
+                Some("folder") => Some(true),
+                _ => None,
+            };
+            Some((glob, is_dir))
+        })
+        .collect()
+}
+
+/// Whether one of `filters` takes the file or folder at `abs`.
+fn renamed_by(filters: &[RenameFilter], abs: &Path, is_dir: bool) -> bool {
+    filters
+        .iter()
+        .any(|(glob, kind)| kind.is_none_or(|k| k == is_dir) && glob.is_match(abs))
+}
+
+/// A server's edits to one file as byte ranges of `text`, the positions read in the server's own
+/// encoding. `None` when one lands past the last line, which makes `text` not the text the server
+/// meant.
+fn byte_edits(
+    text: &str,
+    edits: &[types::TextEdit],
+    enc: Encoding,
+) -> Option<Vec<(usize, usize, String)>> {
+    edits
+        .iter()
+        .map(|e| {
+            let r = enc.char_range(text, e.range);
+            Some((
+                byte_of(text, r.start)?,
+                byte_of(text, r.end)?,
+                e.new_text.clone(),
+            ))
+        })
+        .collect()
+}
+
 /// A file the server named, as the rest of accent names it: vault-relative inside the vault,
 /// absolute outside it.
 fn rel_of(uri: &str, vault_root: &Path) -> Option<String> {
@@ -411,6 +476,7 @@ pub(crate) struct External {
     caps: ServerCapabilities,
     encoding: Encoding,
     docs: Docs,
+    renames: Vec<RenameFilter>,
     /// The vault root, for turning URIs into relative paths and back.
     root: PathBuf,
 }
@@ -453,6 +519,7 @@ pub(crate) async fn start(
 
     Ok(Arc::new(External {
         client,
+        renames: rename_filters(&caps),
         caps,
         encoding,
         docs,
@@ -583,6 +650,25 @@ impl External {
                 None => raw_range(range),
             },
             path: rel,
+        })
+    }
+
+    /// A server's edits to `rel`, measured against the file on disk, which is what the server
+    /// answered about: every open document is written out before a move is planned. One whose
+    /// buffer still differs from its file is left alone rather than edited at positions that
+    /// mean something else there.
+    fn file_edits(&self, rel: &str, edits: &[types::TextEdit]) -> Option<FileEdits> {
+        let (text, etag) = crate::fs::read_note(&Local::join(&self.root, rel).ok()?).ok()?;
+        if locked(&self.docs)
+            .get(rel)
+            .is_some_and(|doc| doc.text != text)
+        {
+            return None;
+        }
+        Some(FileEdits {
+            rel: rel.to_string(),
+            etag,
+            edits: byte_edits(&text, edits, self.encoding)?,
         })
     }
 
@@ -843,6 +929,38 @@ impl Language for External {
                     end_line: r.end_line,
                 })
                 .collect())
+        })
+    }
+
+    fn renames(&self, abs: &Path, is_dir: bool) -> bool {
+        renamed_by(&self.renames, abs, is_dir)
+    }
+
+    fn will_rename(&self, moves: Vec<(String, String)>) -> Fut<'_, Vec<FileEdits>> {
+        Box::pin(async move {
+            let files = moves
+                .iter()
+                .map(|(from, to)| Ok(json!({"oldUri": self.uri(from)?, "newUri": self.uri(to)?})))
+                .collect::<Result<Vec<_>>>()?;
+            let answer: Option<types::WorkspaceEdit> = self
+                .ask("workspace/willRenameFiles", json!({"files": files}))
+                .await?;
+            let mut out = Vec::new();
+            for (uri, edits) in answer
+                .map(types::WorkspaceEdit::text_edits)
+                .unwrap_or_default()
+            {
+                // Inside the vault only: a file elsewhere is not the vault's to change.
+                let Some(rel) = rel_of(&uri, &self.root).filter(|rel| Path::new(rel).is_relative())
+                else {
+                    continue;
+                };
+                match self.file_edits(&rel, &edits) {
+                    Some(found) => out.push(found),
+                    None => tracing::warn!("left {rel} alone: it is not what the server read"),
+                }
+            }
+            Ok(out)
         })
     }
 
@@ -1487,6 +1605,119 @@ mod tests {
                 "\\ci offers cite"
             );
         });
+        drop(vault);
+    }
+
+    /// Which moves a server wants to be asked about: its globs over the whole path, its kinds,
+    /// its case rule, and only for files on disk.
+    #[test]
+    fn a_rename_is_asked_about_where_the_filters_take_it() {
+        let caps: ServerCapabilities = parse(json!({"workspace": {"fileOperations": {
+            "willRename": {"filters": [
+                {"scheme": "file", "pattern": {"glob": "**/*.rs", "matches": "file"}},
+                {"scheme": "file", "pattern": {"glob": "**", "matches": "folder"}},
+                {"scheme": "untitled", "pattern": {"glob": "**/*.md"}},
+                {"pattern": {"glob": "**/*.{ts,TSX}", "options": {"ignoreCase": true}}}
+            ]}
+        }}}));
+        let filters = rename_filters(&caps);
+        let takes = |path: &str, is_dir| renamed_by(&filters, Path::new(path), is_dir);
+        assert!(takes("/v/src/foo.rs", false));
+        assert!(!takes("/v/src/foo.rs.orig", false));
+        assert!(takes("/v/src", true), "any folder");
+        assert!(!takes("/v/src", false), "a file called src is no folder");
+        assert!(!takes("/v/notes/a.md", false), "a scheme other than file");
+        assert!(takes("/v/web/App.tsx", false), "ignoreCase");
+        assert!(!takes("/v/tool.py", false));
+        assert!(rename_filters(&ServerCapabilities::default()).is_empty());
+    }
+
+    /// An import edit lands on the bytes the server meant, whatever it counts columns in: `😀` is
+    /// one character, two UTF-16 units and four bytes.
+    #[test]
+    fn import_edits_land_on_bytes_in_the_servers_encoding() {
+        let text = "let s = \"😀\"; mod foo;\nuse foo::f;\n";
+        let edits: Vec<types::TextEdit> = parse(json!([
+            {"range": range(0, 18, 0, 21), "newText": "bar"},
+            {"range": range(1, 4, 1, 7), "newText": "bar"},
+        ]));
+        let bytes = byte_edits(text, &edits, Encoding::Utf16).unwrap();
+        assert_eq!(bytes[0], (20, 23, "bar".to_string()));
+        let mut out = text.to_string();
+        for (start, end, with) in bytes.iter().rev() {
+            out.replace_range(*start..*end, with);
+        }
+        assert_eq!(out, "let s = \"😀\"; mod bar;\nuse bar::f;\n");
+        // A line the text does not have: not the text the server read.
+        let past: Vec<types::TextEdit> =
+            parse(json!([{"range": range(9, 0, 9, 1), "newText": ""}]));
+        assert_eq!(byte_edits(text, &past, Encoding::Utf16), None);
+    }
+
+    /// rust-analyzer's `willRenameFiles`: a module renamed in its own folder takes its `mod` and
+    /// its `use` along — asked before the move, made after it — and one moved into another folder
+    /// is asked about and answered with nothing, which is rust-analyzer's own limit.
+    #[test]
+    fn rust_analyzer_follows_a_renamed_module() {
+        if !super::super::in_path("rust-analyzer") {
+            eprintln!("rust-analyzer is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        let lib = "mod foo;\npub use foo::f;\n";
+        std::fs::write(root.path().join("src/lib.rs"), lib).unwrap();
+        std::fs::write(root.path().join("src/foo.rs"), "pub fn f() {}\n").unwrap();
+
+        let (vault, events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        let budget = std::time::Duration::from_secs(60);
+        assert!(
+            crate::tests::wait_for(&events, |e| matches!(e, Event::Reconciled(_)), budget)
+                .is_some()
+        );
+        accent_lsp::runtime().block_on(async {
+            vault
+                .open_document("src/lib.rs", "rust", lib.to_string())
+                .await
+                .unwrap();
+        });
+        // Until the crate graph has loaded the server knows no module to rename.
+        let moves = [("src/foo.rs".to_string(), "src/bar.rs".to_string())];
+        let started = std::time::Instant::now();
+        let mut plan = vault.plan_moves(&moves).unwrap();
+        while plan.imports.is_empty() && started.elapsed() < budget {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            plan = vault.plan_moves(&moves).unwrap();
+        }
+        eprintln!("willRenameFiles answered after {:?}", started.elapsed());
+        assert!(plan.unchecked.is_empty(), "rust-analyzer was asked");
+        assert_eq!(plan.imports.len(), 1, "{:?}", plan.imports);
+
+        let away = [("src/foo.rs".to_string(), "src/sub/foo.rs".to_string())];
+        let away = vault.plan_moves(&away).unwrap();
+        assert!(away.imports.is_empty(), "{:?}", away.imports);
+        assert!(
+            away.unchecked.is_empty(),
+            "asked, and answered with nothing"
+        );
+
+        let report = vault.rename(&plan, true).unwrap();
+        assert_eq!(report.rewritten, ["src/lib.rs"]);
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("src/lib.rs")).unwrap(),
+            "mod bar;\npub use bar::f;\n"
+        );
         drop(vault);
     }
 

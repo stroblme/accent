@@ -13,7 +13,8 @@ use accent_core::{diff, markdown, search, template};
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    DiffLine, Etag, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError, fs,
+    DiffLine, Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError,
+    fs,
 };
 
 impl Local {
@@ -149,11 +150,14 @@ impl Local {
     }
 
     /// What moving these files and folders would touch, so the UI can show it before anything
-    /// is written: the notes whose links the moves would leave naming the wrong place.
+    /// is written: the notes whose links the moves would leave naming the wrong place, and the
+    /// source files whose imports the language servers already running say would.
     ///
     /// A dry run of the rewrite rather than a list of backlinks, so a move whose backlinks are
     /// all bare `[[Note]]`s names nothing and asks nothing. The candidates are the notes linking
     /// to anything that moves, and the moved notes whose markdown links are relative to them.
+    /// The servers are asked here, before anything moves, because they may read the disk to
+    /// answer: rust-analyzer asks it whether the path is a folder.
     pub fn plan_moves(&self, moves: &[(String, String)]) -> Result<RenamePlan> {
         let files = self.moved_files(moves)?;
         let mut candidates = BTreeSet::new();
@@ -178,20 +182,34 @@ impl Local {
                 Err(_) => true,
             })
             .collect();
+        let kinds = moves
+            .iter()
+            .map(|(from, to)| Ok((from.clone(), to.clone(), self.resolve(from)?.is_dir())))
+            .collect::<io::Result<Vec<_>>>()?;
+        let (imports, asked) = self.lang.will_rename(&kinds);
+        let mut unchecked: Vec<String> = files
+            .keys()
+            .filter(|old| imports_by_path(old) && !asked.iter().any(|from| is_under(old, from)))
+            .cloned()
+            .collect();
+        unchecked.sort();
         Ok(RenamePlan {
             moves: moves.to_vec(),
             rewrites,
+            imports,
+            unchecked,
         })
     }
 
-    /// Apply a [`RenamePlan`]: the moves in order, stopping at the first that fails, then the
-    /// link rewrites for what did move. Only a failure before the first move fails the call; a
-    /// move or a note that could not be done is reported instead, because a half-renamed vault is
-    /// worse than one whose report says exactly what happened.
-    pub fn rename(&self, plan: &RenamePlan, rewrite_links: bool) -> Result<RenameReport> {
+    /// Apply a [`RenamePlan`]: the moves in order, stopping at the first that fails, then, with
+    /// `update`, the link rewrites for what did move and the import edits. Only a failure before
+    /// the first move fails the call; a move or a file that could not be done is reported
+    /// instead, because a half-renamed vault is worse than one whose report says exactly what
+    /// happened.
+    pub fn rename(&self, plan: &RenamePlan, update: bool) -> Result<RenameReport> {
         // Which file each link names is a question only the index can answer, and only while it
         // still describes the vault as it was: ask before the first move.
-        let (mut files, targets) = match rewrite_links {
+        let (mut files, targets) = match update {
             true => (
                 self.moved_files(&plan.moves)?,
                 self.link_targets(&plan.rewrites)?,
@@ -216,7 +234,7 @@ impl Local {
             }
             report.moved.push((from.clone(), to.clone()));
         }
-        if !rewrite_links {
+        if !update {
             return Ok(report);
         }
         // A link to a file that is still where it was is not stale.
@@ -232,7 +250,50 @@ impl Local {
                 }
             }
         }
+        // The imports name where every file was going, so a batch that stopped part way gets
+        // none of them.
+        if report.not_moved.is_some() {
+            return Ok(report);
+        }
+        for found in &plan.imports {
+            let now = files.get(&found.rel).unwrap_or(&found.rel);
+            match self.edit_one(now, found) {
+                Ok(()) => report.rewritten.push(now.clone()),
+                Err(e) => {
+                    tracing::warn!("updating imports in {now}: {e:#}");
+                    report.failed.push((now.clone(), format!("{e:#}")));
+                }
+            }
+        }
         Ok(report)
+    }
+
+    /// Make a language server's edits to the file now at `now`, back to front, gated on the etag
+    /// they were measured against: a file that changed since the plan is refused, not guessed at,
+    /// and so is a set of edits that overlap.
+    fn edit_one(&self, now: &str, found: &FileEdits) -> Result<()> {
+        let path = self.resolve(now)?;
+        let (mut text, _) = fs::read_note(&path)?;
+        let mut edits = found.edits.clone();
+        edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
+        let mut end = text.len();
+        for (start, stop, with) in &edits {
+            anyhow::ensure!(
+                start <= stop
+                    && *stop <= end
+                    && text.is_char_boundary(*start)
+                    && text.is_char_boundary(*stop),
+                "the language server's edits overlap"
+            );
+            text.replace_range(*start..*stop, with);
+            end = *start;
+        }
+        fs::write_note(&path, &text, Some(found.etag))?;
+        self.post(Msg::Update {
+            rel: now.to_string(),
+            own: true,
+        });
+        Ok(())
     }
 
     /// Every file the moves take somewhere, old path to new: a folder's one by one, as the
@@ -443,6 +504,19 @@ impl Local {
             .filter(|t| matches!(self.template_target(t), Ok(Some(_))))
             .collect())
     }
+}
+
+/// Source files a language server may be asked to follow when they move: what rust-analyzer and
+/// typescript-language-server answer `willRename` for. A moved one no running server was asked
+/// about is reported as unchecked.
+const IMPORTING: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+
+/// Whether `rel` is a source file other files import by its path.
+fn imports_by_path(rel: &str) -> bool {
+    std::path::Path::new(rel)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMPORTING.contains(&ext))
 }
 
 /// Whether `rel` is `dir` or inside it.

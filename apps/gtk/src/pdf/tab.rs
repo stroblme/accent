@@ -432,11 +432,11 @@ impl PdfTab {
         self.view.scroll_to(anchor);
     }
 
-    /// The reading view's geometry, for `ACCENT_BENCH_PDF` and nothing else: the headless image
-    /// has no pointer and no window manager, so the numbers a fit produced are the only way to
-    /// see that it fitted.
+    /// The reading view's geometry and the page the strip frames, for `ACCENT_BENCH_PDF` and
+    /// nothing else: the headless image has no pointer and no window manager, so the numbers a fit
+    /// produced are the only way to see that it fitted.
     pub fn geometry(&self) -> String {
-        self.view.geometry()
+        format!("{} framed={}", self.view.geometry(), self.thumbs.framed())
     }
 
     /// The note links that highlight this document, as the index reports them. Painting them
@@ -955,7 +955,7 @@ impl PdfTab {
                 if !tab.links.borrow().contains_key(&page) {
                     tab.ask(Request::Links(page));
                 }
-                tab.thumbs.queue_draw();
+                tab.thumbs.set_framed(page);
                 if tab.wants_inks() {
                     tab.ask_inks();
                 }

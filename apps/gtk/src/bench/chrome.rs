@@ -14,8 +14,8 @@ pub(super) fn bench_chrome(app: &Rc<App>, notes: &str) {
     let Some((a, b)) = notes.split_once(',') else {
         return bench_quit(app);
     };
-    // The actions end on a find, whose open bar would suspend the fade.
-    app.pane().find.close();
+    // The actions end on a find, and its bar stays open through the rest: an open find bar must
+    // not keep the fade away.
     app.open_path(a);
     app.open_path(b);
     let app = app.clone();
@@ -73,9 +73,11 @@ fn chrome_state(app: &Rc<App>) -> String {
 }
 
 /// The line fade on the active note at High: held for a second and a half with the caret on line
-/// 8 and the line numbers on, which is long enough for `import -window root` to see the veil and
-/// the gutter it leaves alone, then [`fade::paint`] timed over a 2 KB and a 64 KB note. The veil is
-/// a rectangle per line on screen, so the two should cost the same.
+/// 8, the line numbers on and "the" highlighted as a find-bar query, which is long enough for
+/// `import -window root` to see the veil, the gutter it leaves alone and the lines holding a
+/// match, which it leaves alone too. Then [`fade::paint`] timed over a 2 KB and a 64 KB note,
+/// with no match on screen and with one on every line. The veil is a rectangle per line on
+/// screen, and the matches are looked for a line at a time, so the sizes should cost the same.
 ///
 /// `Tab::set_text` leaves the tab clean and the note's own text goes back at the end, so the
 /// tab closes as it opened and nothing asks to write it.
@@ -89,8 +91,15 @@ async fn bench_chrome_veil(app: &Rc<App>) {
     if let Some(iter) = tab.buffer.iter_at_line(8) {
         tab.buffer.place_cursor(&iter);
     }
+    tab.set_query("the");
+    tab.set_highlight(true);
     app.hide_chrome();
-    println!("bench chrome_veil {} caret_line=8", tab.rel());
+    println!(
+        "bench chrome_veil {} caret_line=8 find_open={} {}",
+        tab.rel(),
+        app.pane().find.is_open(),
+        chrome_state(app)
+    );
     glib::timeout_future(Duration::from_millis(1500)).await;
     let own = tab.text();
     for chars in [2 * 1024, 64 * 1024] {
@@ -104,15 +113,25 @@ async fn bench_chrome_veil(app: &Rc<App>) {
             break;
         };
         const PAINTS: u32 = 200;
-        let snapshot = gtk::Snapshot::new();
-        let t0 = Instant::now();
-        for _ in 0..PAINTS {
-            fade::paint(view, &snapshot, 1.0);
+        let mut us = [0.0; 2];
+        for (query, us) in ["the", "filler"].into_iter().zip(&mut us) {
+            tab.set_query(query);
+            // Time for the context to scan the note, as it has by the time anyone is typing.
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let snapshot = gtk::Snapshot::new();
+            let t0 = Instant::now();
+            for _ in 0..PAINTS {
+                fade::paint(view, &snapshot, 1.0);
+            }
+            *us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(PAINTS);
+            drop(snapshot.to_node());
         }
-        let us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(PAINTS);
-        drop(snapshot.to_node());
-        println!("bench fade_paint_us chars={chars} {us:.1}");
+        println!(
+            "bench fade_paint_us chars={chars} {:.1} matched={:.1}",
+            us[0], us[1]
+        );
     }
+    tab.set_highlight(false);
     tab.set_text(&own);
     app.show_chrome();
     app.config.borrow_mut().focus_mode = was;
@@ -128,7 +147,7 @@ async fn bench_chrome_veil(app: &Rc<App>) {
 /// [`ACTIONS`] claims either chord, so they activate nothing and reach no `show_chrome` at all. If
 /// focus mode still drops on them, the cause is elsewhere.
 fn bench_chrome_actions(app: &Rc<App>) {
-    // Find last: it leaves its bar open, and an open find bar suspends the fade entirely.
+    // Find last: it leaves its bar open for the drills after this one.
     for action in ["win.save", "win.scroll-down", "win.zoom-in", "win.find"] {
         app.hide_chrome();
         let _ = WidgetExt::activate_action(&app.window, action, None);

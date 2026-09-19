@@ -358,8 +358,7 @@ methods! {
     /// A host whose `accent-cli serve` predates it answers "no such method" until `make server`
     /// uploads the new one; the rename then says so rather than moving anything.
     any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
-    any rename(plan: ref RenamePlan, rewrite_links: val bool) -> RenameReport,
-        bounded by MOVE_BOUND;
+    any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
     any conflict_diff(original: ref str, conflict: ref str) -> Vec<DiffLine>;
     any template_target(template: ref str) -> Option<String>;

@@ -88,7 +88,7 @@ use tags::bench_tags;
 /// document of several pages, since a one-page PDF is wholly on screen whatever the scroll offset
 /// was. `=stale:<rel_path>` is the remote vault's etag gate: it stamps the cached copy with an
 /// etag the host never had, appends a page and prints whether the host's copy is untouched and
-/// what `<name> (drawn).pdf` beside it holds, then appends another and prints the same again —
+/// what `<name> (edited).pdf` beside it holds, then appends another and prints the same again —
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
 /// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
 /// a drop in the thumbnail strip does, inserts a page after the one being read and deletes the one

@@ -326,6 +326,19 @@ impl PdfView {
         *self.imp().on_page.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Frame `page` in a thumbnail strip: the page the reading view is on, which the strip's own
+    /// scroll has no say in.
+    pub fn set_framed(&self, page: usize) {
+        if self.imp().page.replace(page) != page {
+            self.queue_draw();
+        }
+    }
+
+    /// The page a thumbnail strip frames. Only `ACCENT_BENCH_PDF` reads it.
+    pub fn framed(&self) -> usize {
+        self.imp().page.get()
+    }
+
     /// Rectangles to paint over the page, in page points, per page: the search matches.
     pub fn set_marks(&self, marks: HashMap<usize, Vec<accent_core::pdf::Rect>>) {
         *self.imp().marks.borrow_mut() = marks;
@@ -1213,7 +1226,12 @@ mod imp {
         }
 
         /// Report the page being read when it changes, for the header and the thumbnail frame.
+        /// A strip reports nothing: it frames the page the reading view hands it
+        /// ([`super::PdfView::set_framed`]), not the one in the middle of its own viewport.
         fn notice_page(&self) {
+            if self.thumbnails.get() {
+                return;
+            }
             let page = self.obj().current_page();
             if self.page.replace(page) != page {
                 self.obj().queue_draw();

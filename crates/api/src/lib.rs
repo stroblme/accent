@@ -121,6 +121,24 @@ pub struct RenamePlan {
     pub moves: Vec<(String, String)>,
     /// The notes whose links the moves would leave naming the wrong place, by their paths now.
     pub rewrites: Vec<String>,
+    /// What the language servers already running asked to have changed because of the moves —
+    /// an import naming a moved module — by each file's path now. `default`, as are the fields
+    /// below, so a plan from a host that predates them still reads.
+    #[serde(default)]
+    pub imports: Vec<FileEdits>,
+    /// Moved source files no running language server was asked about, whose imports nothing
+    /// checked.
+    #[serde(default)]
+    pub unchecked: Vec<String>,
+}
+
+/// Edits to one file: byte ranges of its text as it was when they were asked for, which the
+/// etag says, and what to put in each.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileEdits {
+    pub rel: String,
+    pub etag: Etag,
+    pub edits: Vec<(usize, usize, String)>,
 }
 
 /// What a global replace wrote, in the shape [`RenameReport`] has: what worked is counted, what
@@ -139,7 +157,8 @@ pub struct RenameReport {
     pub moved: Vec<(String, String)>,
     /// The move that failed and why. Nothing after it was tried.
     pub not_moved: Option<(String, String)>,
-    /// The notes whose links were rewritten, by their paths after the moves.
+    /// The notes whose links were rewritten, and the files whose imports were, by their paths
+    /// after the moves.
     pub rewritten: Vec<String>,
     pub failed: Vec<(String, String)>,
 }
