@@ -422,25 +422,33 @@ pub fn hash_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_string()
 }
 
-/// Test for the server, so a second connection skips the upload.
-pub fn have_server_cmd(hash: &str) -> String {
-    format!("test -x {}", server_path(hash))
+/// Test for the server, `size` bytes of it, so a second connection skips the upload. The size is
+/// counted too because a host may still hold a short file under the final name from before
+/// [`install_server_cmd`] counted its bytes; failing this, the next install replaces it.
+pub fn have_server_cmd(hash: &str, size: usize) -> String {
+    let installed = server_path(hash);
+    format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq {size} ]")
 }
 
-/// Read the binary from stdin and install it.
+/// Read the binary, `size` bytes of it, from stdin and install it.
 ///
 /// The write goes to a dotted temp name first and is renamed into place: `cat >` straight onto the
 /// final path would make a half-uploaded binary `test -x`-visible, and the next launch would exec
-/// it. Older builds are swept afterwards rather than before, so a failed upload leaves the working
+/// it. `cat` takes an upload cut short for its end, so the bytes are counted before the rename,
+/// and a short file is removed rather than installed under a name every later connection trusts.
+/// Older builds are swept afterwards rather than before, so a failed upload leaves the working
 /// server where it was. The temp name starts with a dot, which is why the sweep's glob cannot
 /// match it.
-pub fn install_server_cmd(hash: &str) -> String {
+pub fn install_server_cmd(hash: &str, size: usize) -> String {
     let dir = format!("$HOME/{SERVER_DIR}");
     let name = server_name(hash);
     let tmp = format!("{dir}/.{name}.tmp");
     let installed = server_path(hash);
     format!(
-        "mkdir -p {dir} && cat > {tmp} && chmod 755 {tmp} && mv -f {tmp} {installed} && \
+        "mkdir -p {dir} && cat > {tmp} && \
+         if [ \"$(wc -c < {tmp})\" -ne {size} ]; then \
+         rm -f {tmp}; echo 'the upload was cut short' >&2; exit 1; fi && \
+         chmod 755 {tmp} && mv -f {tmp} {installed} && \
          for f in {dir}/accent-cli-*; do [ \"$f\" = {installed} ] || rm -f \"$f\"; done"
     )
 }
@@ -928,16 +936,18 @@ mod tests {
             server_path(hash),
             "$HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
         );
+        // A short leftover under the final name is found as missing, so it is uploaded again.
+        let installed = server_path(hash);
         assert_eq!(
-            have_server_cmd(hash),
-            "test -x $HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
+            have_server_cmd(hash, 8_300_000),
+            format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq 8300000 ]")
         );
     }
 
     #[test]
     fn installing_the_server_is_atomic_and_sweeps_stale_builds() {
         let hash = "0123456789abcdef";
-        let cmd = install_server_cmd(hash);
+        let cmd = install_server_cmd(hash, 8_300_000);
         let installed = server_path(hash);
         let tmp = "$HOME/.local/share/accent/server/.accent-cli-0123456789abcdef.tmp";
         assert!(cmd.contains("mkdir -p $HOME/.local/share/accent/server"));
@@ -946,6 +956,10 @@ mod tests {
         assert!(cmd.contains(&format!("chmod 755 {tmp}")));
         assert!(cmd.contains(&format!("mv -f {tmp} {installed}")));
         assert!(!cmd.contains(&format!("cat > {installed}")));
+        // A short upload is counted, removed and refused before anything is renamed.
+        let counted = format!("if [ \"$(wc -c < {tmp})\" -ne 8300000 ]; then rm -f {tmp};");
+        let counted = cmd.find(&counted).expect(&cmd);
+        assert!(counted < cmd.find("mv -f").expect(&cmd));
         // The sweep spares what was just installed.
         assert!(cmd.contains("accent-cli-*"));
         assert!(cmd.contains(&format!("[ \"$f\" = {installed} ] || rm -f \"$f\"")));

@@ -217,29 +217,37 @@ const SSH: &str = "ssh -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o Conn
 
 /// The same 15 s for https, as TCP keepalive on curl's socket: probes from 5 s idle, 5 s apart, two
 /// unanswered. Only an idle socket is probed, so a link that drops with data still in flight is
-/// left to the bound on the call; and a git that predates the variables ignores them.
-const KEEPALIVE: [(&str, &str); 3] = [
-    ("GIT_HTTP_KEEPALIVE_IDLE", "5"),
-    ("GIT_HTTP_KEEPALIVE_INTERVAL", "5"),
-    ("GIT_HTTP_KEEPALIVE_COUNT", "2"),
+/// left to the bound on the call; and a git that predates the variables ignores them. Each is
+/// beside the name of the `http.keepAlive*` setting it would override, as `git config` spells it.
+const KEEPALIVE: [(&str, &str, &str); 3] = [
+    ("GIT_HTTP_KEEPALIVE_IDLE", "keepaliveidle", "5"),
+    ("GIT_HTTP_KEEPALIVE_INTERVAL", "keepaliveinterval", "5"),
+    ("GIT_HTTP_KEEPALIVE_COUNT", "keepalivecount", "2"),
 ];
 
 /// [`command`] for the three that talk to a remote — fetch, pull and push — told to give up on a
 /// link that has stopped answering (see [`SSH`]).
 ///
-/// The user's own settings win. `GIT_SSH_COMMAND` would override a `core.sshCommand`, so it is
-/// set only where the environment and the configuration name no ssh of their own.
+/// The user's own settings win. Each variable here would override the configuration, so it is set
+/// only where neither the environment nor the configuration — `core.sshCommand`, and
+/// `http.keepAlive*` including its per-URL `http.<url>.keepAlive*` form — has one of its own.
 fn network(root: &Path, args: &[&str]) -> Command {
     let mut cmd = command(root, args, false);
     let set = |key: &str| std::env::var_os(key).is_some();
-    let own_ssh = set("GIT_SSH_COMMAND")
-        || set("GIT_SSH")
-        || run(root, &["config", "--get", "core.sshCommand"], true).is_ok();
+    let re = r"^(core\.sshcommand|http\..*keepalive(idle|interval|count))$";
+    // No match is an exit status of 1, which is the same as nothing configured.
+    let configured = run(root, &["config", "--name-only", "--get-regexp", re], true)
+        .map(|out| String::from_utf8_lossy(&out).into_owned())
+        .unwrap_or_default();
+    let names: Vec<&str> = configured.lines().collect();
+    let own_ssh = set("GIT_SSH_COMMAND") || set("GIT_SSH") || names.contains(&"core.sshcommand");
     if !own_ssh {
         cmd.env("GIT_SSH_COMMAND", SSH);
     }
-    for (key, value) in KEEPALIVE.into_iter().filter(|(key, _)| !set(key)) {
-        cmd.env(key, value);
+    for (key, name, value) in KEEPALIVE {
+        if !set(key) && !names.iter().any(|n| n.ends_with(name)) {
+            cmd.env(key, value);
+        }
     }
     cmd
 }
