@@ -26,7 +26,7 @@ use files::{
     bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
     bench_templates,
 };
-use git::{bench_git, bench_git_init, bench_git_press};
+use git::{bench_git, bench_git_close, bench_git_init, bench_git_press};
 use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
@@ -48,6 +48,7 @@ use tags::bench_tags;
 /// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
+/// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -133,16 +134,22 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_CLIP=<rel_file>` copies a file and pastes it beside itself, then cuts the copy
 /// and pastes it in the vault root: the `(copy)` mark, the rows a Cut dims, and whether the paste
-/// of a Cut moved the file rather than copying it again. Last it puts two files on the clipboard
-/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root.
+/// of a Cut moved the file rather than copying it again. Then it puts two files on the clipboard
+/// at once, as a Ctrl+click set does, and prints whether both landed in the vault root. Last it
+/// cuts two notes that link each other and a third, pastes them into the file's folder and
+/// answers the Update Links? question, printing every dialog that came — one is right — and
+/// the three notes' texts afterwards.
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click
 /// does, and prints the set, the items a menu over one of them offers, the rows drawn with the
-/// mark on them, and the same once the marks are let go. `=press:<rel_file>` instead reveals that
-/// row, prints where it is on screen and stays up for an XTEST Ctrl+click — `build-aux/xtest.py
-/// :99 "move X Y; keydown ctrl; down; up; keyup ctrl"` — printing the marked rows and how many
-/// documents are open every five seconds, which is how the modifier half is driven at all.
+/// mark on them, and the same once the marks are let go. Then a Shift+click's range from that
+/// row to the first shut folder below it: the set, the folder opened with its rows drawn marked,
+/// and a Ctrl+click on one of them taking that one alone out. `=press:<rel_file>` instead
+/// reveals that row and prints where it and the row two below it are on screen, and stays up
+/// for an XTEST Ctrl+click or Shift+click — `build-aux/xtest.py :99 "move X Y; keydown ctrl;
+/// down; up; keyup ctrl"` — printing the marked rows and how many documents are open every five
+/// seconds, which is how the modifier half is driven at all.
 ///
 /// `ACCENT_BENCH_TAGS=<rel_note>` writes a marker tag into a note and takes it away again with
 /// the Tags pane on screen, printing whether the pane's list holds the marker at each step.
@@ -346,6 +353,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(arg) = git {
+            if let Some(phase) = arg.strip_prefix("close:") {
+                return bench_git_close(&app, phase);
+            }
             return match (arg.strip_prefix("press:"), arg.as_str()) {
                 (Some(path), _) => bench_git_press(&app, path),
                 (None, "init") => bench_git_init(&app),

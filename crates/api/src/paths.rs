@@ -7,15 +7,9 @@ use std::io;
 use anyhow::Result;
 
 use accent_core::index::Index;
-use accent_core::markdown;
-use accent_core::path::{basename, parent_dir, stem};
+use accent_core::path::{basename, parent_dir};
 
 use crate::fs;
-
-/// What a wikilink resolves a path by, so "did the name change" is asked the way links are.
-pub(crate) fn stem_key(rel: &str) -> String {
-    markdown::link_key(&stem(rel))
-}
 
 /// A template's target is markdown whatever its date pattern spells.
 pub(crate) fn with_md(rel: &str) -> String {

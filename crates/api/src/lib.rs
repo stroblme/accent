@@ -114,11 +114,12 @@ pub enum Event {
     },
 }
 
-/// What a rename would do, so the UI can confirm before anything is written.
+/// What a rename or a move would do, so the UI can confirm before anything is written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenamePlan {
-    pub from: String,
-    pub to: String,
+    /// `(from, to)` for each file or folder, done in this order.
+    pub moves: Vec<(String, String)>,
+    /// The notes whose links the moves would leave naming the wrong place, by their paths now.
     pub rewrites: Vec<String>,
 }
 
@@ -134,6 +135,11 @@ pub struct ReplaceReport {
 /// What it actually did.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RenameReport {
+    /// The moves that happened: all of the plan's, unless one failed.
+    pub moved: Vec<(String, String)>,
+    /// The move that failed and why. Nothing after it was tried.
+    pub not_moved: Option<(String, String)>,
+    /// The notes whose links were rewritten, by their paths after the moves.
     pub rewritten: Vec<String>,
     pub failed: Vec<(String, String)>,
 }

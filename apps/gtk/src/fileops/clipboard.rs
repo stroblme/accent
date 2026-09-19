@@ -14,7 +14,7 @@
 //! machine that has to be carried in ([`transfer::import`]).
 
 use super::paths::{free_path, move_dest};
-use super::{Ops, move_dropped, transfer};
+use super::{Ops, move_all, several, transfer};
 use accent_core::path::basename;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -220,10 +220,12 @@ fn parse(mime: &str, text: &str) -> (bool, Vec<String>) {
 
 /// Put a clip into `dir`: the vault's own files first, then whatever has to be carried in.
 fn apply(ops: &Rc<Ops>, dir: &str, clip: Clip) {
-    for (rel, is_dir) in &clip.inside {
-        match clip.cut {
-            true => move_here(ops, rel, dir),
-            false => copy_here(ops, rel, dir, *is_dir),
+    match clip.cut {
+        true => move_here(ops, &clip.inside, dir),
+        false => {
+            for (rel, is_dir) in &clip.inside {
+                copy_here(ops, rel, dir, *is_dir);
+            }
         }
     }
     if !clip.outside.is_empty() {
@@ -244,14 +246,24 @@ fn apply(ops: &Rc<Ops>, dir: &str, clip: Clip) {
 }
 
 /// A Cut pasted is a move, and a move is the tree's own: the same plan, the same Update Links?
-/// question, and the same rewriting of every note that pointed at the file.
-fn move_here(ops: &Rc<Ops>, rel: &str, dir: &str) {
-    match move_dest(rel, dir) {
-        Some(to) => move_dropped(ops, rel, &to),
-        // The three moves that are not moves: into the folder it is already in, a folder onto
-        // itself, and a folder into something under it. One sentence for all three, because what
-        // the reader did is the same gesture each time.
-        None => (ops.toast)(&format!("Cannot paste {} here", basename(rel))),
+/// question, and the same rewriting of every note that pointed at the files — once for all of
+/// them, so two notes cut together that link each other are rewritten together.
+fn move_here(ops: &Rc<Ops>, inside: &[(String, bool)], dir: &str) {
+    let (mut moves, mut refused) = (Vec::new(), Vec::new());
+    for (rel, _) in inside {
+        match move_dest(rel, dir) {
+            Some(to) => moves.push((rel.clone(), to)),
+            None => refused.push(rel.clone()),
+        }
+    }
+    // The three moves that are not moves: into the folder it is already in, a folder onto
+    // itself, and a folder into something under it. One sentence for all three, because what the
+    // reader did is the same gesture each time.
+    if !refused.is_empty() {
+        (ops.toast)(&format!("Cannot paste {} here", several(&refused)));
+    }
+    if !moves.is_empty() {
+        move_all(ops, moves);
     }
 }
 

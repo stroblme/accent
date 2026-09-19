@@ -1,9 +1,10 @@
 //! Link targets: what a `[[wikilink]]` or `[text](target)` points at, the keys a file answers
-//! to, and rewriting the targets that name a renamed note.
+//! to, and rewriting the links a move leaves pointing at the wrong place.
 
-use super::{Heading, LinkKind, Pending, analyze};
+use super::{Heading, Link, LinkKind, Pending, analyze};
+use crate::path::{self, basename, parent_dir};
 use pulldown_cmark::LinkType;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 pub(super) fn pending(
@@ -232,64 +233,140 @@ pub fn path_keys(rel: &str) -> Vec<String> {
     keys
 }
 
-/// Rewrite every wikilink in `text` that could name `old_rel` so it points at `new_rel`, or
-/// `None` when the note refers to it nowhere.
+/// Rewrite every link in the note `src_old` that a move leaves naming the wrong place, as the
+/// note will read once it is at `src_new`, or `None` when no link needs it.
 ///
-/// Every form of the name is in scope here, including the bare basename, which two notes in
-/// different directories can share. Callers that know which of them really resolve to `old_rel`
-/// (the index does) should use [`rewrite_targets`] instead.
-pub fn rewrite_links(text: &str, old_rel: &str, new_rel: &str) -> Option<String> {
-    rewrite_targets(text, &path_keys(old_rel), new_rel)
-}
-
-/// Rewrite every wikilink in `text` whose target is one of `targets` so it points at `new_rel`,
-/// or `None` when the note holds none of them. Used when a note is renamed or moved.
+/// `targets` is the file each link key resolved to before the move — only the index can say,
+/// so the caller asks it first — and `moves` is where each moved file went, old path to new. A
+/// link is rewritten when, read from where its note now is, it would no longer name the file it
+/// named: a bare `[[Note]]` survives a pure move and `[[Dir/Note]]` does not, and a relative
+/// `[t](../a.png)` follows its own note as much as the image. A wikilink or an embed keeps its
+/// author's spelling ([`as_written`]); a markdown link becomes the relative path from the
+/// note's folder, percent-encoded, its `#anchor` untouched.
 ///
-/// `targets` are compared with [`link_key`], so they may be written any way a link may be.
-/// Which spellings belong to the renamed note is the caller's decision: this is pure text.
-///
-/// ponytail: only `[[wiki]]` and `![[embeds]]` are rewritten. A markdown `[x](a.md)` link is
-/// relative to the note holding it and percent-encoded, so it needs path arithmetic this does
-/// not do; add it when a vault that writes markdown links shows up.
-pub fn rewrite_targets(text: &str, targets: &[String], new_rel: &str) -> Option<String> {
-    let keys: Vec<String> = targets.iter().map(|t| link_key(t)).collect();
-    let mut out: Option<String> = None;
-
-    // Wikilinks cannot nest, so `analyze` yields the matches in source order and applying them
-    // back to front keeps the earlier offsets valid.
-    for link in analyze(text).links.iter().rev() {
-        let open = match link.kind {
-            LinkKind::Wiki => 2,
-            LinkKind::Embed => 3,
-            _ => continue,
+/// ponytail: reference-style `[ref]: path` definitions and HTML `src`/`href` are left alone.
+pub fn rewrite_moved(
+    text: &str,
+    src_old: &str,
+    src_new: &str,
+    targets: &HashMap<String, String>,
+    moves: &HashMap<String, String>,
+) -> Option<String> {
+    let (dir_old, dir_new) = (parent_dir(src_old), parent_dir(src_new));
+    let mut edits: Vec<(Range<usize>, String)> = Vec::new();
+    for link in analyze(text).links {
+        let edit = match link.kind {
+            LinkKind::Wiki | LinkKind::Embed => {
+                let key = link_key(&link.target);
+                let open = if link.kind == LinkKind::Embed { 3 } else { 2 };
+                let at = link.range.start + open..link.range.start + open + link.target.len();
+                // A parser surprise must never corrupt a note: only touch bytes that are the
+                // target.
+                moved(&key, targets, moves)
+                    // By name from anywhere, so a bare `[[Note]]` still finds a note that moved.
+                    .filter(|(_, new)| !path_keys(new).contains(&key))
+                    .filter(|_| text.get(at.clone()) == Some(link.target.as_str()))
+                    .map(|(old, new)| (at, as_written(&link.target, old, new)))
+            }
+            LinkKind::Markdown => markdown_edit(text, &link, dir_old, dir_new, targets, moves),
+            LinkKind::External => None,
         };
-        if !keys.contains(&link_key(&link.target)) {
-            continue;
-        }
-        let at = link.range.start + open..link.range.start + open + link.target.len();
-        // A parser surprise must never corrupt a note: only touch bytes that are the target.
-        if text.get(at.clone()) != Some(link.target.as_str()) {
-            continue;
-        }
-        out.get_or_insert_with(|| text.to_string())
-            .replace_range(at, &as_written(&link.target, new_rel));
+        edits.extend(edit);
     }
-    out
+    // Back to front, so the earlier offsets stay valid. Links nest (an image inside a link), but
+    // the bytes rewritten for each never overlap.
+    edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
+    let mut out = text.to_string();
+    for (at, with) in edits {
+        out.replace_range(at, &with);
+    }
+    (out != text).then_some(out)
 }
 
-/// Spell `new_rel` the way `old_target` was spelled: a bare name stays bare, a path stays a
-/// path, and an extension is only written back if the author wrote one.
-fn as_written(old_target: &str, new_rel: &str) -> String {
-    let full = if old_target.contains('/') {
-        new_rel
-    } else {
-        new_rel.rsplit('/').next().unwrap_or(new_rel)
+/// `(old path, new path)` of the file a link found by `key` before the move; the same path
+/// twice when that file stays where it is.
+fn moved<'a>(
+    key: &str,
+    targets: &'a HashMap<String, String>,
+    moves: &'a HashMap<String, String>,
+) -> Option<(&'a str, &'a str)> {
+    let old = targets.get(key)?;
+    Some((old, moves.get(old).unwrap_or(old)))
+}
+
+/// The edit that points a markdown link back at its file. The link is written relative to its
+/// note's folder, so it is looked up the way the index stores it: resolved from that folder.
+fn markdown_edit(
+    text: &str,
+    link: &Link,
+    dir_old: &str,
+    dir_new: &str,
+    targets: &HashMap<String, String>,
+    moves: &HashMap<String, String>,
+) -> Option<(Range<usize>, String)> {
+    let written = link.target.as_str();
+    let rooted = written.starts_with('/');
+    // An in-note `[t](#heading)` has no path, and a `../..` past the vault root is not ours.
+    if written.is_empty() || !(rooted || path::stays_inside(dir_old, written)) {
+        return None;
+    }
+    let (old, new) = moved(&link_key(&path::resolve(dir_old, written)), targets, moves)?;
+    // A path, so it still finds the file only if it spells that file's path from the note's
+    // new folder: the index's by-name fallback is not something a markdown reader shares.
+    let now = link_key(&path::resolve(dir_new, written));
+    if (rooted || path::stays_inside(dir_new, written))
+        && [link_key(new), link_key(&strip_ext(new))].contains(&now)
+    {
+        return None;
+    }
+    let to = match rooted {
+        true => format!("/{new}"),
+        false => path::relative(dir_new, new),
     };
-    // Only the renamed file's own extension counts as one: `[[Rev 1.2 notes]]` is a name with a
-    // dot in it, and inventing an extension the author never wrote is a corrupted link.
-    match (ext(new_rel), ext(old_target)) {
-        (Some(new), Some(old)) if old.eq_ignore_ascii_case(new) => full.to_string(),
-        _ => strip_ext(full),
+    Some((
+        destination(text, link)?,
+        percent_encode(&ext_as_written(written, old, &to)),
+    ))
+}
+
+/// Where a markdown link's destination path sits in `text`, without its `#anchor` or title.
+///
+/// Read from the end of the link, since its text may hold a `](` of its own, and only where the
+/// bytes decode to the target the parser saw: a reference-style link has no destination here,
+/// and a backslash-escaped one is left as its author wrote it rather than guessed at.
+fn destination(text: &str, link: &Link) -> Option<Range<usize>> {
+    let inner = text.get(link.range.clone())?.strip_suffix(')')?;
+    // Every `](` is a candidate, right to left: a title may hold one too.
+    inner.rmatch_indices("](").find_map(|(i, _)| {
+        let rest = &inner[i + 2..];
+        let lead = rest.len() - rest.trim_start().len();
+        let (open, dest) = match rest[lead..].strip_prefix('<') {
+            Some(r) => (1, &r[..r.find('>')?]),
+            None => (0, rest[lead..].split(char::is_whitespace).next()?),
+        };
+        let raw = split_anchor(dest).0;
+        let start = link.range.start + i + 2 + lead + open;
+        (percent_decode(raw) == link.target).then_some(start..start + raw.len())
+    })
+}
+
+/// Spell `new_rel` the way `target` spelled `old_rel`: a bare name stays bare, a path stays a
+/// path, and an extension is only written back if the author wrote one.
+fn as_written(target: &str, old_rel: &str, new_rel: &str) -> String {
+    let full = match target.contains('/') {
+        true => new_rel,
+        false => basename(new_rel),
+    };
+    ext_as_written(target, old_rel, full)
+}
+
+/// `new` with its extension only where `target` carried `old_rel`'s: `[[Rev 1.2 notes]]` is a
+/// name with a dot in it, and inventing an extension the author never wrote is a corrupted link.
+/// `![[x.png]]` does carry one, so renaming the image to `x.jpg` writes the new one.
+fn ext_as_written(target: &str, old_rel: &str, new: &str) -> String {
+    match (ext(target), ext(old_rel)) {
+        (Some(written), Some(old)) if written.eq_ignore_ascii_case(old) => new.to_string(),
+        _ => strip_ext(new),
     }
 }
 
@@ -447,8 +524,19 @@ mod tests {
         assert_eq!(path_keys("Index.md"), ["index.md", "index"]);
     }
 
+    /// [`rewrite_moved`] for a note that stays at `Ref.md` while `old` moves to `new`, every key
+    /// of `old` resolving to it.
+    fn renamed(text: &str, old: &str, new: &str) -> Option<String> {
+        let targets = path_keys(old)
+            .into_iter()
+            .map(|k| (k, old.into()))
+            .collect();
+        let moves = HashMap::from([(old.to_string(), new.to_string())]);
+        rewrite_moved(text, "Ref.md", "Ref.md", &targets, &moves)
+    }
+
     #[test]
-    fn rewrite_links_handles_every_wikilink_shape() {
+    fn a_rename_rewrites_every_wikilink_shape() {
         let src = concat!(
             "[[Old]] and [[Old|alias]] and [[Old#Heading]]\n\n",
             "![[Old]]\n\n",
@@ -461,39 +549,45 @@ mod tests {
             "[[Notes/New]] and [[Notes/New.md]]\n\n",
             "```\n[[Old]]\n```\n"
         );
+        assert_eq!(renamed(src, "Dir/Old.md", "Notes/New.md").unwrap(), want);
+        assert_eq!(renamed("[[Other]]", "Old.md", "New.md"), None);
+    }
+
+    /// A wikilink resolves by name from anywhere, so only the one that spells a path is stale.
+    #[test]
+    fn a_pure_move_rewrites_only_the_links_that_spell_a_path() {
         assert_eq!(
-            rewrite_links(src, "Dir/Old.md", "Notes/New.md").unwrap(),
-            want
+            renamed(
+                "[[Old]] [[Dir/Old]] [[Old.md]]",
+                "Dir/Old.md",
+                "Other/Old.md"
+            )
+            .unwrap(),
+            "[[Old]] [[Other/Old]] [[Old.md]]"
         );
     }
 
     #[test]
-    fn rewrite_links_returns_none_when_nothing_matches() {
-        assert_eq!(rewrite_links("[[Other]]", "Old.md", "New.md"), None);
-        // Markdown links are not rewritten.
-        assert_eq!(rewrite_links("[x](Old.md)", "Old.md", "New.md"), None);
-    }
-
-    #[test]
-    fn rewrite_targets_only_touches_the_targets_it_was_given() {
+    fn a_rename_leaves_links_the_index_did_not_resolve_to_it_alone() {
         // `[[Old]]` belongs to a different note; renaming `Dir/Old.md` must not hijack it.
+        let targets = HashMap::from([
+            ("dir/old.md".to_string(), "Dir/Old.md".to_string()),
+            ("dir/old".to_string(), "Dir/Old.md".to_string()),
+        ]);
+        let moves = HashMap::from([("Dir/Old.md".to_string(), "Dir/Renamed.md".to_string())]);
         let src = "deep: [[Dir/Old]]\nshallow: [[Old]]\n";
         assert_eq!(
-            rewrite_targets(
-                src,
-                &["Dir/Old.md".to_string(), "Dir/Old".to_string()],
-                "Dir/Renamed.md"
-            )
-            .unwrap(),
+            rewrite_moved(src, "Ref.md", "Ref.md", &targets, &moves).unwrap(),
             "deep: [[Dir/Renamed]]\nshallow: [[Old]]\n"
         );
     }
 
-    /// A dot in a name is not an extension: `[[Rev 1.2 notes]]` must not gain a `.md`.
+    /// A dot in a name is not an extension: `[[Rev 1.2 notes]]` must not gain a `.md`, while an
+    /// image's extension is the author's and changes with the file.
     #[test]
-    fn rewrite_links_only_writes_back_a_real_extension() {
+    fn only_a_written_extension_is_written_back() {
         assert_eq!(
-            rewrite_links(
+            renamed(
                 "[[Rev 1.2 notes]]\n",
                 "Rev 1.2 notes.md",
                 "Rev 1.3 notes.md"
@@ -501,13 +595,77 @@ mod tests {
             .unwrap(),
             "[[Rev 1.3 notes]]\n"
         );
+        assert_eq!(
+            renamed("![[x.png]] ![](x.png)", "x.png", "x.jpg").unwrap(),
+            "![[x.jpg]] ![](x.jpg)"
+        );
     }
 
     #[test]
-    fn rewrite_links_preserves_alias_and_anchor() {
+    fn a_rename_keeps_alias_anchor_and_title() {
         assert_eq!(
-            rewrite_links("see [[Old#Deep Work|this one]].", "Old.md", "Dir/New.md").unwrap(),
+            renamed("see [[Old#Deep Work|this one]].", "Old.md", "Dir/New.md").unwrap(),
             "see [[New#Deep Work|this one]]."
+        );
+        assert_eq!(
+            renamed(
+                "[t](My%20Note.md#Part%20Two \"a ](title\") [u](<My Note.md>)",
+                "My Note.md",
+                "Your Note.md"
+            )
+            .unwrap(),
+            "[t](Your%20Note.md#Part%20Two \"a ](title\") [u](<Your%20Note.md>)"
+        );
+    }
+
+    /// Markdown links are relative to their note: each is rewritten as the path from its folder,
+    /// and what is not a vault path is left as written.
+    #[test]
+    fn markdown_links_follow_their_target_from_the_notes_folder() {
+        let src = concat!(
+            "[t](../img/x.png) ![](../img/x.png) [p](../a.pdf#page=3&selection=1,2,3,4)\n",
+            "[h](#h) [o](../../x.png) [w](https://e.com/img/x.png) [r][ref]\n\n",
+            "[ref]: ../img/x.png\n"
+        );
+        let targets = HashMap::from([
+            ("img/x.png".to_string(), "img/x.png".to_string()),
+            ("a.pdf".to_string(), "a.pdf".to_string()),
+            ("x.png".to_string(), "x.png".to_string()),
+        ]);
+        let moves = HashMap::from([
+            ("img/x.png".to_string(), "pics/y.png".to_string()),
+            ("a.pdf".to_string(), "docs/a.pdf".to_string()),
+            ("x.png".to_string(), "z.png".to_string()),
+        ]);
+        assert_eq!(
+            rewrite_moved(src, "notes/Ref.md", "notes/Ref.md", &targets, &moves).unwrap(),
+            concat!(
+                "[t](../pics/y.png) ![](../pics/y.png) [p](../docs/a.pdf#page=3&selection=1,2,3,4)\n",
+                "[h](#h) [o](../../x.png) [w](https://e.com/img/x.png) [r][ref]\n\n",
+                "[ref]: ../img/x.png\n"
+            )
+        );
+    }
+
+    /// A note that moves takes its relative links with it, whether or not what they name moved.
+    #[test]
+    fn a_moved_note_keeps_its_own_markdown_links() {
+        let targets = HashMap::from([
+            ("img/a.png".to_string(), "img/a.png".to_string()),
+            ("notes/b.md".to_string(), "notes/b.md".to_string()),
+            ("c".to_string(), "c.md".to_string()),
+        ]);
+        let moves = HashMap::from([("notes/n.md".to_string(), "notes/deep/n.md".to_string())]);
+        assert_eq!(
+            rewrite_moved(
+                "[t](../img/a.png) [s](b.md) [[c]]",
+                "notes/n.md",
+                "notes/deep/n.md",
+                &targets,
+                &moves
+            )
+            .unwrap(),
+            "[t](../../img/a.png) [s](../b.md) [[c]]"
         );
     }
 }

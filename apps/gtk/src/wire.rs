@@ -480,6 +480,16 @@ pub fn wire_window(app: &Rc<App>) {
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |_| {
+            // git before any buffer: a pull or a switch still rewriting files must not race the
+            // writes below, so the close waits for it and flushes once it is over.
+            if let Some(git) = app.git.get()
+                && git.busy()
+            {
+                if !git.closing() {
+                    close_after_git(&app, git);
+                }
+                return glib::Propagation::Stop;
+            }
             for tab in app.open_tabs().iter().filter(|t| t.save.modified.get()) {
                 let Err(e) = app.flush_tab(tab) else {
                     continue;
@@ -510,6 +520,10 @@ pub fn wire_window(app: &Rc<App>) {
             // render thread, so it is waited for rather than left to be killed.
             for pdf in app.pdfs() {
                 pdf.flush_blocking();
+            }
+            // The close is certain now: a fetch or a push still running is stopped, not waited for.
+            if let Some(git) = app.git.get() {
+                git.stop();
             }
             app.save_session();
             glib::Propagation::Proceed
@@ -732,6 +746,16 @@ pub fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Proceed;
             };
             let row = tree.selected();
+            // Delete takes the marked set when there is one, as the menu over it does, whichever
+            // row the highlight is on.
+            let marked = tree.marked();
+            if key == gdk::Key::Delete
+                && !marked.is_empty()
+                && let Some(ops) = app.ops()
+            {
+                fileops::trash_all(ops, marked.into_iter().map(|(rel, _)| rel).collect());
+                return glib::Propagation::Stop;
+            }
             // The same rule the pointer path follows: a row the index does not hold is listed and
             // opened, never changed. Both keys stop here rather than falling through to the
             // vault-root menu an empty selection would get.
@@ -830,12 +854,11 @@ fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
 }
 
 /// The marked rows a menu opened over `row` acts on: the whole set when the click landed on one
-/// of its rows, and nothing otherwise — a click anywhere else forgets them, which is what a plain
-/// left click does too.
+/// of its rows — a row inside a marked folder included — and nothing otherwise: a click anywhere
+/// else forgets them, which is what a plain left click does too.
 fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)> {
-    let marked = tree.marked();
-    if row.is_some_and(|row| marked.iter().any(|(rel, _)| *rel == row.rel)) {
-        return marked;
+    if row.is_some_and(|row| tree.is_marked(&row.rel)) {
+        return tree.marked();
     }
     tree.clear_marks();
     Vec::new()
@@ -860,4 +883,44 @@ fn row_anchor(list: &gtk::ListView, host: &gtk::Widget) -> gdk::Rectangle {
         ),
         None => gdk::Rectangle::new(0, 0, 1, 1),
     }
+}
+
+/// What the status bar says while a close waits for git.
+const CLOSING_AFTER_GIT: &str = "Closing when git has finished…";
+
+/// Closing while git rewrites the working tree: ask, and close once it has finished — or stay,
+/// under git's own failure, where it did not go through (DESIGN.md, States). There is no answer
+/// that stops git, since stopping it is what would leave the repository half-updated.
+fn close_after_git(app: &Rc<App>, git: &Rc<git::Panel>) {
+    let dialog = dialogs::alert(
+        "Git Is Updating Files",
+        "Closing now could leave the repository half-updated. The window closes as soon as git \
+         has finished.",
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            (
+                "wait",
+                "Close When Finished",
+                adw::ResponseAppearance::Suggested,
+            ),
+        ],
+        "wait",
+    );
+    let (weak, git) = (Rc::downgrade(app), git.clone());
+    dialogs::choose(&dialog, Some(&app.window), move |response| {
+        let Some(app) = weak.upgrade().filter(|_| response == "wait") else {
+            return;
+        };
+        app.statusbar.set_transfer(CLOSING_AFTER_GIT, true);
+        let weak = Rc::downgrade(&app);
+        git.when_done(move |ok| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            app.statusbar.set_transfer(CLOSING_AFTER_GIT, false);
+            if ok {
+                app.window.close();
+            }
+        });
+    });
 }

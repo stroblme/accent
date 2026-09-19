@@ -2,6 +2,7 @@
 //! a new note is made from, the rename that carries a note's links with it, and the conflict
 //! copies a sync leaves behind.
 
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use accent_core::path::{basename, stem};
 use accent_core::{diff, markdown, search, template};
 
 use super::{Local, Msg};
-use crate::paths::{accent_conflict_name, stem_key, with_md};
+use crate::paths::{accent_conflict_name, with_md};
 use crate::{
     DiffLine, Etag, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError, fs,
 };
@@ -147,93 +148,137 @@ impl Local {
         Ok(())
     }
 
-    /// What a rename would touch, so the UI can show it before anything is written.
+    /// What moving these files and folders would touch, so the UI can show it before anything
+    /// is written: the notes whose links the moves would leave naming the wrong place.
     ///
-    /// `rewrites` is empty for a directory, and for a pure move: a wikilink resolves by basename,
-    /// so a note that keeps its name keeps its links wherever it lands.
-    pub fn plan_rename(&self, from: &str, to: &str) -> Result<RenamePlan> {
-        let renamed = stem_key(from) != stem_key(to);
-        let mut rewrites = Vec::new();
-        if renamed && !self.resolve(from)?.is_dir() {
-            rewrites = self
-                .index()
-                .backlinks(from)?
-                .into_iter()
-                .map(|b| b.src_rel_path)
-                .collect();
-            rewrites.sort();
-            rewrites.dedup();
+    /// A dry run of the rewrite rather than a list of backlinks, so a move whose backlinks are
+    /// all bare `[[Note]]`s names nothing and asks nothing. The candidates are the notes linking
+    /// to anything that moves, and the moved notes whose markdown links are relative to them.
+    pub fn plan_moves(&self, moves: &[(String, String)]) -> Result<RenamePlan> {
+        let files = self.moved_files(moves)?;
+        let mut candidates = BTreeSet::new();
+        {
+            let index = self.index();
+            for old in files.keys() {
+                candidates.extend(index.backlinks(old)?.into_iter().map(|b| b.src_rel_path));
+            }
+            for (from, _) in moves {
+                candidates.extend(index.markdown_link_sources(from)?);
+            }
         }
+        let targets = self.link_targets(&candidates)?;
+        let rewrites = candidates
+            .into_iter()
+            // One that cannot be read is listed all the same: the rewrite will say why it failed.
+            .filter(|rel| match self.read(rel) {
+                Ok((text, _)) => {
+                    let now = files.get(rel).unwrap_or(rel);
+                    markdown::rewrite_moved(&text, rel, now, &targets, &files).is_some()
+                }
+                Err(_) => true,
+            })
+            .collect();
         Ok(RenamePlan {
-            from: from.to_string(),
-            to: to.to_string(),
+            moves: moves.to_vec(),
             rewrites,
         })
     }
 
-    /// Apply a [`RenamePlan`]. The move happens first and is the only step that may fail the
-    /// call: a note whose links could not be rewritten is reported instead, because a
-    /// half-renamed vault is worse than a fully renamed one with a couple of stale links.
+    /// Apply a [`RenamePlan`]: the moves in order, stopping at the first that fails, then the
+    /// link rewrites for what did move. Only a failure before the first move fails the call; a
+    /// move or a note that could not be done is reported instead, because a half-renamed vault is
+    /// worse than one whose report says exactly what happened.
     pub fn rename(&self, plan: &RenamePlan, rewrite_links: bool) -> Result<RenameReport> {
-        // Which spellings of the old name really mean this note is a question only the index can
-        // answer, and only while it still describes the vault as it was: ask before the move.
-        let targets = if rewrite_links {
-            self.targets_of(&plan.from)?
-        } else {
-            Vec::new()
+        // Which file each link names is a question only the index can answer, and only while it
+        // still describes the vault as it was: ask before the first move.
+        let (mut files, targets) = match rewrite_links {
+            true => (
+                self.moved_files(&plan.moves)?,
+                self.link_targets(&plan.rewrites)?,
+            ),
+            false => Default::default(),
         };
-        fs::rename(&self.resolve(&plan.from)?, &self.resolve(&plan.to)?)
-            .with_context(|| format!("renaming {} to {}", plan.from, plan.to))?;
-        // Both ends, so the index and the tree do not wait for inotify.
-        self.post(Msg::Update {
-            rel: plan.from.clone(),
-            own: true,
-        });
-        self.post(Msg::Update {
-            rel: plan.to.clone(),
-            own: true,
-        });
-
         let mut report = RenameReport::default();
-        if rewrite_links {
-            for rel in &plan.rewrites {
-                match self.rewrite_one(rel, &targets, &plan.to) {
-                    Ok(true) => report.rewritten.push(rel.clone()),
-                    Ok(false) => {}
-                    Err(e) => {
-                        tracing::warn!("rewriting links in {rel}: {e:#}");
-                        report.failed.push((rel.clone(), format!("{e:#}")));
-                    }
+        for (from, to) in &plan.moves {
+            if let Err(e) = self
+                .resolve(from)
+                .and_then(|path| fs::rename(&path, &self.resolve(to)?))
+            {
+                report.not_moved = Some((from.clone(), e.to_string()));
+                break;
+            }
+            // Both ends, so the index and the tree do not wait for inotify.
+            for rel in [from, to] {
+                self.post(Msg::Update {
+                    rel: rel.clone(),
+                    own: true,
+                });
+            }
+            report.moved.push((from.clone(), to.clone()));
+        }
+        if !rewrite_links {
+            return Ok(report);
+        }
+        // A link to a file that is still where it was is not stale.
+        files.retain(|old, _| report.moved.iter().any(|(from, _)| is_under(old, from)));
+        for rel in &plan.rewrites {
+            let now = files.get(rel).unwrap_or(rel);
+            match self.rewrite_one(rel, now, &targets, &files) {
+                Ok(true) => report.rewritten.push(now.clone()),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("rewriting links in {now}: {e:#}");
+                    report.failed.push((now.clone(), format!("{e:#}")));
                 }
             }
         }
         Ok(report)
     }
 
-    /// The ways of writing `rel` that really resolve to it. `[[Old]]` in a note that also
-    /// links `[[Dir/Old]]` may well be a different note's, and renaming this one must leave that
-    /// link exactly as its author wrote it.
-    fn targets_of(&self, rel: &str) -> Result<Vec<String>> {
+    /// Every file the moves take somewhere, old path to new: a folder's one by one, as the
+    /// index lists them.
+    fn moved_files(&self, moves: &[(String, String)]) -> Result<HashMap<String, String>> {
         let index = self.index();
-        let mut out = Vec::new();
-        for key in markdown::path_keys(rel) {
-            if index.resolve_target(&key)?.as_deref() == Some(rel) {
-                out.push(key);
+        let mut out = HashMap::new();
+        for (from, to) in moves {
+            for old in index.files_under(from)? {
+                let new = format!("{to}{}", &old[from.len()..]);
+                out.insert(old, new);
             }
         }
         Ok(out)
     }
 
-    /// `Ok(false)` when the note turned out to link nowhere near the renamed file.
-    fn rewrite_one(&self, rel: &str, targets: &[String], to: &str) -> Result<bool> {
-        let path = self.resolve(rel)?;
+    /// What every link key in these notes resolves to.
+    fn link_targets<'a>(
+        &self,
+        notes: impl IntoIterator<Item = &'a String>,
+    ) -> Result<HashMap<String, String>> {
+        let index = self.index();
+        let mut out = HashMap::new();
+        for rel in notes {
+            out.extend(index.resolved_links(rel)?);
+        }
+        Ok(out)
+    }
+
+    /// Rewrite the note that was at `old` and is at `now`, gated on the etag it is read with.
+    /// `Ok(false)` when it turned out to link nowhere near what moved.
+    fn rewrite_one(
+        &self,
+        old: &str,
+        now: &str,
+        targets: &HashMap<String, String>,
+        files: &HashMap<String, String>,
+    ) -> Result<bool> {
+        let path = self.resolve(now)?;
         let (text, etag) = fs::read_note(&path)?;
-        let Some(rewritten) = markdown::rewrite_targets(&text, targets, to) else {
+        let Some(rewritten) = markdown::rewrite_moved(&text, old, now, targets, files) else {
             return Ok(false);
         };
         fs::write_note(&path, &rewritten, Some(etag))?;
         self.post(Msg::Update {
-            rel: rel.to_string(),
+            rel: now.to_string(),
             own: true,
         });
         Ok(true)
@@ -400,6 +445,12 @@ impl Local {
     }
 }
 
+/// Whether `rel` is `dir` or inside it.
+fn is_under(rel: &str, dir: &str) -> bool {
+    rel.strip_prefix(dir)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
 /// `cp -r`: `std::fs` copies one file, and a pasted folder is the one caller that needs the rest.
 /// Follows a symlink rather than recreating it, which is what copying its contents means.
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
@@ -432,14 +483,31 @@ mod tests {
         f
     }
 
+    /// One move, the shape a rename and a single dragged row have.
+    fn one(from: &str, to: &str) -> Vec<(String, String)> {
+        vec![(from.to_string(), to.to_string())]
+    }
+
+    /// A vault holding these notes, indexed.
+    fn vault_of(files: &[(&str, &str)]) -> Fixture {
+        let f = Fixture::open(VaultConfig::default());
+        for (rel, text) in files {
+            f.write(rel, text);
+        }
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+        f
+    }
+
     #[test]
     fn rename_rewrites_wikilinks_and_backlinks_follow() {
         let f = linked_vault();
 
-        let plan = f.vault.plan_rename("B.md", "C.md").unwrap();
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
         assert_eq!(plan.rewrites, ["a.md"]);
 
         let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.moved, one("B.md", "C.md"));
         assert_eq!(report.rewritten, ["a.md"]);
         assert!(report.failed.is_empty());
         assert_eq!(f.read("a.md"), "see [[C]] for details\n");
@@ -526,7 +594,7 @@ mod tests {
     fn rename_without_rewrite_leaves_links_alone() {
         let f = linked_vault();
 
-        let plan = f.vault.plan_rename("B.md", "C.md").unwrap();
+        let plan = f.vault.plan_moves(&one("B.md", "C.md")).unwrap();
         let report = f.vault.rename(&plan, false).unwrap();
 
         assert!(report.rewritten.is_empty());
@@ -534,17 +602,88 @@ mod tests {
         assert!(f.vault.root().join("C.md").exists());
     }
 
+    /// A note that keeps its name keeps its bare links; only the one spelling its path is stale.
     #[test]
-    fn a_pure_move_rewrites_nothing() {
-        let f = linked_vault();
-        assert!(
-            f.vault
-                .plan_rename("B.md", "sub/B.md")
-                .unwrap()
-                .rewrites
-                .is_empty(),
-            "a note that keeps its name keeps its links"
+    fn a_pure_move_rewrites_only_path_links() {
+        let f = vault_of(&[
+            ("Dir/B.md", "the target\n"),
+            ("a.md", "[[B]]\n"),
+            ("p.md", "[[Dir/B]]\n"),
+        ]);
+        let plan = f.vault.plan_moves(&one("Dir/B.md", "sub/B.md")).unwrap();
+        assert_eq!(plan.rewrites, ["p.md"]);
+
+        std::fs::create_dir(f.vault.root().join("sub")).unwrap();
+        assert_eq!(f.vault.rename(&plan, true).unwrap().not_moved, None);
+        assert_eq!(f.read("p.md"), "[[sub/B]]\n");
+        assert_eq!(f.read("a.md"), "[[B]]\n");
+    }
+
+    /// A folder takes every file in it along: links into it are rewritten, and so are the
+    /// relative links its own notes hold.
+    #[test]
+    fn a_folder_move_rewrites_links_into_it_and_out_of_it() {
+        let f = vault_of(&[
+            ("a/b/note.md", "[i](../../img/x.png) ![[x.png]]\n"),
+            ("img/x.png", "png"),
+            ("Ref.md", "[[a/b/note]] [t](a/b/note.md) [[note]]\n"),
+        ]);
+        let plan = f.vault.plan_moves(&one("a/b", "c")).unwrap();
+        assert_eq!(plan.rewrites, ["Ref.md", "a/b/note.md"]);
+
+        let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.rewritten, ["Ref.md", "c/note.md"]);
+        assert_eq!(f.read("Ref.md"), "[[c/note]] [t](c/note.md) [[note]]\n");
+        assert_eq!(f.read("c/note.md"), "[i](../img/x.png) ![[x.png]]\n");
+    }
+
+    /// Two notes moved together that link each other, and an image renamed with them: every
+    /// note is written once, with what all the moves did.
+    #[test]
+    fn a_batch_rewrites_each_note_once() {
+        let f = vault_of(&[
+            ("p/x.md", "[y](../q/y.md) ![](../img/a.png)\n"),
+            ("q/y.md", "[x](../p/x.md) ![[a.png]]\n"),
+            ("img/a.png", "png"),
+        ]);
+        let moves = vec![
+            ("p/x.md".to_string(), "r/x.md".to_string()),
+            ("q/y.md".to_string(), "r/y.md".to_string()),
+            ("img/a.png".to_string(), "img/b.png".to_string()),
+        ];
+        std::fs::create_dir(f.vault.root().join("r")).unwrap();
+        let plan = f.vault.plan_moves(&moves).unwrap();
+        assert_eq!(plan.rewrites, ["p/x.md", "q/y.md"]);
+
+        let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.moved, moves);
+        assert_eq!(report.rewritten, ["r/x.md", "r/y.md"]);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert_eq!(f.read("r/x.md"), "[y](y.md) ![](../img/b.png)\n");
+        assert_eq!(f.read("r/y.md"), "[x](x.md) ![[b.png]]\n");
+    }
+
+    /// A move that fails stops the batch, and links to what did not move stay as they were.
+    #[test]
+    fn a_failed_move_stops_the_batch() {
+        let f = vault_of(&[
+            ("p/x.md", "x\n"),
+            ("q/y.md", "y\n"),
+            ("r/y.md", "in the way\n"),
+            ("Ref.md", "[[p/x]] [[q/y]]\n"),
+        ]);
+        let moves = vec![
+            ("p/x.md".to_string(), "r/x.md".to_string()),
+            ("q/y.md".to_string(), "r/y.md".to_string()),
+        ];
+        let plan = f.vault.plan_moves(&moves).unwrap();
+        let report = f.vault.rename(&plan, true).unwrap();
+        assert_eq!(report.moved, moves[..1]);
+        assert_eq!(
+            report.not_moved.map(|(from, _)| from).as_deref(),
+            Some("q/y.md")
         );
+        assert_eq!(f.read("Ref.md"), "[[r/x]] [[q/y]]\n");
     }
 
     #[test]
@@ -679,7 +818,10 @@ mod tests {
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let plan = f.vault.plan_rename("Dir/Old.md", "Dir/Renamed.md").unwrap();
+        let plan = f
+            .vault
+            .plan_moves(&one("Dir/Old.md", "Dir/Renamed.md"))
+            .unwrap();
         assert_eq!(plan.rewrites, ["Ref.md"]);
         let report = f.vault.rename(&plan, true).unwrap();
 
@@ -700,7 +842,10 @@ mod tests {
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
-        let plan = f.vault.plan_rename("Dir/Old.md", "Dir/Renamed.md").unwrap();
+        let plan = f
+            .vault
+            .plan_moves(&one("Dir/Old.md", "Dir/Renamed.md"))
+            .unwrap();
         let report = f.vault.rename(&plan, true).unwrap();
 
         assert_eq!(report.rewritten, ["Ref.md"]);
@@ -724,7 +869,7 @@ mod tests {
             ["a/b/note.md", "a/b/sub/x.md"]
         );
 
-        let plan = f.vault.plan_rename("a/b", "a/c").unwrap();
+        let plan = f.vault.plan_moves(&one("a/b", "a/c")).unwrap();
         f.vault.rename(&plan, true).unwrap();
 
         assert!(

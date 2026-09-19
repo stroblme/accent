@@ -58,16 +58,35 @@ impl Panel {
             self.sync_busy.set(true);
             (self.hooks.syncing)(true);
         }
+        self.jobs.set(self.jobs.get() + 1);
+        // The last window closing must not end the process under git (`Panel::stop`).
+        let hold = self.hooks.window.application().map(|app| app.hold());
         let panel = self.clone();
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
             let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
+            panel.jobs.set(panel.jobs.get() - 1);
+            drop(hold);
+            if panel.gone.get() {
+                return;
+            }
             // The button comes back as `sync_state` last left it, which the refresh below
             // brings up to date.
             if sync {
                 panel.sync_slot.set_visible_child_name("button");
                 panel.sync_busy.set(false);
                 (panel.hooks.syncing)(false);
+            }
+            // A close waiting for git: the last command to go through closes the window, and one
+            // that fails keeps it open under the failure said below.
+            let ok = matches!(done, Ok(Ok(_)));
+            if (!ok || panel.jobs.get() == 0)
+                && let Some(leave) = panel.leaving.take()
+            {
+                leave(ok);
+                if ok {
+                    return;
+                }
             }
             match done {
                 Ok(Ok(message)) => {
@@ -90,6 +109,44 @@ impl Panel {
             // query, and the `.git` write this just made will schedule one of those anyway.
             panel.refresh(Depth::Everything);
         });
+    }
+
+    /// Whether closing the window now would cut git off while it rewrites the files: any command
+    /// the pane has running, except a sync that has reached its push, which like a fetch is
+    /// stopped instead ([`Panel::stop`]). Which half a sync is in is the host's to know on a
+    /// remote vault, so there a sync counts all the way through (DESIGN.md, States).
+    pub fn busy(&self) -> bool {
+        let state = self.state.borrow();
+        let pushing = self.sync_busy.get()
+            && !self.hooks.vault.is_remote()
+            && state.repos.iter().any(|r| git::running(&r.root, "push"));
+        self.jobs.get() > usize::from(pushing)
+    }
+
+    /// Call `then` once the commands under way have ended, with whether they all went through,
+    /// or at once where none is running. What a close [`Panel::busy`] held back waits on.
+    pub fn when_done(&self, then: impl FnOnce(bool) + 'static) {
+        match self.jobs.get() {
+            0 => then(true),
+            _ => *self.leaving.borrow_mut() = Some(Box::new(then)),
+        }
+    }
+
+    /// Whether a close is already waiting on git, which a second one leaves to it.
+    pub fn closing(&self) -> bool {
+        self.leaving.borrow().is_some()
+    }
+
+    /// The window is closing for good: stop the fetches and pushes still running here, and let
+    /// everything else end without a word, there being nowhere left to say it. A remote vault's
+    /// git is the host's, which finishes it within its own bounds once the link closes.
+    pub fn stop(&self) {
+        self.gone.set(true);
+        if !self.hooks.vault.is_remote() {
+            for repo in &self.state.borrow().repos {
+                git::interrupt(&repo.root);
+            }
+        }
     }
 
     /// Say why a command did not run. One toast in the window's own wording where git answered in
