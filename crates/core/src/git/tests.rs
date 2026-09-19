@@ -1340,9 +1340,10 @@ fn an_interrupted_command_stops_at_once() {
     assert!(!running(&root, "sleep"));
 }
 
-/// A link that stops answering is given up on, unless the user has said how ssh should run.
+/// A link that stops answering is given up on, unless the user has said how ssh should run or how
+/// long an idle https socket may go unprobed.
 #[test]
-fn the_users_own_ssh_command_wins_over_ours() {
+fn the_users_own_ssh_command_and_keepalive_win_over_ours() {
     if !have_git() {
         return;
     }
@@ -1351,14 +1352,20 @@ fn the_users_own_ssh_command_wins_over_ours() {
     init(&plain);
     init(&own);
     ok(&own, &["config", "core.sshCommand", "ssh -i key"]);
-    let ours = |dir: &Path| {
+    ok(&own, &["config", "http.keepAliveIdle", "30"]);
+    let ours = |dir: &Path, key: &str| {
         network(dir, &["fetch"])
             .get_envs()
-            .any(|(key, value)| key == "GIT_SSH_COMMAND" && value.is_some())
+            .any(|(k, value)| k == key && value.is_some())
     };
-    let inherited = ["GIT_SSH_COMMAND", "GIT_SSH"]
-        .iter()
-        .any(|key| std::env::var_os(key).is_some());
-    assert_eq!(ours(&plain), !inherited);
-    assert!(!ours(&own));
+    let inherited = |keys: &[&str]| keys.iter().any(|key| std::env::var_os(key).is_some());
+    let own_ssh = inherited(&["GIT_SSH_COMMAND", "GIT_SSH"]);
+    assert_eq!(ours(&plain, "GIT_SSH_COMMAND"), !own_ssh);
+    assert!(!ours(&own, "GIT_SSH_COMMAND"));
+    let idle = inherited(&["GIT_HTTP_KEEPALIVE_IDLE"]);
+    assert_eq!(ours(&plain, "GIT_HTTP_KEEPALIVE_IDLE"), !idle);
+    assert!(!ours(&own, "GIT_HTTP_KEEPALIVE_IDLE"));
+    // Only the one the config names is left to it.
+    let count = inherited(&["GIT_HTTP_KEEPALIVE_COUNT"]);
+    assert_eq!(ours(&own, "GIT_HTTP_KEEPALIVE_COUNT"), !count);
 }
