@@ -46,12 +46,13 @@ pub fn paint(view: &multicaret::View, snapshot: &gtk::Snapshot, strength: f32) {
     let visible = view.visible_rect();
     let bottom = visible.y() + visible.height();
     let (mut line, _) = view.line_at_y(visible.y());
+    let found = found(view, line, bottom);
     loop {
         let (y, height) = view.line_yrange(&line);
         if y >= bottom {
             break;
         }
-        let cover = (1.0 - alpha(distance(line.line(), &span))) * strength;
+        let cover = cover(line.line(), &span, &found) * strength;
         // A folded line has no height, and a line at the caret nothing to cover.
         if height > 0 && cover > 0.0 {
             snapshot.append_color(
@@ -68,6 +69,37 @@ pub fn paint(view: &multicaret::View, snapshot: &gtk::Snapshot, strength: f32) {
             break;
         }
     }
+}
+
+/// How much of a line the veil takes at full strength: what [`alpha`] leaves of it, and nothing
+/// of a line holding a find-bar match, so a search left open stays readable while the rest of
+/// the text recedes.
+fn cover(line: i32, span: &RangeInclusive<i32>, found: &[RangeInclusive<i32>]) -> f32 {
+    if found.iter().any(|lines| lines.contains(&line)) {
+        return 0.0;
+    }
+    1.0 - alpha(distance(line, span))
+}
+
+/// The lines from `at` down to `bottom` holding a match of the find bar's query, first to
+/// last, or none while its highlight is off. One match is all a line needs, so the walk goes on
+/// from the line after each, which also keeps a match of no width from being found forever.
+fn found(view: &multicaret::View, mut at: gtk::TextIter, bottom: i32) -> Vec<RangeInclusive<i32>> {
+    let Some(search) = view.highlighted_search() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    while let Some((start, mut end, wrapped)) = search.forward(&at) {
+        if wrapped || view.line_yrange(&start).0 >= bottom {
+            break;
+        }
+        lines.push(start.line()..=end.line());
+        if !end.forward_line() {
+            break;
+        }
+        at = end;
+    }
+    lines
 }
 
 /// The lines the carets and their selections cover, first to last: every caret *and* every
@@ -103,7 +135,7 @@ fn veil(view: &sourceview5::View) -> gdk::RGBA {
 
 #[cfg(test)]
 mod tests {
-    use super::{FLOOR, SIGMA, alpha, distance};
+    use super::{FLOOR, SIGMA, alpha, cover, distance};
 
     /// The caret's own line is untouched, nothing further away is brighter than something nearer,
     /// and from three sigmas out a line has settled on what a far line keeps.
@@ -127,5 +159,16 @@ mod tests {
         assert_eq!(distance(1, &(3..=7)), 2);
         assert_eq!(distance(10, &(3..=7)), 3);
         assert_eq!(distance(4, &(4..=4)), 0);
+    }
+
+    /// A line holding a find-bar match keeps all of itself however far it is from the caret,
+    /// and the lines around it fade as they would without it.
+    #[test]
+    fn a_line_holding_a_match_is_not_veiled() {
+        let found = [10..=11];
+        assert_eq!(cover(10, &(0..=0), &found), 0.0);
+        assert_eq!(cover(11, &(0..=0), &found), 0.0);
+        assert_eq!(cover(12, &(0..=0), &found), cover(12, &(0..=0), &[]));
+        assert!(cover(12, &(0..=0), &found) > 0.6);
     }
 }
