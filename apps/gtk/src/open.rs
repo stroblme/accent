@@ -2,6 +2,7 @@
 //! PDF, image, diff and status tabs, and adopting the result into a pane.
 
 use super::*;
+use accent_core::pdf::PageEdit;
 
 /// Why a tab was opened, which decides whether it stays.
 ///
@@ -287,6 +288,16 @@ impl App {
             self,
             move |pdf, result| app.exported(pdf, result)
         ));
+        // A page edit does not rewrite the notes that name pages by number (NOTEPAD), so the
+        // reader is told when it left some of them pointing at other pages.
+        pdf.connect_links_moved(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_, moved| app.toast(&match moved {
+                1 => "A highlight in a note now points at another page".to_string(),
+                n => format!("{n} highlights in notes now point at other pages"),
+            })
+        ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -500,6 +511,37 @@ impl App {
     pub fn pdf_add_page(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else { return };
         pdf.add_page();
+    }
+
+    /// A blank page after the one being read, the size of it.
+    pub fn pdf_insert_page(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        pdf.edit_pages(PageEdit::Insert(pdf.current_page() + 1));
+    }
+
+    /// Take out the page being read, once the reader has said so. Never the last one.
+    pub fn pdf_delete_page(self: &Rc<Self>) {
+        let Some(pdf) = self.active_pdf() else { return };
+        if pdf.page_count() < 2 {
+            return self.cannot("delete the page", "a PDF keeps at least one page");
+        }
+        pdf.ask_delete_page(pdf.current_page());
+    }
+
+    /// Move the page being read one place towards the end (`down`) or the start of the document.
+    /// The reader goes with it.
+    pub fn pdf_move_page(self: &Rc<Self>, down: bool) {
+        let Some(pdf) = self.active_pdf() else { return };
+        let from = pdf.current_page();
+        let to = match down {
+            true => Some(from + 1).filter(|to| *to < pdf.page_count()),
+            false => from.checked_sub(1),
+        };
+        match to {
+            Some(to) => pdf.edit_pages(PageEdit::Move { from, to }),
+            None if down => self.cannot("move the page down", "it is the last page"),
+            None => self.cannot("move the page up", "it is the first page"),
+        }
     }
 
     /// Show or hide the ring of drawing tools over the page.

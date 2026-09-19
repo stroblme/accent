@@ -1,5 +1,5 @@
-//! Drills over a PDF: the layout either side of Fit Height, the page Add Page appends, and the
-//! blank document New Drawing writes.
+//! Drills over a PDF: the layout either side of Fit Height, the page Add Page appends, the page
+//! edits, and the blank document New Drawing writes.
 
 use super::*;
 
@@ -48,6 +48,92 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
         println!("bench pdf added in_vault {}", vault_pages(&app, &pdf.key()));
         bench_pdf_renamed(&app).await;
     });
+}
+
+/// Page edits end to end: the first page moved below the third by the call a drop in the
+/// thumbnail strip makes, a page inserted after the one being read and the one being read deleted
+/// through the window actions — the delete's dialog answered by emitting its own `response`, as
+/// [`bench_drawing`] answers New Drawing's — each followed to the file. What a headless run cannot
+/// reach is the pointer's half: the drag itself, the buttons on hover, the drop bar and the scroll
+/// at the strip's edge.
+pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench pages no_tab");
+            return bench_quit(&app);
+        };
+        println!("bench pages opened {}", pages_read(&pdf));
+        pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
+        written(&app).await;
+        println!("bench pages moved {}", pages_read(&pdf));
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-insert-page", None);
+        written(&app).await;
+        println!("bench pages inserted {}", pages_read(&pdf));
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-delete-page", None);
+        for _ in 0..40 {
+            if app.window.visible_dialog().is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_then(|d| d.downcast::<adw::AlertDialog>().ok())
+        else {
+            println!("bench pages no_dialog");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench pages asked heading={:?} body={:?}",
+            dialog.heading(),
+            dialog.body()
+        );
+        dialog.emit_by_name::<()>("response", &[&"delete"]);
+        written(&app).await;
+        println!("bench pages deleted {}", pages_read(&pdf));
+        bench_quit(&app);
+    });
+}
+
+/// The thumbnail strip held on screen for XTEST to hover and drag along: the Outline pane up, and
+/// the page being read and the file's pages printed every two seconds for 40 s.
+pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench strip no_tab");
+            return bench_quit(&app);
+        };
+        app.show_pane("outline");
+        for _ in 0..20 {
+            println!("bench strip {}", pages_read(&pdf));
+            glib::timeout_future(Duration::from_secs(2)).await;
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The page being read, and what each page of the file on disk says: what a second reader opens.
+fn pages_read(pdf: &pdftab::PdfTab) -> String {
+    let text = |doc: &accent_core::pdf::PdfDoc, page| {
+        let glyphs = doc.page_text(page).unwrap_or_default();
+        glyphs
+            .iter()
+            .map(|g| g.ch)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    };
+    let on_disk: Vec<String> = accent_core::pdf::PdfDoc::open(pdf.path())
+        .map(|doc| (0..doc.page_count()).map(|p| text(&doc, p)).collect())
+        .unwrap_or_default();
+    format!(
+        "reading={} of {} on_disk={on_disk:?}",
+        pdf.current_page() + 1,
+        pdf.page_count()
+    )
 }
 
 /// Open `rel` and hand back the tab once its pages are known.

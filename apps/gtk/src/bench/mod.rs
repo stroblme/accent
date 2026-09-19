@@ -31,7 +31,7 @@ use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
-use pdf::{bench_drawing, bench_pdf, bench_pdf_stale};
+use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
 use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
@@ -89,7 +89,14 @@ use tags::bench_tags;
 /// etag the host never had, appends a page and prints whether the host's copy is untouched and
 /// what `<name> (drawn).pdf` beside it holds, then appends another and prints the same again —
 /// the second refusal must write that same copy rather than a numbered one, and must leave the
-/// toast count where the first put it.
+/// toast count where the first put it. `=pages:<rel_path>` moves the first page below the third as
+/// a drop in the thumbnail strip does, inserts a page after the one being read and deletes the one
+/// being read through the window actions, answering the delete's dialog, and prints the page being
+/// read and each page's text on disk after every step. Point it at a scratch copy of the generated
+/// vault's `Attachments/pages.pdf`. `=strip:<rel_path>` is the pointer's half, held for XTEST: it
+/// opens the document with the Outline pane up and prints the same every two seconds for 40 s, so
+/// a hover and a drag along the thumbnail strip (`build-aux/xtest.py :N "drag X0 Y0 X1 Y1"`) can
+/// be watched landing in the file.
 /// `ACCENT_BENCH_DRAWING=1` fires New Drawing at the vault root, prints what the dialog came up
 /// with, answers it with the window-shaped size and prints the file that landed and the tool the
 /// tab it opened has in hand.
@@ -255,6 +262,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = pdf {
+            if let Some(rel) = rel.strip_prefix("pages:") {
+                return bench_pdf_pages(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("strip:") {
+                return bench_pdf_strip(&app, rel);
+            }
             return match rel.strip_prefix("stale:") {
                 Some(rel) => bench_pdf_stale(&app, rel),
                 None => bench_pdf(&app, &rel),

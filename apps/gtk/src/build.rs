@@ -922,6 +922,8 @@ fn install_chrome_css() {
              .dividers-hidden scrolledwindow > undershoot {{ box-shadow: none; \
                background-image: none; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
+             .accent-drop-bar {{ background-color: var(--accent-bg-color); border-radius: 2px; }} \
+             .accent-page-strip:drop(active) {{ box-shadow: none; }} \
              .accent-marked {{ border-radius: 6px; \
                background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
              .git-actions {{ opacity: 0; }} \

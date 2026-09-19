@@ -34,6 +34,8 @@ type FailHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, String)>>>;
 /// A width or a colour was picked on the ring for a tool.
 type ChoiceHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>>>;
 type UriHook = RefCell<Option<Rc<dyn Fn(&str)>>>;
+/// A page edit left this many note links pointing at other pages.
+type CountHook = RefCell<Option<Rc<dyn Fn(&Rc<PdfTab>, usize)>>>;
 
 pub struct PdfTab {
     pub(super) key: RefCell<String>,
@@ -54,6 +56,9 @@ pub struct PdfTab {
     /// `GtkScrolledWindow` around the same widget every time would re-parent a widget that
     /// already has a parent, which GTK refuses with a critical.
     pub(super) thumb_strip: gtk::ScrolledWindow,
+    /// The strip with the page buttons and the drop bar floating over it, which is what the
+    /// Outline pane is handed. Built once, for the same reason.
+    pub(super) organize: super::organize::Organize,
     /// Requests to the render thread. Dropping it is what ends the thread, so it is dropped with
     /// the tab and nothing else has to be joined.
     pub(super) tx: RefCell<Option<Sender<Request>>>,
@@ -107,6 +112,9 @@ pub struct PdfTab {
     pub(super) pending: Cell<Option<Place>>,
     /// Which search these results belong to, so a stale page's answer is dropped.
     pub(super) query: Cell<u64>,
+    /// What was searched for last, so a page edit can run it again: the matches are filed by
+    /// page like everything else.
+    pub(super) searched: RefCell<String>,
     pub(super) matches: RefCell<Vec<(usize, pdf::Rect)>>,
     pub(super) current: Cell<Option<usize>>,
     pub(super) on_zoom: Hook,
@@ -127,6 +135,7 @@ pub struct PdfTab {
     /// somewhere else.
     pub(super) on_saved: Hook,
     pub(super) on_choice: ChoiceHook,
+    pub(super) on_links_moved: CountHook,
 }
 
 /// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
@@ -169,6 +178,11 @@ pub fn open(
     page.set_tooltip(tooltip);
     page.set_icon(Some(&gio::ThemedIcon::new("x-office-document-symbolic")));
 
+    let thumb_strip = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&thumbs)
+        .build();
     let tab = Rc::new(PdfTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),
@@ -179,11 +193,8 @@ pub fn open(
         thumbs: thumbs.clone(),
         host,
         ring: ring.clone(),
-        thumb_strip: gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
-            .child(&thumbs)
-            .build(),
+        organize: super::organize::Organize::new(&thumb_strip),
+        thumb_strip,
         tx: RefCell::new(None),
         inverted: Cell::new(false),
         theme: Cell::new(theme_of(adw::StyleManager::default().is_dark())),
@@ -207,6 +218,7 @@ pub fn open(
         outline: RefCell::new(Vec::new()),
         preview: RefCell::new(None),
         query: Cell::new(0),
+        searched: RefCell::new(String::new()),
         matches: RefCell::new(Vec::new()),
         current: Cell::new(None),
         on_zoom: RefCell::new(None),
@@ -223,6 +235,7 @@ pub fn open(
         on_save_failed: RefCell::new(None),
         on_saved: RefCell::new(None),
         on_choice: RefCell::new(None),
+        on_links_moved: RefCell::new(None),
     });
 
     tab.view.set_zoom(place.zoom);
@@ -235,6 +248,7 @@ pub fn open(
         move || tab.emit(&tab.on_zoom)
     ));
     tab.wire_strip(&thumbs);
+    tab.wire_organize();
     tab.ring.connect_choice(glib::clone!(
         #[weak]
         tab,
@@ -277,6 +291,11 @@ impl PdfTab {
 
     pub fn page_count(&self) -> usize {
         self.view.page_count()
+    }
+
+    /// The page being read: the one under the middle of the reading view.
+    pub fn current_page(&self) -> usize {
+        self.view.current_page()
     }
 
     /// The widget a reader's keys have to reach: the reading view, which is where [`Self::wire_keys`]
@@ -588,11 +607,42 @@ impl PdfTab {
     }
 
     /// Another blank page at the end, the size of the last one — a notebook's answer to running
-    /// out of paper. Written out on the same timer a stroke is: the thread marks the document
-    /// dirty and this asks for the save a second later.
+    /// out of paper.
     pub fn add_page(self: &Rc<Self>) {
-        self.ask(Request::AddPage);
+        self.edit_pages(pdf::PageEdit::Insert(self.page_count()));
+    }
+
+    /// Put a blank page in, take one out, or move one. Written out on the same timer a stroke is:
+    /// the thread marks the document dirty and this asks for the save a second later.
+    pub fn edit_pages(self: &Rc<Self>, edit: pdf::PageEdit) {
+        self.ask(Request::Pages(edit));
         self.save_soon();
+    }
+
+    /// Ask before taking `page` out, since nothing puts it back: Undo walks ink, not pages. The
+    /// last page is never offered — a PDF keeps one.
+    pub fn ask_delete_page(self: &Rc<Self>, page: usize) {
+        if self.page_count() < 2 {
+            return;
+        }
+        let name = crate::doc::file_name(&self.key()).to_string();
+        let dialog = crate::dialogs::alert(
+            &format!("Delete Page {}?", page + 1),
+            &format!("The page is removed from {name}. This cannot be undone."),
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("delete", "Delete", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
+        );
+        let tab = Rc::downgrade(self);
+        crate::dialogs::choose(&dialog, Some(&self.view), move |response| {
+            if let Some(tab) = tab.upgrade()
+                && response == "delete"
+            {
+                tab.edit_pages(pdf::PageEdit::Delete(page));
+            }
+        });
     }
 
     /// The same, but wait for it — the window is closing and the process is about to end, so a
@@ -703,17 +753,19 @@ impl PdfTab {
     /// textures. It takes itself out of whatever held it last: the pane rebuilds its container
     /// each time, and a widget with two parents is a GTK critical.
     pub fn thumbnails(&self) -> gtk::Widget {
-        if let Some(parent) = self.thumb_strip.parent() {
+        let pane = &self.organize.pane;
+        if let Some(parent) = pane.parent() {
             match parent.downcast_ref::<gtk::Paned>() {
                 Some(paned) => paned.set_end_child(gtk::Widget::NONE),
-                None => self.thumb_strip.unparent(),
+                None => pane.unparent(),
             }
         }
-        self.thumb_strip.clone().upcast()
+        pane.clone().upcast()
     }
 
     /// Search the whole document. An empty query clears what is shown.
     pub fn find(self: &Rc<Self>, text: &str) {
+        *self.searched.borrow_mut() = text.to_string();
         self.matches.borrow_mut().clear();
         self.current.set(None);
         self.view.set_marks(std::collections::HashMap::new());
@@ -815,6 +867,11 @@ impl PdfTab {
 
     pub fn connect_uri(&self, f: impl Fn(&str) + 'static) {
         *self.on_uri.borrow_mut() = Some(Rc::new(f));
+    }
+
+    /// Called after a page edit that left note links pointing at other pages, with how many.
+    pub fn connect_links_moved(&self, f: impl Fn(&Rc<PdfTab>, usize) + 'static) {
+        *self.on_links_moved.borrow_mut() = Some(Rc::new(f));
     }
 
     pub(super) fn emit(self: &Rc<Self>, hook: &Hook) {
@@ -1007,11 +1064,11 @@ impl PdfTab {
 
     /// The page's own menu, on a secondary click over it.
     ///
-    /// Copy and Copy Link to Selection when there is a selection, then Add Page and Export
-    /// Highlights, which are about the document rather than about what is selected and so are
-    /// always offered — a read-only or remote document says so in a toast rather than by hiding
-    /// the row. The drawing tools are not here: they are the ring, which the header's Drawing
-    /// button opens.
+    /// Copy and Copy Link to Selection when there is a selection, then Add Page, Insert Page,
+    /// Delete Page and Export Highlights, which are about the document rather than about what is
+    /// selected and so are always offered — a read-only or remote document says so in a toast
+    /// rather than by hiding the row. The drawing tools are not here: they are the ring, which the
+    /// header's Drawing button opens.
     ///
     /// `win.` actions rather than a group of the tab's own: that is what gives them a row in the
     /// palette and a rebindable accelerator, which is the whole argument of DESIGN.md's keyboard
@@ -1041,7 +1098,12 @@ impl PdfTab {
             menu.append_section(None, &clipboard);
         }
         let file = gio::Menu::new();
-        for action in ["win.pdf-add-page", "win.pdf-export-highlights"] {
+        for action in [
+            "win.pdf-add-page",
+            "win.pdf-insert-page",
+            "win.pdf-delete-page",
+            "win.pdf-export-highlights",
+        ] {
             file.append(Some(crate::actions::label_of(action)), Some(action));
         }
         menu.append_section(None, &file);
@@ -1154,6 +1216,33 @@ impl PdfTab {
         self.view.add_controller(keys);
     }
 
+    /// Forget what is kept of each page that cannot follow it to another number or document: the
+    /// strokes the tools know, the links, and the glyphs with the selection made of them — an
+    /// export or a rebuild moves the text, and a stale index would paint the selection elsewhere.
+    /// Each is asked for again as it is needed.
+    fn forget_pages(&self) {
+        self.view.clear_inks();
+        self.links.borrow_mut().clear();
+        self.glyphs.borrow_mut().clear();
+        self.clear_selection();
+    }
+
+    /// Notes that highlight this document name its pages by number, so an edit that moved or took
+    /// out a page they name leaves them pointing at another one. They are not rewritten (NOTEPAD);
+    /// the reader is told how many, once for the edit.
+    fn warn_moved_links(self: &Rc<Self>, edit: pdf::PageEdit) {
+        let moved = self
+            .notes
+            .borrow()
+            .iter()
+            .filter(|link| edit.map(link.page) != Some(link.page))
+            .count();
+        let hook = self.on_links_moved.borrow().clone();
+        if let Some(f) = hook.filter(|_| moved > 0) {
+            f(self, moved);
+        }
+    }
+
     /// Everything from the render thread that is not a texture.
     fn on_reply(self: &Rc<Self>, reply: Reply) {
         match reply {
@@ -1243,14 +1332,47 @@ impl PdfTab {
                     f(self, why);
                 }
             }
-            Reply::Paged(sizes) => {
-                let last = sizes.len().saturating_sub(1);
+            Reply::Repaged { sizes, edit } => {
+                let anchor = self.view.anchor();
+                let map = |page| edit.map(page);
+                // One cache for both views, so it moves once; each view moves what it is still
+                // waiting on for a page.
+                self.view.cache().borrow_mut().repage(map);
+                self.view.repage(map);
+                self.thumbs.repage(map);
+                self.forget_pages();
                 self.view.set_sizes(sizes.clone());
                 self.thumbs.set_sizes(sizes);
-                self.thumbs.queue_draw();
-                // Land on the new page: adding one is asking for somewhere to draw, and a jump
-                // so the reader can come back with Back.
-                self.goto_page(last);
+                match edit {
+                    // Land on the new page: putting one in is asking for somewhere to draw, and
+                    // a jump, so the reader can come back with Back.
+                    pdf::PageEdit::Insert(at) => self.goto_page(at),
+                    // The page the reader was on, wherever it went — or, deleted, the one that
+                    // took its place.
+                    _ => {
+                        let page = edit.map(anchor.page).unwrap_or(anchor.page);
+                        let anchor = Anchor { page, ..anchor }.clamped(self.page_count());
+                        self.view.scroll_to(anchor);
+                    }
+                }
+                // Asked again under the new numbers: the bookmarks' pages, where the notes'
+                // highlights land, the strokes a tool in hand needs, this page's links, and the
+                // search's matches.
+                self.ask(Request::Outline);
+                self.ask(Request::Highlights(self.notes.borrow().clone()));
+                if self.wants_inks() {
+                    self.ask_inks();
+                }
+                self.ask(Request::Links(self.view.current_page()));
+                let searched = self.searched.borrow().clone();
+                if !searched.is_empty() {
+                    self.find(&searched);
+                }
+                // The page count changed, or the page the reader is on did, with no scroll.
+                self.emit(&self.on_page);
+                // The strip's buttons are over whichever page is under the pointer now.
+                self.hover_thumbnail();
+                self.warn_moved_links(edit);
             }
             Reply::Reloaded(sizes) => {
                 // Whatever the far end had that we did not is in hand now, so a refusal after
@@ -1261,12 +1383,7 @@ impl PdfTab {
                 let anchor = self.view.anchor().clamped(sizes.len());
                 self.view.forget_textures();
                 self.thumbs.forget_textures();
-                self.view.clear_inks();
-                self.links.borrow_mut().clear();
-                // The glyphs and anything made of them are of the old document: an export or a
-                // rebuild moves the text, and a stale index would paint the selection elsewhere.
-                self.glyphs.borrow_mut().clear();
-                self.clear_selection();
+                self.forget_pages();
                 self.view.set_sizes(sizes.clone());
                 self.thumbs.set_sizes(sizes);
                 match self.pending.take() {
