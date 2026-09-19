@@ -17,7 +17,7 @@ mod transfer;
 
 pub use clipboard::Clip;
 pub use menu::{context_menu, item, labels, popup, row_dir};
-pub use paths::move_dest;
+pub use paths::{move_dest, topmost};
 pub use transfer::{download, upload};
 
 use self::paths::{
@@ -88,6 +88,9 @@ pub struct Ops {
     /// Point every tab at or under the first path at the same place under the second: a move of
     /// our own, followed before the notes it rewrote are reloaded by the paths they have now.
     pub moved: Box<dyn Fn(&str, &str)>,
+    /// Let the tree's marks go, after any move or trash: it may have taken what they named, and
+    /// marks naming paths that are gone would come back on whatever takes those names next.
+    pub unmark: Box<dyn Fn()>,
     /// Close every document at or under a path that has stopped existing — a folder in the trash
     /// takes the notes inside it. Only called once the file is really gone, so there is nothing
     /// left to write the buffer into and nothing to ask about.
@@ -599,28 +602,37 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     });
 }
 
-/// Move a note or folder into another directory of the same vault, keeping its name, from a drag
-/// in the tree. A wikilink resolves by basename, so nothing pointing at it has to be rewritten —
-/// but a folder full of notes still can be, which is why this goes through [`plan`] like the rest.
+/// Move notes and folders into another directory of the same vault, keeping their names: a row
+/// dragged in the tree, the marked set dragged with it, or a Cut pasted. However many there are,
+/// it is one plan and one Update Links? question, because the links between them are rewritten
+/// together.
 ///
-/// Where the drop may land at all is [`move_dest`]'s decision, taken while the pointer is still
+/// Where a drop may land at all is [`move_dest`]'s decision, taken while the pointer is still
 /// moving so a row that cannot take what is over it never lights up. What is left to refuse here
-/// is a name the destination already holds.
-pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
+/// is a name the destination already holds, and a batch is refused whole for it rather than moved
+/// in part.
+pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
     let (vault, ops) = (ops.vault.clone(), ops.clone());
-    let (from, to) = (from.to_string(), to.to_string());
     glib::spawn_future_local(async move {
         // Asked before the move rather than read off its error, as `new_folder` does: the error
         // names an absolute path, which is not what anyone dropped anything on. On a worker, as
-        // the plan is, being a round trip on a remote vault.
-        let asked = to.clone();
-        match gio::spawn_blocking(move || vault.exists(&asked)).await {
-            Ok(false) => plan(&ops, vec![(from, to)], "Moved"),
-            Ok(true) => (ops.toast)(&format!(
+        // the plan is, being a `stat` each and a round trip each on a remote vault. Two files of
+        // one name from two folders would take the same place, so the batch asks for it too.
+        let dests: Vec<String> = moves.iter().map(|(_, to)| to.clone()).collect();
+        let taken = gio::spawn_blocking(move || {
+            let mut seen = std::collections::HashSet::new();
+            dests
+                .into_iter()
+                .find(|to| !seen.insert(to.clone()) || vault.exists(to))
+        })
+        .await;
+        match taken {
+            Ok(None) => plan(&ops, moves, "Moved"),
+            Ok(Some(to)) => (ops.toast)(&format!(
                 "Cannot move {}: it is already there",
                 basename(&to)
             )),
-            Err(_) => (ops.toast)(&format!("Cannot move {}", basename(&from))),
+            Err(_) => (ops.toast)(&format!("Cannot move {}", several(&sources(&moves)))),
         }
     });
 }
@@ -656,7 +668,7 @@ fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
 fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
     let dialog = alert(
         "Update Links?",
-        &link_body(&plan.rewrites),
+        &link_body(&plan.rewrites, plan.moves.len()),
         &[
             ("cancel", "Cancel", adw::ResponseAppearance::Default),
             ("keep", "Rename Only", adw::ResponseAppearance::Default),
@@ -676,11 +688,16 @@ fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
 }
 
 /// Body of the "Update Links?" dialog: the count, then the paths, then what it stopped listing.
-fn link_body(rewrites: &[String]) -> String {
+/// `moving` is how many files and folders the move takes.
+fn link_body(rewrites: &[String], moving: usize) -> String {
     let n = rewrites.len();
+    let what = match moving {
+        1 => "this one",
+        _ => "these files",
+    };
     let mut body = match n {
-        1 => "1 note links to this one.".to_string(),
-        _ => format!("{n} notes link to this one."),
+        1 => format!("1 note links to {what}."),
+        _ => format!("{n} notes link to {what}."),
     };
     body.push('\n');
     for rel in rewrites.iter().take(LISTED) {
@@ -709,7 +726,15 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
         ops.clone(),
         several(&sources(&plan.moves)),
     );
-    let to = plan.moves[0].1.clone();
+    // One move names where the file went; a batch goes into one folder, which it names instead.
+    let to = match &plan.moves[..] {
+        [(_, to)] => to.clone(),
+        many => match parent_dir(&many[0].1) {
+            "" => "the vault root".to_string(),
+            dir => dir.to_string(),
+        },
+    };
+    let first = plan.moves[0].1.clone();
     glib::spawn_future_local(async move {
         let done = gio::spawn_blocking({
             let name = name.clone();
@@ -733,12 +758,15 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
                 for (from, to) in &report.moved {
                     (ops.moved)(from, to);
                 }
+                if !report.moved.is_empty() {
+                    (ops.unmark)();
+                }
                 let unsaved = (ops.reload)(&report.rewritten);
                 let mut message = match &report.not_moved {
                     Some((from, why)) => format!("Cannot move {}: {why}", basename(from)),
                     None => rename_message(verb, &name, &to, report.failed.len(), unsaved),
                 };
-                if hidden_now(&ops, &to) {
+                if hidden_now(&ops, &first) {
                     message.push_str(&format!("; {HIDDEN}"));
                 }
                 (ops.toast)(&message);
@@ -784,6 +812,7 @@ pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
     // written out before the file moves — a folder takes the notes inside it, and their unsaved
     // edits used to go with it in silence. Whatever cannot be written stays in its tab's banner.
     (ops.flush)(&rels);
+    (ops.unmark)();
     // A vault on another machine has no session bus to ask and no trash to ask it about, so the
     // only delete there is is the permanent one — which is exactly the case this already has a
     // dialog for, and it says so in the same words.
@@ -1190,15 +1219,15 @@ mod tests {
 
     #[test]
     fn link_body_counts_then_names_then_stops() {
-        assert!(link_body(&["a.md".into()]).starts_with("1 note links to this one."));
+        assert!(link_body(&["a.md".into()], 1).starts_with("1 note links to this one."));
 
-        let body = link_body(&["a.md".into(), "b/c.md".into()]);
-        assert!(body.starts_with("2 notes link to this one."));
+        let body = link_body(&["a.md".into(), "b/c.md".into()], 2);
+        assert!(body.starts_with("2 notes link to these files."));
         assert!(body.contains("\nb/c.md"));
         assert!(!body.contains("more"));
 
         let many: Vec<String> = (0..25).map(|i| format!("n{i}.md")).collect();
-        let body = link_body(&many);
+        let body = link_body(&many, 1);
         assert!(body.contains("n19.md"));
         assert!(!body.contains("n20.md"));
         assert!(body.ends_with("and 5 more"));

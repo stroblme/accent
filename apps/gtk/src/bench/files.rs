@@ -505,11 +505,75 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
             }
         }
 
+        bench_cut_many(&app, &ops, &vault, &dir).await;
         // The drill writes into the vault, so it takes its own leavings back out again.
         let _ = vault.delete(&moved);
         let _ = vault.delete(&copied);
         bench_quit(&app);
     });
+}
+
+/// A Cut of two notes pasted into `dir`: one plan for both, so one Update Links? question, and
+/// every note rewritten once — the one linking both from the root, and the moved note whose own
+/// relative link now has a folder to climb out of. Prints each dialog as it comes, the number of
+/// them, and the three texts afterwards.
+async fn bench_cut_many(app: &Rc<App>, ops: &Rc<fileops::Ops>, vault: &Arc<Vault>, dir: &str) {
+    if dir.is_empty() {
+        return println!("bench clip_cut_many none");
+    }
+    let notes = [
+        ("clip-a.md", "[r](clip-ref.md) [b](clip-b.md)\n"),
+        ("clip-b.md", "[a](clip-a.md)\n"),
+        ("clip-ref.md", "[a](clip-a.md) [b](clip-b.md) [[clip-a]]\n"),
+    ];
+    for (rel, text) in notes {
+        let _ = vault.save(rel, text, None);
+    }
+    // Saved through the vault, so the index has them within a worker batch.
+    for _ in 0..50 {
+        if vault.backlinks("clip-b.md").is_ok_and(|b| b.len() >= 2) {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    let both = [
+        ("clip-a.md".to_string(), false),
+        ("clip-b.md".to_string(), false),
+    ];
+    fileops::clipboard::cut_all(ops, &both);
+    fileops::clipboard::paste(ops, dir);
+    // Counted by identity: a dialog closing is still the visible one for its animation.
+    let mut seen: Vec<adw::AlertDialog> = Vec::new();
+    for _ in 0..40 {
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+            .filter(|dialog| !seen.contains(dialog))
+        else {
+            continue;
+        };
+        seen.push(dialog.clone());
+        println!(
+            "bench clip_cut_many_dialog {:?} {:?}",
+            dialog.heading().unwrap_or_default(),
+            dialog.body()
+        );
+        dialog.emit_by_name::<()>("response", &[&"update"]);
+        dialog.close();
+    }
+    println!("bench clip_cut_many dialogs={}", seen.len());
+    let moved = |rel: &str| format!("{dir}/{rel}");
+    for rel in [
+        moved("clip-a.md"),
+        moved("clip-b.md"),
+        "clip-ref.md".to_string(),
+    ] {
+        let text = vault.read(&rel).map(|(text, _)| text);
+        println!("bench clip_cut_many_text {rel} {:?}", text.ok());
+        let _ = vault.delete(&rel);
+    }
 }
 
 /// Open a tree row's context menu and then take the pointer away from the list, which is what the
@@ -581,8 +645,69 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
         tree.clear_marks();
         glib::timeout_future(Duration::from_millis(200)).await;
         println!("bench menu_marked_cleared {:?}", marked_rows(tree.view()));
+        bench_range(tree, &rel).await;
         bench_quit(&app);
     });
+}
+
+/// A Shift+click's range, from `rel` down to the first shut folder below it, which is marked
+/// whole; then that folder opened, which shows everything in it marked, and a Ctrl+click on the
+/// first of its rows, which takes that one alone out of the set and leaves its siblings marked.
+async fn bench_range(tree: &tree::Tree, rel: &str) {
+    let model = tree.model();
+    let rows: Vec<(tree::Row, bool)> = (0..model.n_items())
+        .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>())
+        .filter_map(|row| Some((tree::decode(&row.item()?)?, row.is_expanded())))
+        .collect();
+    let below = rows.iter().skip_while(|(row, _)| row.rel != rel);
+    let Some((folder, _)) = below
+        .skip(1)
+        .find(|(row, open)| row.is_dir() && row.indexed && !open)
+    else {
+        return println!("bench menu_range none");
+    };
+    let folder = folder.rel.clone();
+    tree.mark_range(rel, &folder, false);
+    glib::timeout_future(Duration::from_millis(200)).await;
+    println!("bench menu_range {:?}", tree.marked());
+    println!("bench menu_range_drawn {:?}", marked_rows(tree.view()));
+
+    if let Some(row) = tree::find_row(model, &folder) {
+        row.set_expanded(true);
+    }
+    // The folder's listing lands from a worker thread.
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let inside = |rows: Vec<String>| {
+        rows.into_iter()
+            .filter(|row| row.starts_with(&format!("{folder}/")))
+            .collect::<Vec<_>>()
+    };
+    let shown = inside(
+        drawn_rows(tree.view())
+            .into_iter()
+            .map(|(rel, _)| rel)
+            .collect(),
+    );
+    println!(
+        "bench menu_range_opened drawn={} of={}",
+        inside(marked_rows(tree.view())).len(),
+        shown.len()
+    );
+    let (Some(first), Some(second)) = (shown.first(), shown.get(1)) else {
+        return println!("bench menu_range_split none");
+    };
+    tree.toggle_mark(first);
+    glib::timeout_future(Duration::from_millis(200)).await;
+    println!(
+        "bench menu_range_split folder_in_set={} {first}={} {second}={} set={} drawn={} of={}",
+        tree.marked().iter().any(|(rel, _)| *rel == folder),
+        tree.is_marked(first),
+        tree.is_marked(second),
+        tree.marked().len(),
+        inside(marked_rows(tree.view())).len(),
+        shown.len()
+    );
+    tree.clear_marks();
 }
 
 /// Reveal a row, print where it is on screen and stay up, for an XTEST Ctrl+click held against
@@ -601,24 +726,25 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
             glib::timeout_future(Duration::from_millis(200)).await;
         }
         glib::timeout_future(Duration::from_millis(400)).await;
-        let at = tree::expanders(tree.view())
-            .into_iter()
-            .find(|expander| {
-                let row = expander.list_row().and_then(|row| row.item());
-                row.as_ref()
-                    .and_then(tree::decode)
-                    .is_some_and(|r| r.rel == rel)
-            })
-            .and_then(|expander| {
-                let middle = graphene::Point::new(
-                    expander.width() as f32 / 2.0,
-                    expander.height() as f32 / 2.0,
-                );
-                expander.compute_point(&app.window, &middle)
-            });
-        match at {
+        match centre(&app, tree, &rel) {
             Some(at) => println!("bench menu_press {} {}", at.x() as i32, at.y() as i32),
             None => println!("bench menu_press none"),
+        }
+        // And the row two below it, for a Shift+click range to end on.
+        let model = tree.model();
+        let to = tree::find_row(model, &rel)
+            .and_then(|row| model.item(row.position() + 2))
+            .and_downcast::<gtk::TreeListRow>()
+            .and_then(|row| row.item())
+            .and_then(|item| tree::decode(&item))
+            .and_then(|row| Some((row.rel.clone(), centre(&app, tree, &row.rel)?)));
+        match to {
+            Some((rel, at)) => println!(
+                "bench menu_press_to {rel} {} {}",
+                at.x() as i32,
+                at.y() as i32
+            ),
+            None => println!("bench menu_press_to none"),
         }
         for step in 0..3 {
             glib::timeout_future(Duration::from_secs(5)).await;
@@ -630,6 +756,25 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// The middle of `rel`'s row in window coordinates, which under Xvfb are the screen's.
+fn centre(app: &App, tree: &tree::Tree, rel: &str) -> Option<graphene::Point> {
+    tree::expanders(tree.view())
+        .into_iter()
+        .find(|expander| {
+            let row = expander.list_row().and_then(|row| row.item());
+            row.as_ref()
+                .and_then(tree::decode)
+                .is_some_and(|r| r.rel == rel)
+        })
+        .and_then(|expander| {
+            let middle = graphene::Point::new(
+                expander.width() as f32 / 2.0,
+                expander.height() as f32 / 2.0,
+            );
+            expander.compute_point(&app.window, &middle)
+        })
 }
 
 /// The pointer leaving the list, as the popover's own grab sends it.
