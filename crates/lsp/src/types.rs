@@ -26,6 +26,8 @@
 //! DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -111,6 +113,51 @@ pub struct ServerCapabilities {
     pub document_symbol_provider: Option<Value>,
     pub folding_range_provider: Option<Value>,
     pub inline_completion_provider: Option<Value>,
+    pub workspace: Option<WorkspaceServerCapabilities>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkspaceServerCapabilities {
+    pub file_operations: Option<FileOperations>,
+}
+
+/// Which file operations the server wants to hear about. Only `willRename` is read: it is the
+/// one that comes back with edits, and the one asked before the files move.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileOperations {
+    pub will_rename: Option<FileOperationRegistration>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileOperationRegistration {
+    pub filters: Vec<FileOperationFilter>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationFilter {
+    /// `file` for anything on disk; absent means every scheme.
+    pub scheme: Option<String>,
+    pub pattern: FileOperationPattern,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileOperationPattern {
+    /// A glob over the whole path: `**/*.rs`, `**/*.{ts,js}`.
+    pub glob: String,
+    /// `file` or `folder`; absent means both.
+    pub matches: Option<String>,
+    pub options: Option<FileOperationPatternOptions>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FileOperationPatternOptions {
+    pub ignore_case: bool,
 }
 
 /// Whether a capability gate is on: present, and not an explicit `false`.
@@ -317,6 +364,45 @@ pub struct FoldingRange {
     pub kind: Option<String>,
 }
 
+// ------------------------------------------------------------------- edits
+
+/// Edits to other files, in the two shapes a server may send them: `changes`, keyed by URI, and
+/// `documentChanges`, which also carries create/rename/delete operations. accent advertises no
+/// `documentChanges` support, but reads it anyway, keeping the text edits and leaving the
+/// resource operations: the file operation that asked is already moving the files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WorkspaceEdit {
+    pub changes: HashMap<String, Vec<TextEdit>>,
+    pub document_changes: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentEdit {
+    pub text_document: TextDocumentIdentifier,
+    /// Annotated edits read as plain ones: the annotation is extra fields.
+    pub edits: Vec<TextEdit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextDocumentIdentifier {
+    pub uri: String,
+}
+
+impl WorkspaceEdit {
+    /// Every file's text edits, whichever shape they came in.
+    pub fn text_edits(self) -> Vec<(String, Vec<TextEdit>)> {
+        let documents = self
+            .document_changes
+            .into_iter()
+            .filter_map(|change| serde_json::from_value::<TextDocumentEdit>(change).ok())
+            .map(|edit| (edit.text_document.uri, edit.edits));
+        self.changes.into_iter().chain(documents).collect()
+    }
+}
+
 // ------------------------------------------------------------------- diagnostics
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -437,6 +523,58 @@ mod tests {
             panic!("a location makes it a SymbolInformation")
         };
         assert_eq!(rows[0].name, "main");
+    }
+
+    /// What rust-analyzer and typescript-language-server say about renames, as they send it.
+    #[test]
+    fn will_rename_filters_read_as_the_servers_send_them() {
+        let caps: ServerCapabilities = serde_json::from_value(json!({"workspace": {
+            "fileOperations": {"willRename": {"filters": [
+                {"scheme": "file", "pattern": {"glob": "**/*.rs", "matches": "file"}},
+                {"scheme": "file", "pattern": {"glob": "**", "matches": "folder"}}
+            ]}}
+        }}))
+        .unwrap();
+        let filters = caps
+            .workspace
+            .and_then(|w| w.file_operations)
+            .and_then(|f| f.will_rename)
+            .unwrap()
+            .filters;
+        assert_eq!(filters[0].pattern.glob, "**/*.rs");
+        assert_eq!(filters[1].pattern.matches.as_deref(), Some("folder"));
+
+        let ts: ServerCapabilities = serde_json::from_value(json!({"workspace": {
+            "fileOperations": {"willRename": {"filters": [{"scheme": "file", "pattern": {
+                "glob": "**/*.{ts,js,jsx,tsx,mjs,mts,cjs,cts}", "matches": "file"
+            }}]}}
+        }}))
+        .unwrap();
+        assert!(ts.workspace.is_some());
+        let none: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert!(none.workspace.is_none());
+    }
+
+    #[test]
+    fn a_workspace_edit_reads_in_both_shapes() {
+        let edit = json!({"range": range(0, 4, 0, 7), "newText": "bar", "annotationId": "rename"});
+        let changes: WorkspaceEdit =
+            serde_json::from_value(json!({"changes": {"file:///a.rs": [edit]}})).unwrap();
+        let documents: WorkspaceEdit = serde_json::from_value(json!({"documentChanges": [
+            {"textDocument": {"uri": "file:///a.rs", "version": 3}, "edits": [edit]},
+            {"kind": "rename", "oldUri": "file:///b.rs", "newUri": "file:///c.rs"}
+        ]}))
+        .unwrap();
+        for shape in [changes, documents] {
+            let edits = shape.text_edits();
+            assert_eq!(edits.len(), 1, "the resource operation is left out");
+            assert_eq!(edits[0].0, "file:///a.rs");
+            assert_eq!(edits[0].1[0].new_text, "bar");
+        }
+    }
+
+    fn range(l0: u32, c0: u32, l1: u32, c1: u32) -> Value {
+        json!({"start": {"line": l0, "character": c0}, "end": {"line": l1, "character": c1}})
     }
 
     #[test]

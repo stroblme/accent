@@ -80,7 +80,8 @@ pub struct Ops {
     pub reconciled: Box<dyn Fn() -> bool>,
     /// Save any dirty tab at or under these paths before the file moves under them, and reload
     /// the ones listed afterwards. Called with the notes a rename is about to rewrite, and with
-    /// the folder a trash or a move is about to take: a path here is a subtree, not only a key.
+    /// the folder a trash or a move is about to take: a path here is a subtree, not only a key,
+    /// and "" is the vault root, every tab.
     pub flush: Box<dyn Fn(&[String])>,
     /// Reload these paths' tabs from disk, returning how many were left alone because their
     /// buffer still holds unsaved edits (those get the changed-on-disk banner instead).
@@ -651,28 +652,47 @@ fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
     if !(ops.reconciled)() {
         return (ops.toast)("Cannot rename yet: the vault is still being indexed");
     }
+    // Every unsaved buffer is written out first: the links are read off the disk, and so is
+    // what a language server answers about the imports — positions in the file, not the tab.
+    (ops.flush)(&[String::new()]);
     let (vault, ops, name) = (ops.vault.clone(), ops.clone(), several(&sources(&moves)));
     glib::spawn_future_local(async move {
         let planned = gio::spawn_blocking(move || vault.plan_moves(&moves)).await;
         match planned {
-            Ok(Ok(plan)) if plan.rewrites.is_empty() => apply(&ops, plan, false, verb),
-            Ok(Ok(plan)) => confirm_links(&ops, plan, verb),
+            Ok(Ok(plan)) if asks_nothing(&plan) => apply(&ops, plan, false, verb),
+            Ok(Ok(plan)) => confirm_update(&ops, plan, verb),
             Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
             Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
         }
     });
 }
 
-/// Rewriting other people's notes is a data-losing choice, so it is an `AlertDialog` and the
-/// notes it would touch are named rather than counted.
-fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
+/// Whether a plan goes through without a question: nothing to rewrite in a note and no import
+/// to change.
+fn asks_nothing(plan: &RenamePlan) -> bool {
+    plan.rewrites.is_empty() && plan.imports.is_empty()
+}
+
+/// What an unchecked plan says, in the dialog or, with no dialog, in the toast.
+const UNCHECKED: &str = "Imports not checked: no language server is running";
+
+/// Rewriting other people's notes and code is a data-losing choice, so it is an `AlertDialog`
+/// and the files it would touch are named rather than counted: the notes, then the source
+/// files. One question and one Update for both, since a move is one thing to agree to.
+fn confirm_update(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
+    let what = match (plan.rewrites.is_empty(), plan.imports.is_empty()) {
+        (false, true) => "Links",
+        (true, false) => "Imports",
+        _ => "Links and Imports",
+    };
+    let update = format!("Update {what}");
     let dialog = alert(
-        "Update Links?",
-        &link_body(&plan.rewrites, plan.moves.len()),
+        &format!("{update}?"),
+        &update_body(&plan),
         &[
             ("cancel", "Cancel", adw::ResponseAppearance::Default),
             ("keep", "Rename Only", adw::ResponseAppearance::Default),
-            ("update", "Update Links", adw::ResponseAppearance::Suggested),
+            ("update", &update, adw::ResponseAppearance::Suggested),
         ],
         "update",
     );
@@ -687,37 +707,61 @@ fn confirm_links(ops: &Rc<Ops>, plan: RenamePlan, verb: &'static str) {
     });
 }
 
-/// Body of the "Update Links?" dialog: the count, then the paths, then what it stopped listing.
-/// `moving` is how many files and folders the move takes.
-fn link_body(rewrites: &[String], moving: usize) -> String {
-    let n = rewrites.len();
-    let what = match moving {
+/// Body of the update dialog: for the notes and then for the source files, the count, the
+/// paths, and what it stopped listing; last, whether some imports went unchecked.
+fn update_body(plan: &RenamePlan) -> String {
+    let what = match plan.moves.len() {
         1 => "this one",
         _ => "these files",
     };
-    let mut body = match n {
-        1 => format!("1 note links to {what}."),
-        _ => format!("{n} notes link to {what}."),
-    };
+    let code: Vec<String> = plan.imports.iter().map(|f| f.rel.clone()).collect();
+    let mut parts = Vec::new();
+    if !plan.rewrites.is_empty() {
+        let n = plan.rewrites.len();
+        let count = match n {
+            1 => format!("1 note links to {what}."),
+            _ => format!("{n} notes link to {what}."),
+        };
+        parts.push(listed(count, &plan.rewrites));
+    }
+    if !code.is_empty() {
+        let count = match code.len() {
+            1 => format!("1 source file imports {what}."),
+            n => format!("{n} source files import {what}."),
+        };
+        parts.push(listed(count, &code));
+    }
+    if !plan.unchecked.is_empty() {
+        parts.push(format!("{UNCHECKED}."));
+    }
+    parts.join("\n\n")
+}
+
+/// A count, then the paths under it, then what it stopped listing.
+fn listed(count: String, rels: &[String]) -> String {
+    let mut body = count;
     body.push('\n');
-    for rel in rewrites.iter().take(LISTED) {
+    for rel in rels.iter().take(LISTED) {
         body.push('\n');
         body.push_str(rel);
     }
-    if n > LISTED {
-        body.push_str(&format!("\nand {} more", n - LISTED));
+    if rels.len() > LISTED {
+        body.push_str(&format!("\nand {} more", rels.len() - LISTED));
     }
     body
 }
 
-/// Move the files, then report. A partly rewritten vault is a real outcome, so the notes that
+/// Move the files, then report. A partly rewritten vault is a real outcome, so the files that
 /// could not be updated are said out loud instead of being logged and forgotten.
-fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str) {
-    // What is being moved is flushed with the notes about to be rewritten: their tabs are about
+fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
+    // What is being moved is flushed with the files about to be rewritten: their tabs are about
     // to point at paths that no longer exist, and an unsaved buffer must not be the casualty.
     let mut dirty = plan.rewrites.clone();
+    dirty.extend(plan.imports.iter().map(|f| f.rel.clone()));
     dirty.extend(sources(&plan.moves));
     (ops.flush)(&dirty);
+    // With no dialog to have said so, the toast says the imports went unchecked.
+    let unchecked = asks_nothing(&plan) && !plan.unchecked.is_empty();
 
     // The write itself is N notes rewritten, one fsync each, and on a remote vault a round trip
     // per note: the same worker thread the plan was made on.
@@ -747,7 +791,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
                     make_parents(&vault, to)?;
                 }
                 vault
-                    .rename(&plan, update_links)
+                    .rename(&plan, update)
                     .map_err(|e| format!("Cannot rename {name}: {}", why(&e)))
             }
         })
@@ -769,6 +813,9 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
                 if hidden_now(&ops, &first) {
                     message.push_str(&format!("; {HIDDEN}"));
                 }
+                if unchecked {
+                    message.push_str(&format!(". {UNCHECKED}"));
+                }
                 (ops.toast)(&message);
             }
             Ok(Err(why)) => (ops.toast)(&why),
@@ -782,7 +829,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
 fn rename_message(verb: &str, name: &str, to: &str, failed: usize, unsaved: usize) -> String {
     let mut message = match failed {
         0 => format!("{verb} {name} to {to}"),
-        n => format!("{verb} {name}, but {n} notes could not be updated"),
+        n => format!("{verb} {name}, but {n} files could not be updated"),
     };
     match unsaved {
         0 => {}
@@ -1169,7 +1216,7 @@ mod tests {
         );
         assert_eq!(
             rename_message("Moved", "a.md", "x/b.md", 2, 0),
-            "Moved a.md, but 2 notes could not be updated"
+            "Moved a.md, but 2 files could not be updated"
         );
         assert_eq!(
             rename_message("Renamed", "a.md", "b.md", 0, 1),
@@ -1177,7 +1224,7 @@ mod tests {
         );
         assert_eq!(
             rename_message("Renamed", "a.md", "b.md", 2, 3),
-            "Renamed a.md, but 2 notes could not be updated; 3 notes have unsaved changes and were not reloaded"
+            "Renamed a.md, but 2 files could not be updated; 3 notes have unsaved changes and were not reloaded"
         );
     }
 
@@ -1218,16 +1265,39 @@ mod tests {
     }
 
     #[test]
-    fn link_body_counts_then_names_then_stops() {
-        assert!(link_body(&["a.md".into()], 1).starts_with("1 note links to this one."));
+    fn update_body_names_the_notes_then_the_code_then_what_went_unchecked() {
+        let plan =
+            |moves: usize, rewrites: &[&str], imports: &[&str], unchecked: &[&str]| RenamePlan {
+                moves: vec![("a".to_string(), "b".to_string()); moves],
+                rewrites: rewrites.iter().map(|r| r.to_string()).collect(),
+                imports: imports
+                    .iter()
+                    .map(|rel| accent_api::FileEdits {
+                        rel: rel.to_string(),
+                        etag: accent_api::Etag {
+                            mtime_ns: 0,
+                            size: 0,
+                            ino: 0,
+                        },
+                        edits: Vec::new(),
+                    })
+                    .collect(),
+                unchecked: unchecked.iter().map(|r| r.to_string()).collect(),
+            };
+        assert_eq!(
+            update_body(&plan(1, &["a.md"], &[], &[])),
+            "1 note links to this one.\n\na.md"
+        );
 
-        let body = link_body(&["a.md".into(), "b/c.md".into()], 2);
+        let body = update_body(&plan(2, &["a.md", "b/c.md"], &["src/lib.rs"], &["x.rs"]));
         assert!(body.starts_with("2 notes link to these files."));
-        assert!(body.contains("\nb/c.md"));
+        assert!(body.contains("\nb/c.md\n\n1 source file imports these files.\n\nsrc/lib.rs"));
+        assert!(body.ends_with("\n\nImports not checked: no language server is running."));
         assert!(!body.contains("more"));
 
         let many: Vec<String> = (0..25).map(|i| format!("n{i}.md")).collect();
-        let body = link_body(&many, 1);
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        let body = update_body(&plan(1, &many, &[], &[]));
         assert!(body.contains("n19.md"));
         assert!(!body.contains("n20.md"));
         assert!(body.ends_with("and 5 more"));

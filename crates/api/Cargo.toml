@@ -27,6 +27,8 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 # `ssh` names a control socket and the uploaded server binary by content hash; same version as
 # core so the two agree on one blake3.
 blake3 = "1"
+# Already built for `ignore`: a language server's `willRename` filters are globs.
+globset = "0.4"
 
 # The Android bindings. `crates/api` is the façade Android calls, so the annotations live here;
 # the cdylib that carries them is `android/ffi`, which a desktop build never touches.

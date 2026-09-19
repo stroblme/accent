@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 
 use crate::remote::Remote;
 use crate::vault::{Backend, remote_err};
-use crate::{Event, Local, LspConfig, Vault, locked};
+use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
 pub(crate) mod notes;
@@ -330,6 +330,16 @@ pub(crate) trait Language: Send + Sync {
     fn symbols(&self, rel: &str) -> Fut<'_, Vec<Symbol>>;
     fn references(&self, rel: &str, pos: Pos) -> Fut<'_, Vec<Location>>;
     fn folds(&self, rel: &str) -> Fut<'_, Vec<Fold>>;
+    /// Whether the provider wants to be asked before the file or folder at `abs` moves: a
+    /// language server's `willRename` filters.
+    fn renames(&self, _abs: &Path, _is_dir: bool) -> bool {
+        false
+    }
+    /// What has to change because these files move, `(old, new)` vault-relative: an import naming
+    /// a moved module. Asked before they move, because a server may look at the disk to answer.
+    fn will_rename(&self, _moves: Vec<(String, String)>) -> Fut<'_, Vec<FileEdits>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     /// The provider stopped answering (the server exited); the registry starts a fresh one.
     fn is_dead(&self) -> bool {
         false
@@ -483,6 +493,54 @@ impl Languages {
                 let _ = handle.await;
             }
         });
+    }
+
+    /// Ask every language server already running, whose project holds a moved path and whose
+    /// filters take it, what the moves mean for the code naming them — before anything moves.
+    /// Returns those edits and the moves some server was asked about.
+    ///
+    /// Only running sessions: a rename is no reason to start rust-analyzer, and a server that
+    /// was not running has nothing open that could be wrong. Each is given 5 s. Blocks on the
+    /// runtime, so it must not be called from one of its workers; the callers are a rename's
+    /// worker thread and the host's request threads.
+    pub(crate) fn will_rename(
+        &self,
+        moves: &[(String, String, bool)],
+    ) -> (Vec<FileEdits>, Vec<String>) {
+        let running: Vec<(PathBuf, Arc<dyn Language>)> = locked(&self.sessions)
+            .iter()
+            .filter_map(|((_, root), cell)| Some((root.clone(), cell.get()?.clone())))
+            .filter(|(_, provider)| !provider.is_dead())
+            .collect();
+        let (mut edits, mut asked) = (Vec::new(), Vec::new());
+        for (root, provider) in running {
+            let mine: Vec<(String, String)> = moves
+                .iter()
+                .filter(|(from, _, is_dir)| {
+                    Local::join(&self.root, from)
+                        .is_ok_and(|abs| abs.starts_with(&root) && provider.renames(&abs, *is_dir))
+                })
+                .map(|(from, to, _)| (from.clone(), to.clone()))
+                .collect();
+            if mine.is_empty() {
+                continue;
+            }
+            asked.extend(mine.iter().map(|(from, _)| from.clone()));
+            // The timer is made inside the runtime, which is the only place it has a clock.
+            let answer = accent_lsp::runtime().block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    provider.will_rename(mine),
+                )
+                .await
+            });
+            match answer {
+                Ok(Ok(found)) => edits.extend(found),
+                Ok(Err(e)) => tracing::warn!("asking about a rename: {e:#}"),
+                Err(_) => tracing::warn!("asking about a rename: no answer within 5 s"),
+            }
+        }
+        (edits, asked)
     }
 
     pub(crate) fn open_document(
