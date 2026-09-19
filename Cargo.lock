@@ -40,6 +40,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "chrono",
+ "globset",
  "serde",
  "serde_json",
  "tempfile",

@@ -233,7 +233,13 @@ impl Client {
                     "foldingRange": {"lineFoldingOnly": true},
                     "publishDiagnostics": {}
                 },
-                "workspace": {"configuration": true, "workspaceFolders": true},
+                // `willRename` alone: asked before a move, answered with the imports it breaks.
+                // No `documentChanges`, so the answer comes as plain `changes`.
+                "workspace": {
+                    "configuration": true,
+                    "workspaceFolders": true,
+                    "fileOperations": {"willRename": true}
+                },
                 "window": {"workDoneProgress": true}
             }
         });
@@ -565,6 +571,10 @@ mod tests {
             let server = tokio::spawn(async move {
                 let ask = recv(&mut theirs).await;
                 assert_eq!(ask["method"], "initialize");
+                assert_eq!(
+                    ask["params"]["capabilities"]["workspace"]["fileOperations"]["willRename"],
+                    true
+                );
                 send(
                     &mut their_write,
                     json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"capabilities": {
