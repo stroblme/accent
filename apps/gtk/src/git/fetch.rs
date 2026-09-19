@@ -21,7 +21,8 @@ impl Panel {
     /// every five minutes. It is not silent either: [`Panel::sync_state`] puts it on the Sync
     /// button's tooltip, beside the counts a failed fetch is the reason for.
     pub(super) fn autofetch(self: &Rc<Self>) {
-        if self.fetch_busy.get() {
+        // Nor while a sync runs: its pull fetches anyway, and two fetches race for the same refs.
+        if self.fetch_busy.get() || self.sync_busy.get() {
             return;
         }
         let Some(repo) = ({
@@ -33,9 +34,15 @@ impl Panel {
         self.fetch_busy.set(true);
         let vault = self.hooks.vault.clone();
         let panel = self.clone();
+        // As a command does: the process outlives the window until the fetch is stopped.
+        let hold = self.hooks.window.application().map(|app| app.hold());
         glib::spawn_future_local(async move {
             let fetched = gio::spawn_blocking(move || vault.git_fetch(&repo)).await;
+            drop(hold);
             panel.fetch_busy.set(false);
+            if panel.gone.get() {
+                return;
+            }
             let failed = !matches!(fetched, Ok(Ok(_)));
             if panel.fetch_failed.replace(failed) != failed {
                 panel.sync_state();

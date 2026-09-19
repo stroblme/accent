@@ -167,7 +167,8 @@ impl Bar {
     }
 
     /// A copy to or from the host has started (`running`) or ended: "Downloading a.pdf…". Its
-    /// size is not asked for, so it says that it runs rather than how far it has got.
+    /// size is not asked for, so it says that it runs rather than how far it has got. A close
+    /// waiting for git says so here too.
     pub fn set_transfer(&self, text: &str, running: bool) {
         {
             let mut transfers = self.transfers.borrow_mut();

@@ -26,7 +26,7 @@ use files::{
     bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
     bench_templates,
 };
-use git::{bench_git, bench_git_init, bench_git_press};
+use git::{bench_git, bench_git_close, bench_git_init, bench_git_press};
 use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
@@ -48,6 +48,7 @@ use tags::bench_tags;
 /// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
+/// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -346,6 +347,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(arg) = git {
+            if let Some(phase) = arg.strip_prefix("close:") {
+                return bench_git_close(&app, phase);
+            }
             return match (arg.strip_prefix("press:"), arg.as_str()) {
                 (Some(path), _) => bench_git_press(&app, path),
                 (None, "init") => bench_git_init(&app),
