@@ -702,6 +702,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let draw = Rc::downgrade(app);
     let exclude = Rc::downgrade(app);
     let cut = Rc::downgrade(app);
+    let moved = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -772,6 +773,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             }
         }),
         clip: std::cell::RefCell::new(None),
+        moved: Box::new(move |from, to| {
+            if let Some(app) = moved.upgrade() {
+                app.follow_rename(from, to);
+            }
+        }),
         close: Box::new(move |rel| {
             let Some(app) = close.upgrade() else { return };
             // A folder in the trash takes everything under it, so every document at or below the

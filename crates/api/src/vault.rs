@@ -226,6 +226,10 @@ impl Vault {
     }
 }
 
+/// How much longer than a round trip a remote move may take: a folder of a few thousand notes
+/// is an index query and a read each to plan, and an fsync per rewritten note to apply.
+const MOVE_BOUND: std::time::Duration = std::time::Duration::from_secs(50);
+
 /// Turn an RPC failure into the `anyhow` error every caller of the façade already handles.
 pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
     anyhow::anyhow!("{}", e.message)
@@ -351,8 +355,11 @@ methods! {
     /// paste inside a remote vault sends nothing over the link; overwriting is not its business,
     /// the caller naming a path nothing holds yet.
     io copy(from: ref str, to: ref str) -> ();
-    any plan_rename(from: ref str, to: ref str) -> RenamePlan;
-    any rename(plan: ref RenamePlan, rewrite_links: val bool) -> RenameReport;
+    /// A host whose `accent-cli serve` predates it answers "no such method" until `make server`
+    /// uploads the new one; the rename then says so rather than moving anything.
+    any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
+    any rename(plan: ref RenamePlan, rewrite_links: val bool) -> RenameReport,
+        bounded by MOVE_BOUND;
     any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
     any conflict_diff(original: ref str, conflict: ref str) -> Vec<DiffLine>;
     any template_target(template: ref str) -> Option<String>;

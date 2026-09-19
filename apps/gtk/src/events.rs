@@ -6,6 +6,23 @@ use super::*;
 const POLL: Duration = Duration::from_millis(120);
 
 impl App {
+    /// Point every tab at or under `from` at the same place under `to`. The watcher's rename
+    /// does this, and so does a move of our own before it reloads the notes it rewrote: those
+    /// are named by where they are now, which their tabs are not until they follow.
+    pub(crate) fn follow_rename(self: &Rc<Self>, from: &str, to: &str) {
+        let prefix = format!("{from}/");
+        for doc in self.docs() {
+            let key = doc.key();
+            if key == from {
+                doc.retarget(&self.root(), to);
+            } else if let Some(rest) = key.strip_prefix(&prefix) {
+                doc.retarget(&self.root(), &format!("{to}/{rest}"));
+            }
+        }
+        accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), from, to);
+        self.sync_active();
+    }
+
     fn on_event(self: &Rc<Self>, event: Event) {
         // Anything that touched a file may have changed what git says about it. The pane
         // debounces, so a burst of watcher events still costs one `git status` — and only a walk
@@ -216,19 +233,7 @@ impl App {
                     }
                 }
             }
-            Event::FileRenamed { from, to } => {
-                let prefix = format!("{from}/");
-                for doc in self.docs() {
-                    let key = doc.key();
-                    if key == from {
-                        doc.retarget(&self.root(), &to);
-                    } else if let Some(rest) = key.strip_prefix(&prefix) {
-                        doc.retarget(&self.root(), &format!("{to}/{rest}"));
-                    }
-                }
-                accent_core::config::rename_in(&mut self.recent_notes.borrow_mut(), &from, &to);
-                self.sync_active();
-            }
+            Event::FileRenamed { from, to } => self.follow_rename(&from, &to),
             Event::Conflict { original, .. } => self.sync_conflict_banner(&original, None),
             // A repository moved under us: a commit in a shell, a checkout, a rebase. The pane
             // asks git what changed; nothing else in the window is affected.

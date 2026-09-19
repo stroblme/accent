@@ -2,9 +2,9 @@
 
 use super::{Backlink, Index, PdfLink};
 use crate::markdown;
-use crate::path::{FileType, file_type, linked_path};
+use crate::path::{self, FileType, file_type, linked_path};
 use anyhow::Result;
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
 
 /// Obsidian's rule as one subquery: of the files answering to a link's key, the shortest
@@ -130,6 +130,34 @@ impl Index {
                 byte_end: r.get(2)?,
             })
         })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `(key, file)` for every link in the note `src` that resolves: what each way the note
+    /// names a file meant, keyed the way [`markdown::rewrite_moved`] looks them up. Asked before
+    /// a move, while the index still describes the vault as it was.
+    pub fn resolved_links(&self, src: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT l.key, t.rel_path FROM links l
+             JOIN files s ON s.id = l.src_file
+             JOIN files t ON t.id = l.resolved_file
+             WHERE s.rel_path = ?1",
+        )?;
+        let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The notes at `rel` or under it that hold a markdown link which resolves. Such a link is
+    /// written relative to its note, so moving the note alone can leave it pointing at nothing.
+    pub fn markdown_link_sources(&self, rel: &str) -> Result<Vec<String>> {
+        let (lo, hi) = path::subtree_range(rel);
+        let mut st = self.conn.prepare_cached(
+            "SELECT DISTINCT s.rel_path FROM files s JOIN links l ON l.src_file = s.id
+             WHERE (s.rel_path = ?1 OR (s.rel_path >= ?2 AND s.rel_path < ?3))
+               AND l.kind = 2 AND l.resolved_file IS NOT NULL
+             ORDER BY s.rel_path",
+        )?;
+        let rows = st.query_map(params![rel, lo, hi], |r| r.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

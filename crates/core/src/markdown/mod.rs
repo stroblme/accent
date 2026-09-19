@@ -13,7 +13,7 @@ mod spans;
 pub use html::{math_errors, mathml, to_html};
 pub use links::{
     heading_for, is_image, link_key, path_keys, pdf_anchor, percent_decode, percent_encode,
-    rewrite_links, rewrite_targets, slugs, strip_ext,
+    rewrite_moved, slugs, strip_ext,
 };
 
 use frontmatter::{frontmatter, scan_tags};

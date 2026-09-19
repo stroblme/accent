@@ -89,6 +89,18 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Every file at `rel` or under it, without the folders: what moving `rel` takes along, one
+    /// by one. `rel` itself when it is a file.
+    pub fn files_under(&self, rel: &str) -> Result<Vec<String>> {
+        let (lo, hi) = path::subtree_range(rel);
+        let mut st = self.conn.prepare_cached(
+            "SELECT rel_path FROM files
+              WHERE kind <> 0 AND (rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3))",
+        )?;
+        let rows = st.query_map(params![rel, lo, hi], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Every markdown note's rel_path, for the file switcher's fuzzy match. What `[[` completes
     /// against is [`note_and_pdf_paths`](Self::note_and_pdf_paths), a wikilink naming a PDF as
     /// readily as a note.
