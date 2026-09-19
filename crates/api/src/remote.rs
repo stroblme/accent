@@ -80,22 +80,23 @@ pub enum Pushed {
     Kept(PathBuf, String),
 }
 
-/// How many `(drawn)` copies of one document the host may already hold before a refusal gives up
+/// How many `(edited)` copies of one document the host may already hold before a refusal gives up
 /// and keeps the bytes here instead. Each one costs a `stat` round trip to rule out, and twenty
 /// unread copies of the same document is a reader with a different problem.
-const DRAWN_COPIES: usize = 20;
+const EDITED_COPIES: usize = 20;
 
-/// `notes/doc.pdf` -> `notes/doc (drawn).pdf`, and `notes/doc (drawn 2).pdf` for the next one:
-/// where a copy the host would not take over the original goes instead.
-pub fn drawn_name(rel: &str, nth: usize) -> String {
+/// `notes/doc.pdf` -> `notes/doc (edited).pdf`, and `notes/doc (edited 2).pdf` for the next one:
+/// where a copy the host would not take over the original goes instead, whether it was drawn on
+/// or had pages moved, put in or taken out.
+pub fn edited_name(rel: &str, nth: usize) -> String {
     let (stem, ext) = match rel.rsplit_once('.') {
         // A dot in a directory's name is not this file's extension.
         Some((stem, ext)) if !ext.contains('/') => (stem, format!(".{ext}")),
         _ => (rel, String::new()),
     };
     match nth {
-        1 => format!("{stem} (drawn){ext}"),
-        n => format!("{stem} (drawn {n}){ext}"),
+        1 => format!("{stem} (edited){ext}"),
+        n => format!("{stem} (edited {n}){ext}"),
     }
 }
 
@@ -427,10 +428,10 @@ impl Remote {
     /// event does not pull our bytes back over a page that is still being drawn on. On a mismatch
     /// it goes [beside](Self::push_beside) the original instead.
     ///
-    /// `drawn` is the copy an earlier refusal of this same document already left on the host, so
+    /// `edited` is the copy an earlier refusal of this same document already left on the host, so
     /// that a reader who keeps drawing writes that one again rather than a numbered copy per
     /// stroke.
-    pub fn push(&self, rel: &str, drawn: Option<&str>) -> std::io::Result<Pushed> {
+    pub fn push(&self, rel: &str, edited: Option<&str>) -> std::io::Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -447,7 +448,7 @@ impl Remote {
             .ok()
             .and_then(|b| serde_json::from_slice::<crate::Etag>(&b).ok());
         if current != fetched {
-            return Ok(self.push_beside(&dest, rel, drawn));
+            return Ok(self.push_beside(&dest, rel, edited));
         }
         self.upload(&dest, rel)?;
         if let Ok(Some(now)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
@@ -456,20 +457,20 @@ impl Remote {
         Ok(Pushed::Sent)
     }
 
-    /// The refusal's other half: the written-on copy goes up as `<name> (drawn).pdf` in the same
+    /// The refusal's other half: the written-on copy goes up as `<name> (edited).pdf` in the same
     /// folder, the way a note's conflict copy lands in the vault, and the original is not touched.
     /// It is then a file like any other — the tree lists it, it opens and it syncs — so the reader
     /// can hold the two against each other and delete one, where a copy left in the ssh cache was
     /// reachable only through the text of a toast.
     ///
     /// A second conflict on the same document takes the next free number rather than writing over
-    /// `(drawn)`, whose ink nobody has looked at yet; only the refusals of one conflict, which
-    /// carry `drawn`, write the same copy again. If not even the copy can go up, the bytes stay
+    /// `(edited)`, whose changes nobody has looked at yet; only the refusals of one conflict, which
+    /// carry `edited`, write the same copy again. If not even the copy can go up, the bytes stay
     /// here — the one place a `.kept.pdf` still appears — and the toast says so.
-    fn push_beside(&self, dest: &Path, rel: &str, drawn: Option<&str>) -> Pushed {
-        let named = match drawn {
+    fn push_beside(&self, dest: &Path, rel: &str, edited: Option<&str>) -> Pushed {
+        let named = match edited {
             Some(name) => Ok(name.to_string()),
-            None => self.free_drawn_name(rel),
+            None => self.free_edited_name(rel),
         };
         match named.and_then(|name| self.upload(dest, &name).map(|()| name)) {
             Ok(name) => Pushed::Conflict(name),
@@ -477,10 +478,10 @@ impl Remote {
         }
     }
 
-    /// The first of `<name> (drawn).pdf`, `<name> (drawn 2).pdf`, … the host does not hold.
-    fn free_drawn_name(&self, rel: &str) -> std::io::Result<String> {
-        for nth in 1..=DRAWN_COPIES {
-            let name = drawn_name(rel, nth);
+    /// The first of `<name> (edited).pdf`, `<name> (edited 2).pdf`, … the host does not hold.
+    fn free_edited_name(&self, rel: &str) -> std::io::Result<String> {
+        for nth in 1..=EDITED_COPIES {
+            let name = edited_name(rel, nth);
             let held: Option<crate::Etag> = self
                 .call("stat", json!([&name]))
                 .map_err(RpcError::io_error)?;
@@ -490,7 +491,7 @@ impl Remote {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
-            format!("{DRAWN_COPIES} drawn copies of it are already there"),
+            format!("{EDITED_COPIES} edited copies of it are already there"),
         ))
     }
 
@@ -901,7 +902,7 @@ fn mb(bytes: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{drawn_name, kept_path};
+    use super::{edited_name, kept_path};
     use std::path::Path;
 
     /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind
@@ -916,11 +917,11 @@ mod tests {
     /// The conflict copy sits in the original's folder, under the original's extension, so the
     /// tree lists it beside what it came from and it opens in the same reader.
     #[test]
-    fn a_drawn_copy_is_named_beside_the_original() {
-        assert_eq!(drawn_name("a/doc.pdf", 1), "a/doc (drawn).pdf");
-        assert_eq!(drawn_name("a/doc.pdf", 2), "a/doc (drawn 2).pdf");
-        assert_eq!(drawn_name("doc", 1), "doc (drawn)");
+    fn an_edited_copy_is_named_beside_the_original() {
+        assert_eq!(edited_name("a/doc.pdf", 1), "a/doc (edited).pdf");
+        assert_eq!(edited_name("a/doc.pdf", 2), "a/doc (edited 2).pdf");
+        assert_eq!(edited_name("doc", 1), "doc (edited)");
         // A dot in a folder's name is not the file's extension.
-        assert_eq!(drawn_name("a.d/doc", 1), "a.d/doc (drawn)");
+        assert_eq!(edited_name("a.d/doc", 1), "a.d/doc (edited)");
     }
 }

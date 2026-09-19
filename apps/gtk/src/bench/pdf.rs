@@ -228,7 +228,7 @@ fn vault_pages(app: &Rc<App>, key: &str) -> String {
 
 /// The etag gate on the way back to a host: a page appended to a document whose host copy has
 /// moved since it was fetched must not overwrite it, and the ink must not be dropped either — it
-/// goes beside the original in the vault, as `<name> (drawn).pdf`.
+/// goes beside the original in the vault, as `<name> (edited).pdf`.
 ///
 /// The move is made by stamping the cached copy with an etag the host never had, rather than by
 /// really writing on the host: a host-side write is reported by its own watcher, and the refetch
@@ -261,13 +261,13 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
         );
         let kept = pdf.path().with_extension("kept.pdf");
         let (first, second) = (
-            accent_api::remote::drawn_name(&key, 1),
-            accent_api::remote::drawn_name(&key, 2),
+            accent_api::remote::edited_name(&key, 1),
+            accent_api::remote::edited_name(&key, 2),
         );
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
         written(&app).await;
         println!(
-            "bench pdf stale refused pages={} in_vault {} drawn {} said={} {:?} kept={}",
+            "bench pdf stale refused pages={} in_vault {} edited {} said={} {:?} kept={}",
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),
@@ -278,7 +278,7 @@ pub(super) fn bench_pdf_stale(app: &Rc<App>, rel: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page", None);
         written(&app).await;
         println!(
-            "bench pdf stale again pages={} in_vault {} drawn {} said={} numbered={}",
+            "bench pdf stale again pages={} in_vault {} edited {} said={} numbered={}",
             pdf.page_count(),
             vault_pages(&app, &key),
             vault_pages(&app, &first),

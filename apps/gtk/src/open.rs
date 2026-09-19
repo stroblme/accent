@@ -363,32 +363,32 @@ impl App {
             return;
         }
         let (weak_app, weak_pdf) = (Rc::downgrade(self), Rc::downgrade(pdf));
-        let drawn = pdf.conflict_copy();
+        let edited = pdf.conflict_copy();
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let sent = gio::spawn_blocking(move || remote.push(&asked, drawn.as_deref())).await;
+            let sent = gio::spawn_blocking(move || remote.push(&asked, edited.as_deref())).await;
             let (Some(app), Some(pdf)) = (weak_app.upgrade(), weak_pdf.upgrade()) else {
                 return;
             };
             let what = format!("save {}", doc::file_name(&key));
             match sent {
                 Ok(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
-                // The host's copy moved while this one was being drawn on. Overwriting it would
-                // lose whatever moved it, so the drawing went beside it in the vault instead and
+                // The host's copy moved while this one was being changed. Overwriting it would
+                // lose whatever moved it, so the changes went beside it in the vault instead and
                 // the reader is told what it is called — once, however long they keep drawing.
                 Ok(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
                     if pdf.told_conflict(Some(copy.clone())) {
                         app.cannot(
                             &what,
                             format!(
-                                "it changed on {}; the drawing is saved as {}",
+                                "it changed on {}; your changes are saved as {}",
                                 app.host(),
                                 doc::file_name(&copy)
                             ),
                         );
                     }
                 }
-                // Not even the copy would go up. The drawing is on this machine only, so say
+                // Not even the copy would go up. The changes are on this machine only, so say
                 // where before anything else writes over it.
                 Ok(Ok(accent_api::remote::Pushed::Kept(at, why))) => {
                     if pdf.told_conflict(None) {
@@ -396,7 +396,7 @@ impl App {
                             &what,
                             format!(
                                 "it changed on {} and the copy beside it would not go either \
-                                 ({why}); the drawing is kept at {}",
+                                 ({why}); your changes are kept at {}",
                                 app.host(),
                                 at.display()
                             ),
