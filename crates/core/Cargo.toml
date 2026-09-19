@@ -31,6 +31,9 @@ blake3 = "1"
 toml = "1"
 similar = { version = "3", default-features = false, features = ["text", "inline"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+# `setsid` and `kill` for git's process group: a git stopped part way takes its hooks and its ssh
+# with it (`git::bounded`).
+libc = "0.2"
 pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
 [dev-dependencies]
