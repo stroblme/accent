@@ -10,13 +10,21 @@ use accent_core::walk::FileKind;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
 /// The style class a row a Ctrl+click has marked carries, defined in `build::install_chrome_css`.
 const MARKED: &str = "accent-marked";
+
+/// The rows a Ctrl+click or a Shift+click has marked, by path, each with whether it is a folder.
+///
+/// A marked folder stands for everything under it, shut or open, so nothing under one is ever in
+/// the set as well ([`fileops::topmost`](crate::fileops::topmost)): its rows are drawn marked when
+/// it is opened, and a batch acts on the set exactly as it is. A folder shut with thousands of
+/// files in it is one entry, not thousands.
+type Marks = BTreeMap<String, bool>;
 
 /// One row of the tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,11 +243,11 @@ pub struct Tree {
     ignored: Rc<RefCell<Ignored>>,
     /// The rows a Cut is waiting to move, shared with the factory the same way.
     cut: Rc<RefCell<HashSet<String>>>,
-    /// The rows a Ctrl+click has marked, which is the set the context menu acts on when the
-    /// right-click lands on one of them. Sorted, so the menu and the toasts name them in the
-    /// order the tree lists them. Shared with the factory like [`cut`](Self::cut): a marked row
-    /// scrolled out of view and back has to come back marked.
-    marked: Rc<RefCell<BTreeSet<String>>>,
+    /// The marked rows, which are the set the context menu acts on when the right-click lands on
+    /// one of them. Sorted, so the menu and the toasts name them in path order. Shared with the
+    /// factory like [`cut`](Self::cut): a marked row scrolled out of view and back has to come
+    /// back marked.
+    marked: Rc<RefCell<Marks>>,
     /// The open file, which the selection follows. Shared with the pointer-leave handler: the
     /// list selects rows on hover (see `build`), so the selection has to be put back whenever
     /// the pointer goes away again.
@@ -278,33 +286,38 @@ impl Tree {
         rebind(&self.view);
     }
 
-    /// The rows a Ctrl+click has marked, each with whether it is a directory, in path order.
-    ///
-    /// ponytail: the kind is read back off the rows the model holds right now, the set itself
-    /// keeping paths alone. A marked row whose folder has been collapsed again since is reported
-    /// as a file, which decides nothing but where a `(copy)` mark would go.
+    /// The marked rows, each with whether it is a directory, in path order. None is inside
+    /// another, a marked folder standing for what it holds.
     pub fn marked(&self) -> Vec<(String, bool)> {
         self.marked
             .borrow()
             .iter()
-            .map(|rel| (rel.clone(), self.is_dir(rel)))
+            .map(|(rel, is_dir)| (rel.clone(), *is_dir))
             .collect()
     }
 
-    fn is_dir(&self, rel: &str) -> bool {
-        find_row(&self.model, rel)
-            .and_then(|row| row.item())
-            .as_ref()
-            .and_then(decode)
-            .is_some_and(|row| row.is_dir())
+    /// Whether `rel` is drawn marked: marked itself, or inside a marked folder.
+    pub fn is_marked(&self, rel: &str) -> bool {
+        is_marked(&self.marked.borrow(), rel)
     }
 
-    /// Mark `rel`, or take the mark off it again.
+    /// What a Ctrl+click on the row `rel` does: mark it, or take the mark off it again.
     pub fn toggle_mark(&self, rel: &str) {
+        let row = find_row(&self.model, rel).and_then(|row| row.item());
+        let Some(row) = row.as_ref().and_then(decode) else {
+            return;
+        };
         let mut marked = self.marked.borrow_mut();
-        if !marked.remove(rel) {
-            marked.insert(rel.to_string());
-        }
+        toggle(&mut marked, &row, &self.cache);
+        redraw_marks(&self.view, &marked);
+    }
+
+    /// What a Shift+click on the row `to` does with `from` as the last row clicked without Shift:
+    /// mark every row between them, replacing the marks, or with Ctrl held too (`add`) adding
+    /// to them.
+    pub fn mark_range(&self, from: &str, to: &str, add: bool) {
+        let mut marked = self.marked.borrow_mut();
+        mark_range(&mut marked, &self.model, from, to, add);
         redraw_marks(&self.view, &marked);
     }
 
@@ -539,6 +552,86 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
     expander.list_row()?.item().as_ref().and_then(decode)
 }
 
+/// Whether `rel` is marked itself or inside a marked folder.
+fn is_marked(marks: &Marks, rel: &str) -> bool {
+    !marks.is_empty()
+        && (marks.contains_key(rel) || ancestors(rel).any(|dir| marks.contains_key(dir)))
+}
+
+/// Add rows to the marks, keeping only the top-most: what a folder being marked already takes
+/// along is not marked again.
+fn add_marks(marks: &mut Marks, rows: impl IntoIterator<Item = (String, bool)>) {
+    marks.extend(rows);
+    let all: Vec<(String, bool)> = std::mem::take(marks).into_iter().collect();
+    marks.extend(crate::fileops::topmost(&all));
+}
+
+/// A Ctrl+click on `row`: its mark on, or off again.
+///
+/// Off inside a marked folder, that folder gives way to what it holds, level by level down to
+/// the row, which alone is left out: the rest of the folder stays marked. The levels are the
+/// tree's own listings, which every folder above a row on screen has; what they leave out — a
+/// dot-named file while Show Hidden Files is off — is then no longer marked.
+fn toggle(marks: &mut Marks, row: &Row, cache: &RefCell<HashMap<String, gio::ListStore>>) {
+    if !is_marked(marks, &row.rel) {
+        return add_marks(marks, [(row.rel.clone(), row.is_dir())]);
+    }
+    if marks.remove(&row.rel).is_some() {
+        return;
+    }
+    let Some(top) = ancestors(&row.rel).find(|dir| marks.contains_key(*dir)) else {
+        return;
+    };
+    marks.remove(top);
+    let mut dir = top.to_string();
+    loop {
+        let mut next = None;
+        for (child, is_dir) in listed(cache, &dir) {
+            if ancestors(&row.rel).any(|above| above == child) {
+                next = Some(child);
+            } else if child != row.rel {
+                marks.insert(child, is_dir);
+            }
+        }
+        match next {
+            Some(child) => dir = child,
+            None => break,
+        }
+    }
+}
+
+/// The rows the tree lists in `dir`, as it has them, leaving out the ones the index does not
+/// hold: those are never marked.
+fn listed(cache: &RefCell<HashMap<String, gio::ListStore>>, dir: &str) -> Vec<(String, bool)> {
+    let Some(store) = cache.borrow().get(dir).cloned() else {
+        return Vec::new();
+    };
+    (0..store.n_items())
+        .filter_map(|i| store.item(i).as_ref().and_then(decode))
+        .filter(|row| row.indexed)
+        .map(|row| (row.rel.clone(), row.is_dir()))
+        .collect()
+}
+
+/// A Shift+click: every row from `from` to `to`, both included, in the order the tree lists them,
+/// replacing the marks or added to them. A shut folder in between is marked whole.
+fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &str, add: bool) {
+    let at = |rel| find_row(model, rel).map(|row| row.position());
+    let (Some(a), Some(b)) = (at(from), at(to)) else {
+        return;
+    };
+    let rows: Vec<(String, bool)> = (a.min(b)..=a.max(b))
+        .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
+        .filter_map(|item| decode(&item))
+        .filter(|row| row.indexed)
+        .map(|row| (row.rel.clone(), row.is_dir()))
+        .collect();
+    if !add {
+        marks.clear();
+    }
+    add_marks(marks, rows);
+}
+
 /// Put the mark on the rows on screen that carry it and take it off the rest.
 ///
 /// Written straight onto the row widgets rather than through [`rebind`]: a factory reset recreates
@@ -546,7 +639,7 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
 /// with the widget pulled out from under it the note under a plain click stopped opening
 /// (`ACCENT_BENCH_MENU=press:<rel>` and an XTEST click, 2026-09-14). The factory reads the set on
 /// every bind all the same, which is what brings a mark back with a row scrolled out of view.
-fn redraw_marks(view: &gtk::ListView, marked: &BTreeSet<String>) {
+fn redraw_marks(view: &gtk::ListView, marked: &Marks) {
     for expander in expanders(view) {
         let rel = expander
             .list_row()
@@ -557,7 +650,7 @@ fn redraw_marks(view: &gtk::ListView, marked: &BTreeSet<String>) {
         set_class(
             &expander,
             MARKED,
-            rel.is_some_and(|rel| marked.contains(&rel)),
+            rel.is_some_and(|rel| is_marked(marked, &rel)),
         );
     }
 }
@@ -663,17 +756,37 @@ fn move_content(rel: &str) -> gdk::ContentProvider {
     gdk::ContentProvider::for_value(&gtk::StringObject::new(rel).to_value())
 }
 
-/// What a dropped row is handed to: the path it came from, and the path it goes to.
-type Move = Rc<dyn Fn(&str, &str)>;
+/// What a drop is handed to: each path a drag carried, and the path it goes to.
+type Move = Rc<dyn Fn(Vec<(String, String)>)>;
 
-/// The path a tree drag is carrying, if it is one.
-fn dragged(value: &glib::Value) -> Option<String> {
-    Some(value.get::<gtk::StringObject>().ok()?.string().to_string())
+/// The paths a tree drag is carrying: one row, or the marked set a marked row carries along
+/// (a `GtkStringList`, which no pane takes either — there is no one note in it to open).
+fn dragged(value: &glib::Value) -> Vec<String> {
+    if let Ok(one) = value.get::<gtk::StringObject>() {
+        return vec![one.string().to_string()];
+    }
+    value.get::<gtk::StringList>().map_or_else(
+        |_| Vec::new(),
+        |list| {
+            (0..list.n_items())
+                .filter_map(|i| list.string(i))
+                .map(|rel| rel.to_string())
+                .collect()
+        },
+    )
 }
 
-/// A drop target that moves the dragged file into the directory `dir` answers with for the
+/// What dropping `paths` into `dir` moves: each of them that has somewhere to go there.
+fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
+    paths
+        .iter()
+        .filter_map(|from| Some((from.clone(), crate::fileops::move_dest(from, dir)?)))
+        .collect()
+}
+
+/// A drop target that moves the dragged files into the directory `dir` answers with for the
 /// pointer position — `Some("")` being the vault root — and refuses the drop where it answers
-/// `None`.
+/// `None`, or where none of them has anywhere to go there.
 ///
 /// The refusal happens while the pointer is still moving rather than after the drop, so a row
 /// that cannot take what is over it never lights up: a folder onto itself, into what is under it,
@@ -683,17 +796,20 @@ fn move_target(
     on_move: &Move,
     dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
 ) -> gtk::DropTarget {
-    let target = gtk::DropTarget::new(gtk::StringObject::static_type(), gdk::DragAction::MOVE);
-    // The dragged path has to be readable while the drag is still in flight, or the decision
+    let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::MOVE);
+    target.set_types(&[
+        gtk::StringObject::static_type(),
+        gtk::StringList::static_type(),
+    ]);
+    // The dragged paths have to be readable while the drag is still in flight, or the decision
     // could only be taken once the drop had already happened.
     target.set_preload(true);
     let dir = Rc::new(dir);
     let planned = {
         let dir = dir.clone();
         move |target: &gtk::DropTarget, x, y| {
-            let from = target.value().as_ref().and_then(dragged)?;
-            let to = crate::fileops::move_dest(&from, &dir(target, x, y)?)?;
-            Some((from, to))
+            let moves = moves_into(&dragged(&target.value()?), &dir(target, x, y)?);
+            (!moves.is_empty()).then_some(moves)
         }
     };
     let planned = Rc::new(planned);
@@ -715,16 +831,15 @@ fn move_target(
     target.connect_drop(move |target, value, x, y| {
         // The value is handed over here rather than read back off the target, which is the one
         // place it is certain to have arrived.
-        let (Some(from), Some(dir)) = (dragged(value), dir(target, x, y)) else {
+        let Some(dir) = dir(target, x, y) else {
             return false;
         };
-        match crate::fileops::move_dest(&from, &dir) {
-            Some(to) => {
-                on_move(&from, &to);
-                true
-            }
-            None => false,
+        let moves = moves_into(&dragged(value), &dir);
+        if moves.is_empty() {
+            return false;
         }
+        on_move(moves);
+        true
     });
     target
 }
@@ -770,22 +885,22 @@ fn root_row(label: &str) -> gtk::Box {
 /// Build the tree. `show_hidden` is Show Hidden Files as the window opens. `on_activate` is called
 /// with the rel_path of an activated non-directory row, `on_drag` with `true` while a row is being
 /// dragged out of the tree and `false` when it is over, so the panes can put their drop zones up
-/// for the duration, and `on_move` with the path a row was dragged from and the path it was
-/// dropped onto.
+/// for the duration, and `on_move` with each path a drag carried and the path it was dropped
+/// onto.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
     show_hidden: bool,
     on_activate: impl Fn(char, &str) + 'static,
     on_drag: impl Fn(bool) + 'static,
-    on_move: impl Fn(&str, &str) + 'static,
+    on_move: impl Fn(Vec<(String, String)>) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
     let show_hidden = ShowHidden::new(Cell::new(show_hidden));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
-    let marked: Rc<RefCell<BTreeSet<String>>> = Rc::new(RefCell::new(BTreeSet::new()));
+    let marked: Rc<RefCell<Marks>> = Rc::new(RefCell::new(Marks::new()));
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
         let (vault, cache, asked, show_hidden) = (
             vault.clone(),
@@ -813,6 +928,7 @@ pub fn build(
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
     let bind_marked = marked.clone();
+    let drag_marked = marked.clone();
     let row_moves = moves.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
@@ -849,13 +965,21 @@ pub fn build(
         let source = gtk::DragSource::builder()
             .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
             .build();
-        source.connect_prepare(|source, _, _| {
+        let marked = drag_marked.clone();
+        source.connect_prepare(move |source, _, _| {
             let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
             let row = expander.list_row()?.item().as_ref().and_then(decode)?;
             // Nothing is dragged out of a tree the index does not hold: the move would happen on
             // disk and the index would go on listing the file where it used to be.
             if !row.indexed {
                 return None;
+            }
+            // A marked row carries the whole set, unless the set is that row alone.
+            let marks = marked.borrow();
+            if is_marked(&marks, &row.rel) && !(marks.len() == 1 && marks.contains_key(&row.rel)) {
+                let set: Vec<&str> = marks.keys().map(String::as_str).collect();
+                let set = gtk::StringList::new(&set);
+                return Some(gdk::ContentProvider::for_value(&set.to_value()));
             }
             let moving = move_content(&row.rel);
             // A directory offers the move type alone: it has no single note to open, so a pane
@@ -931,7 +1055,11 @@ pub fn build(
         }
         // On the expander rather than on the label: a mark is about the row, not about its name,
         // and the expander is the one widget here that spans the whole of it.
-        set_class(&expander, MARKED, bind_marked.borrow().contains(&item.rel));
+        set_class(
+            &expander,
+            MARKED,
+            is_marked(&bind_marked.borrow(), &item.rel),
+        );
     });
 
     let selection = gtk::SingleSelection::new(Some(model.clone()));
@@ -942,47 +1070,78 @@ pub fn build(
     // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
     // so a click never costs anything you did not ask for.
     view.set_single_click_activate(true);
-    // Ctrl+click marks a row instead of opening it, which is the only multiple selection the tree
-    // has: the context menu acts on the whole set when the right-click lands on one of them. The
-    // gesture runs in the capture phase and claims the press, so the list never sees it and
-    // neither a note opens nor a folder toggles. A click with nothing held is the reader saying
-    // "this one", so it forgets the set again — and so does a click on the blank area below the
-    // last row. Rows the index does not hold are never marked: nothing the menu offers may happen
-    // inside a tree nothing is watching.
+    // Ctrl+click marks a row instead of opening it, and Shift+click marks every row from the last
+    // one clicked without Shift to this one, replacing the marks — or with Ctrl held as well,
+    // adding to them. That is the only multiple selection the tree has: the context menu acts on
+    // the whole set when the right-click lands on one of them, Delete trashes it and a drag of one
+    // of its rows carries it. The gesture runs in the capture phase and claims those presses, so
+    // the list never sees them and neither a note opens nor a folder toggles. A click with
+    // nothing held is the reader saying "this one", so it forgets the set again — and so does a
+    // click on the blank area below the last row. Rows the index does not hold are never marked:
+    // nothing the menu offers may happen inside a tree nothing is watching.
     let marking = gtk::GestureClick::builder()
         .button(gdk::BUTTON_PRIMARY)
         .propagation_phase(gtk::PropagationPhase::Capture)
         .build();
+    // Where a Shift+click's range starts: the last row clicked without Shift.
+    let anchor = Rc::new(RefCell::new(None::<String>));
+    let active = Rc::new(RefCell::new(None::<String>));
     marking.connect_pressed({
-        let marked = marked.clone();
+        let (marked, active, cache, model) =
+            (marked.clone(), active.clone(), cache.clone(), model.clone());
         move |gesture, _, x, y| {
             let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
                 return;
             };
-            let ctrl = gesture
-                .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK);
+            let held = gesture.current_event_state();
+            let ctrl = held.contains(gdk::ModifierType::CONTROL_MASK);
+            let shift = held.contains(gdk::ModifierType::SHIFT_MASK);
             let row = row_at(&view, x, y).filter(|row| row.indexed);
-            match (ctrl, row) {
-                (true, Some(row)) => {
-                    let mut set = marked.borrow_mut();
-                    if !set.remove(&row.rel) {
-                        set.insert(row.rel);
-                    }
+            let mut marks = marked.borrow_mut();
+            match row {
+                Some(row) if shift => {
+                    // From the anchor while it is on screen, else from the open file's row,
+                    // else the row alone; Shift leaves the anchor where it is.
+                    let shown = |rel: &String| find_row(&model, rel).is_some();
+                    let from = (anchor.borrow().clone().filter(shown))
+                        .or_else(|| active.borrow().clone().filter(shown))
+                        .unwrap_or_else(|| row.rel.clone());
+                    mark_range(&mut marks, &model, &from, &row.rel, ctrl);
                     gesture.set_state(gtk::EventSequenceState::Claimed);
-                    redraw_marks(&view, &set);
                 }
-                _ if !marked.borrow().is_empty() => {
-                    let mut set = marked.borrow_mut();
-                    set.clear();
-                    redraw_marks(&view, &set);
+                Some(row) if ctrl => {
+                    toggle(&mut marks, &row, &cache);
+                    *anchor.borrow_mut() = Some(row.rel);
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
-                _ => {}
+                // A press on a marked row may start a drag that carries the set, so the marks
+                // stay until it turns out to be a click, which the list activates.
+                Some(row) if is_marked(&marks, &row.rel) => {
+                    *anchor.borrow_mut() = Some(row.rel);
+                    return;
+                }
+                row => {
+                    *anchor.borrow_mut() = row.map(|row| row.rel);
+                    if marks.is_empty() {
+                        return;
+                    }
+                    marks.clear();
+                }
             }
+            redraw_marks(&view, &marks);
         }
     });
     view.add_controller(marking);
+    let activate_marked = marked.clone();
     view.connect_activate(move |view, pos| {
+        // A plain click on a marked row lets the marks go, as one anywhere else already has.
+        {
+            let mut marks = activate_marked.borrow_mut();
+            if !marks.is_empty() {
+                marks.clear();
+                redraw_marks(view, &marks);
+            }
+        }
         let Some(row) = view
             .model()
             .and_then(|m| m.item(pos))
@@ -1003,7 +1162,6 @@ pub fn build(
     // the selection is what the pointer leaves behind as it crosses the list — and it is also
     // the highlight that says which file is open. The two are the same thing, so the open file's
     // row is put back the moment the pointer goes away, instead of a row nobody chose staying lit.
-    let active = Rc::new(RefCell::new(None::<String>));
     let pinned = Rc::new(RefCell::new(None::<String>));
     // Where the highlight belongs when nothing is pointing at a row: the row a context menu is
     // open over while there is one, and otherwise the open file.

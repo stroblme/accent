@@ -746,6 +746,16 @@ pub fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Proceed;
             };
             let row = tree.selected();
+            // Delete takes the marked set when there is one, as the menu over it does, whichever
+            // row the highlight is on.
+            let marked = tree.marked();
+            if key == gdk::Key::Delete
+                && !marked.is_empty()
+                && let Some(ops) = app.ops()
+            {
+                fileops::trash_all(ops, marked.into_iter().map(|(rel, _)| rel).collect());
+                return glib::Propagation::Stop;
+            }
             // The same rule the pointer path follows: a row the index does not hold is listed and
             // opened, never changed. Both keys stop here rather than falling through to the
             // vault-root menu an empty selection would get.
@@ -844,12 +854,11 @@ fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
 }
 
 /// The marked rows a menu opened over `row` acts on: the whole set when the click landed on one
-/// of its rows, and nothing otherwise — a click anywhere else forgets them, which is what a plain
-/// left click does too.
+/// of its rows — a row inside a marked folder included — and nothing otherwise: a click anywhere
+/// else forgets them, which is what a plain left click does too.
 fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)> {
-    let marked = tree.marked();
-    if row.is_some_and(|row| marked.iter().any(|(rel, _)| *rel == row.rel)) {
-        return marked;
+    if row.is_some_and(|row| tree.is_marked(&row.rel)) {
+        return tree.marked();
     }
     tree.clear_marks();
     Vec::new()

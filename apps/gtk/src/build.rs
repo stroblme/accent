@@ -411,14 +411,15 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             app,
             move |on| app.set_drop_active(on)
         ),
-        // A row dropped back into the tree moves the file. Where it may land at all is decided
-        // before the drop; what is left is the same plan-and-rewrite Rename goes through.
+        // A row dropped back into the tree moves the file, and a marked row the whole set. Where
+        // they may land at all is decided before the drop; what is left is the same
+        // plan-and-rewrite Rename goes through.
         glib::clone!(
             #[weak]
             app,
-            move |from: &str, to: &str| {
+            move |moves: Vec<(String, String)>| {
                 if let Some(ops) = app.ops() {
-                    fileops::move_dropped(ops, from, to);
+                    fileops::move_all(ops, moves);
                 }
             }
         ),
@@ -703,6 +704,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let exclude = Rc::downgrade(app);
     let cut = Rc::downgrade(app);
     let moved = Rc::downgrade(app);
+    let unmark = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -776,6 +778,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         moved: Box::new(move |from, to| {
             if let Some(app) = moved.upgrade() {
                 app.follow_rename(from, to);
+            }
+        }),
+        unmark: Box::new(move || {
+            if let Some(tree) = unmark.upgrade().as_ref().and_then(|app| app.tree.get()) {
+                tree.clear_marks();
             }
         }),
         close: Box::new(move |rel| {

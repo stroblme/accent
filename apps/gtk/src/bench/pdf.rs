@@ -184,7 +184,7 @@ async fn bench_pdf_renamed(app: &Rc<App>) {
         return bench_quit(app);
     };
     let (to, was) = (format!("{stem}-renamed.pdf"), pdf.path());
-    crate::fileops::move_dropped(&ops, &from, &to);
+    crate::fileops::move_all(&ops, vec![(from.clone(), to.clone())]);
     // The rename runs on a worker and the watcher's event lands a turn after it.
     glib::timeout_future(Duration::from_millis(1500)).await;
     let Some(pdf) = app.active_pdf() else {

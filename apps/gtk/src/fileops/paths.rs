@@ -99,6 +99,21 @@ pub fn move_dest(from: &str, dir: &str) -> Option<String> {
     Some(moved_path(from, dir))
 }
 
+/// The paths no other one of them is inside, each with whether it is a folder, in their order.
+/// A folder takes what is under it along, so a batch acts on it alone rather than on it and then
+/// on files that have already gone with it.
+pub fn topmost(paths: &[(String, bool)]) -> Vec<(String, bool)> {
+    let all: std::collections::HashSet<&str> = paths.iter().map(|(rel, _)| rel.as_str()).collect();
+    paths
+        .iter()
+        .filter(|(rel, _)| {
+            !rel.match_indices('/')
+                .any(|(at, _)| all.contains(&rel[..at]))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The folder a half-typed path points into and the last segment, which is the file's own name.
 ///
 /// `base` is the folder the path is typed in: the file's own for Rename, the clicked row's for
@@ -227,6 +242,19 @@ mod tests {
     fn renamed_part_leaves_a_file_its_extension_and_a_folder_nothing() {
         assert_eq!(renamed_part("note.md", false), "note");
         assert_eq!(renamed_part("Archive.2024", true), "Archive.2024");
+    }
+
+    #[test]
+    fn topmost_drops_what_a_marked_folder_already_takes() {
+        let paths = |list: &[&str]| -> Vec<(String, bool)> {
+            list.iter().map(|rel| (rel.to_string(), false)).collect()
+        };
+        // A name that merely starts the same way is not inside the folder.
+        assert_eq!(
+            topmost(&paths(&["a", "a/b.md", "ab.md", "a/c/d.md"])),
+            paths(&["a", "ab.md"])
+        );
+        assert_eq!(topmost(&paths(&["x/y.md"])), paths(&["x/y.md"]));
     }
 
     #[test]
