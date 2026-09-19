@@ -422,9 +422,12 @@ pub fn hash_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_string()
 }
 
-/// Test for the server, so a second connection skips the upload.
-pub fn have_server_cmd(hash: &str) -> String {
-    format!("test -x {}", server_path(hash))
+/// Test for the server, `size` bytes of it, so a second connection skips the upload. The size is
+/// counted too because a host may still hold a short file under the final name from before
+/// [`install_server_cmd`] counted its bytes; failing this, the next install replaces it.
+pub fn have_server_cmd(hash: &str, size: usize) -> String {
+    let installed = server_path(hash);
+    format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq {size} ]")
 }
 
 /// Read the binary, `size` bytes of it, from stdin and install it.
@@ -933,9 +936,11 @@ mod tests {
             server_path(hash),
             "$HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
         );
+        // A short leftover under the final name is found as missing, so it is uploaded again.
+        let installed = server_path(hash);
         assert_eq!(
-            have_server_cmd(hash),
-            "test -x $HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
+            have_server_cmd(hash, 8_300_000),
+            format!("test -x {installed} && [ \"$(wc -c < {installed})\" -eq 8300000 ]")
         );
     }
 

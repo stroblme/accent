@@ -734,11 +734,11 @@ impl Remote {
         let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
         let hash = ssh::hash_of(&bytes);
 
-        if self.ssh_output(&ssh::have_server_cmd(&hash)).is_ok() {
+        let total = bytes.len();
+        if self.ssh_output(&ssh::have_server_cmd(&hash, total)).is_ok() {
             return Ok(hash);
         }
 
-        let total = bytes.len();
         self.step(
             &format!("Uploading the server (0 / {} MB)", mb(total)),
             Some(0.0),
