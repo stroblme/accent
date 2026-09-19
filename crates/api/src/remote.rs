@@ -747,7 +747,7 @@ impl Remote {
             .ssh(&ssh::run(
                 &self.url,
                 &self.ctl,
-                &ssh::install_server_cmd(&hash),
+                &ssh::install_server_cmd(&hash, total),
             ))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
