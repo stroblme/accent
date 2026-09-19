@@ -432,7 +432,7 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
     };
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        // A move goes through `plan_rename`, which reads the backlinks out of the index and is
+        // A move goes through `plan_moves`, which reads the backlinks out of the index and is
         // refused while the first reconcile is still running — on the generated vault that is
         // half a minute of walking.
         for _ in 0..300 {

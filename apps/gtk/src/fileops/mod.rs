@@ -85,6 +85,9 @@ pub struct Ops {
     /// Reload these paths' tabs from disk, returning how many were left alone because their
     /// buffer still holds unsaved edits (those get the changed-on-disk banner instead).
     pub reload: Box<dyn Fn(&[String]) -> usize>,
+    /// Point every tab at or under the first path at the same place under the second: a move of
+    /// our own, followed before the notes it rewrote are reloaded by the paths they have now.
+    pub moved: Box<dyn Fn(&str, &str)>,
     /// Close every document at or under a path that has stopped existing — a folder in the trash
     /// takes the notes inside it. Only called once the file is really gone, so there is nothing
     /// left to write the buffer into and nothing to ask about.
@@ -555,7 +558,7 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
         }
         match note && !is_markdown(basename(&to)) {
             true => confirm_demote(&ops, &rel, &to),
-            false => plan(&ops, &rel, &to, verb(&rel, &to)),
+            false => plan(&ops, vec![(rel.clone(), to.clone())], verb(&rel, &to)),
         }
     });
     let selected = renamed_part(&current, is_dir).chars().count() as i32;
@@ -565,8 +568,8 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
 /// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but
 /// it stops being a note: no backlinks, and every `[[wikilink]]` pointing at it stops resolving.
 ///
-/// It gets a dialog of its own because the Update Links one cannot cover it: `plan_rename`
-/// compares stems, so a rename that changes only the extension finds nothing to rewrite and would
+/// It gets a dialog of its own because the Update Links one cannot cover it: the links that name
+/// the note by its stem still find it, so there is nothing to rewrite and the rename would
 /// otherwise go through in silence.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     let dialog = alert(
@@ -590,7 +593,8 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     );
     choose(&dialog, Some(&window), move |response| {
         if response == "rename" {
-            plan(&ops, &from, &to, verb(&from, &to));
+            let verb = verb(&from, &to);
+            plan(&ops, vec![(from.clone(), to.clone())], verb);
         }
     });
 }
@@ -611,7 +615,7 @@ pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
         // the plan is, being a round trip on a remote vault.
         let asked = to.clone();
         match gio::spawn_blocking(move || vault.exists(&asked)).await {
-            Ok(false) => plan(&ops, &from, &to, "Moved"),
+            Ok(false) => plan(&ops, vec![(from, to)], "Moved"),
             Ok(true) => (ops.toast)(&format!(
                 "Cannot move {}: it is already there",
                 basename(&to)
@@ -621,23 +625,23 @@ pub fn move_dropped(ops: &Rc<Ops>, from: &str, to: &str) {
     });
 }
 
-/// Ask the vault what the move would touch, then either do it or confirm the link rewrites first.
+/// Ask the vault what the moves would touch, then either do them or confirm the link rewrites
+/// first.
 ///
 /// The question is index reads and, on a remote vault, a round trip, so it is asked on a worker
 /// thread the way [`download`] and [`upload`] send their bytes: a rename must not freeze the
 /// window for as long as the host takes to answer.
-fn plan(ops: &Rc<Ops>, from: &str, to: &str, verb: &'static str) {
-    // `plan_rename` reads the backlinks out of the index, so during the first reconcile it finds
+fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
+    // `plan_moves` reads the backlinks out of the index, so during the first reconcile it finds
     // none — and an empty rewrite list is also what skips the confirmation dialog, so the rename
     // would go through in silence and break every wikilink pointing at the note. Rename and a
     // dropped row both land here, which is why the check sits at the top rather than in either.
     if !(ops.reconciled)() {
         return (ops.toast)("Cannot rename yet: the vault is still being indexed");
     }
-    let (vault, from, to) = (ops.vault.clone(), from.to_string(), to.to_string());
-    let (ops, name) = (ops.clone(), basename(&from).to_string());
+    let (vault, ops, name) = (ops.vault.clone(), ops.clone(), several(&sources(&moves)));
     glib::spawn_future_local(async move {
-        let planned = gio::spawn_blocking(move || vault.plan_rename(&from, &to)).await;
+        let planned = gio::spawn_blocking(move || vault.plan_moves(&moves)).await;
         match planned {
             Ok(Ok(plan)) if plan.rewrites.is_empty() => apply(&ops, plan, false, verb),
             Ok(Ok(plan)) => confirm_links(&ops, plan, verb),
@@ -689,19 +693,23 @@ fn link_body(rewrites: &[String]) -> String {
     body
 }
 
-/// Move the file, then report. A partly rewritten vault is a real outcome, so the notes that
+/// Move the files, then report. A partly rewritten vault is a real outcome, so the notes that
 /// could not be updated are said out loud instead of being logged and forgotten.
 fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str) {
-    // The note being moved is flushed with the ones about to be rewritten: its own tab is about
-    // to point at a path that no longer exists, and an unsaved buffer must not be the casualty.
+    // What is being moved is flushed with the notes about to be rewritten: their tabs are about
+    // to point at paths that no longer exist, and an unsaved buffer must not be the casualty.
     let mut dirty = plan.rewrites.clone();
-    dirty.push(plan.from.clone());
+    dirty.extend(sources(&plan.moves));
     (ops.flush)(&dirty);
 
     // The write itself is N notes rewritten, one fsync each, and on a remote vault a round trip
     // per note: the same worker thread the plan was made on.
-    let (vault, to, ops) = (ops.vault.clone(), plan.to.clone(), ops.clone());
-    let name = basename(&plan.from).to_string();
+    let (vault, ops, name) = (
+        ops.vault.clone(),
+        ops.clone(),
+        several(&sources(&plan.moves)),
+    );
+    let to = plan.moves[0].1.clone();
     glib::spawn_future_local(async move {
         let done = gio::spawn_blocking({
             let name = name.clone();
@@ -710,7 +718,9 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
                 // there yet, so they are made here — after the confirmation, so nothing exists
                 // until the move really happens. A dropped row never needs one: every destination
                 // the tree offers is a row that is already there.
-                make_parents(&vault, &plan.to)?;
+                for (_, to) in &plan.moves {
+                    make_parents(&vault, to)?;
+                }
                 vault
                     .rename(&plan, update_links)
                     .map_err(|e| format!("Cannot rename {name}: {}", why(&e)))
@@ -719,8 +729,15 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update_links: bool, verb: &'static str
         .await;
         match done {
             Ok(Ok(report)) => {
+                // Tabs follow first: a rewritten note is named by where it is now.
+                for (from, to) in &report.moved {
+                    (ops.moved)(from, to);
+                }
                 let unsaved = (ops.reload)(&report.rewritten);
-                let mut message = rename_message(verb, &name, &to, report.failed.len(), unsaved);
+                let mut message = match &report.not_moved {
+                    Some((from, why)) => format!("Cannot move {}: {why}", basename(from)),
+                    None => rename_message(verb, &name, &to, report.failed.len(), unsaved),
+                };
                 if hidden_now(&ops, &to) {
                     message.push_str(&format!("; {HIDDEN}"));
                 }
@@ -798,6 +815,11 @@ pub fn trash_all(ops: &Rc<Ops>, rels: Vec<String>) {
             confirm_delete(&ops, refused);
         }
     });
+}
+
+/// The paths a batch of moves takes from.
+fn sources(moves: &[(String, String)]) -> Vec<String> {
+    moves.iter().map(|(from, _)| from.clone()).collect()
 }
 
 /// How a toast or a dialog names the paths it is about: a single one by its name, several by
