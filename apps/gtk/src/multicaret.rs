@@ -448,6 +448,9 @@ mod imp {
         pub fade: Cell<f32>,
         pub fade_from: Cell<(i64, f32)>,
         pub fade_tick: RefCell<Option<gtk::TickCallbackId>>,
+        /// The find bar's search context over this view's buffer, whose matches the fade leaves
+        /// unveiled.
+        pub search: RefCell<Option<sourceview5::SearchContext>>,
     }
 
     #[glib::object_subclass]
@@ -717,6 +720,20 @@ impl View {
     /// Whether the line fade is on, for the headless check that cannot see it.
     pub(crate) fn fading(&self) -> bool {
         self.imp().fade_on.get()
+    }
+
+    /// Hand the view the find bar's search context, so the line fade can leave its matches be.
+    pub fn set_search(&self, context: &sourceview5::SearchContext) {
+        self.imp().search.replace(Some(context.clone()));
+    }
+
+    /// The find bar's search context, while it is highlighting its matches.
+    pub(crate) fn highlighted_search(&self) -> Option<sourceview5::SearchContext> {
+        self.imp()
+            .search
+            .borrow()
+            .clone()
+            .filter(|context| context.is_highlight())
     }
 
     /// Put a caret one line below (or above) the outermost caret in that direction, so repeating

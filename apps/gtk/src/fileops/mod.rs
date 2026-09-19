@@ -570,7 +570,7 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
 }
 
 /// A note that loses its `.md` keeps its place in the vault and is still searched and opened, but
-/// it stops being a note: no backlinks, and every `[[wikilink]]` pointing at it stops resolving.
+/// it stops being a note: it opens as plain text, and its own links and tags are no longer read.
 ///
 /// It gets a dialog of its own because the Update Links one cannot cover it: the links that name
 /// the note by its stem still find it, so there is nothing to rewrite and the rename would
@@ -579,7 +579,7 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     let dialog = alert(
         "No Longer a Note?",
         &format!(
-            "{} stays in the vault and stays searchable, but links to it will no longer resolve.",
+            "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
             basename(to)
         ),
         &[

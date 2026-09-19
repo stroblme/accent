@@ -557,6 +557,9 @@ pub fn open(
         .visible_only(false)
         .build();
     let context = sourceview5::SearchContext::new(&buffer, Some(&settings));
+    if let Some(column) = view.downcast_ref::<multicaret::View>() {
+        column.set_search(&context);
+    }
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);

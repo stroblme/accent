@@ -449,8 +449,9 @@ impl App {
         chrome
     }
 
-    /// Never fade over something that is waiting for an answer: a dialog, a banner, an open
-    /// popover or the find bar.
+    /// Never fade over something that is waiting for an answer: a dialog, a banner or an open
+    /// popover. An open find bar is not one: it stays, and its matches stay unveiled
+    /// (`fade::cover`), while the rest fades around the note being written in.
     fn chrome_busy(&self) -> bool {
         if self.window.visible_dialog().is_some() {
             return true;
@@ -458,8 +459,6 @@ impl App {
         let in_popover = self
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
-        in_popover
-            || self.panes.borrow().iter().any(|pane| pane.find.is_open())
-            || self.active().is_some_and(|tab| tab.banner.is_revealed())
+        in_popover || self.active().is_some_and(|tab| tab.banner.is_revealed())
     }
 }
