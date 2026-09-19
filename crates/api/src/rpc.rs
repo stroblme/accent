@@ -19,7 +19,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -45,6 +45,11 @@ pub const PING: Duration = Duration::from_secs(10);
 /// well past the 10–17 s a flaky VPN drops out for, and past ssh's own 15 s ServerAlive give-up,
 /// after which the window has let go of this server anyway.
 pub const SILENCE: Duration = Duration::from_secs(90);
+
+/// How long a server that has stopped hearing from its client still waits for the requests it is
+/// running: the longest a git call may take on the host — a sync, a pull and a push each under
+/// `TRANSFER_TIMEOUT` — and a little over for the process group to be stopped.
+const LINGER: Duration = Duration::from_secs(2 * accent_core::git::TRANSFER_TIMEOUT.as_secs() + 10);
 
 /// A save refused because the file changed under it. Its `data` is the current [`Etag`], so the
 /// client can rebuild [`SaveError::ChangedOnDisk`] and the UI can offer the same comparison it
@@ -513,7 +518,7 @@ pub(crate) fn serve_local(
         });
 
     let live: InFlight = Arc::new(Mutex::new(HashMap::new()));
-    let mut workers = Vec::new();
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut pinged = false;
     loop {
         let line = match pinged {
@@ -525,9 +530,14 @@ pub(crate) fn serve_local(
             Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {
                 // The link died without closing. Nobody reads what the threads still have to
-                // write, so joining them could wait on a full pipe for good: the vault goes, and
-                // the process exits around the rest.
+                // write, so joining them could wait on a full pipe for good. A commit or a sync
+                // still running is the user's, though, so they are given until the longest git
+                // bound to finish; then the vault goes, and the process exits around the rest.
                 tracing::info!("nothing from the client in {silence:?}; stopping");
+                let until = Instant::now() + LINGER;
+                while workers.iter().any(|w| !w.is_finished()) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 drop(vault);
                 return;
             }
@@ -1100,6 +1110,68 @@ mod tests {
         assert!(!unpinged.is_finished(), "nothing armed the silence");
         drop(quiet);
         unpinged.join().expect("stdin closing still ends it");
+    }
+
+    /// A link that goes quiet in the middle of a commit leaves the commit to finish on the host:
+    /// the server waits for it before letting the vault go, rather than exiting around it.
+    #[test]
+    fn a_server_gone_quiet_still_finishes_the_commit_it_was_running() {
+        use std::os::unix::fs::PermissionsExt;
+        let run = |root: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        std::fs::create_dir(&root).unwrap();
+        run(&root, &["init", "-q", "-b", "main"]);
+        for (key, value) in [
+            ("user.name", "Accent Test"),
+            ("user.email", "test@accent.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "hooks"),
+        ] {
+            run(&root, &["config", key, value]);
+        }
+        let hook = root.join("hooks/pre-commit");
+        std::fs::create_dir(root.join("hooks")).unwrap();
+        std::fs::write(&hook, "#!/bin/sh\nsleep 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("a.md"), "one\n").unwrap();
+        run(&root, &["add", "a.md"]);
+        let repo = crate::git::toplevel(&root).unwrap().unwrap();
+
+        let silence = Duration::from_millis(200);
+        let (vault, events) =
+            Local::open_at(&root, &dir.path().join("index.db"), VaultConfig::default()).unwrap();
+        let (server_in, mut input) = std::io::pipe().unwrap();
+        let (_output, server_out) = std::io::pipe().unwrap();
+        let t = Instant::now();
+        let server = std::thread::spawn(move || {
+            serve_local(vault, events, server_in, server_out, silence);
+        });
+        writeln!(input, r#"{{"jsonrpc":"2.0","method":"ping"}}"#).unwrap();
+        let commit = json!({"jsonrpc": "2.0", "id": 1, "method": "git_commit",
+            "params": [repo, "first", false]});
+        writeln!(input, "{commit}").unwrap();
+
+        while !server.is_finished() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            server.is_finished(),
+            "still serving after {:?}",
+            t.elapsed()
+        );
+        assert!(
+            crate::git::status(&repo).unwrap().branch.oid.is_some(),
+            "the server stopped before the commit landed"
+        );
     }
 
     /// A mistyped root is refused rather than served as an empty vault, and the refusal is the
