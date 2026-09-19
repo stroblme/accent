@@ -70,6 +70,7 @@ dependencies = [
  "blake3",
  "chrono",
  "ignore",
+ "libc",
  "notify",
  "notify-debouncer-full",
  "nucleo-matcher",

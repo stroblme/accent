@@ -214,9 +214,59 @@ pub(super) fn page_at(layout: &Layout, y: f64) -> usize {
         .saturating_sub(1)
 }
 
+/// Which gap between pages a content y is nearest: gap `g` is the one above page `g`, so a column
+/// of `n` pages has `n + 1`, the last one below the last page. The top half of a page is nearer
+/// the gap above it; the gap below a page counts as below it.
+pub(super) fn gap_at(layout: &Layout, y: f64) -> usize {
+    let page = page_at(layout, y);
+    match layout.pages.get(page) {
+        Some(rect) if y < f64::from(rect.y + rect.h / 2.0) => page,
+        Some(_) => page + 1,
+        None => 0,
+    }
+}
+
+/// The content y through the middle of gap `g` (see [`gap_at`]).
+pub(super) fn gap_middle(layout: &Layout, gap: usize) -> f32 {
+    match gap.checked_sub(1).and_then(|above| layout.pages.get(above)) {
+        Some(above) => above.y + above.h + GAP / 2.0,
+        None => GAP / 2.0,
+    }
+}
+
+/// Where a page dragged from `from` lands when it is dropped into gap `gap`, or `None` when the
+/// two gaps either side of it would leave it where it is.
+pub(super) fn move_to(from: usize, gap: usize) -> Option<usize> {
+    if gap == from || gap == from + 1 {
+        None
+    } else if gap > from {
+        Some(gap - 1)
+    } else {
+        Some(gap)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Three pages 100 px tall, one gap of 12 above each and one below the last.
+    #[test]
+    fn a_drop_lands_in_the_nearest_gap_and_a_gap_beside_the_page_moves_nothing() {
+        let out = layout(&[(100.0, 100.0); 3], 1.0, 200.0);
+        // The top half of the second page, its bottom half, and the gap below it.
+        assert_eq!(gap_at(&out, f64::from(GAP + 112.0 + 10.0)), 1);
+        assert_eq!(gap_at(&out, f64::from(GAP + 112.0 + 60.0)), 2);
+        assert_eq!(gap_at(&out, f64::from(GAP + 112.0 + 105.0)), 2);
+        // Above the first page and below the last.
+        assert_eq!(gap_at(&out, 0.0), 0);
+        assert_eq!(gap_at(&out, f64::from(out.height)), 3);
+        assert_eq!(gap_middle(&out, 0), GAP / 2.0);
+        assert_eq!(gap_middle(&out, 1), GAP + 100.0 + GAP / 2.0);
+        // The second page dropped either side of itself stays; anywhere else, it moves.
+        assert_eq!((move_to(1, 1), move_to(1, 2)), (None, None));
+        assert_eq!((move_to(1, 0), move_to(1, 3)), (Some(0), Some(2)));
+    }
 
     fn letter(n: usize) -> Vec<(f32, f32)> {
         vec![(612.0, 792.0); n]

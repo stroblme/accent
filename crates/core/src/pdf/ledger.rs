@@ -57,6 +57,12 @@ impl Step {
             | Step::Moved { page, id, .. } => (page, id),
         }
     }
+
+    fn page_mut(&mut self) -> &mut usize {
+        match self {
+            Step::Drawn { page, .. } | Step::Erased { page, .. } | Step::Moved { page, .. } => page,
+        }
+    }
 }
 
 /// What the render thread knows about the ink of the pages it has touched or listed, so that the
@@ -175,6 +181,31 @@ impl Ink {
     pub fn moved(&mut self, page: usize, index: usize, matrix: pdf::Matrix) {
         let id = self.requeued(page, index);
         self.record(Step::Moved { page, id, matrix }, false);
+    }
+
+    /// The document's pages were put in, taken out or reordered, and `map` says where each page
+    /// went — `None` for one that is gone (see [`pdf::PageEdit::map`]).
+    ///
+    /// What the ledger holds of a page follows it. The steps of a deleted page go with it: Undo
+    /// cannot put a stroke back on a page that is not there, and a step keeping the old number
+    /// would land on whichever page took it. The page edit itself is no step — it is not ink.
+    pub fn repage(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        self.ids = std::mem::take(&mut self.ids)
+            .into_iter()
+            .filter_map(|(page, slots)| Some((map(page)?, slots)))
+            .collect();
+        for history in [&mut self.done, &mut self.undone] {
+            for gesture in history.iter_mut() {
+                gesture.retain_mut(|step| match map(step.at().0) {
+                    Some(page) => {
+                        *step.page_mut() = page;
+                        true
+                    }
+                    None => false,
+                });
+            }
+            history.retain(|gesture| !gesture.is_empty());
+        }
     }
 
     /// Whether Undo, and then Redo, has anything to walk.
@@ -372,6 +403,31 @@ mod tests {
         assert_eq!(lines(&doc), [20, 50, 60]);
         assert_eq!(ink.history(), (true, false));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A page edit takes the history with it: a step follows its page to wherever it went, and
+    /// the steps of a deleted page go, leaving Undo nothing to aim at another page with.
+    #[test]
+    fn the_history_follows_its_pages() {
+        let mut ink = Ink::default();
+        ink.drew(0, 0);
+        let a = newest(&ink, 0);
+        ink.drew(2, 0);
+        let c = newest(&ink, 2);
+        // Page 0 of three goes to the end, and the two after it move up one.
+        ink.repage(|p| pdf::PageEdit::Move { from: 0, to: 2 }.map(p));
+        assert_eq!((ink.index_of(2, a), ink.index_of(1, c)), (Some(0), Some(0)));
+        assert_eq!(pages(&ink), [2, 1]);
+        // The page holding `c` is deleted, and the page after it takes its number.
+        ink.repage(|p| pdf::PageEdit::Delete(1).map(p));
+        assert_eq!((ink.index_of(1, a), ink.index_of(1, c)), (Some(0), None));
+        assert_eq!(pages(&ink), [1]);
+        assert_eq!(ink.history(), (true, false));
+    }
+
+    /// The page each step of the undo list is on, oldest first.
+    fn pages(ink: &Ink) -> Vec<usize> {
+        ink.done.iter().flatten().map(|step| step.at().0).collect()
     }
 
     /// The name of the annotation last put on the end of `page`.

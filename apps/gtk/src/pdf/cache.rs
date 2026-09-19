@@ -100,6 +100,37 @@ impl Cache {
         self.lowres_bytes -= drop_oldest(&mut self.lowres, self.lowres_bytes, LOWRES_BUDGET);
     }
 
+    /// The document's pages were put in, taken out or reordered, and `map` says where each went.
+    ///
+    /// Every render is still of the page it was rendered from, only under another number: it
+    /// follows its page, and what was rendered of a deleted page goes. Clearing instead would
+    /// paint every page on screen, and the whole thumbnail strip, blank until it rendered again.
+    /// A new generation, so a view asks again for tiles it had asked for under the old numbers.
+    pub fn repage(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        let page = |p: u32| map(p as usize).map(|p| p as u32);
+        self.generation += 1;
+        self.tiles = std::mem::take(&mut self.tiles)
+            .into_iter()
+            .filter_map(|(key, tile)| match page(key.page) {
+                Some(page) => Some((TileKey { page, ..key }, tile)),
+                None => {
+                    self.bytes -= bytes_of(&tile.0);
+                    None
+                }
+            })
+            .collect();
+        self.lowres = std::mem::take(&mut self.lowres)
+            .into_iter()
+            .filter_map(|((at, dark), low)| match page(at) {
+                Some(at) => Some(((at, dark), low)),
+                None => {
+                    self.lowres_bytes -= bytes_of(&low.0);
+                    None
+                }
+            })
+            .collect();
+    }
+
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.lowres.clear();

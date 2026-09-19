@@ -436,7 +436,7 @@ fn blank_pdf_is_one_page_of_the_size_it_was_asked_for() {
 }
 
 #[test]
-fn add_page_appends_the_size_of_the_last_one_and_takes_ink() {
+fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
     if !available() {
         eprintln!("skipping: no libpdfium");
         return;
@@ -447,7 +447,7 @@ fn add_page_appends_the_size_of_the_last_one_and_takes_ink() {
     std::fs::write(&path, blank_pdf(square).unwrap()).unwrap();
 
     let mut doc = PdfDoc::open(&path).unwrap();
-    doc.add_page().unwrap();
+    doc.insert_page(1).unwrap();
     assert_eq!(doc.page_count(), 2);
     assert_eq!(doc.page_sizes().unwrap(), vec![square, square]);
 
@@ -469,6 +469,82 @@ fn add_page_appends_the_size_of_the_last_one_and_takes_ink() {
     let reopened = PdfDoc::open(&path).unwrap();
     assert_eq!(reopened.page_sizes().unwrap(), vec![square, square]);
     assert_eq!(reopened.inks(1).unwrap().len(), 1);
+}
+
+#[test]
+fn a_page_edit_says_where_every_page_went() {
+    // Five pages, and where each of them is after the edit.
+    let after = |edit: PageEdit| (0..5).map(|p| edit.map(p)).collect::<Vec<_>>();
+    let s = Some;
+    assert_eq!(after(PageEdit::Insert(2)), [s(0), s(1), s(3), s(4), s(5)]);
+    assert_eq!(after(PageEdit::Insert(5)), [s(0), s(1), s(2), s(3), s(4)]);
+    assert_eq!(after(PageEdit::Delete(1)), [s(0), None, s(1), s(2), s(3)]);
+    let down = PageEdit::Move { from: 1, to: 3 };
+    assert_eq!(after(down), [s(0), s(3), s(1), s(2), s(4)]);
+    let up = PageEdit::Move { from: 3, to: 0 };
+    assert_eq!(after(up), [s(1), s(2), s(3), s(0), s(4)]);
+}
+
+/// Each page's text, trimmed, in the document's order.
+fn page_texts(doc: &PdfDoc) -> Vec<String> {
+    (0..doc.page_count())
+        .map(|p| {
+            let glyphs = doc.page_text(p).unwrap();
+            glyphs
+                .iter()
+                .map(|g| g.ch)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Moving a page moves the page itself, so the bookmark and the link that point at it follow it
+/// — in the document and in the file it is saved to. A copy and a delete would leave both
+/// pointing at a page that is gone.
+#[test]
+fn a_moved_page_keeps_its_bookmark_and_the_link_into_it() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    doc.move_page(1, 0).unwrap();
+    for doc in [&doc, &reopen(&dir, &doc)] {
+        assert_eq!(page_texts(doc), ["Second page", "Hello accent"]);
+        let bookmarks: Vec<_> = doc.outline().unwrap().iter().map(|o| o.page).collect();
+        assert_eq!(bookmarks, [Some(0), Some(0)]);
+        let links = doc.links(1).unwrap();
+        assert!(
+            matches!(links[0].target, LinkTarget::Page { page: 0, .. }),
+            "{links:?}"
+        );
+    }
+    assert!(doc.move_page(2, 0).is_err(), "there is no third page");
+}
+
+#[test]
+fn a_page_inserted_between_two_is_blank_and_sized_like_the_one_before() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    doc.edit_pages(PageEdit::Insert(1)).unwrap();
+    let doc = reopen(&dir, &doc);
+    assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
+    assert_eq!(doc.page_size(1).unwrap(), doc.page_size(0).unwrap());
+    // The bookmark into the page that moved down follows it.
+    assert_eq!(doc.outline().unwrap()[0].page, Some(2));
+}
+
+#[test]
+fn a_page_is_deleted_and_the_last_one_is_kept() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    doc.edit_pages(PageEdit::Delete(0)).unwrap();
+    let mut doc = reopen(&dir, &doc);
+    assert_eq!(page_texts(&doc), ["Second page"]);
+    assert!(doc.delete_page(0).is_err(), "a PDF keeps one page");
+    assert_eq!(doc.page_count(), 1);
 }
 
 #[test]

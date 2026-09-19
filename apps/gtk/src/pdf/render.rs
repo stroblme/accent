@@ -351,14 +351,23 @@ fn render_loop(
                         }
                     }
                 }
-                Request::AddPage => match doc.add_page() {
+                Request::Pages(edit) => match doc.edit_pages(edit) {
                     Ok(()) => {
-                        // Dirty like a stroke, so the tab's own timer writes it out: an appended
-                        // page is a change to the file and nothing else would save it.
+                        // Dirty like a stroke, so the tab's own timer writes it out: a page put
+                        // in, taken out or moved is a change to the file and nothing else would
+                        // save it.
                         ink.dirty = true;
-                        send(&view, Reply::Paged(page_sizes(&doc)));
+                        // What is kept of a page is filed under its number, which the edit may
+                        // have given to another page.
+                        ink.repage(|page| edit.map(page));
+                        glyphs = std::mem::take(&mut glyphs)
+                            .into_iter()
+                            .filter_map(|(page, found)| Some((edit.map(page)?, found)))
+                            .collect();
+                        let sizes = page_sizes(&doc);
+                        send(&view, Reply::Repaged { sizes, edit });
                     }
-                    Err(e) => tracing::warn!("appending a page: {e:#}"),
+                    Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
                 request @ (Request::Undo | Request::Redo) => {
                     for (page, area) in ink.walk(&mut doc, matches!(request, Request::Redo)) {

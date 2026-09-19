@@ -9,9 +9,13 @@
 //! so callers run these off the main thread.
 
 use std::collections::HashSet;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -177,8 +181,8 @@ pub enum Error {
 ///
 /// It waits for ever, which is right for reading a local repository: this is a `git status` per
 /// save, and the poll interval [`bounded`] wakes on would be latency on every one of them.
-/// Everything that talks to a network — and the commit, whose hooks are the user's own programs —
-/// goes through [`bounded`] instead.
+/// Everything that talks to a network — and the commit and the switches, which run the user's own
+/// hooks and filters — goes through [`bounded`] instead.
 fn run(root: &Path, args: &[&str], readonly: bool) -> Result<Vec<u8>, Error> {
     let out = command(root, args, readonly)
         .stdin(Stdio::null())
@@ -202,6 +206,40 @@ fn command(root: &Path, args: &[&str], readonly: bool) -> Command {
         .stderr(Stdio::piped());
     if readonly {
         cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    }
+    cmd
+}
+
+/// How git's ssh learns that a link has died: a probe every 5 s, given up on after three go
+/// unanswered, so 15 s; and 10 s to connect at all. Without it ssh waits as long as the kernel
+/// does, and a link that dropped without closing is two hours of that.
+const SSH: &str = "ssh -o ServerAliveInterval=5 -o ServerAliveCountMax=3 -o ConnectTimeout=10";
+
+/// The same 15 s for https, as TCP keepalive on curl's socket: probes from 5 s idle, 5 s apart, two
+/// unanswered. Only an idle socket is probed, so a link that drops with data still in flight is
+/// left to the bound on the call; and a git that predates the variables ignores them.
+const KEEPALIVE: [(&str, &str); 3] = [
+    ("GIT_HTTP_KEEPALIVE_IDLE", "5"),
+    ("GIT_HTTP_KEEPALIVE_INTERVAL", "5"),
+    ("GIT_HTTP_KEEPALIVE_COUNT", "2"),
+];
+
+/// [`command`] for the three that talk to a remote — fetch, pull and push — told to give up on a
+/// link that has stopped answering (see [`SSH`]).
+///
+/// The user's own settings win. `GIT_SSH_COMMAND` would override a `core.sshCommand`, so it is
+/// set only where the environment and the configuration name no ssh of their own.
+fn network(root: &Path, args: &[&str]) -> Command {
+    let mut cmd = command(root, args, false);
+    let set = |key: &str| std::env::var_os(key).is_some();
+    let own_ssh = set("GIT_SSH_COMMAND")
+        || set("GIT_SSH")
+        || run(root, &["config", "--get", "core.sshCommand"], true).is_ok();
+    if !own_ssh {
+        cmd.env("GIT_SSH_COMMAND", SSH);
+    }
+    for (key, value) in KEEPALIVE.into_iter().filter(|(key, _)| !set(key)) {
+        cmd.env(key, value);
     }
     cmd
 }
@@ -437,48 +475,163 @@ pub const TRANSFER_TIMEOUT: Duration = Duration::from_secs(60);
 /// long enough that a slow one costs nothing to wait for.
 const POLL: Duration = Duration::from_millis(50);
 
-/// Run one git command and wait for it, killing it after `cap`.
+/// How long a stopped command has to clean up — git removes its lock files on `SIGTERM` — before
+/// what is left of it is killed.
+const GRACE: Duration = Duration::from_secs(2);
+
+/// How long git's output is waited for once git has exited. Its pipes close with it, unless a
+/// helper that left its process group — a daemon, an ssh master going into the background — still
+/// holds them.
+const LINGER: Duration = Duration::from_secs(1);
+
+/// The commands running right now that may be stopped part way ([`interrupt`]): the repository,
+/// what the command is, and the flag its [`bounded`] wait watches.
+static STOPPABLE: Mutex<Vec<(PathBuf, String, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
+
+fn registry() -> std::sync::MutexGuard<'static, Vec<(PathBuf, String, Arc<AtomicBool>)>> {
+    STOPPABLE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a `what` — "fetch", "push" — is running in `root`: which half of a sync a closing
+/// window has caught.
+pub fn running(root: &Path, what: &str) -> bool {
+    registry().iter().any(|(r, w, _)| r == root && w == what)
+}
+
+/// Stop every fetch and push running in `root`, for a window that is closing.
+///
+/// Those two only: a fetch moves remote-tracking refs and nothing else, and the remote takes a
+/// push whole or not at all, so either can be cut off at any point. Everything that rewrites the
+/// working tree is left to finish. The thread waiting on each does the stopping, so this returns
+/// at once.
+pub fn interrupt(root: &Path) {
+    for (_, _, stop) in registry().iter().filter(|(r, _, _)| r == root) {
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Run one git command and wait for it, stopping it after `cap`, or on [`interrupt`] where
+/// `stoppable` names its repository.
 ///
 /// The wait is ours rather than `Command`'s, which waits for ever. Everything that talks to a
 /// network needs to be able to give up — `GIT_TERMINAL_PROMPT=0` only stops it hanging on a
 /// *prompt*, and a host that accepts the connection and then says nothing holds the thread it runs
 /// on for as long as ssh's own timeout — and so does a commit, whose hooks are the user's own
 /// programs. `what` names the command in the refusal.
+///
+/// git runs in a session of its own, so it has no terminal to prompt on and everything it starts —
+/// a hook, ssh, `git-remote-https` — shares its process group, which is what [`end`] signals. Its
+/// output is read while it runs: a pipe holds 64 KiB, and a git with more to say would otherwise
+/// block on it until the cap.
 fn bounded(
     mut cmd: Command,
     stdin: Option<&[u8]>,
     cap: Duration,
     what: &str,
+    stoppable: Option<&Path>,
 ) -> Result<Output, Error> {
-    let mut child = match stdin {
-        Some(bytes) => {
-            let mut child = cmd.stdin(Stdio::piped()).spawn()?;
-            // Dropping the handle at the end of the statement closes the pipe, which is what
-            // tells git the message is complete.
-            child
-                .stdin
-                .take()
-                .expect("stdin is piped")
-                .write_all(bytes)?;
-            child
-        }
-        None => cmd.stdin(Stdio::null()).spawn()?,
+    // SAFETY: `setsid` is async-signal-safe and touches no memory of ours, which is all that may
+    // run between `fork` and `exec`.
+    unsafe {
+        cmd.pre_exec(|| match libc::setsid() {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    let input = match stdin {
+        Some(_) => Stdio::piped(),
+        None => Stdio::null(),
     };
+    let mut child = cmd.stdin(input).spawn()?;
+    let (out, err) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    if let (Some(mut pipe), Some(bytes)) = (child.stdin.take(), stdin) {
+        // On a thread too, so a git that stops reading cannot hold the wait below. The pipe
+        // closing when the thread ends is what tells git the message is complete; a git that has
+        // exited says why on stderr, so a failed write has nothing to add.
+        let bytes = bytes.to_vec();
+        std::thread::spawn(move || pipe.write_all(&bytes));
+    }
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Some(root) = stoppable {
+        registry().push((root.to_path_buf(), what.to_string(), stop.clone()));
+    }
     let deadline = Instant::now() + cap;
-    while child.try_wait()?.is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::Git(format!(
-                "the {what} did not finish within {} seconds",
-                cap.as_secs()
-            )));
+    let waited = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if stop.load(Ordering::Relaxed) => {
+                end(&mut child);
+                break Err(Error::Git(format!("the {what} was stopped")));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                end(&mut child);
+                break Err(Error::Git(format!(
+                    "the {what} did not finish within {} seconds",
+                    cap.as_secs()
+                )));
+            }
+            Ok(None) => std::thread::sleep(POLL),
+            Err(e) => {
+                end(&mut child);
+                break Err(e.into());
+            }
         }
+    };
+    registry().retain(|(_, _, s)| !Arc::ptr_eq(s, &stop));
+    let until = Instant::now() + LINGER;
+    checked(Output {
+        status: waited?,
+        stdout: collect(&out, until),
+        stderr: collect(&err, until),
+    })
+}
+
+/// Stop `child` and everything it started: `SIGTERM` to its process group, which git answers by
+/// removing its lock files, then `SIGKILL` for whatever is still there after [`GRACE`].
+fn end(child: &mut Child) {
+    let group = -(child.id() as libc::pid_t);
+    let signal = |sig| {
+        // SAFETY: `kill` takes plain integers and has no memory-safety preconditions. The group's
+        // id stays taken while anything in the group lives, so a signal sent after `try_wait` has
+        // reaped the leader reaches what is left of the group or nothing.
+        unsafe { libc::kill(group, sig) };
+    };
+    signal(libc::SIGTERM);
+    let until = Instant::now() + GRACE;
+    while Instant::now() < until && matches!(child.try_wait(), Ok(None)) {
         std::thread::sleep(POLL);
     }
-    // `try_wait` has already reaped the child and cached its status, so this only drains the two
-    // pipes. They hold a ref summary at most: git prints progress only to a terminal.
-    checked(child.wait_with_output()?)
+    signal(libc::SIGKILL);
+    let _ = child.wait();
+}
+
+/// Read a pipe to its end on a thread of its own, a chunk at a time, so that what arrived is
+/// there to [`collect`] even if the end never comes.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> Receiver<Vec<u8>> {
+    let (tx, rx) = channel();
+    if let Some(mut pipe) = pipe {
+        std::thread::spawn(move || {
+            let mut buf = [0; 8192];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) if tx.send(buf[..n].to_vec()).is_ok() => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    _ => break,
+                }
+            }
+        });
+    }
+    rx
+}
+
+/// What [`drain`] has read by `until`, which is all of it unless something still holds the pipe.
+fn collect(chunks: &Receiver<Vec<u8>>, until: Instant) -> Vec<u8> {
+    let mut out = Vec::new();
+    while let Ok(chunk) = chunks.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        out.extend(chunk);
+    }
+    out
 }
 
 /// Bring the remote-tracking refs up to date, and nothing else.
@@ -489,10 +642,11 @@ fn bounded(
 /// repository and a vault may hold several.
 ///
 /// Nobody is waiting for it, so it is the shortest-lived of the bounded calls (see
-/// [`FETCH_TIMEOUT`]).
+/// [`FETCH_TIMEOUT`]), and a closing window stops it ([`interrupt`]).
 pub fn fetch(repo: &Repo) -> Result<String, Error> {
-    let cmd = command(&repo.root, &["fetch"], false);
-    Ok(transcribe(bounded(cmd, None, FETCH_TIMEOUT, "fetch")?))
+    let cmd = network(&repo.root, &["fetch"]);
+    let out = bounded(cmd, None, FETCH_TIMEOUT, "fetch", Some(&repo.root))?;
+    Ok(transcribe(out))
 }
 
 /// The commits the upstream has and HEAD does not: exactly what a pull would bring in.
@@ -900,23 +1054,20 @@ pub fn parse_branches(bytes: &[u8]) -> Branches {
 /// or a tag cannot quietly detach HEAD instead. Whether the switch is safe is git's decision, not
 /// ours — it refuses where the working tree would be clobbered, and that refusal is the answer.
 pub fn checkout(repo: &Repo, branch: &str) -> Result<(), Error> {
-    run(&repo.root, &["switch", "--", branch], false)?;
-    Ok(())
+    switch(repo, &["switch", "--", branch])
 }
 
 /// Make a local branch of a remote-tracking one (`origin/x`) and move HEAD to it, the way
 /// `git switch --track` does: git names it after the remote branch and sets it as the upstream.
 /// A local branch of that name already there is git's refusal, like every other.
 pub fn track(repo: &Repo, remote: &str) -> Result<(), Error> {
-    run(&repo.root, &["switch", "--track", "--", remote], false)?;
-    Ok(())
+    switch(repo, &["switch", "--track", "--", remote])
 }
 
 /// Move HEAD onto one commit, detached, which is how a past state is looked at without a branch
 /// being moved. Git refuses this too where the working tree would be clobbered.
 pub fn checkout_commit(repo: &Repo, oid: &str) -> Result<(), Error> {
-    run(&repo.root, &["switch", "--detach", oid], false)?;
-    Ok(())
+    switch(repo, &["switch", "--detach", oid])
 }
 
 /// Create `name` at HEAD, checking it out as it is created when `checkout` is set, which is what
@@ -927,7 +1078,14 @@ pub fn create_branch(repo: &Repo, name: &str, checkout: bool) -> Result<(), Erro
         true => &["switch", "-c"],
         false => &["branch", "--"],
     };
-    run(&repo.root, &[args, &[name]].concat(), false)?;
+    switch(repo, &[args, &[name]].concat())
+}
+
+/// One of the commands above, bounded like the commit: checking files out runs the user's own
+/// programs too, a `post-checkout` hook and smudge filters such as LFS's, which download.
+fn switch(repo: &Repo, args: &[&str]) -> Result<(), Error> {
+    let cmd = command(&repo.root, args, false);
+    bounded(cmd, None, TRANSFER_TIMEOUT, args[0], None)?;
     Ok(())
 }
 
@@ -974,7 +1132,7 @@ pub enum Merge {
 pub fn merge(repo: &Repo, branch: &str) -> Result<Merge, Error> {
     let (before, under_way) = (rev(repo, "HEAD"), merging(repo));
     let cmd = command(&repo.root, &["merge", "--no-edit", "--", branch], false);
-    if let Err(e) = bounded(cmd, None, TRANSFER_TIMEOUT, "merge") {
+    if let Err(e) = bounded(cmd, None, TRANSFER_TIMEOUT, "merge", None) {
         // Stopped part way rather than refused: the conflicts are what is left to do. A merge
         // left waiting with none — a hook that refused its commit — has only git's words to say.
         if under_way || !merging(repo) {
@@ -1092,7 +1250,7 @@ pub fn stage_text(repo: &Repo, path: &str, text: &str) -> Result<(), Error> {
         &["hash-object", "-w", "--stdin", &format!("--path={path}")],
         false,
     );
-    let out = bounded(cmd, Some(text.as_bytes()), TRANSFER_TIMEOUT, "stage")?;
+    let out = bounded(cmd, Some(text.as_bytes()), TRANSFER_TIMEOUT, "stage", None)?;
     let oid = String::from_utf8_lossy(&out.stdout);
     let info = format!("{mode},{},{path}", oid.trim());
     run(
@@ -1136,17 +1294,19 @@ pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
         false => (&["-F", "-"], Some(message.as_bytes())),
     };
     let cmd = command(&repo.root, &[args, from].concat(), false);
-    bounded(cmd, stdin, TRANSFER_TIMEOUT, "commit")?;
+    bounded(cmd, stdin, TRANSFER_TIMEOUT, "commit", None)?;
     let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], true)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
+/// A push can be stopped part way ([`interrupt`]): the remote takes it whole or not at all.
 pub fn push(repo: &Repo) -> Result<String, Error> {
-    transcript(repo, &["push"])
+    transcript(repo, &["push"], true)
 }
 
+/// A pull cannot: its merge rewrites the working tree.
 pub fn pull(repo: &Repo) -> Result<String, Error> {
-    transcript(repo, &["pull"])
+    transcript(repo, &["pull"], false)
 }
 
 /// Where the current branch's upstream is, if it has one. `None` covers a detached HEAD and a
@@ -1227,7 +1387,7 @@ pub fn sync(repo: &Repo) -> Result<String, Error> {
 /// branch it is on, and refuses if it is on none.
 fn publish(repo: &Repo) -> Result<String, Error> {
     let remote = default_remote(repo)?;
-    transcript(repo, &["push", "--set-upstream", &remote, "HEAD"])
+    transcript(repo, &["push", "--set-upstream", &remote, "HEAD"], true)
 }
 
 /// There is nothing worth parsing in what a transfer prints, and plenty worth reading, so the UI
@@ -1235,11 +1395,13 @@ fn publish(repo: &Repo) -> Result<String, Error> {
 /// summary that says what actually moved.
 ///
 /// Bounded by [`TRANSFER_TIMEOUT`]: this is where a pull that never answers would otherwise leave
-/// the Sync button insensitive for good.
-fn transcript(repo: &Repo, args: &[&str]) -> Result<String, Error> {
-    let cmd = command(&repo.root, args, false);
+/// the Sync button insensitive for good. `stoppable` is whether a closing window may cut it off.
+fn transcript(repo: &Repo, args: &[&str], stoppable: bool) -> Result<String, Error> {
+    let cmd = network(&repo.root, args);
     let what = args.first().copied().unwrap_or("transfer");
-    Ok(transcribe(bounded(cmd, None, TRANSFER_TIMEOUT, what)?))
+    let root = stoppable.then_some(repo.root.as_path());
+    let out = bounded(cmd, None, TRANSFER_TIMEOUT, what, root)?;
+    Ok(transcribe(out))
 }
 
 /// Both streams in the order a terminal would have shown them.

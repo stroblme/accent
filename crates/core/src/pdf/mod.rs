@@ -12,6 +12,7 @@ mod annot;
 mod doc;
 mod ink;
 pub mod ledger;
+mod pages;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -19,6 +20,7 @@ mod text;
 pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
 pub use ledger::{Ink, NamedInk, fresh_id};
+pub use pages::PageEdit;
 pub use text::{line_top, same_quads, selection_link, selection_quads};
 
 use std::path::{Path, PathBuf};

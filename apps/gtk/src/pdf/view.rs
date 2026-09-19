@@ -247,6 +247,45 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The document's pages were put in, taken out or reordered, and `map` says where each went:
+    /// what this view waits on for a page — a stroke to settle, a tile to replace — follows it.
+    /// The cache is shared with the other view, so it is the tab's to move, once.
+    pub fn repage(&self, map: impl Fn(usize) -> Option<usize>) {
+        let page = |p: u32| map(p as usize).map(|p| p as u32);
+        let imp = self.imp();
+        let stale = std::mem::take(&mut *imp.stale_pages.borrow_mut());
+        *imp.stale_pages.borrow_mut() = stale
+            .into_iter()
+            .filter_map(|(at, area)| Some((page(at)?, area)))
+            .collect();
+        let stale = std::mem::take(&mut *imp.stale_tiles.borrow_mut());
+        *imp.stale_tiles.borrow_mut() = stale
+            .into_iter()
+            .filter_map(|key| {
+                Some(TileKey {
+                    page: page(key.page)?,
+                    ..key
+                })
+            })
+            .collect();
+        imp.strokes
+            .borrow_mut()
+            .retain_mut(|stroke| match map(stroke.page) {
+                Some(at) => {
+                    stroke.page = at;
+                    true
+                }
+                None => false,
+            });
+        self.queue_draw();
+    }
+
+    /// Where the pages are laid out, and how far down the view is scrolled: what the thumbnail
+    /// strip places its buttons and its drop bar by.
+    pub(super) fn placement(&self) -> (Layout, f64) {
+        (self.imp().layout.borrow().clone(), self.scroll_offset().1)
+    }
+
     /// Called with a page number when a click or a key asks to go somewhere.
     pub fn connect_goto(&self, f: impl Fn(usize) + 'static) {
         *self.imp().on_goto.borrow_mut() = Some(Box::new(f));
@@ -1261,8 +1300,9 @@ mod imp {
                     match obj.imp().drag_mode.get() {
                         super::Mode::Select => {
                             // A few pixels of travel is a click with a shaky hand, not a
-                            // selection.
-                            if dx.abs() < 3.0 && dy.abs() < 3.0 {
+                            // selection. And the strip selects nothing: a drag there moves the
+                            // page, which is its drag source's to claim (`organize.rs`).
+                            if dx.abs() < 3.0 && dy.abs() < 3.0 || obj.imp().thumbnails.get() {
                                 return;
                             }
                             gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -1358,14 +1398,7 @@ mod imp {
                         return;
                     }
                     match gesture.current_button() {
-                        // A thumbnail is a button: clicking one goes to its page.
-                        1 if obj.imp().thumbnails.get() => {
-                            let page = obj.page_point(x, y).map(|(page, _, _)| page);
-                            let handler = obj.imp().on_goto.borrow();
-                            if let (Some(page), Some(f)) = (page, handler.as_ref()) {
-                                f(page);
-                            }
-                        }
+                        1 if obj.imp().thumbnails.get() => {}
                         1 => {
                             let handler = obj.imp().on_pressed.borrow();
                             if let Some(f) = handler.as_ref() {
@@ -1373,6 +1406,24 @@ mod imp {
                             }
                         }
                         _ => {}
+                    }
+                }
+            ));
+            // A thumbnail is a button: clicking one goes to its page. On the release, as a button
+            // does, because a press is also how a drag that moves the page begins, and that must
+            // not send the reader to the page first. A drag takes the sequence, so it never gets
+            // here.
+            click.connect_released(glib::clone!(
+                #[weak]
+                obj,
+                move |gesture, _, x, y| {
+                    if gesture.current_button() != 1 || !obj.imp().thumbnails.get() {
+                        return;
+                    }
+                    let page = obj.page_point(x, y).map(|(page, _, _)| page);
+                    let handler = obj.imp().on_goto.borrow();
+                    if let (Some(page), Some(f)) = (page, handler.as_ref()) {
+                        f(page);
                     }
                 }
             ));

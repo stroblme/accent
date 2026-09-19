@@ -53,6 +53,10 @@ impl PdfDoc {
         self.doc.as_ref().expect("document is closed only in Drop")
     }
 
+    pub(super) fn doc_mut(&mut self) -> &mut PdfDocument<'static> {
+        self.doc.as_mut().expect("document is closed only in Drop")
+    }
+
     pub(super) fn page(&self, page: usize) -> Result<PdfPage<'_>> {
         self.doc()
             .pages()
@@ -225,38 +229,6 @@ impl PdfDoc {
         self.doc().save_to_bytes().context("save pdf")
     }
 
-    /// Another blank page at the end, the size of the last one: what a paper notebook does when
-    /// the page runs out, and what keeps a drawing readable in any viewer — one MediaBox per
-    /// page, none of them growing.
-    ///
-    /// Nothing reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink.
-    pub fn add_page(&mut self) -> Result<()> {
-        let _guard = lock();
-        let last = self
-            .doc()
-            .pages()
-            .len()
-            .checked_sub(1)
-            .ok_or_else(|| anyhow!("the document has no pages"))?;
-        let rect = self
-            .doc()
-            .pages()
-            .page_size(last)
-            .map_err(|e| anyhow!("page {last}: {e:?}"))?;
-        let size = paper((rect.width().value, rect.height().value));
-        let mut page = self
-            .doc
-            .as_mut()
-            .expect("document is closed only in Drop")
-            .pages_mut()
-            .create_page_at_end(size)
-            .map_err(|e| anyhow!("append a page: {e:?}"))?;
-        // Manual, as every other mutation in this module sets it: dropping the page otherwise
-        // re-serialises a content stream we never wrote.
-        page.set_content_regeneration_strategy(PdfPageContentRegenerationStrategy::Manual);
-        Ok(())
-    }
-
     /// The `/Link` annotations on one page, in document order. Links whose target we cannot
     /// resolve to a page or a URI are skipped.
     ///
@@ -414,6 +386,6 @@ pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
 }
 
 /// A size in points as pdfium's page constructors want it.
-fn paper((width, height): (f32, f32)) -> PdfPagePaperSize {
+pub(super) fn paper((width, height): (f32, f32)) -> PdfPagePaperSize {
     PdfPagePaperSize::from_points(PdfPoints::new(width), PdfPoints::new(height))
 }
