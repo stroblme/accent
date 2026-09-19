@@ -46,10 +46,14 @@ pub enum Reply {
     /// The file was read: these are its page sizes. The first one arrives when the document is
     /// opened, which is why a tab can be on screen before anything is known about it.
     Reloaded(Vec<(f32, f32)>),
-    /// A page was appended: the document's page sizes again, with one more on the end. Not
-    /// [`Reply::Reloaded`], which throws away every render, glyph and selection of a document
-    /// that has been replaced — here the pages before the new one are the same pages.
-    Paged(Vec<(f32, f32)>),
+    /// A page was put in, taken out or moved: the document's page sizes again, and the edit, which
+    /// says where each page the tab holds anything of went. Not [`Reply::Reloaded`], which throws
+    /// away every render of a document that has been replaced — here every page is still the page
+    /// it was, only under another number.
+    Repaged {
+        sizes: Vec<(f32, f32)>,
+        edit: pdf::PageEdit,
+    },
     /// Where every note link that highlights this document lands on the page today, and which
     /// link each one is. The whole map every time, so a stale page cannot survive underneath.
     Highlights(Highlights),
@@ -142,8 +146,8 @@ pub enum Request {
         id: u32,
         matrix: pdf::Matrix,
     },
-    /// Another blank page at the end, the size of the last one.
-    AddPage,
+    /// Put a blank page in, take one out, or move one.
+    Pages(pdf::PageEdit),
     /// Take back the last step drawn, erased or moved in this session.
     Undo,
     /// Make the last step Undo took back again.

@@ -163,6 +163,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     ("win.pdf-add-page", "Add Page", &[]),
+    // A page put in after, taken out, or moved from the one being read. The thumbnail strip does
+    // the same by pointer, on any page.
+    ("win.pdf-insert-page", "Insert Page", &[]),
+    ("win.pdf-delete-page", "Delete Page", &[]),
+    ("win.pdf-move-page-up", "Move Page Up", &[]),
+    ("win.pdf-move-page-down", "Move Page Down", &[]),
     // The diagram tab. Undo, Redo, Delete Selection, Select All Shapes, Edit Label and the
     // paging commands are the canvas's own keys, which fire these, and carry no chord for the
     // PDF's reason: `Ctrl+Z`, `Ctrl+A`, `Delete` and `Return` belong to whatever has the
@@ -370,6 +376,10 @@ impl App {
             "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
             "pdf-add-page" => self.pdf_add_page(),
+            "pdf-insert-page" => self.pdf_insert_page(),
+            "pdf-delete-page" => self.pdf_delete_page(),
+            "pdf-move-page-up" => self.pdf_move_page(false),
+            "pdf-move-page-down" => self.pdf_move_page(true),
             "pdf-fit-width" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitWidth)),
             "pdf-fit-page" => self.with_pdf(|pdf| pdf.set_zoom(PdfZoom::FitPage)),
             "minimap" => self.toggle_minimap(),
