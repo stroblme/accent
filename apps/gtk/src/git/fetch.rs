@@ -32,12 +32,16 @@ impl Panel {
             return;
         };
         self.fetch_busy.set(true);
-        let vault = self.hooks.vault.clone();
+        let (vault, lock) = (self.hooks.vault.clone(), self.fetch_lock.clone());
         let panel = self.clone();
         // As a command does: the process outlives the window until the fetch is stopped.
         let hold = self.hooks.window.application().map(|app| app.hold());
         glib::spawn_future_local(async move {
-            let fetched = gio::spawn_blocking(move || vault.git_fetch(&repo)).await;
+            let fetched = gio::spawn_blocking(move || {
+                let _held = lock.lock();
+                vault.git_fetch(&repo)
+            })
+            .await;
             drop(hold);
             panel.fetch_busy.set(false);
             if panel.gone.get() {

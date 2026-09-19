@@ -204,6 +204,10 @@ pub struct Panel {
     /// A background fetch is in flight, so a timer tick landing on a slow one is dropped rather
     /// than stacked.
     fetch_busy: Cell<bool>,
+    /// Held by the background fetch for as long as it runs, and taken by a Sync before it pulls,
+    /// so a Sync asked for mid-fetch waits for it — `git::FETCH_TIMEOUT` at most — rather than
+    /// racing it for the remote-tracking refs, which git refuses with `cannot lock ref`.
+    fetch_lock: Arc<std::sync::Mutex<()>>,
     /// Whether the last background fetch did not go through. Not a toast: a fetch nobody asked
     /// for that fails every five minutes because the laptop is on a train would be a notification
     /// every five minutes. The Sync button's tooltip carries it instead, which is where a reader
@@ -366,6 +370,7 @@ impl Panel {
             syncing: Cell::new(false),
             sync_busy: Cell::new(false),
             fetch_busy: Cell::new(false),
+            fetch_lock: Arc::default(),
             fetch_failed: Cell::new(false),
             fetched_once: Cell::new(false),
             missed_fetch: Cell::new(false),
