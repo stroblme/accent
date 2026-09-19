@@ -112,6 +112,10 @@ pub struct Hooks {
     pub set_tree: Box<dyn Fn(bool)>,
 }
 
+/// What a close waiting for git does once the commands under way have ended, told whether they
+/// all went through ([`Panel::when_done`]).
+type Leave = Box<dyn FnOnce(bool)>;
+
 /// Everything the last refresh learned. One struct behind one `RefCell`, because every field of
 /// it is replaced at the same moment and a reader wants a consistent set.
 #[derive(Default)]
@@ -211,6 +215,14 @@ pub struct Panel {
     /// A timer tick was skipped because the window did not have the focus. Run as soon as it
     /// does, so coming back to a window that has been aside for an hour is not another wait.
     missed_fetch: Cell<bool>,
+    /// How many commands [`Panel::command_then`] has running, the sync among them: what a
+    /// closing window waits for ([`Panel::busy`]).
+    jobs: Cell<usize>,
+    /// A close waiting for those commands to end ([`Panel::when_done`]), told whether they all
+    /// went through.
+    leaving: RefCell<Option<Leave>>,
+    /// The window has closed ([`Panel::stop`]): whatever is still running ends without a word.
+    gone: Cell<bool>,
     /// The commit whose file list is open, if any. One at a time: a second expansion closes the
     /// first, and a refresh re-opens whichever it was.
     ///
@@ -357,6 +369,9 @@ impl Panel {
             fetch_failed: Cell::new(false),
             fetched_once: Cell::new(false),
             missed_fetch: Cell::new(false),
+            jobs: Cell::new(0),
+            leaving: RefCell::new(None),
+            gone: Cell::new(false),
             expanded: RefCell::new(None),
             expanded_at: Cell::new(None),
         });

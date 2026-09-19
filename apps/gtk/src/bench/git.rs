@@ -263,3 +263,109 @@ fn row_button(row: &gtk::Widget, tooltip: &str) -> Option<gtk::Button> {
     })
     .and_downcast::<gtk::Button>()
 }
+
+/// Close the window while git runs, and print what the close did (DESIGN.md, States).
+///
+/// `pull` starts a Sync and closes during its pull, which asks, is answered Close When Finished
+/// and waits for the whole sync; `push` closes during that sync's push and `fetch` during the
+/// fetch on opening the vault, which are stopped and close at once. Point it at a scratch clone
+/// whose origin is slow both ways — `remote.origin.uploadpack` set to `sleep 3; git-upload-pack`,
+/// a `pre-receive` hook in the origin that sleeps 3 s — with a commit to push, and launch it from
+/// outside the clone's parent directory: what it prints last is how many processes are still
+/// working in there, which is to be none.
+pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
+    let Some(gtk_app) = app.window.application() else {
+        return bench_quit(app);
+    };
+    let (app, phase) = (app.clone(), phase.to_string());
+    glib::spawn_future_local(async move {
+        // The printing goes on after the window has gone.
+        let _hold = gtk_app.hold();
+        // A remote vault's pane and its repository come with the host's answers.
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        let root = app.root().canonicalize().unwrap_or_else(|_| app.root());
+        let running = |what: &str| accent_api::git::running(&root, what);
+        // Polled rather than a `destroy` handler: this drill holds the window, so a closed one is
+        // hidden and kept, and hiding it notifies nothing.
+        let open = || app.window.is_visible();
+        wait_for(|| running("fetch"), 3000).await;
+        if phase != "fetch" {
+            wait_for(|| !running("fetch"), 10000).await;
+            git.sync(None);
+            match phase.as_str() {
+                "push" => wait_for(|| running("push"), 10000).await,
+                _ => glib::timeout_future(Duration::from_millis(800)).await,
+            }
+        }
+        let dir = root.parent().unwrap_or(&root).to_path_buf();
+        println!(
+            "bench git_close phase={phase} fetch={} push={} busy={} working={}",
+            running("fetch"),
+            running("push"),
+            git.busy(),
+            working_in(&dir)
+        );
+        let asked = Instant::now();
+        app.window.close();
+        println!("bench git_close_now open={}", open());
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let dialog = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+            .filter(|_| open());
+        println!(
+            "bench git_close_dialog {:?}",
+            dialog.as_ref().and_then(|d| d.heading())
+        );
+        if let Some(dialog) = dialog {
+            dialog.emit_by_name::<()>("response", &[&"wait"]);
+            dialog.close();
+            glib::timeout_future(Duration::from_millis(1000)).await;
+            println!("bench git_close_waiting open={}", open());
+        }
+        wait_for(|| !open(), 20000).await;
+        let said = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        println!(
+            "bench git_close_closed {} after_ms={:.0} dialog={:?}",
+            !open(),
+            ms_since(asked),
+            said.and_then(|d| d.heading())
+        );
+        let t = Instant::now();
+        wait_for(|| working_in(&dir) == 0, 5000).await;
+        println!(
+            "bench git_close_left {} after_ms={:.0}",
+            working_in(&dir),
+            ms_since(t)
+        );
+        std::process::exit(0);
+    });
+}
+
+async fn wait_for(done: impl Fn() -> bool, ms: u64) {
+    let t = Instant::now();
+    while !done() && t.elapsed() < Duration::from_millis(ms) {
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+}
+
+/// How many processes other than this one are working in `dir` or below it: git, its hooks, and
+/// what they started. A zombie has no working directory left to read, so it does not count.
+fn working_in(dir: &Path) -> usize {
+    let me = std::process::id().to_string();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_str() != Some(me.as_str()))
+        .filter_map(|entry| std::fs::read_link(entry.path().join("cwd")).ok())
+        .filter(|cwd| cwd.starts_with(dir))
+        .count()
+}
