@@ -804,6 +804,37 @@ impl Gen {
             "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
             format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
         ];
+        Self::pdf_of(&objs)
+    }
+
+    /// `n` A4 pages that say which page they are and nothing random, so paging, the thumbnail
+    /// strip and page edits have a document whose pages can be told apart. Nothing is drawn from
+    /// the stream, so every other file comes out as it did; the bulk fill, which runs last and to
+    /// exactly `--files`, ends one file sooner.
+    fn pages_pdf(n: usize) -> Vec<u8> {
+        // 1 the catalog, 2 the page tree, 3 the font, then each page and its text.
+        let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+        let mut objs = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+            format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+        ];
+        for i in 0..n {
+            let content = format!("BT /F1 48 Tf 60 700 Td (Page {}) Tj ET\n", i + 1);
+            objs.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                5 + 2 * i
+            ));
+            objs.push(format!(
+                "<< /Length {} >>\nstream\n{content}endstream",
+                content.len()
+            ));
+        }
+        Self::pdf_of(&objs)
+    }
+
+    /// These objects as a PDF, numbered from 1 with the catalog first, and their xref.
+    fn pdf_of(objs: &[String]) -> Vec<u8> {
         let mut out = Vec::with_capacity(1024);
         out.extend_from_slice(b"%PDF-1.4\n");
         let mut offsets = Vec::with_capacity(objs.len());
@@ -991,9 +1022,10 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    // 29: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
-    // Syncthing artefacts, pyvenv.cfg), which the bulk fill has to leave room for.
-    let floor = notes + 29 + venv_in + flat_imgs + flat_pdfs + excal;
+    // 30: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // Syncthing artefacts, pyvenv.cfg, the five-page PDF), which the bulk fill has to leave room
+    // for.
+    let floor = notes + 30 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -1290,6 +1322,7 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
         let b = g.pdf(&name);
         g.write(&format!("Attachments/{name}"), &b)?;
     }
+    g.write("Attachments/pages.pdf", &Gen::pages_pdf(5))?;
     g.mkdir("Attachments/Excalidraw")?;
     for i in 0..excal {
         let n = g.rng.range(8 * 1024, 40 * 1024);
