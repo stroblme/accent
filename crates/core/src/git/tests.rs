@@ -1242,3 +1242,123 @@ fn parse_submodule_reads_state_oid_path_and_describe() {
     assert_eq!(bare.path, "vendor/off");
     assert_eq!(bare.describe, None);
 }
+
+/// Whether `pid` is still running: a zombie waiting for init to reap it has already stopped.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+        .is_ok_and(|stat| !stat.rsplit(") ").next().is_some_and(|s| s.starts_with('Z')))
+}
+
+fn piped(program: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd
+}
+
+#[test]
+fn a_command_stopped_at_its_limit_takes_what_it_started_with_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cmd = piped("sh", &["-c", "sleep 30 & echo $! > pid; wait"]);
+    cmd.current_dir(tmp.path());
+    assert!(bounded(cmd, None, Duration::from_millis(300), "wait", None).is_err());
+    let pid = std::fs::read_to_string(tmp.path().join("pid")).unwrap();
+    let t = Instant::now();
+    while alive(&pid) && t.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!alive(&pid), "the shell's sleep outlived it");
+}
+
+#[test]
+fn a_commit_stopped_at_its_limit_leaves_no_lock_behind() {
+    if !have_git() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init(dir);
+    write_file(dir, "a.md", "one\n");
+    commit_all(dir, "first");
+    write_file(dir, "a.md", "two\n");
+    // `-a` is the commit that holds the index lock while its hook runs.
+    let hook = dir.join(".git/hooks-disabled/pre-commit");
+    write_file(
+        dir,
+        ".git/hooks-disabled/pre-commit",
+        "#!/bin/sh\nsleep 30\n",
+    );
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cmd = command(dir, &["commit", "-a", "-m", "slow"], false);
+    assert!(bounded(cmd, None, Duration::from_millis(500), "commit", None).is_err());
+    assert!(
+        !dir.join(".git/index.lock").exists(),
+        "the lock outlived git"
+    );
+    std::fs::remove_file(hook).unwrap();
+    commit(&open(dir), "plain", true).unwrap();
+}
+
+#[test]
+fn a_command_that_says_a_lot_is_read_while_it_runs() {
+    let t = Instant::now();
+    let cmd = piped("head", &["-c", "200000", "/dev/zero"]);
+    let out = bounded(cmd, None, Duration::from_secs(5), "head", None).unwrap();
+    assert_eq!(out.stdout.len(), 200_000);
+    assert!(
+        t.elapsed() < Duration::from_secs(2),
+        "it waited on a full pipe"
+    );
+}
+
+#[test]
+fn an_interrupted_command_stops_at_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    let waiting = std::thread::spawn({
+        let root = root.clone();
+        move || {
+            bounded(
+                piped("sleep", &["30"]),
+                None,
+                Duration::from_secs(30),
+                "sleep",
+                Some(&root),
+            )
+        }
+    });
+    let t = Instant::now();
+    while !running(&root, "sleep") && t.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    interrupt(&root);
+    assert!(waiting.join().unwrap().is_err());
+    assert!(
+        t.elapsed() < Duration::from_secs(3),
+        "it ran on after the interrupt"
+    );
+    assert!(!running(&root, "sleep"));
+}
+
+/// A link that stops answering is given up on, unless the user has said how ssh should run.
+#[test]
+fn the_users_own_ssh_command_wins_over_ours() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (plain, own) = (tmp.path().join("plain"), tmp.path().join("own"));
+    init(&plain);
+    init(&own);
+    ok(&own, &["config", "core.sshCommand", "ssh -i key"]);
+    let ours = |dir: &Path| {
+        network(dir, &["fetch"])
+            .get_envs()
+            .any(|(key, value)| key == "GIT_SSH_COMMAND" && value.is_some())
+    };
+    let inherited = ["GIT_SSH_COMMAND", "GIT_SSH"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some());
+    assert_eq!(ours(&plain), !inherited);
+    assert!(!ours(&own));
+}
