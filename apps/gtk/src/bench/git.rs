@@ -349,6 +349,67 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
     });
 }
 
+/// A Sync asked for while the fetch on opening the vault still runs, which must wait for that
+/// fetch rather than race it for the remote-tracking refs (git's `cannot lock ref`). Point it at
+/// the slow scratch clone `close:` uses. It prints whether the fetch was running when the Sync was
+/// asked, whether a `git pull` was seen before the fetch had ended, and what the Sync left.
+pub(super) fn bench_git_sync_over_fetch(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        let root = app.root().canonicalize().unwrap_or_else(|_| app.root());
+        let fetching = || accent_api::git::running(&root, "fetch");
+        wait_for(fetching, 3000).await;
+        let asked_while = fetching();
+        git.sync(None);
+        let mut pulled_early = false;
+        while fetching() {
+            pulled_early |= pulling(&root);
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+        wait_for(|| !git.busy(), 20000).await;
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // A toast may be queued behind another, so what the Sync did is read off the repository:
+        // nothing left to pull is a pull that went through, and a refusal of several lines is a
+        // dialog.
+        let behind = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["rev-list", "--count", "HEAD..@{u}"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+        let dialog = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+            .map(|d| (d.heading(), d.body()));
+        println!(
+            "bench git_sync_over_fetch asked_while_fetching={asked_while} \
+             pulled_early={pulled_early} behind_after={behind:?} toasts={} dialog={dialog:?}",
+            app.toasted.get()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Whether a `git pull` is running in `dir`, read off `/proc` as [`working_in`] reads the
+/// processes there: a pull is not one of the transfers `git::running` can name.
+fn pulling(dir: &Path) -> bool {
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let cmdline = std::fs::read(entry.path().join("cmdline")).unwrap_or_default();
+            cmdline.split(|b| *b == 0).any(|arg| arg == b"pull")
+                && std::fs::read_link(entry.path().join("cwd"))
+                    .is_ok_and(|cwd| cwd.starts_with(dir))
+        })
+}
+
 async fn wait_for(done: impl Fn() -> bool, ms: u64) {
     let t = Instant::now();
     while !done() && t.elapsed() < Duration::from_millis(ms) {
