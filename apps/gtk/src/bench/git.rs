@@ -410,6 +410,50 @@ fn pulling(dir: &Path) -> bool {
         })
 }
 
+/// The banner a stopped rebase raises, and Continue pressed through it twice. Point it at a scratch
+/// repository whose rebase stopped on the first of two commits that conflict on `f.md`, with that
+/// conflict resolved and staged: the first press stops on the second commit's conflict with the
+/// banner still up, the drill resolves and stages it as a user would, and the second press
+/// finishes. Abort asks first, and a dialog takes no answer under Xvfb, so it is not pressed.
+pub(super) fn bench_git_rebase(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), 30000).await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        // The first refresh, which is what raises the banner.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let root = app.root();
+        let say = |when: &str| {
+            let ((banner, button), (live, _)) = (git.banner_hint(), git.commit_hint());
+            let rows = git.changes_rows();
+            println!(
+                "bench git_rebase {when} banner={banner:?} button={button} live={live} rows={rows}"
+            );
+        };
+        for press in ["first", "second"] {
+            say(press);
+            git.press_commit();
+            wait_for(|| !git.busy(), 20000).await;
+            // The refresh the command brings, and a toast's worth of the watcher's after it.
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            if press == "first" {
+                say("stopped");
+                let _ = std::fs::write(root.join("f.md"), "both two\n");
+                let _ = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(["add", "f.md"])
+                    .status();
+                glib::timeout_future(Duration::from_millis(2500)).await;
+            }
+        }
+        say("done");
+        bench_quit(&app);
+    });
+}
+
 async fn wait_for(done: impl Fn() -> bool, ms: u64) {
     let t = Instant::now();
     while !done() && t.elapsed() < Duration::from_millis(ms) {

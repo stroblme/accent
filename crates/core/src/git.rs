@@ -66,6 +66,10 @@ pub struct Status {
     pub ignored: Vec<String>,
     /// A merge stopped part way and is waiting for a commit or an abort.
     pub merging: bool,
+    /// A rebase stopped part way — a `pull.rebase=true` pull on a conflict, most often — and is
+    /// waiting for a continue or an abort. Defaulted, so a server that does not send it reads.
+    #[serde(default)]
+    pub rebasing: bool,
 }
 
 impl Status {
@@ -361,6 +365,7 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     )?;
     Ok(Status {
         merging: merging(repo),
+        rebasing: rebasing(repo),
         ..parse_status(&out)
     })
 }
@@ -369,6 +374,15 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
 /// as long as one is waiting to be committed or aborted.
 fn merging(repo: &Repo) -> bool {
     repo.git_dir.join("MERGE_HEAD").exists()
+}
+
+/// Whether a rebase is under way, read the way `git status` reads it: `rebase-merge/` for the
+/// default backend, `rebase-apply/` for the `apply` one — unless `applying` is in it, which makes
+/// it a `git am`. Both live in the worktree's own git dir, which is what `git_dir` is.
+fn rebasing(repo: &Repo) -> bool {
+    let apply = repo.git_dir.join("rebase-apply");
+    repo.git_dir.join("rebase-merge").exists()
+        || (apply.exists() && !apply.join("applying").exists())
 }
 
 /// Parse `git status --porcelain=v2 -z --branch --ignored`.
@@ -1170,6 +1184,44 @@ pub fn merge(repo: &Repo, branch: &str) -> Result<Merge, Error> {
 /// Give up the merge under way and put the repository back where it was before it started.
 pub fn merge_abort(repo: &Repo) -> Result<(), Error> {
     run(&repo.root, &["merge", "--abort"], false)?;
+    Ok(())
+}
+
+/// How far a `git rebase --continue` got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Rebase {
+    /// Every commit is replayed and the branch is back.
+    Done,
+    /// It stopped again before the end: on these conflicts of the next commit, or on none where
+    /// the rebase itself asked to stop (an `edit` in an interactive one).
+    Stopped(Vec<String>),
+}
+
+/// Carry on with the rebase under way, once its conflicts are resolved and staged. Each commit
+/// keeps its own message: `GIT_EDITOR=true` takes the one git offers where it would open an editor.
+///
+/// Bounded like [`merge`], and read off the repository the same way: a stop on the next commit's
+/// conflicts is where the rebase is, not a refusal.
+pub fn rebase_continue(repo: &Repo) -> Result<Rebase, Error> {
+    let mut cmd = command(&repo.root, &["rebase", "--continue"], false);
+    cmd.env("GIT_EDITOR", "true");
+    let done = bounded(cmd, None, TRANSFER_TIMEOUT, "rebase", None);
+    if !rebasing(repo) {
+        return done.map(|_| Rebase::Done);
+    }
+    let conflicts: Vec<String> = status(repo)?
+        .conflicts()
+        .map(|entry| entry.path.clone())
+        .collect();
+    match (done, conflicts.is_empty()) {
+        (Err(e), true) => Err(e),
+        _ => Ok(Rebase::Stopped(conflicts)),
+    }
+}
+
+/// Give up the rebase under way and put the branch back where it was before it started.
+pub fn rebase_abort(repo: &Repo) -> Result<(), Error> {
+    run(&repo.root, &["rebase", "--abort"], false)?;
     Ok(())
 }
 

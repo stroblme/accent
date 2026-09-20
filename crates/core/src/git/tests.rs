@@ -1114,6 +1114,55 @@ fn a_conflicting_merge_waits_for_a_commit_or_an_abort() {
     assert!(commit(&repo, "", true).is_err());
 }
 
+/// What a `pull.rebase=true` pull leaves when it stops: two commits on `side` replayed onto `main`,
+/// each conflicting on `f.md`.
+#[test]
+fn a_stopped_rebase_is_seen_aborted_and_continued_to_the_end() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    diverged(dir);
+    ok(dir, &["config", "rebase.autoStash", "false"]);
+    ok(dir, &["checkout", "-q", "side"]);
+    write_file(dir, "f.md", "side two\n");
+    commit_all(dir, "side two");
+    let before = head(dir);
+    let repo = open(dir);
+    assert!(!status(&repo).unwrap().rebasing);
+
+    assert!(!sh(dir, &["rebase", "main"]).status.success());
+    assert!(status(&repo).unwrap().rebasing);
+    rebase_abort(&repo).unwrap();
+    assert!(!status(&repo).unwrap().rebasing);
+    assert_eq!(head(dir), before);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.md")).unwrap(),
+        "side two\n"
+    );
+
+    // Resolving the first commit stops on the second's conflict, still under way.
+    assert!(!sh(dir, &["rebase", "main"]).status.success());
+    write_file(dir, "f.md", "both\n");
+    stage(&repo, &["f.md"]).unwrap();
+    assert_eq!(
+        rebase_continue(&repo).unwrap(),
+        Rebase::Stopped(vec!["f.md".to_string()])
+    );
+    assert!(status(&repo).unwrap().rebasing);
+
+    write_file(dir, "f.md", "both two\n");
+    stage(&repo, &["f.md"]).unwrap();
+    assert_eq!(rebase_continue(&repo).unwrap(), Rebase::Done);
+    let st = status(&repo).unwrap();
+    assert!(!st.rebasing);
+    assert_eq!(st.branch.head.as_deref(), Some("side"));
+    let top = log(&repo, 0, 3).unwrap();
+    assert_eq!(top[0].summary, "side two", "git's own message, no editor");
+    assert_eq!(top[2].summary, "main");
+}
+
 #[test]
 fn sync_moves_a_commit_each_way_through_the_bare_origin() {
     if !have_git() {
