@@ -528,6 +528,19 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
         state("bar_jump", &tab, &bar);
         glib::timeout_add_local_once(Duration::from_millis(300), move || {
             state("bar_settled", &tab, &bar);
+            // Go to Line paints the line it is pointing at while the number is still being typed,
+            // the same way a hit is painted, and takes it down again when the box is emptied.
+            bar.open(crate::find::Mode::Goto);
+            // Line 1, which the note this drill wants has a heading on: an empty line has no
+            // text to paint and would print the same `on=false` the bug did.
+            for typed in ["1", ""] {
+                bar.line_box().set_text(typed);
+                let (on, tag) = tab.reveal_highlight();
+                println!(
+                    "bench reveal case=goto_preview typed={typed:?} on={on} at={:?}",
+                    bench_tag_ranges(&tab, &tag)
+                );
+            }
             // The bar goes away again so the view has the keyboard back: from here on the drill
             // edits the buffer, and nothing may take the focus off a note that is dirty.
             bar.close();

@@ -802,7 +802,18 @@ impl App {
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
-        self.statusbar.set_facts(facts.as_deref());
+        // The count of what is wrong with a document is also the switch that keeps it out of the
+        // text; every other count is a readout with nothing to press.
+        let press = match &doc {
+            Some(Doc::Text(tab)) if tab.flavour() == editor::Flavour::Code && facts.is_some() => {
+                Some(match tab.diagnostics_hidden() {
+                    true => "Show these in the text",
+                    false => "Hide these in the text; the pointer still shows them",
+                })
+            }
+            _ => None,
+        };
+        self.statusbar.set_facts(facts.as_deref(), press);
         // Only a text tab has a buffer that can be ahead of the disk; the dot is the tab's own,
         // so one symbol means "unsaved" in both places.
         self.statusbar.set_unsaved(match &doc {
