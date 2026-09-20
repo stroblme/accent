@@ -254,6 +254,9 @@ impl Worker {
         if self.paused {
             return false;
         }
+        if touches_gitignore(msg) {
+            return true;
+        }
         match msg {
             Msg::Resume | Msg::Rescan | Msg::Fs(VaultEvent::Rescan) => true,
             // A directory that shows up with children was moved in whole, and inotify reports
@@ -529,6 +532,25 @@ fn watch(index: &Index, root: &Path, git_dirs: &[PathBuf], tx: &Sender<Msg>) -> 
 /// A directory with something in it, which is what a moved-in tree looks like.
 fn has_children(path: &Path) -> bool {
     std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_some())
+}
+
+/// News about a `.gitignore`, wherever in the vault it sits.
+///
+/// One of these decides which *directories* the walk enters (`walk::stat_one`), so editing one
+/// changes the shape of the index rather than the contents of a file: adding `mlruns/` has to
+/// drop the tree the last walk indexed, and removing it has to walk the tree left lazy. Only a
+/// walk can do either, and there is no walk of one subtree — [`Index::reconcile_with`] is the
+/// whole vault or nothing — so this asks for the whole thing. A `.gitignore` is edited about as
+/// often as a preference, which is what makes that affordable.
+fn touches_gitignore(msg: &Msg) -> bool {
+    let named = |p: &Path| p.file_name().is_some_and(|n| n == ".gitignore");
+    match msg {
+        Msg::Fs(VaultEvent::Changed(p) | VaultEvent::Removed(p)) => named(p),
+        Msg::Fs(VaultEvent::Renamed { from, to }) => named(from) || named(to),
+        // Our own save of one, which the watcher reports as well; whichever arrives first walks.
+        Msg::Update { rel, .. } => named(Path::new(rel)),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -899,6 +921,33 @@ mod tests {
         assert!(
             f.wait(|e| matches!(e, Event::GitChanged)).is_some(),
             "a commit has to reach the pane"
+        );
+    }
+
+    /// A `.gitignore` decides which directories the walk enters, so editing one has to walk the
+    /// vault again: the tree it starts ignoring leaves the index, and the one it stops ignoring
+    /// comes back. Asked of the index rather than of an event, because a reconcile the writes
+    /// themselves set off would answer a wait for one.
+    #[test]
+    fn editing_a_gitignore_walks_the_vault_again() {
+        let f = Fixture::open(VaultConfig::default());
+        let run = "mlruns/run.md".to_string();
+        let indexed = || f.vault.file_paths(false).unwrap().contains(&run);
+        f.write("keep.md", "keep\n");
+        f.write(&run, "run\n");
+        f.vault.rescan().unwrap();
+        assert!(poll_until(indexed, BUDGET), "the walk missed the tree");
+
+        f.write(".gitignore", "mlruns/\n");
+        assert!(
+            poll_until(|| !indexed(), BUDGET),
+            "a newly ignored tree stayed in the index"
+        );
+
+        f.write(".gitignore", "# nothing\n");
+        assert!(
+            poll_until(indexed, BUDGET),
+            "the tree stayed lazy after it stopped being ignored"
         );
     }
 
