@@ -129,6 +129,12 @@ fn main() -> glib::ExitCode {
     if let Some(code) = askpass::maybe_run() {
         return code;
     }
+    // And this is the process that spawns it: a Sync over ssh points git's ssh back at this
+    // binary. Handed over rather than found, because the same code runs in `accent-cli serve`,
+    // whose binary has no askpass mode.
+    if let Ok(exe) = std::env::current_exe() {
+        accent_core::git::set_askpass(exe);
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
