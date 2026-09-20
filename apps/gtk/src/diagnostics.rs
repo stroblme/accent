@@ -151,6 +151,31 @@ pub fn render(
     }
 }
 
+/// How much of `buffer` the diagnostics are painted over: how many underlined runs it carries and
+/// how many gutter marks. Only `ACCENT_BENCH_DIAG` reads it.
+pub fn painted(buffer: &sourceview5::Buffer) -> (usize, usize) {
+    let table = buffer.tag_table();
+    let runs = |tag: gtk::TextTag| {
+        let mut at = buffer.start_iter();
+        // A tag over the first character toggles where the walk begins rather than where it
+        // lands, so that one is counted before the walk.
+        let mut runs = usize::from(at.starts_tag(Some(&tag)));
+        while at.forward_to_tag_toggle(Some(&tag)) {
+            runs += usize::from(at.starts_tag(Some(&tag)));
+        }
+        runs
+    };
+    let underlined = TAGS.iter().filter_map(|n| table.lookup(n)).map(runs).sum();
+    // Line by line: the binding leaves `forward_iter_to_source_mark` unimplemented, and a mark
+    // sits at the start of its line, so a pass over the lines sees every one of them.
+    let marks = (0..buffer.line_count())
+        .flat_map(|line| {
+            [MARK_ERROR, MARK_WARNING].map(|c| buffer.source_marks_at_line(line, Some(c)).len())
+        })
+        .sum();
+    (underlined, marks)
+}
+
 /// Reading order, which is what a range comparison means. `Pos` is not `Ord` — it crosses the
 /// wire and orderings are not part of that contract — so the tuple does it here.
 fn key(pos: Pos) -> (u32, u32) {

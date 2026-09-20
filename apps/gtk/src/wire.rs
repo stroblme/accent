@@ -348,6 +348,23 @@ pub fn wire_window(app: &Rc<App>) {
         }
     ));
 
+    // The diagnostic count is also the switch that keeps what it counts out of the text: the
+    // squiggles, the gutter marks and the messages at the ends of the lines all go, while the
+    // count itself and the hover stay, so a diagnostic that is in the way is still readable by
+    // pointing at its line. Per tab, as everything else in that corner of the bar is.
+    app.statusbar.facts_control().connect_clicked(glib::clone!(
+        #[weak]
+        app,
+        move |_| {
+            let Some(tab) = app.active() else {
+                return;
+            };
+            tab.hide_diagnostics(!tab.diagnostics_hidden());
+            // For the tooltip, which now offers the other half.
+            app.sync_status();
+        }
+    ));
+
     // Right-click over the zoom readout: a PDF's two fitting modes, which otherwise live only in
     // the palette. Parented on the status bar's own button rather than in a header bar, so the
     // popover has a plain widget to hang off.

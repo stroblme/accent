@@ -6,6 +6,7 @@ use super::*;
 
 mod chrome;
 mod compare;
+mod diagnostics;
 mod diagram;
 mod files;
 mod find;
@@ -22,6 +23,7 @@ mod tags;
 
 use chrome::bench_chrome;
 use compare::{bench_compare, bench_compare_lines, bench_compare_pads};
+use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
     bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
@@ -167,6 +169,10 @@ use tags::bench_tags;
 /// twice over the open bar — once on a typed query, once on one Up recalled — printing what is
 /// selected in the box each time and again once its delayed search has run.
 ///
+/// `ACCENT_BENCH_DIAG=<rel_code_file>` hands a code tab an error, a warning and a hint, then
+/// presses the status bar's count twice, printing what the count says and how much of the answer
+/// the text is carrying each time.
+///
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` leaves `<query>` in the Search pane and writes `n` notes
 /// holding it behind the pane's back, printing the rows before, after and once they are gone
 /// again — once ranked, then once more with the replace row open, which is the exact scan, and
@@ -224,8 +230,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
+    let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
     if expand.is_none()
         && find.is_none()
+        && diag.is_none()
         && tags.is_none()
         && !replace
         && search.is_none()
@@ -309,6 +317,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = find {
             return bench_find(&app, &rel);
+        }
+        if let Some(rel) = diag {
+            return bench_diagnostics(&app, &rel);
         }
         if let Some(rel) = menu {
             if let Some(rel) = rel.strip_prefix("press:") {

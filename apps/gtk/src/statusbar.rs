@@ -53,7 +53,11 @@ pub struct Bar {
     kind: gtk::Label,
     /// The dot a dirty tab wears, so one symbol means "unsaved" wherever it appears.
     unsaved: gtk::Label,
+    /// The document's own count, and the button around it. A code tab's diagnostic count is also
+    /// the switch that keeps them out of the text, so the readout is a control there and plain
+    /// text everywhere else — a word count has nothing to press.
     words: gtk::Label,
+    facts: gtk::Button,
     /// The zoom readout, which is also the control that resets it.
     zoom: gtk::Button,
     zoom_label: gtk::Label,
@@ -84,6 +88,7 @@ impl Bar {
         unsaved.set_label("•");
         unsaved.set_tooltip_text(Some("Unsaved changes"));
         let words = label(true);
+        let facts = bar_button(&words, None, "");
 
         // The readout is the reset control: clicking it is Ctrl+0, which is 100 % for a document
         // and Fit Height for a PDF.
@@ -98,7 +103,7 @@ impl Bar {
         kind.set_halign(gtk::Align::End);
         row.append(&kind);
         row.append(&unsaved);
-        row.append(&words);
+        row.append(&facts);
         row.append(&zoom);
 
         Bar {
@@ -115,6 +120,7 @@ impl Bar {
             kind,
             unsaved,
             words,
+            facts,
             zoom,
             zoom_label,
         }
@@ -224,8 +230,21 @@ impl Bar {
     /// The document's own count, whatever it counts: a note's words, a code tab's errors and
     /// warnings, a PDF's page. One slot, because a tab has one such fact and it is the same
     /// corner of the bar.
-    pub fn set_facts(&self, text: Option<&str>) {
+    ///
+    /// `press` is what pressing it does, said in the tooltip, or `None` for a count that is only
+    /// a readout. Without one the slot keeps the pointer and the keyboard out rather than going
+    /// insensitive: a dimmed count reads as a count that is out of date.
+    pub fn set_facts(&self, text: Option<&str>, press: Option<&str>) {
         set(&self.words, text);
+        self.facts.set_visible(text.is_some());
+        self.facts.set_can_target(press.is_some());
+        self.facts.set_can_focus(press.is_some());
+        self.facts.set_tooltip_text(press);
+    }
+
+    /// The count itself, which the window hangs the diagnostics toggle off.
+    pub fn facts_control(&self) -> &gtk::Button {
+        &self.facts
     }
 
     /// Whether the document has edits the disk does not. Nothing is shown when it is saved: a
