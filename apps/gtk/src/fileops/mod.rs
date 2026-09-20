@@ -18,7 +18,7 @@ mod transfer;
 pub use clipboard::Clip;
 pub use menu::{context_menu, item, labels, popup, row_dir};
 pub use paths::{move_dest, topmost};
-pub use transfer::{download, upload};
+pub use transfer::{download, import, upload};
 
 use self::paths::{
     already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,

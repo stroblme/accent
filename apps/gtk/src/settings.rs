@@ -89,6 +89,7 @@ fn page(
     let page = adw::PreferencesPage::new();
     page.add(&appearance_group(&config, &save));
     page.add(&editor_group(&config, &save));
+    page.add(&files_group(&config, &save));
     page.add(&git_group(&config, &save));
     page.add(&pdf_group(&config, &save));
     if let Some(root) = &root {
@@ -348,12 +349,36 @@ fn system_font() -> String {
     crate::editor::default_font()
 }
 
+// ------------------------------------------------------------------------------------ files
+
+fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder().title("Files").build();
+
+    // How the tree lists, which is no single row's business — so it is a preference rather than
+    // an item on the menu a right-click over one row opens. `win.show-hidden-files` in the
+    // palette toggles the same value.
+    let hidden = adw::SwitchRow::builder()
+        .title("Show Hidden Files")
+        .subtitle("List dot-named files and folders in the Files pane")
+        .active(config.borrow().show_hidden)
+        .build();
+    hidden.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().show_hidden = r.is_active();
+            save();
+        }
+    });
+    group.add(&hidden);
+
+    group
+}
+
 // -------------------------------------------------------------------------------------- git
 
 fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Git").build();
 
-    // The Git pane's own toggle writes the same value, so the two surfaces are one preference.
     let tree = adw::SwitchRow::builder()
         .title("Group Changes by Folder")
         .subtitle("Show the Git pane's changed files as a tree instead of a flat list")

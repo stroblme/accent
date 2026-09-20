@@ -179,10 +179,11 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
 /// the originals away where they were cut.
 ///
 /// What a paste of files the vault does not hold does, on a local vault as much as on a remote
-/// one: a file outside the vault has to be copied in either way. It never replaces, where Upload
-/// Files… asks about it — an upload has a chooser to ask in and a paste has nowhere to ask, so a
-/// name that is taken gets the same `(copy)` mark an in-vault paste gets.
-pub(super) fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
+/// one, and what a drag from another application onto the tree does: a file outside the vault has
+/// to be copied in either way. It never replaces, where Upload Files… asks about it — an upload
+/// has a chooser to ask in and a paste has nowhere to ask, so a name that is taken gets the same
+/// `(copy)` mark an in-vault paste gets.
+pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let busy = busy_line("Copying", &files);
     (ops.transferring)(&busy, true);

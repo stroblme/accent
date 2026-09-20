@@ -229,6 +229,7 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         title: r.get(3)?,
         size: r.get(4)?,
         mtime_ns: r.get(5)?,
+        dependency: false,
     })
 }
 

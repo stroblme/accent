@@ -330,27 +330,44 @@ pub fn stat_one(root: &Path, rel: &str) -> io::Result<Option<FileMeta>> {
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
-/// Does the walk refuse to look inside `rel`? True for the trees [`scan`] never enters:
+/// What the walk makes of a directory, and the one thing the file tree needs beyond "the index
+/// does not hold it": *why*.
+///
+/// [`Unindexed::Dependency`] is somebody else's tree — a `node_modules`, a `.venv`, a cargo
+/// `target/` — opened to look at and never to edit; [`Unindexed::Ignored`] is a folder the reader
+/// gitignored on purpose, an `mlruns/` or a build output, which is theirs to change like any other.
+/// The two are kept apart here so the tree does not have to guess at a name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unindexed {
+    Dependency,
+    Ignored,
+}
+
+/// Does the walk refuse to look inside `rel`, and why? `Some` for the trees [`scan`] never enters:
 /// [`ALWAYS_SKIP_DIRS`], [`SKIP_DIRS`], anything at or under a [`DEPENDENCY_MARKERS`] file, and
 /// anything at or under a directory git ignores.
 ///
 /// This is [`stat_one`]'s rule asked as a question, so the file tree and the watcher cannot
 /// disagree about which paths the index holds. The vault root is the user's own choice and is
-/// never refused.
-fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> bool {
+/// never refused. A dependency tree inside a gitignored folder — the usual `node_modules` under an
+/// ignored build directory — answers `Dependency`: the stricter of the two wins.
+fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> Option<Unindexed> {
     if rel.is_empty() {
-        return false;
+        return None;
     }
     if rel.split('/').any(|part| never_walked(part, false)) {
-        return true;
+        return Some(Unindexed::Dependency);
     }
     let mut dir = root.to_path_buf();
     let marked = rel.split('/').any(|part| {
         dir.push(part);
         is_dependency_tree(&dir)
     });
+    if marked {
+        return Some(Unindexed::Dependency);
+    }
     // Only ever asked about a directory the reader has opened, so the name is a directory's.
-    marked || in_ignored_dir(ignores, rel, true)
+    in_ignored_dir(ignores, rel, true).then_some(Unindexed::Ignored)
 }
 
 /// The children of the directory `rel` that `held` — the index's own listing of it — does not
@@ -377,7 +394,7 @@ pub fn unindexed_children(
     root: &Path,
     rel: &str,
     held: &std::collections::HashSet<&str>,
-) -> io::Result<Vec<(String, FileKind)>> {
+) -> io::Result<Vec<(String, FileKind, Unindexed)>> {
     // One matcher for the whole listing: it caches the ignore files it reads on the way down, so
     // a directory of a thousand children asks the disk for them once.
     let mut ignores = dir_ignores(root);
@@ -412,14 +429,26 @@ pub fn unindexed_children(
         // of the trees the walk refuses. Anything else missing from the index is missing for a
         // reason of its own — a symlink pointing back into the vault, a file that vanished
         // between the scan and now — and guessing at it here is not this function's business.
-        let refused = dir
-            && (SKIP_DIRS.contains(&name.as_str())
-                || is_dependency_tree(&path)
-                || in_ignored_dir(&mut ignores, &rel_path, true));
-        if !inside && !refused {
-            continue;
-        }
-        out.push((rel_path, if dir { FileKind::Dir } else { classify(&name) }));
+        let refused = dir.then(|| {
+            if SKIP_DIRS.contains(&name.as_str()) || is_dependency_tree(&path) {
+                return Some(Unindexed::Dependency);
+            }
+            in_ignored_dir(&mut ignores, &rel_path, true).then_some(Unindexed::Ignored)
+        });
+        // A child of an unindexed tree is of its parent's kind, unless it is a stricter tree of
+        // its own: a `node_modules` under a gitignored build folder is still nobody's to edit.
+        let why = match (inside, refused.flatten()) {
+            (_, Some(Unindexed::Dependency)) | (Some(Unindexed::Dependency), _) => {
+                Unindexed::Dependency
+            }
+            (Some(Unindexed::Ignored), _) | (_, Some(Unindexed::Ignored)) => Unindexed::Ignored,
+            (None, None) => continue,
+        };
+        out.push((
+            rel_path,
+            if dir { FileKind::Dir } else { classify(&name) },
+            why,
+        ));
     }
     Ok(out)
 }
@@ -1127,7 +1156,7 @@ mod tests {
             let mut n: Vec<String> = unindexed_children(vault.path(), rel, &held)
                 .unwrap()
                 .into_iter()
-                .map(|(rel, _)| rel)
+                .map(|(rel, ..)| rel)
                 .collect();
             n.sort();
             n
@@ -1264,17 +1293,19 @@ mod tests {
         let vault = skipped_vault();
         let mut ignores = dir_ignores(vault.path());
         let mut un = |rel| is_unindexed(vault.path(), rel, &mut ignores);
-        assert!(un("node_modules"));
-        assert!(un("node_modules/pkg/index.js"));
-        assert!(
+        let dep = Some(Unindexed::Dependency);
+        assert_eq!(un("node_modules"), dep);
+        assert_eq!(un("node_modules/pkg/index.js"), dep);
+        assert_eq!(
             un(".venv"),
+            dep,
             "a dependency marker is checked on the path itself"
         );
-        assert!(un(".venv/lib"));
-        assert!(un(".git"));
-        assert!(!un("Note.md"));
+        assert_eq!(un(".venv/lib"), dep);
+        assert_eq!(un(".git"), dep);
+        assert_eq!(un("Note.md"), None);
         // The root is the user's own choice, marker or not.
-        assert!(!un(""));
+        assert_eq!(un(""), None);
     }
 
     #[test]
@@ -1284,7 +1315,7 @@ mod tests {
             let mut n: Vec<String> = unindexed_children(vault.path(), rel, &HashSet::new())
                 .unwrap()
                 .into_iter()
-                .map(|(rel, _)| rel)
+                .map(|(rel, ..)| rel)
                 .collect();
             n.sort();
             n
@@ -1297,6 +1328,37 @@ mod tests {
         assert_eq!(names("node_modules/pkg"), ["node_modules/pkg/index.js"]);
     }
 
+    /// The tree's whole question: a gitignored folder is the reader's own, a dependency tree is
+    /// not, and one nested in the other is still not.
+    #[test]
+    fn unindexed_children_says_which_trees_are_somebody_elses() {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |p: &str| vault.path().join(p);
+        fs::write(at(".gitignore"), "build/\n").unwrap();
+        fs::create_dir_all(at("build/node_modules/pkg")).unwrap();
+        fs::write(at("build/out.md"), "o").unwrap();
+        fs::write(at("build/node_modules/pkg/index.js"), "i").unwrap();
+
+        let why = |rel: &str, name: &str| {
+            unindexed_children(vault.path(), rel, &HashSet::new())
+                .unwrap()
+                .into_iter()
+                .find(|(r, ..)| r == name)
+                .map(|(.., why)| why)
+        };
+        assert_eq!(why("", "build"), Some(Unindexed::Ignored));
+        assert_eq!(why("build", "build/out.md"), Some(Unindexed::Ignored));
+        assert_eq!(
+            why("build", "build/node_modules"),
+            Some(Unindexed::Dependency),
+            "a dependency tree under a gitignored folder is still nobody's to edit"
+        );
+        assert_eq!(
+            why("build/node_modules", "build/node_modules/pkg"),
+            Some(Unindexed::Dependency)
+        );
+    }
+
     #[test]
     fn unindexed_children_leaves_out_what_the_index_already_holds() {
         let vault = skipped_vault();
@@ -1305,7 +1367,7 @@ mod tests {
         let held = HashSet::from(["node_modules"]);
         let rows = unindexed_children(vault.path(), "", &held).unwrap();
         assert_eq!(
-            rows.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+            rows.iter().map(|(r, ..)| r.as_str()).collect::<Vec<_>>(),
             [".venv"]
         );
     }
@@ -1315,7 +1377,7 @@ mod tests {
         let vault = skipped_vault();
         fs::write(vault.path().join("node_modules/README.md"), "r").unwrap();
         let rows = unindexed_children(vault.path(), "node_modules", &HashSet::new()).unwrap();
-        let kind = |rel: &str| rows.iter().find(|(r, _)| r == rel).map(|(_, k)| *k);
+        let kind = |rel: &str| rows.iter().find(|(r, ..)| r == rel).map(|(_, k, _)| *k);
         assert_eq!(kind("node_modules/README.md"), Some(FileKind::Markdown));
         assert_eq!(kind("node_modules/pkg"), Some(FileKind::Dir));
     }

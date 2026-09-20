@@ -38,13 +38,14 @@ impl Local {
         if extra.is_empty() {
             return Ok(rows);
         }
-        rows.extend(extra.into_iter().map(|(rel_path, kind)| FileRow {
+        rows.extend(extra.into_iter().map(|(rel_path, kind, why)| FileRow {
             id: 0,
             rel_path,
             kind,
             title: None,
             size: 0,
             mtime_ns: 0,
+            dependency: why == walk::Unindexed::Dependency,
         }));
         // `Index::list_files` orders directories first and then by path, case-insensitively; the
         // merged listing has to come out the same way or the disk rows would land in a block of

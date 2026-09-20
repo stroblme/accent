@@ -117,8 +117,8 @@ impl Panel {
         });
     }
 
-    /// Draw the changes list from what the last refresh learned, and nothing else: what the tree
-    /// toggle and a folder row both need, neither of them being a reason to ask git again.
+    /// Draw the changes list from what the last refresh learned, and nothing else: what the
+    /// grouping preference and a folder row both need, neither being a reason to ask git again.
     ///
     /// Only the run of rows that differs is spliced, as the log compares before it draws: a save,
     /// a watcher event and the `.git` write a Stage makes each land a refresh that mostly says
@@ -234,33 +234,9 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
             }
         }
     ));
-    // One preference with two surfaces: this and the switch in Preferences write the same
-    // `git_tree`. It rides the Changes header because that is where the list it reshapes begins,
-    // and the binder puts it back on the preference every time the row is reused — which is why
-    // the handler below has to recognise its own echo and do nothing.
-    let view = gtk::ToggleButton::builder()
-        .icon_name("view-list-symbolic")
-        .tooltip_text("Group changed files by folder")
-        .valign(gtk::Align::Center)
-        .build();
-    view.add_css_class("flat");
-    let weak = panel.clone();
-    view.connect_toggled(move |button| {
-        let Some(panel) = weak.upgrade() else {
-            return;
-        };
-        let on = button.is_active();
-        if panel.tree.get() == on {
-            return;
-        }
-        panel.set_tree(on);
-        (panel.hooks.set_tree)(on);
-    });
-
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     header.append(&title);
     header.append(&all);
-    header.append(&view);
 
     // A folder of the tree view: the chevron says whether it is open, the folder icon says it is
     // one — the same icon the Files tree gives a directory — and the label carries whatever
@@ -437,10 +413,7 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
-    let (Some(title), Some(view)) = (
-        header.first_child().and_downcast::<gtk::Label>(),
-        header.last_child().and_downcast::<gtk::ToggleButton>(),
-    ) else {
+    let Some(title) = header.first_child().and_downcast::<gtk::Label>() else {
         return;
     };
     let Some(all) = title.next_sibling().and_downcast::<gtk::Button>() else {
@@ -463,10 +436,6 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
                 Some(Section::Staged) => "Unstage All",
                 _ => "Stage All",
             });
-            // One toggle for the whole list, on the section it is most about. Setting it here is
-            // what the handler in `change_row` reads back as its own echo.
-            view.set_visible(section == Some(Section::Changes));
-            view.set_active(panel.tree.get());
         }
         Row::Folder {
             label,

@@ -167,8 +167,9 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("strong").set_weight(700);
     tag("em").set_style(pango::Style::Italic);
     tag("strike").set_strikethrough(true);
+    let mono = monospace_family();
     for name in ["code", "codeblock", "math", "html", "frontmatter"] {
-        tag(name).set_family(Some("monospace"));
+        tag(name).set_family(Some(&mono));
     }
     for name in ["link", "wikilink"] {
         tag(name).set_underline(pango::Underline::Single);
@@ -182,6 +183,22 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("task");
     tag("taskdone").set_strikethrough(true);
     tag("marker");
+}
+
+/// The family of the platform's monospace font, which is the font a code tab is given
+/// (`editor::page::install_font`) and the one a run of code or a formula inside a note is set in.
+///
+/// Named rather than left to CSS's generic `monospace`: the alias is whatever fontconfig answers
+/// with, which is a face nothing else in the window uses, and a run set in it sits on the same
+/// line as prose set in another — so its glyphs are rasterised on their own terms, at a size
+/// chosen for the other font's metrics. That is what left an inline `$=$` with the top bar of its
+/// `=` all but gone beside a plain `=` two lines down that kept it. With the defaults this is the
+/// note's own face, and the formula is drawn exactly as the text around it is.
+fn monospace_family() -> String {
+    pango::FontDescription::from_string(&adw::StyleManager::default().monospace_font_name())
+        .family()
+        .map(|family| family.to_string())
+        .unwrap_or_else(|| "monospace".to_string())
 }
 
 /// The colour at `alpha`, which is how everything in the editor dims: composited over the

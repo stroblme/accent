@@ -300,6 +300,10 @@ pub struct Tab {
     /// both read it back after the paint.
     diagnostics: RefCell<Vec<Diagnostic>>,
     annotations: sourceview5::AnnotationProvider,
+    /// Whether this tab's diagnostics are kept out of the text: no squiggles, no gutter marks and
+    /// no messages at the ends of the lines. What the server said is still held above, so the
+    /// hover still answers for a line and the status bar still counts them.
+    diagnostics_hidden: Cell<bool>,
     /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
@@ -607,6 +611,7 @@ pub fn open(
         follow: RefCell::new(Follow::default()),
         diagnostics: RefCell::new(Vec::new()),
         annotations,
+        diagnostics_hidden: Cell::new(false),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         font: RefCell::new(None),
@@ -1058,11 +1063,36 @@ impl Tab {
     /// What the language server last said about this file. Replaces the previous answer whole,
     /// which is what a publish is; an empty list clears the tab.
     pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
-        diagnostics::render(&self.buffer, &self.annotations, &items);
         *self.diagnostics.borrow_mut() = items;
+        self.paint_diagnostics();
     }
 
-    /// What is painted now, for the status bar and the hover.
+    /// Show what the server said in the text, or keep it out of it: the counter in the status bar
+    /// is the switch. Per tab, as the count beside it is — the readout says what *this* document
+    /// has, and pressing it answers for the document it is counting.
+    pub fn hide_diagnostics(&self, hidden: bool) {
+        if self.diagnostics_hidden.replace(hidden) != hidden {
+            self.paint_diagnostics();
+        }
+    }
+
+    pub fn diagnostics_hidden(&self) -> bool {
+        self.diagnostics_hidden.get()
+    }
+
+    /// Lay the stored answer over the text, or nothing at all while it is hidden — which is the
+    /// same pass, so hiding and showing go through the code a publish does rather than a second
+    /// way of lifting the same tags.
+    fn paint_diagnostics(&self) {
+        let items = self.diagnostics.borrow();
+        let painted: &[Diagnostic] = match self.diagnostics_hidden.get() {
+            true => &[],
+            false => &items,
+        };
+        diagnostics::render(&self.buffer, &self.annotations, painted);
+    }
+
+    /// What the server said, painted or not: what the status bar counts and the hover reads back.
     pub fn diagnostics(&self) -> std::cell::Ref<'_, Vec<Diagnostic>> {
         self.diagnostics.borrow()
     }

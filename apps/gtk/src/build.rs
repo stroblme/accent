@@ -423,6 +423,18 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         ),
+        // Files dragged in from another application go through the same path a paste of GNOME
+        // Files' clipboard takes, so the name clashes, the remote vaults and the toast are
+        // already answered for.
+        glib::clone!(
+            #[weak]
+            app,
+            move |files: Vec<PathBuf>, dir: String, cut: bool| {
+                if let Some(ops) = app.ops() {
+                    fileops::import(ops, &dir, files, cut);
+                }
+            }
+        ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
@@ -537,8 +549,7 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 /// The Git pane. Every hook holds the window weakly: the pane lives in the sidebar, which the
 /// window owns, so a strong capture here is a cycle that keeps a closed window's vault open.
 fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
-    let (toast, open, diff, compare, trash, changed, syncing, set_tree) = (
-        Rc::downgrade(app),
+    let (toast, open, diff, compare, trash, changed, syncing) = (
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -599,15 +610,6 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             if let Some(app) = syncing.upgrade() {
                 app.statusbar.set_syncing(on);
             }
-        }),
-        // The pane has already redrawn itself; this writes the preference the Preferences switch
-        // edits, so the two surfaces stay one value, and hands it to every other window's pane.
-        set_tree: Box::new(move |on| {
-            let Some(app) = set_tree.upgrade() else {
-                return;
-            };
-            app.config.borrow_mut().git_tree = on;
-            app.config_changed();
         }),
     })
 }

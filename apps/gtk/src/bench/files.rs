@@ -603,7 +603,32 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
             glib::timeout_future(Duration::from_millis(200)).await;
         }
         glib::timeout_future(Duration::from_millis(400)).await;
-        println!("bench menu_row {:?}", tree.selected().map(|row| row.rel));
+        let row = tree.selected();
+        println!("bench menu_row {:?}", row.as_ref().map(|row| &row.rel));
+        // Whether the tree would open a menu here at all, and what it would hold: a row inside a
+        // dependency tree gets none (`wire::wire_tree`), a gitignored one the whole of it.
+        if let Some(row) = &row {
+            let at = gdk::Rectangle::new(0, 0, 1, 1);
+            let items = (!row.dependency).then(|| {
+                let menu = fileops::context_menu(
+                    &ops,
+                    tree.widget(),
+                    Some((&row.rel, row.is_dir())),
+                    &[],
+                    at,
+                );
+                let items = menu.menu_model().map(|m| fileops::labels(&m));
+                menu.popdown();
+                items
+            });
+            let items = items.flatten();
+            println!(
+                "bench menu_items {} dir={} dependency={} {items:?}",
+                row.rel,
+                row.is_dir(),
+                row.dependency,
+            );
+        }
 
         let at = gdk::Rectangle::new(0, 0, 1, 1);
         let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), &[], at);
@@ -936,4 +961,175 @@ pub(super) fn bench_expand(app: &Rc<App>, rel: &str) {
         }
     }
     println!("bench bind_probe {n} rows in {:.1} ms", ms_since(t0));
+}
+
+/// `ACCENT_BENCH_DROP="<rel_folder> <abs_file> <abs_file>"`: the half of a drag from GNOME Files
+/// a headless run can drive. Xvfb carries a drag inside one process and not between two, so this
+/// builds the `GdkFileList` a file manager would offer and takes the two ends the app owns.
+///
+/// First the spring-open: the folder's row is shut, `enter` is emitted on its own drop target the
+/// way a drag resting over it does, and the row has to be open a second later. Then the drop
+/// itself: `tree::dropped_paths` over the list, then `fileops::import` into that folder, which is
+/// the path a paste of GNOME Files' clipboard already takes — a copy first, then a move, which
+/// has to leave nothing behind. What no drill sees is the three lines of `connect_drop` glue
+/// between the two, and the action a real file manager reports with Shift held.
+pub(super) fn bench_drop(app: &Rc<App>, arg: &str) {
+    let Some(ops) = app.ops().cloned() else {
+        return bench_quit(app);
+    };
+    let mut words = arg.split_whitespace();
+    let Some(dir) = words.next().map(str::to_string) else {
+        return bench_quit(app);
+    };
+    let files: Vec<std::path::PathBuf> = words.map(std::path::PathBuf::from).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        for _ in 0..50 {
+            if tree.reveal(&dir) {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+
+        // Shut again, so the spring has something to open.
+        let row = tree::find_row(tree.model(), &dir).expect("the folder's row");
+        row.set_expanded(false);
+        let target = import_target_on(tree.view(), &dir).expect("the row's import target");
+        println!("bench drop_before expanded={}", row.is_expanded());
+        let _ = target.emit_by_name::<gdk::DragAction>("enter", &[&1.0f64, &1.0f64]);
+        glib::timeout_future(Duration::from_millis(1200)).await;
+        println!("bench drop_spring expanded={}", row.is_expanded());
+
+        let list =
+            gdk::FileList::from_array(&files.iter().map(gio::File::for_path).collect::<Vec<_>>());
+        let carried = tree::dropped_paths(&list.to_value());
+        println!("bench drop_paths {carried:?}");
+        let Some(carried) = carried else {
+            return bench_quit(&app);
+        };
+        // A plain drag copies; the sources stay where they are.
+        fileops::import(&ops, &dir, carried.clone(), false);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!(
+            "bench drop_copied {:?} sources_kept={}",
+            landed(&app, &dir),
+            carried.iter().filter(|p| p.exists()).count()
+        );
+        // Shift held in the file manager: the same path with the sources taken away.
+        fileops::import(&ops, &dir, carried.clone(), true);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!(
+            "bench drop_moved {:?} sources_left={}",
+            landed(&app, &dir),
+            carried.iter().filter(|p| p.exists()).count()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// The drop target on `dir`'s row that takes files from another application, found among the
+/// controllers the row expander carries.
+fn import_target_on(view: &gtk::ListView, dir: &str) -> Option<gtk::DropTarget> {
+    let expander = tree::expanders(view).into_iter().find(|expander| {
+        expander
+            .list_row()
+            .and_then(|row| row.item())
+            .as_ref()
+            .and_then(tree::decode)
+            .is_some_and(|row| row.rel == dir)
+    })?;
+    expander
+        .observe_controllers()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.downcast::<gtk::DropTarget>().ok())
+        .find(|t| {
+            t.formats()
+                .is_some_and(|f| f.contains_type(gdk::FileList::static_type()))
+        })
+}
+
+/// What the vault lists in `dir` now, by name.
+fn landed(app: &Rc<App>, dir: &str) -> Vec<String> {
+    let Some(vault) = app.vault() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = vault
+        .list_dir(dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| accent_core::path::basename(&row.rel_path).to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// `ACCENT_BENCH_WATCH="<rel_gitignored_dir> <rel_dependency_dir>"`: whether a file written into
+/// an open folder the index does not walk reaches the tree.
+///
+/// Both rows are expanded, a file is written into each from outside the app and then removed
+/// again, and the tree's own rows are read after each step. The gitignored folder has to follow
+/// the disk (`tree::watch_unindexed`); the dependency tree has to *not*, which is the half that
+/// keeps a 40 000-file `node_modules` unwatched.
+pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return bench_quit(app);
+    };
+    let mut words = arg.split_whitespace().map(str::to_string);
+    let (Some(ignored), Some(dependency)) = (words.next(), words.next()) else {
+        return bench_quit(app);
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        for dir in [&ignored, &dependency] {
+            for _ in 0..50 {
+                if tree.reveal(dir) {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(200)).await;
+            }
+            if let Some(row) = tree::find_row(tree.model(), dir) {
+                row.set_expanded(true);
+            }
+        }
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let children = |dir: &str| {
+            let model = tree.model();
+            let mut names: Vec<String> = (0..model.n_items())
+                .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
+                .filter_map(|item| tree::decode(&item))
+                .filter_map(|row| row.rel.strip_prefix(&format!("{dir}/")).map(str::to_string))
+                .filter(|rest| !rest.contains('/'))
+                .collect();
+            names.sort();
+            names
+        };
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_before {:?}", children(dir));
+        }
+        // Written the way anything outside accent writes: straight to the disk, with nothing
+        // telling the app about it.
+        let made: Vec<std::path::PathBuf> = [&ignored, &dependency]
+            .iter()
+            .map(|dir| vault.root().join(dir).join("made.md"))
+            .collect();
+        for path in &made {
+            let _ = std::fs::write(path, "# made\n");
+        }
+        glib::timeout_future(Duration::from_secs(3)).await;
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_added {:?}", children(dir));
+        }
+        for path in &made {
+            let _ = std::fs::remove_file(path);
+        }
+        glib::timeout_future(Duration::from_secs(3)).await;
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_removed {:?}", children(dir));
+        }
+        bench_quit(&app);
+    });
 }

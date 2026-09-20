@@ -44,6 +44,7 @@ pub struct FileRow {
     pub title: Option<String>,
     pub size: i64,
     pub mtime_ns: i64,
+    pub dependency: bool,
 }
 
 #[uniffi::remote(Record)]
