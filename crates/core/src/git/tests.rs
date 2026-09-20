@@ -1403,7 +1403,7 @@ fn the_users_own_ssh_command_and_keepalive_win_over_ours() {
     ok(&own, &["config", "core.sshCommand", "ssh -i key"]);
     ok(&own, &["config", "http.keepAliveIdle", "30"]);
     let ours = |dir: &Path, key: &str| {
-        network(dir, &["fetch"])
+        network(dir, &["fetch"], false)
             .get_envs()
             .any(|(k, value)| k == key && value.is_some())
     };
@@ -1417,4 +1417,41 @@ fn the_users_own_ssh_command_and_keepalive_win_over_ours() {
     // Only the one the config names is left to it.
     let count = inherited(&["GIT_HTTP_KEEPALIVE_COUNT"]);
     assert_eq!(ours(&own, "GIT_HTTP_KEEPALIVE_COUNT"), !count);
+}
+
+/// Only a transfer the user asked for may raise the passphrase dialog, and only where ssh is ours
+/// to configure.
+#[test]
+fn only_an_asked_for_transfer_may_ask_for_a_passphrase() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (plain, own) = (tmp.path().join("plain"), tmp.path().join("own"));
+    init(&plain);
+    init(&own);
+    ok(&own, &["config", "core.sshCommand", "ssh -i key"]);
+    set_askpass(PathBuf::from("/nowhere/accent"));
+    let env = |dir: &Path, ask: bool, key: &str| {
+        network(dir, &["push"], ask)
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new(key))
+            .and_then(|(_, value)| Some(value?.to_string_lossy().into_owned()))
+    };
+    // A developer running the suite under their own ssh or askpass gets theirs, not ours.
+    let theirs = ["GIT_SSH_COMMAND", "GIT_SSH", "SSH_ASKPASS"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some());
+    assert_eq!(
+        env(&plain, true, "SSH_ASKPASS").as_deref(),
+        (!theirs).then_some("/nowhere/accent")
+    );
+    assert_eq!(
+        env(&plain, true, "GIT_SSH_COMMAND").is_some_and(|ssh| ssh.contains("AddKeysToAgent=yes")),
+        !theirs
+    );
+    // The autofetch never asks: a dialog nobody prompted, every five minutes.
+    assert_eq!(env(&plain, false, "SSH_ASKPASS"), None);
+    // The user's own ssh brings its own askpass with it.
+    assert_eq!(env(&own, true, "SSH_ASKPASS"), None);
 }
