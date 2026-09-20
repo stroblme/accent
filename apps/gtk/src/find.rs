@@ -467,12 +467,24 @@ impl Bar {
             return self.to_preview(PreviewOp::Find(text.to_string()));
         }
         let Some(tab) = self.tab() else { return };
+        // What the two boxes have selected, to put back below. The query box says `search-changed`
+        // after a delay, so this runs a moment *after* Ctrl+F or Ctrl+H over an open bar has
+        // selected the whole of one of them — and the step below moves the document's caret, which
+        // takes that selection with it. The select-all used to flash and go, leaving the reader
+        // appending to the old query rather than typing over it.
+        let boxes: [&gtk::Editable; 2] = [self.query.upcast_ref(), self.replace.upcast_ref()];
+        let selected = boxes.map(|entry| entry.selection_bounds());
         tab.set_query(text);
         tab.set_highlight(true);
         // From the current match, not past it: typing must not walk through the document.
         self.busy.set(true);
         tab.step(true, true);
         self.busy.set(false);
+        for (entry, bounds) in boxes.into_iter().zip(selected) {
+            if let Some((start, end)) = bounds {
+                entry.select_region(start, end);
+            }
+        }
         self.matches.set_text(&tab.matches_label());
     }
 
@@ -567,6 +579,17 @@ impl Bar {
     /// What the query box says. Only `ACCENT_BENCH_REVEAL` reads it.
     pub fn query_text(&self) -> String {
         self.query.text().to_string()
+    }
+
+    /// The query box itself, to type into and to read what is selected in. Only
+    /// `ACCENT_BENCH_FIND` touches it.
+    pub fn query_box(&self) -> &gtk::SearchEntry {
+        &self.query
+    }
+
+    /// The replacement box, for the same reason as [`Bar::query_box`].
+    pub fn replace_box(&self) -> &gtk::Entry {
+        &self.replace
     }
 
     /// The bar went away: drop the match highlight on both possible targets.
