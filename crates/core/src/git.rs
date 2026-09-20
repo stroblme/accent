@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,10 @@ pub struct Status {
     pub ignored: Vec<String>,
     /// A merge stopped part way and is waiting for a commit or an abort.
     pub merging: bool,
+    /// A rebase stopped part way — a `pull.rebase=true` pull on a conflict, most often — and is
+    /// waiting for a continue or an abort. Defaulted, so a server that does not send it reads.
+    #[serde(default)]
+    pub rebasing: bool,
 }
 
 impl Status {
@@ -225,13 +229,46 @@ const KEEPALIVE: [(&str, &str, &str); 3] = [
     ("GIT_HTTP_KEEPALIVE_COUNT", "keepalivecount", "2"),
 ];
 
+/// What a transfer the user asked for adds to [`SSH`]: a key whose passphrase was just typed goes
+/// into the agent, so the push after the pull does not ask for the same one again.
+const ADD_KEYS: &str = " -o AddKeysToAgent=yes";
+
+/// The program ssh asks a passphrase through, printing the answer on stdout — the GTK app's own
+/// askpass mode (`askpass.rs`), handed over at startup by [`set_askpass`].
+///
+/// Handed over rather than found, because this module also runs inside `accent-cli serve` on a
+/// host, whose binary has no dialog to show: `current_exe` here would point ssh at a program that
+/// cannot ask.
+static ASKPASS: OnceLock<PathBuf> = OnceLock::new();
+
+/// Let the transfers the user asks for raise `exe` when ssh wants a passphrase. Called once, at
+/// startup; a process that never calls it never prompts.
+pub fn set_askpass(exe: PathBuf) {
+    let _ = ASKPASS.set(exe);
+}
+
+/// The helper, unless the user has an askpass of their own: theirs wins, as `core.sshCommand`
+/// does.
+fn askpass() -> Option<&'static Path> {
+    if std::env::var_os("SSH_ASKPASS").is_some() {
+        return None;
+    }
+    ASKPASS.get().map(PathBuf::as_path)
+}
+
 /// [`command`] for the three that talk to a remote — fetch, pull and push — told to give up on a
 /// link that has stopped answering (see [`SSH`]).
 ///
+/// `ask` is whether ssh may put the passphrase dialog on screen, which is true of a Sync's pull
+/// and push and false of the autofetch: that one runs on a five-minute timer, so its dialog would
+/// arrive over whatever is being typed with nobody having asked for it, and its own shorter bound
+/// would kill it mid-answer. Note that git reads `SSH_ASKPASS` as the last fallback for
+/// `GIT_ASKPASS` too, so an https remote's username and password come through the same dialog.
+///
 /// The user's own settings win. Each variable here would override the configuration, so it is set
-/// only where neither the environment nor the configuration — `core.sshCommand`, and
-/// `http.keepAlive*` including its per-URL `http.<url>.keepAlive*` form — has one of its own.
-fn network(root: &Path, args: &[&str]) -> Command {
+/// only where neither the environment nor the configuration — `core.sshCommand`, `SSH_ASKPASS`,
+/// and `http.keepAlive*` including its per-URL `http.<url>.keepAlive*` form — has one of its own.
+fn network(root: &Path, args: &[&str], ask: bool) -> Command {
     let mut cmd = command(root, args, false);
     let set = |key: &str| std::env::var_os(key).is_some();
     let re = r"^(core\.sshcommand|http\..*keepalive(idle|interval|count))$";
@@ -242,7 +279,19 @@ fn network(root: &Path, args: &[&str]) -> Command {
     let names: Vec<&str> = configured.lines().collect();
     let own_ssh = set("GIT_SSH_COMMAND") || set("GIT_SSH") || names.contains(&"core.sshcommand");
     if !own_ssh {
-        cmd.env("GIT_SSH_COMMAND", SSH);
+        match ask.then(askpass).flatten() {
+            Some(exe) => {
+                cmd.env("GIT_SSH_COMMAND", format!("{SSH}{ADD_KEYS}"))
+                    .env("SSH_ASKPASS", exe)
+                    // ssh prompts on its terminal unless told not to, and accent was very likely
+                    // started from one.
+                    .env("SSH_ASKPASS_REQUIRE", "force")
+                    .env("ACCENT_ASKPASS", "1");
+            }
+            None => {
+                cmd.env("GIT_SSH_COMMAND", SSH);
+            }
+        }
     }
     for (key, name, value) in KEEPALIVE {
         if !set(key) && !names.iter().any(|n| n.ends_with(name)) {
@@ -361,6 +410,7 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
     )?;
     Ok(Status {
         merging: merging(repo),
+        rebasing: rebasing(repo),
         ..parse_status(&out)
     })
 }
@@ -369,6 +419,15 @@ pub fn status(repo: &Repo) -> Result<Status, Error> {
 /// as long as one is waiting to be committed or aborted.
 fn merging(repo: &Repo) -> bool {
     repo.git_dir.join("MERGE_HEAD").exists()
+}
+
+/// Whether a rebase is under way, read the way `git status` reads it: `rebase-merge/` for the
+/// default backend, `rebase-apply/` for the `apply` one — unless `applying` is in it, which makes
+/// it a `git am`. Both live in the worktree's own git dir, which is what `git_dir` is.
+fn rebasing(repo: &Repo) -> bool {
+    let apply = repo.git_dir.join("rebase-apply");
+    repo.git_dir.join("rebase-merge").exists()
+        || (apply.exists() && !apply.join("applying").exists())
 }
 
 /// Parse `git status --porcelain=v2 -z --branch --ignored`.
@@ -652,7 +711,7 @@ fn collect(chunks: &Receiver<Vec<u8>>, until: Instant) -> Vec<u8> {
 /// Nobody is waiting for it, so it is the shortest-lived of the bounded calls (see
 /// [`FETCH_TIMEOUT`]), and a closing window stops it ([`interrupt`]).
 pub fn fetch(repo: &Repo) -> Result<String, Error> {
-    let cmd = network(&repo.root, &["fetch"]);
+    let cmd = network(&repo.root, &["fetch"], false);
     let out = bounded(cmd, None, FETCH_TIMEOUT, "fetch", Some(&repo.root))?;
     Ok(transcribe(out))
 }
@@ -1173,6 +1232,44 @@ pub fn merge_abort(repo: &Repo) -> Result<(), Error> {
     Ok(())
 }
 
+/// How far a `git rebase --continue` got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Rebase {
+    /// Every commit is replayed and the branch is back.
+    Done,
+    /// It stopped again before the end: on these conflicts of the next commit, or on none where
+    /// the rebase itself asked to stop (an `edit` in an interactive one).
+    Stopped(Vec<String>),
+}
+
+/// Carry on with the rebase under way, once its conflicts are resolved and staged. Each commit
+/// keeps its own message: `GIT_EDITOR=true` takes the one git offers where it would open an editor.
+///
+/// Bounded like [`merge`], and read off the repository the same way: a stop on the next commit's
+/// conflicts is where the rebase is, not a refusal.
+pub fn rebase_continue(repo: &Repo) -> Result<Rebase, Error> {
+    let mut cmd = command(&repo.root, &["rebase", "--continue"], false);
+    cmd.env("GIT_EDITOR", "true");
+    let done = bounded(cmd, None, TRANSFER_TIMEOUT, "rebase", None);
+    if !rebasing(repo) {
+        return done.map(|_| Rebase::Done);
+    }
+    let conflicts: Vec<String> = status(repo)?
+        .conflicts()
+        .map(|entry| entry.path.clone())
+        .collect();
+    match (done, conflicts.is_empty()) {
+        (Err(e), true) => Err(e),
+        _ => Ok(Rebase::Stopped(conflicts)),
+    }
+}
+
+/// Give up the rebase under way and put the branch back where it was before it started.
+pub fn rebase_abort(repo: &Repo) -> Result<(), Error> {
+    run(&repo.root, &["rebase", "--abort"], false)?;
+    Ok(())
+}
+
 /// The commit `spec` names, or `None` where it names none — an unborn HEAD, a missing branch.
 fn rev(repo: &Repo, spec: &str) -> Option<String> {
     let out = run(
@@ -1404,8 +1501,11 @@ fn publish(repo: &Repo) -> Result<String, Error> {
 ///
 /// Bounded by [`TRANSFER_TIMEOUT`]: this is where a pull that never answers would otherwise leave
 /// the Sync button insensitive for good. `stoppable` is whether a closing window may cut it off.
+///
+/// Every transfer through here was asked for by hand, so this is the one place that may ask for a
+/// passphrase (see [`network`]).
 fn transcript(repo: &Repo, args: &[&str], stoppable: bool) -> Result<String, Error> {
-    let cmd = network(&repo.root, args);
+    let cmd = network(&repo.root, args, true);
     let what = args.first().copied().unwrap_or("transfer");
     let root = stoppable.then_some(repo.root.as_path());
     let out = bounded(cmd, None, TRANSFER_TIMEOUT, what, root)?;

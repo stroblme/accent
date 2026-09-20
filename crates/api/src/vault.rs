@@ -417,6 +417,11 @@ methods! {
     git git_merge = merge(repo: ref Repo, branch: ref str) -> git::Merge,
         bounded by git::TRANSFER_TIMEOUT;
     git git_merge_abort = merge_abort(repo: ref Repo) -> ();
+    /// A rebase stopped part way, carried on or given up. A host whose `accent-cli serve` predates
+    /// them answers "no such method".
+    git git_rebase_continue = rebase_continue(repo: ref Repo) -> git::Rebase,
+        bounded by git::TRANSFER_TIMEOUT;
+    git git_rebase_abort = rebase_abort(repo: ref Repo) -> ();
     /// What Stage and Unstage Selected Lines write. A host whose `accent-cli serve` predates it
     /// answers "no such method".
     git git_stage_text = stage_text(repo: ref Repo, path: ref str, text: ref str) -> (),

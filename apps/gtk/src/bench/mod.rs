@@ -26,7 +26,10 @@ use files::{
     bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
     bench_templates,
 };
-use git::{bench_git, bench_git_close, bench_git_init, bench_git_press, bench_git_sync_over_fetch};
+use git::{
+    bench_git, bench_git_close, bench_git_init, bench_git_press, bench_git_rebase,
+    bench_git_sync_over_fetch,
+};
 use image::bench_image;
 use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
@@ -361,6 +364,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (Some(path), _) => bench_git_press(&app, path),
                 (None, "init") => bench_git_init(&app),
                 (None, "sync") => bench_git_sync_over_fetch(&app),
+                (None, "rebase") => bench_git_rebase(&app),
                 _ => bench_git(&app),
             };
         }

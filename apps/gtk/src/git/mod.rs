@@ -146,7 +146,7 @@ struct State {
 pub struct Panel {
     hooks: Hooks,
     root: gtk::Widget,
-    /// Over the pane while the selected repository is part way through a merge.
+    /// Over the pane while the selected repository is part way through a merge or a rebase.
     banner: adw::Banner,
     /// The pane's own box, and the only widget here a popover may hang off: GTK re-presents a
     /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
@@ -325,11 +325,9 @@ impl Panel {
         column.append(&divider);
 
         // A banner and not a toast (DESIGN.md, States): a merge that stopped is a state that
-        // lasts until it is committed or aborted, and Abort is the one decision it can offer.
-        let banner = adw::Banner::builder()
-            .title("A merge is in progress")
-            .button_label("Abort")
-            .build();
+        // lasts until it is committed or aborted, and Abort is the one decision it can offer. A
+        // rebase is the same state with Continue where Commit is; the title is set per refresh.
+        let banner = adw::Banner::builder().button_label("Abort").build();
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.append(&banner);
         root.append(&column);
@@ -478,7 +476,10 @@ impl Panel {
         let weak = Rc::downgrade(self);
         self.banner.connect_button_clicked(move |_| {
             if let Some(panel) = weak.upgrade() {
-                panel.abort_merge();
+                match panel.rebasing() {
+                    true => panel.abort_rebase(),
+                    false => panel.abort_merge(),
+                }
             }
         });
 
@@ -692,7 +693,12 @@ impl Panel {
             state.selected = selected;
         }
         self.sync_state();
-        self.banner.set_revealed(self.merging());
+        let rebasing = self.rebasing();
+        self.banner.set_title(match rebasing {
+            true => "A rebase is in progress",
+            false => "A merge is in progress",
+        });
+        self.banner.set_revealed(rebasing || self.merging());
         // git has answered for the first time since the window opened this vault, so there is a
         // repository to fetch at last. Everything after this is the timer's.
         if !self.state.borrow().repos.is_empty() && !self.fetched_once.replace(true) {
@@ -835,6 +841,15 @@ impl Panel {
             .is_some_and(|s| s.merging)
     }
 
+    /// Whether the selected repository is part way through a rebase.
+    pub(super) fn rebasing(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| s.rebasing)
+    }
+
     /// Whether the selected repository still has a conflict that is not staged as resolved. git
     /// refuses a commit over one, so Commit is not offered until there is none.
     pub(super) fn unresolved(&self) -> bool {
@@ -849,18 +864,25 @@ impl Panel {
     ///
     /// A merge under way always has its commit to make — resolved to "ours", it may stage nothing
     /// at all — and a message of its own already, so neither an index nor a message is needed.
+    /// A rebase under way keeps each commit's own message, so the box goes and the button is
+    /// Continue.
     fn sync_commit(&self) {
         let message = self.message_text();
-        let merging = self.merging();
+        let (merging, rebasing) = (self.merging(), self.rebasing());
         self.placeholder.set_visible(message.is_empty());
         self.placeholder.set_label(match merging {
             true => "Merge message (optional)",
             false => "Commit message",
         });
-        let anything = merging || self.to_commit().1;
+        self.commit.set_label(match rebasing {
+            true => "Continue",
+            false => "Commit",
+        });
+        let under_way = merging || rebasing;
+        let anything = under_way || self.to_commit().1;
         let unresolved = self.unresolved();
         self.commit
-            .set_sensitive(anything && !unresolved && (merging || !message.trim().is_empty()));
+            .set_sensitive(anything && !unresolved && (under_way || !message.trim().is_empty()));
         self.commit
             .set_tooltip_text(unresolved.then_some("Stage the resolved conflicts first"));
         // A clean tree has nothing to say, so the box goes — but never out from under a message
@@ -868,7 +890,7 @@ impl Panel {
         // mid-sentence. The button lives in the branch row now, so it is hidden by the same rule
         // rather than by being in the same container.
         let show = anything || !message.is_empty() || self.message.has_focus();
-        self.commit_box.set_visible(show);
+        self.commit_box.set_visible(show && !rebasing);
         self.commit.set_visible(show);
     }
 }
@@ -927,6 +949,26 @@ impl Panel {
     pub fn commit_hint(&self) -> (bool, Option<String>) {
         let tip = self.commit.tooltip_text().map(|t| t.to_string());
         (self.commit.is_sensitive(), tip)
+    }
+
+    /// The banner's title while it is up, and what the commit button reads. `ACCENT_BENCH_GIT`
+    /// and nothing else.
+    pub fn banner_hint(&self) -> (Option<String>, String) {
+        let title = self
+            .banner
+            .is_revealed()
+            .then(|| self.banner.title().to_string());
+        let label = self
+            .commit
+            .label()
+            .map(|l| l.to_string())
+            .unwrap_or_default();
+        (title, label)
+    }
+
+    /// Press the commit button, whatever it reads. `ACCENT_BENCH_GIT` and nothing else.
+    pub fn press_commit(&self) {
+        self.commit.emit_clicked();
     }
 
     /// Whether any repository's HEAD moved in the last refresh: a commit, a checkout or a pull.
@@ -1566,6 +1608,7 @@ mod tests {
             entries: Vec::new(),
             ignored: vec!["build/".to_string()],
             merging: false,
+            rebasing: false,
         };
         assert_eq!(branch_line(&clean).as_deref(), Some("main ↑1 ↓2"));
 

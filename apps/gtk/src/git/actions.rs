@@ -166,6 +166,10 @@ impl Panel {
     }
 
     pub(super) fn do_commit(self: &Rc<Self>) {
+        // The button reads Continue while a rebase is under way, and that is what it does.
+        if self.rebasing() {
+            return self.continue_rebase();
+        }
         let message = self.message_text();
         // A merge under way commits with git's own message where the box is empty.
         let merging = self.merging();
@@ -493,6 +497,59 @@ impl Panel {
                     vault
                         .git_merge_abort(repo)
                         .map(|()| "Merge aborted".to_string())
+                },
+            );
+        });
+    }
+
+    /// Carry on with the rebase under way, each commit keeping its own message. One that stops on
+    /// the next commit's conflicts leaves the banner and the Merge Conflicts rows up, as a merge
+    /// does, with the refresh [`Panel::command`] brings.
+    fn continue_rebase(self: &Rc<Self>) {
+        if self.unresolved() {
+            return;
+        }
+        self.command(
+            "continue the rebase".to_string(),
+            false,
+            Fail::Say,
+            |vault, repo| {
+                vault.git_rebase_continue(repo).map(|rebase| match rebase {
+                    git::Rebase::Done => "Rebase finished".to_string(),
+                    git::Rebase::Stopped(paths) if paths.is_empty() => "Rebase stopped".to_string(),
+                    git::Rebase::Stopped(paths) => {
+                        format!("Rebasing: conflicts in {}", files(paths.len()))
+                    }
+                })
+            },
+        );
+    }
+
+    /// Give up the rebase under way, which asks first for the reason [`Panel::abort_merge`] does.
+    pub(super) fn abort_rebase(self: &Rc<Self>) {
+        let dialog = dialogs::alert(
+            "Abort Rebase?",
+            "The branch goes back to where it was before the rebase, and the conflicts resolved \
+             so far are lost.",
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("abort", "Abort", adw::ResponseAppearance::Destructive),
+            ],
+            "cancel",
+        );
+        let panel = self.clone();
+        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
+            if response != "abort" {
+                return;
+            }
+            panel.command(
+                "abort the rebase".to_string(),
+                false,
+                Fail::Say,
+                |vault, repo| {
+                    vault
+                        .git_rebase_abort(repo)
+                        .map(|()| "Rebase aborted".to_string())
                 },
             );
         });
