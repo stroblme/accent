@@ -1065,3 +1065,71 @@ fn landed(app: &Rc<App>, dir: &str) -> Vec<String> {
     names.sort();
     names
 }
+
+/// `ACCENT_BENCH_WATCH="<rel_gitignored_dir> <rel_dependency_dir>"`: whether a file written into
+/// an open folder the index does not walk reaches the tree.
+///
+/// Both rows are expanded, a file is written into each from outside the app and then removed
+/// again, and the tree's own rows are read after each step. The gitignored folder has to follow
+/// the disk (`tree::watch_unindexed`); the dependency tree has to *not*, which is the half that
+/// keeps a 40 000-file `node_modules` unwatched.
+pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return bench_quit(app);
+    };
+    let mut words = arg.split_whitespace().map(str::to_string);
+    let (Some(ignored), Some(dependency)) = (words.next(), words.next()) else {
+        return bench_quit(app);
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        for dir in [&ignored, &dependency] {
+            for _ in 0..50 {
+                if tree.reveal(dir) {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(200)).await;
+            }
+            if let Some(row) = tree::find_row(tree.model(), dir) {
+                row.set_expanded(true);
+            }
+        }
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let children = |dir: &str| {
+            let model = tree.model();
+            let mut names: Vec<String> = (0..model.n_items())
+                .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
+                .filter_map(|item| tree::decode(&item))
+                .filter_map(|row| row.rel.strip_prefix(&format!("{dir}/")).map(str::to_string))
+                .filter(|rest| !rest.contains('/'))
+                .collect();
+            names.sort();
+            names
+        };
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_before {:?}", children(dir));
+        }
+        // Written the way anything outside accent writes: straight to the disk, with nothing
+        // telling the app about it.
+        let made: Vec<std::path::PathBuf> = [&ignored, &dependency]
+            .iter()
+            .map(|dir| vault.root().join(dir).join("made.md"))
+            .collect();
+        for path in &made {
+            let _ = std::fs::write(path, "# made\n");
+        }
+        glib::timeout_future(Duration::from_secs(3)).await;
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_added {:?}", children(dir));
+        }
+        for path in &made {
+            let _ = std::fs::remove_file(path);
+        }
+        glib::timeout_future(Duration::from_secs(3)).await;
+        for (what, dir) in [("ignored", &ignored), ("dependency", &dependency)] {
+            println!("bench watch_{what}_removed {:?}", children(dir));
+        }
+        bench_quit(&app);
+    });
+}

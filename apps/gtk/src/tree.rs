@@ -243,6 +243,8 @@ pub struct Tree {
     vault: Arc<Vault>,
     root: gio::ListStore,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
+    /// What keeps the listings the index does not walk fresh. See [`watch_unindexed`].
+    watches: Watches,
     asked: Asked,
     show_hidden: ShowHidden,
     /// The root's [`Landed`], which tells the empty page the host has answered.
@@ -406,9 +408,10 @@ impl Tree {
             // of the vault rather than of this disk, which on a remote vault is not where the
             // files are — and asked on a worker thread, because on that vault it is one round
             // trip per invalidated directory and a reindex invalidates a handful at a time.
-            let (vault, cache, asked, show_hidden) = (
+            let (vault, cache, watches, asked, show_hidden) = (
                 self.vault.clone(),
                 self.cache.clone(),
+                self.watches.clone(),
                 self.asked.clone(),
                 self.show_hidden.clone(),
             );
@@ -423,6 +426,7 @@ impl Tree {
                     Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
                     Ok(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
+                        watches.borrow_mut().remove(&dir);
                     }
                     // No answer is not an answer that it is gone. A reconnect's reindex arrives
                     // while the link is still being made, and taking that as gone left each
@@ -727,6 +731,60 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
         let item = row.item().as_ref().and_then(decode)?;
         (item.rel == rel).then_some(row)
     })
+}
+
+/// One `GFileMonitor` per folder the index does not walk but the tree keeps a listing of.
+type Watches = Rc<RefCell<HashMap<String, gio::FileMonitor>>>;
+
+/// Keep `dir`'s listing in step with the disk for as long as the tree holds it.
+///
+/// The index never walks a gitignored folder, so nothing in the vault's own watch set reports a
+/// file written into one: a build filling the folder whose row is open, or a training run writing
+/// into an `mlruns/`, showed nothing new until the row was collapsed and opened again. One
+/// monitor per such folder answers for exactly the listings the tree keeps — a child model is
+/// built and cached the first time its row is bound and lives as long as the window, so the watch
+/// has the same lifetime as the rows it keeps honest, and collapsing one throws neither away. The
+/// listing it stands beside is already paid for, which is what makes this the cheap answer rather
+/// than a budget of its own.
+///
+/// The dependency trees get none: a `node_modules` is opened to look at, and 40 000 files is the
+/// one tree this must not start watching. `GFileMonitor` rate-limits itself, so a directory
+/// written to in a burst is re-listed once rather than per file.
+///
+/// Local vaults only: a remote vault's files are on the host, where this machine cannot watch
+/// them. There the host's own watcher is the only answer, and it does not walk these folders
+/// either.
+fn watch_unindexed(
+    watches: &Watches,
+    vault: &Arc<Vault>,
+    asked: &Asked,
+    show_hidden: &ShowHidden,
+    store: &gio::ListStore,
+    dir: &str,
+) {
+    if vault.is_remote() || watches.borrow().contains_key(dir) {
+        return;
+    }
+    let monitor = gio::File::for_path(vault.root().join(dir))
+        .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE);
+    let monitor = match monitor {
+        Ok(monitor) => monitor,
+        // A folder that cannot be watched still lists; it is only as fresh as its last expansion,
+        // which is what every one of them used to be.
+        Err(e) => return tracing::debug!(dir, "watching an unindexed folder: {e}"),
+    };
+    let (store, vault, asked, show_hidden, dir) = (
+        store.clone(),
+        vault.clone(),
+        asked.clone(),
+        show_hidden.clone(),
+        dir.to_string(),
+    );
+    monitor.connect_changed({
+        let dir = dir.clone();
+        move |_, _, _, _| fill(&store, &vault, &asked, &show_hidden, &dir, None)
+    });
+    watches.borrow_mut().insert(dir, monitor);
 }
 
 fn children_model(
@@ -1053,17 +1111,27 @@ pub fn build(
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let marked: Rc<RefCell<Marks>> = Rc::new(RefCell::new(Marks::new()));
+    let watches = Watches::default();
     let model = gtk::TreeListModel::new(root.clone(), false, false, {
-        let (vault, cache, asked, show_hidden) = (
+        let (vault, cache, asked, show_hidden, watches) = (
             vault.clone(),
             cache.clone(),
             asked.clone(),
             show_hidden.clone(),
+            watches.clone(),
         );
         move |obj| {
             let row = decode(obj)?;
-            row.is_dir()
-                .then(|| children_model(&vault, &cache, &asked, &show_hidden, &row.rel).upcast())
+            if !row.is_dir() {
+                return None;
+            }
+            let store = children_model(&vault, &cache, &asked, &show_hidden, &row.rel);
+            // A gitignored folder is one the reader opened on purpose and one the index does not
+            // walk, so its listing has nothing keeping it fresh but this.
+            if !row.indexed && !row.dependency {
+                watch_unindexed(&watches, &vault, &asked, &show_hidden, &store, &row.rel);
+            }
+            Some(store.upcast())
         }
     });
 
@@ -1445,6 +1513,7 @@ pub fn build(
         vault,
         root: root.clone(),
         cache,
+        watches,
         asked,
         show_hidden,
         landed,
