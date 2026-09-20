@@ -11,9 +11,10 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The style class a row a Ctrl+click has marked carries, defined in `build::install_chrome_css`.
 const MARKED: &str = "accent-marked";
@@ -792,6 +793,46 @@ fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// How long a drag rests over a shut folder before it opens. Long enough that crossing one on the
+/// way somewhere else never opens it, short enough to read as part of the drag — the second
+/// GTK's own file chooser and Nautilus both wait.
+const SPRING_OPEN: Duration = Duration::from_millis(800);
+
+/// A timer waiting to open the folder a drag is resting on.
+type Spring = Rc<RefCell<Option<glib::SourceId>>>;
+
+/// Open the shut folder a drag has come to rest on, so a file can be dropped into something that
+/// was not on screen when the drag began. `row` is the row under the pointer, `None` when the drag
+/// has left the target or has been dropped, which disarms the timer.
+///
+/// Per drop target, which is per row: a drag crossing three folders arms and disarms three timers,
+/// one at a time. Nothing closes the folder again — a drag that opened one and went elsewhere
+/// leaves the tree as the reader would have left it by clicking the chevron.
+fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
+    if let Some(id) = timer.borrow_mut().take() {
+        id.remove();
+    }
+    let Some(row) = row.filter(|row| row.is_expandable() && !row.is_expanded()) else {
+        return;
+    };
+    let disarm = timer.clone();
+    let id = glib::timeout_add_local_once(SPRING_OPEN, move || {
+        disarm.borrow_mut().take();
+        row.set_expanded(true);
+    });
+    *timer.borrow_mut() = Some(id);
+}
+
+/// The `GtkTreeListRow` a drop target on a row expander is over, and `None` for a target that is
+/// not on one — the vault row above the tree, and the list's own blank area.
+fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
+    target
+        .widget()?
+        .downcast::<gtk::TreeExpander>()
+        .ok()?
+        .list_row()
+}
+
 /// A drop target that moves the dragged files into the directory `dir` answers with for the
 /// pointer position — `Some("")` being the vault root — and refuses the drop where it answers
 /// `None`, or where none of them has anywhere to go there.
@@ -821,13 +862,21 @@ fn move_target(
         }
     };
     let planned = Rc::new(planned);
+    let spring = Spring::default();
     // Both, because `enter` is what decides whether the row highlights at all and `motion` is
     // what corrects it once the preloaded value has arrived.
     let answer = {
-        let planned = planned.clone();
+        let (planned, spring) = (planned.clone(), spring.clone());
         move |target: &gtk::DropTarget, x, y| match planned(target, x, y) {
-            Some(_) => gdk::DragAction::MOVE,
-            None => gdk::DragAction::empty(),
+            Some(_) => {
+                spring_open(&spring, target_row(target));
+                gdk::DragAction::MOVE
+            }
+            // A folder that cannot take what is over it has no reason to open either.
+            None => {
+                spring_open(&spring, None);
+                gdk::DragAction::empty()
+            }
         }
     };
     target.connect_enter({
@@ -835,8 +884,13 @@ fn move_target(
         move |target, x, y| answer(target, x, y)
     });
     target.connect_motion(answer);
+    target.connect_leave({
+        let spring = spring.clone();
+        move |_| spring_open(&spring, None)
+    });
     let on_move = on_move.clone();
     target.connect_drop(move |target, value, x, y| {
+        spring_open(&spring, None);
         // The value is handed over here rather than read back off the target, which is the one
         // place it is certain to have arrived.
         let Some(dir) = dir(target, x, y) else {
@@ -850,6 +904,94 @@ fn move_target(
         true
     });
     target
+}
+
+/// What a drop of files from outside accent is handed to: the files, the vault-relative folder
+/// they go into ("" being the root) and whether the drag was a move, which takes the originals
+/// away.
+type Import = Rc<dyn Fn(Vec<PathBuf>, String, bool)>;
+
+/// A drop target for files dragged in from another application — GNOME Files, a browser's
+/// downloads — onto the same three zones a tree-to-tree move has: a folder row, a file row (its
+/// folder) and the blank area or the vault row (the root). `dir` answers with the folder for a
+/// pointer position, exactly as [`move_target`]'s does.
+///
+/// `GdkFileList` is the type rather than `text/uri-list`: GDK deserialises the one into the other,
+/// so this takes what every file manager offers without reading a stream by hand. A drop that
+/// offers **only** move is moved — that is Shift held in the file manager — and anything else is
+/// copied, which is what a plain drag between applications means.
+fn import_target(
+    on_import: &Import,
+    dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
+) -> gtk::DropTarget {
+    let target = gtk::DropTarget::new(
+        gdk::FileList::static_type(),
+        gdk::DragAction::COPY | gdk::DragAction::MOVE,
+    );
+    let dir = Rc::new(dir);
+    let spring = Spring::default();
+    let answer = {
+        let (dir, spring) = (dir.clone(), spring.clone());
+        move |target: &gtk::DropTarget, x, y| match dir(target, x, y) {
+            Some(_) => {
+                spring_open(&spring, target_row(target));
+                wanted(target)
+            }
+            None => {
+                spring_open(&spring, None);
+                gdk::DragAction::empty()
+            }
+        }
+    };
+    target.connect_enter({
+        let answer = answer.clone();
+        move |target, x, y| answer(target, x, y)
+    });
+    target.connect_motion(answer);
+    target.connect_leave({
+        let spring = spring.clone();
+        move |_| spring_open(&spring, None)
+    });
+    let on_import = on_import.clone();
+    target.connect_drop(move |target, value, x, y| {
+        spring_open(&spring, None);
+        let (Some(into), Some(files)) = (dir(target, x, y), dropped_paths(value)) else {
+            return false;
+        };
+        on_import(files, into, wanted(target) == gdk::DragAction::MOVE);
+        true
+    });
+    target
+}
+
+/// The files a drop from another application carries, as paths on this machine, or `None` where
+/// it named none that way — an `ftp://` or a `trash://` URI has nothing here to copy from.
+///
+/// Public because it is the half of a cross-application drop a drill can drive: Xvfb carries a
+/// drag inside one process and not between two, so `ACCENT_BENCH_DROP` builds the `GdkFileList`
+/// itself and takes it from here.
+pub fn dropped_paths(value: &glib::Value) -> Option<Vec<PathBuf>> {
+    let files: Vec<PathBuf> = value
+        .get::<gdk::FileList>()
+        .ok()?
+        .files()
+        .iter()
+        .filter_map(|f| f.path())
+        .collect();
+    (!files.is_empty()).then_some(files)
+}
+
+/// What a drop from another application is asking for: a move only where move is the one action
+/// it offers, which is how a file manager reports Shift being held.
+fn wanted(target: &gtk::DropTarget) -> gdk::DragAction {
+    let offered = target
+        .current_drop()
+        .map(|drop| drop.actions())
+        .unwrap_or(gdk::DragAction::COPY);
+    match offered == gdk::DragAction::MOVE {
+        true => gdk::DragAction::MOVE,
+        false => gdk::DragAction::COPY,
+    }
 }
 
 /// The row above the tree naming the vault, and the drop zone for "put it in the vault root".
@@ -893,8 +1035,9 @@ fn root_row(label: &str) -> gtk::Box {
 /// Build the tree. `show_hidden` is Show Hidden Files as the window opens. `on_activate` is called
 /// with the rel_path of an activated non-directory row, `on_drag` with `true` while a row is being
 /// dragged out of the tree and `false` when it is over, so the panes can put their drop zones up
-/// for the duration, and `on_move` with each path a drag carried and the path it was dropped
-/// onto.
+/// for the duration, `on_move` with each path a drag carried and the path it was dropped onto, and
+/// `on_import` with the files another application dropped in, the folder they go into and whether
+/// the drag was a move.
 pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
@@ -902,6 +1045,7 @@ pub fn build(
     on_activate: impl Fn(char, &str) + 'static,
     on_drag: impl Fn(bool) + 'static,
     on_move: impl Fn(Vec<(String, String)>) + 'static,
+    on_import: impl Fn(Vec<PathBuf>, String, bool) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
@@ -930,14 +1074,17 @@ pub fn build(
     // report through the same closure.
     let dragging: Rc<dyn Fn(bool)> = Rc::new(on_drag);
     let moves: Move = Rc::new(on_move);
+    let imports: Import = Rc::new(on_import);
     let vault_row = root_row(&root_label);
     vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
+    vault_row.add_controller(import_target(&imports, |_, _, _| Some(String::new())));
     let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
     let bind_marked = marked.clone();
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
+    let row_imports = imports.clone();
     factory.connect_setup(move |_, item| {
         let icon = gtk::Image::new();
         let label = gtk::Label::builder()
@@ -1007,14 +1154,17 @@ pub fn build(
         expander.add_controller(source);
         // Dropped on a row: into the folder, or into the folder holding the file, which is where
         // that row's New File would have put one too.
-        expander.add_controller(move_target(&row_moves, |target, _, _| {
+        let row_dir = |target: &gtk::DropTarget, _: f64, _: f64| {
             let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
             let row = expander.list_row()?.item().as_ref().and_then(decode)?;
             // And nothing is dropped into one either, for the same reason. The row simply never
             // lights up.
             (!row.dependency)
                 .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
-        }));
+        };
+        expander.add_controller(move_target(&row_moves, row_dir));
+        // The same row takes files from another application, into the same folder.
+        expander.add_controller(import_target(&row_imports, row_dir));
         item.downcast_ref::<gtk::ListItem>()
             .expect("list item")
             .set_child(Some(&expander));
@@ -1212,10 +1362,12 @@ pub fn build(
     // creates in. A drop that landed on a row is that row's own business — its target has already
     // accepted or refused it — so this one has to answer for the blank area alone, or a refusal
     // bubbling up out of a row would turn into a move to the root.
-    view.add_controller(move_target(&moves, |target, x, y| {
+    let blank = |target: &gtk::DropTarget, x, y| {
         let view = target.widget()?.downcast::<gtk::ListView>().ok()?;
         row_at(&view, x, y).is_none().then(String::new)
-    }));
+    };
+    view.add_controller(move_target(&moves, blank));
+    view.add_controller(import_target(&imports, blank));
 
     let scroller = scroller(&view);
     // ponytail: a plain `GtkBox` around the scroller, purely so the context menu has a

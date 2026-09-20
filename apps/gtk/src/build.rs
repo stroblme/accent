@@ -423,6 +423,18 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 }
             }
         ),
+        // Files dragged in from another application go through the same path a paste of GNOME
+        // Files' clipboard takes, so the name clashes, the remote vaults and the toast are
+        // already answered for.
+        glib::clone!(
+            #[weak]
+            app,
+            move |files: Vec<PathBuf>, dir: String, cut: bool| {
+                if let Some(ops) = app.ops() {
+                    fileops::import(ops, &dir, files, cut);
+                }
+            }
+        ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
