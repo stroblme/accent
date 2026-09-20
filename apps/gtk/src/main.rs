@@ -1170,9 +1170,9 @@ impl App {
 
     /// Put the config this window has just changed into effect in every open window, and write it
     /// a second later, so a run of ring picks is one write. The route for every surface that
-    /// writes a preference outside the dialog — Toggle Minimap, the Git pane's tree toggle, a
-    /// drawing ring pick, a rebound chord, Leave Out of Search — so none of them is left acting on
-    /// its own window alone.
+    /// writes a preference outside the dialog — Toggle Minimap, Show Hidden Files, a drawing ring
+    /// pick, a rebound chord, Leave Out of Search — so none of them is left acting on its own
+    /// window alone.
     fn config_changed(&self) {
         let config = self.config.borrow().clone();
         if let Some(shell) = self.shell.upgrade() {
