@@ -540,6 +540,11 @@ impl Bar {
 
     fn preview_line(&self, text: &str) {
         let Some((line, _)) = goto_target(text) else {
+            // The box emptied, or says something that is not a line: nothing is being pointed at,
+            // so nothing stays painted.
+            if let Some(tab) = self.tab() {
+                tab.clear_reveal();
+            }
             return;
         };
         match self.presenting() {
@@ -550,6 +555,10 @@ impl Bar {
             false => {
                 if let Some(tab) = self.tab() {
                     tab.show_line(line);
+                    // The same paint a search hit leaves, and the same one this line's Return
+                    // will leave: scrolling a line into view says nothing about which of the ones
+                    // on screen it is. `show_line` has opened whatever folded it first.
+                    tab.reveal_line(line);
                 }
             }
         }
@@ -590,6 +599,12 @@ impl Bar {
     /// The replacement box, for the same reason as [`Bar::query_box`].
     pub fn replace_box(&self) -> &gtk::Entry {
         &self.replace
+    }
+
+    /// The go-to box, so a drill can type a line number into it. Only `ACCENT_BENCH_REVEAL`
+    /// touches it.
+    pub fn line_box(&self) -> &gtk::Entry {
+        &self.line
     }
 
     /// The bar went away: drop the match highlight on both possible targets.
