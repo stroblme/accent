@@ -1,7 +1,7 @@
 //! Link targets: what a `[[wikilink]]` or `[text](target)` points at, the keys a file answers
 //! to, and rewriting the links a move leaves pointing at the wrong place.
 
-use super::{Heading, Link, LinkKind, Pending, analyze};
+use super::{Analysis, Heading, Link, LinkKind, Pending, Style, analyze};
 use crate::path::{self, basename, parent_dir};
 use pulldown_cmark::LinkType;
 use std::collections::{HashMap, HashSet};
@@ -244,7 +244,9 @@ pub fn path_keys(rel: &str) -> Vec<String> {
 /// author's spelling ([`as_written`]); a markdown link becomes the relative path from the
 /// note's folder, percent-encoded, its `#anchor` untouched.
 ///
-/// ponytail: reference-style `[ref]: path` definitions and HTML `src`/`href` are left alone.
+/// Two path forms the parser does not hand over as links are scanned for as well: reference-style
+/// `[ref]: path "title"` definitions ([`definition_edits`]) and the `src`/`href` of the HTML a
+/// note holds ([`html_edits`]).
 pub fn rewrite_moved(
     text: &str,
     src_old: &str,
@@ -252,9 +254,15 @@ pub fn rewrite_moved(
     targets: &HashMap<String, String>,
     moves: &HashMap<String, String>,
 ) -> Option<String> {
-    let (dir_old, dir_new) = (parent_dir(src_old), parent_dir(src_new));
+    let m = Moved {
+        dir_old: parent_dir(src_old),
+        dir_new: parent_dir(src_new),
+        targets,
+        moves,
+    };
+    let analysis = analyze(text);
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
-    for link in analyze(text).links {
+    for link in &analysis.links {
         let edit = match link.kind {
             LinkKind::Wiki | LinkKind::Embed => {
                 let key = link_key(&link.target);
@@ -268,11 +276,13 @@ pub fn rewrite_moved(
                     .filter(|_| text.get(at.clone()) == Some(link.target.as_str()))
                     .map(|(old, new)| (at, as_written(&link.target, old, new)))
             }
-            LinkKind::Markdown => markdown_edit(text, &link, dir_old, dir_new, targets, moves),
+            LinkKind::Markdown => markdown_edit(text, link, &m),
             LinkKind::External => None,
         };
         edits.extend(edit);
     }
+    edits.extend(definition_edits(text, &analysis, &m));
+    edits.extend(html_edits(text, &analysis, &m));
     // Back to front, so the earlier offsets stay valid. Links nest (an image inside a link), but
     // the bytes rewritten for each never overlap.
     edits.sort_by_key(|(at, _)| std::cmp::Reverse(at.start));
@@ -294,39 +304,174 @@ fn moved<'a>(
     Some((old, moves.get(old).unwrap_or(old)))
 }
 
+/// What one move is, for the three path forms that have to follow it.
+struct Moved<'a> {
+    /// The note's folder before the move, and after it.
+    dir_old: &'a str,
+    dir_new: &'a str,
+    targets: &'a HashMap<String, String>,
+    moves: &'a HashMap<String, String>,
+}
+
+impl Moved<'_> {
+    /// What `written` — a path as its author spelled it, relative to the note's folder or rooted
+    /// at the vault — has to become to go on naming the file it named, or `None` when it names it
+    /// still. The rule an inline link, a reference-style definition and an HTML attribute share.
+    ///
+    /// Nothing outside the vault is reachable through it: a path is only ever rewritten when the
+    /// index resolved it to a file *before* the move, which is what leaves an `https://` URL, a
+    /// bare `#anchor` and a `../..` past the root alone.
+    fn repoint(&self, written: &str) -> Option<String> {
+        let rooted = written.starts_with('/');
+        if written.is_empty() || !(rooted || path::stays_inside(self.dir_old, written)) {
+            return None;
+        }
+        let key = link_key(&path::resolve(self.dir_old, written));
+        let (old, new) = moved(&key, self.targets, self.moves)?;
+        // A path, so it still finds the file only if it spells that file's path from the note's
+        // new folder: the index's by-name fallback is not something a markdown reader shares.
+        let now = link_key(&path::resolve(self.dir_new, written));
+        if (rooted || path::stays_inside(self.dir_new, written))
+            && [link_key(new), link_key(&strip_ext(new))].contains(&now)
+        {
+            return None;
+        }
+        let to = match rooted {
+            true => format!("/{new}"),
+            false => path::relative(self.dir_new, new),
+        };
+        Some(ext_as_written(written, old, &to))
+    }
+
+    /// [`Moved::repoint`] over the bytes at `at`, which are a destination as written in the note.
+    /// Its `#anchor` is not part of the path and stays where the author put it, as a markdown
+    /// link's does.
+    fn edit(&self, text: &str, at: Range<usize>) -> Option<(Range<usize>, String)> {
+        let written = split_anchor(text.get(at.clone())?).0;
+        let to = self.repoint(&percent_decode(written))?;
+        Some((at.start..at.start + written.len(), percent_encode(&to)))
+    }
+}
+
 /// The edit that points a markdown link back at its file. The link is written relative to its
 /// note's folder, so it is looked up the way the index stores it: resolved from that folder.
-fn markdown_edit(
-    text: &str,
-    link: &Link,
-    dir_old: &str,
-    dir_new: &str,
-    targets: &HashMap<String, String>,
-    moves: &HashMap<String, String>,
-) -> Option<(Range<usize>, String)> {
-    let written = link.target.as_str();
-    let rooted = written.starts_with('/');
-    // An in-note `[t](#heading)` has no path, and a `../..` past the vault root is not ours.
-    if written.is_empty() || !(rooted || path::stays_inside(dir_old, written)) {
-        return None;
+fn markdown_edit(text: &str, link: &Link, m: &Moved) -> Option<(Range<usize>, String)> {
+    let to = m.repoint(&link.target)?;
+    Some((destination(text, link)?, percent_encode(&to)))
+}
+
+/// The reference-style definitions a move leaves stale: `[ref]: path "title"` on a line of its own.
+///
+/// pulldown-cmark resolves a definition into the links that use it and never says where the
+/// definition itself sits, so this is a scan of its own: a line indented at most three spaces —
+/// four would make it code — whose `[label]` is closed by `]:`, outside anything verbatim. A
+/// footnote's `[^1]:` is a definition of another kind and its text is no path. The destination is
+/// read to the next space; a title after it, and a `<…>` destination's brackets, are left as
+/// written.
+fn definition_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+    let skip = verbatim(a);
+    let mut out = Vec::new();
+    let mut start = 0;
+    for line in text.split_inclusive('\n') {
+        let at = definition_destination(line).map(|r| start + r.start..start + r.end);
+        start += line.len();
+        match at {
+            Some(at) if !skip.iter().any(|r| r.contains(&at.start)) => out.extend(m.edit(text, at)),
+            _ => {}
+        }
     }
-    let (old, new) = moved(&link_key(&path::resolve(dir_old, written)), targets, moves)?;
-    // A path, so it still finds the file only if it spells that file's path from the note's
-    // new folder: the index's by-name fallback is not something a markdown reader shares.
-    let now = link_key(&path::resolve(dir_new, written));
-    if (rooted || path::stays_inside(dir_new, written))
-        && [link_key(new), link_key(&strip_ext(new))].contains(&now)
-    {
-        return None;
-    }
-    let to = match rooted {
-        true => format!("/{new}"),
-        false => path::relative(dir_new, new),
+    out
+}
+
+/// Where a reference-style definition's destination sits in `line`, if the line is one.
+fn definition_destination(line: &str) -> Option<Range<usize>> {
+    let indent = line.len() - line.trim_start().len();
+    let rest = match indent <= 3 {
+        true => line[indent..].strip_prefix('[')?,
+        false => return None,
     };
-    Some((
-        destination(text, link)?,
-        percent_encode(&ext_as_written(written, old, &to)),
-    ))
+    if rest.starts_with('^') {
+        return None;
+    }
+    let close = rest.find("]:")?;
+    let after = &rest[close + 2..];
+    let lead = after.len() - after.trim_start().len();
+    let value = &after[lead..];
+    let (open, len) = match value.strip_prefix('<') {
+        Some(inner) => (1, inner.find('>')?),
+        None => (0, value.find(char::is_whitespace).unwrap_or(value.len())),
+    };
+    let start = indent + 1 + close + 2 + lead + open;
+    (len > 0).then_some(start..start + len)
+}
+
+/// The `src` and `href` a move leaves stale in the HTML a note holds — a block of it, or an inline
+/// tag. pulldown-cmark hands HTML over as opaque text, so these are scanned too.
+fn html_edits(text: &str, a: &Analysis, m: &Moved) -> Vec<(Range<usize>, String)> {
+    let mut out = Vec::new();
+    for span in a.spans.iter().filter(|s| s.style == Style::Html) {
+        for at in attribute_values(&text[span.range.clone()]) {
+            out.extend(m.edit(text, span.range.start + at.start..span.range.start + at.end));
+        }
+    }
+    out
+}
+
+/// Every `src=` or `href=` value in `chunk`, as ranges into it.
+///
+/// A small scanner rather than an HTML parser, which is enough because nothing it finds is
+/// rewritten unless [`Moved::repoint`] recognises it as a file in the vault: the name preceded by
+/// whitespace, so a `data-src` is not one, an `=`, and a value in double quotes, single quotes or
+/// none at all.
+fn attribute_values(chunk: &str) -> Vec<Range<usize>> {
+    let lower = chunk.to_ascii_lowercase();
+    let mut out = Vec::new();
+    for (eq, _) in lower.match_indices('=') {
+        let name = lower[..eq].trim_end();
+        let named = ["src", "href"].into_iter().any(|n| {
+            name.strip_suffix(n)
+                .and_then(|before| before.chars().next_back())
+                .is_some_and(char::is_whitespace)
+        });
+        if !named {
+            continue;
+        }
+        let rest = &chunk[eq + 1..];
+        let lead = rest.len() - rest.trim_start().len();
+        let value = &rest[lead..];
+        let (open, len) = match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => match value[1..].find(quote) {
+                Some(len) => (1, len),
+                None => continue,
+            },
+            _ => (
+                0,
+                value
+                    .find(|c: char| c.is_whitespace() || c == '>')
+                    .unwrap_or(value.len()),
+            ),
+        };
+        let start = eq + 1 + lead + open;
+        if len > 0 {
+            out.push(start..start + len);
+        }
+    }
+    out
+}
+
+/// The byte ranges the two scans above must keep out of: a code block, a code span, the
+/// frontmatter — and, for a definition, the HTML the attribute scan covers instead.
+fn verbatim(a: &Analysis) -> Vec<Range<usize>> {
+    a.spans
+        .iter()
+        .filter(|s| {
+            matches!(
+                s.style,
+                Style::CodeBlock | Style::CodeInline | Style::Frontmatter | Style::Html
+            )
+        })
+        .map(|s| s.range.clone())
+        .collect()
 }
 
 /// Where a markdown link's destination path sits in `text`, without its `#anchor` or title.
@@ -642,7 +787,57 @@ mod tests {
             concat!(
                 "[t](../pics/y.png) ![](../pics/y.png) [p](../docs/a.pdf#page=3&selection=1,2,3,4)\n",
                 "[h](#h) [o](../../x.png) [w](https://e.com/img/x.png) [r][ref]\n\n",
-                "[ref]: ../img/x.png\n"
+                "[ref]: ../pics/y.png\n"
+            )
+        );
+    }
+
+    /// A reference-style definition is scanned for on its own: the parser resolves it into the
+    /// links that use it and never says where it sits.
+    #[test]
+    fn a_reference_definition_follows_its_target() {
+        let src = concat!(
+            "[r][one] [s][two] [t][three] [u][four]\n\n",
+            "[one]: Dir/Old.md \"A title\"\n",
+            "   [two]: <Dir/Old.md>\n",
+            "[three]: https://e.com/Dir/Old.md\n",
+            "[four]: ./Dir/Old.md#Heading\n",
+            "[^1]: Dir/Old.md is a footnote, not a path\n",
+            "```\n[five]: Dir/Old.md\n```\n"
+        );
+        assert_eq!(
+            renamed(src, "Dir/Old.md", "Notes/New.md").unwrap(),
+            concat!(
+                "[r][one] [s][two] [t][three] [u][four]\n\n",
+                "[one]: Notes/New.md \"A title\"\n",
+                "   [two]: <Notes/New.md>\n",
+                "[three]: https://e.com/Dir/Old.md\n",
+                "[four]: Notes/New.md#Heading\n",
+                "[^1]: Dir/Old.md is a footnote, not a path\n",
+                "```\n[five]: Dir/Old.md\n```\n"
+            )
+        );
+    }
+
+    /// HTML is opaque to the parser, so its `src` and `href` are scanned for too — in a block of
+    /// it and in an inline tag, quoted either way or not at all, and for vault paths alone.
+    #[test]
+    fn html_src_and_href_follow_their_target() {
+        let src = concat!(
+            "<figure>\n<img src=\"Dir/Old.png\" alt=\"x\">\n</figure>\n\n",
+            "Inline <img src='Dir/Old.png'> and <a href=Dir/Old.png>bare</a>.\n\n",
+            "<a href=\"https://e.com/Dir/Old.png\">out</a> <a href=\"#here\">anchor</a>\n\n",
+            "<img data-src=\"Dir/Old.png\">\n\n",
+            "```\n<img src=\"Dir/Old.png\">\n```\n"
+        );
+        assert_eq!(
+            renamed(src, "Dir/Old.png", "Pics/New.png").unwrap(),
+            concat!(
+                "<figure>\n<img src=\"Pics/New.png\" alt=\"x\">\n</figure>\n\n",
+                "Inline <img src='Pics/New.png'> and <a href=Pics/New.png>bare</a>.\n\n",
+                "<a href=\"https://e.com/Dir/Old.png\">out</a> <a href=\"#here\">anchor</a>\n\n",
+                "<img data-src=\"Dir/Old.png\">\n\n",
+                "```\n<img src=\"Dir/Old.png\">\n```\n"
             )
         );
     }
