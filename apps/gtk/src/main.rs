@@ -1146,11 +1146,11 @@ impl App {
         }
     }
 
-    /// The selected tree row, where it is one the app may act on. A row inside a tree the index
-    /// does not hold lists and opens but is never changed, so it is no target for a rename, a new
-    /// note or a trash (`tree::Row::indexed`).
+    /// The selected tree row, where it is one the app may act on. A row inside a dependency tree
+    /// lists and opens but is never changed, so it is no target for a rename, a new note or a
+    /// trash (`tree::Row::dependency`).
     fn selected_row(&self) -> Option<tree::Row> {
-        self.tree.get()?.selected().filter(|row| row.indexed)
+        self.tree.get()?.selected().filter(|row| !row.dependency)
     }
 
     /// The directory the tree selection points at: the folder itself, or the one a file sits in.

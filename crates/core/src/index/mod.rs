@@ -83,6 +83,14 @@ pub struct FileRow {
     pub title: Option<String>,
     pub size: i64,
     pub mtime_ns: i64,
+    /// True for a row inside one of the dependency or build trees the walk refuses by name or by
+    /// marker file (`crate::walk::Unindexed::Dependency`): somebody else's tree, listed so the
+    /// reader can look at it and never edited from here. A row the index does not hold because
+    /// git ignores its folder is **not** one of these — that folder is the reader's own.
+    ///
+    /// Defaulted so a vault served by an accent that predates the field still lists.
+    #[serde(default)]
+    pub dependency: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

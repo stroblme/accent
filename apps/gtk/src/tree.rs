@@ -35,13 +35,18 @@ pub struct Row {
     pub rel: String,
     /// Whether the index holds this row.
     ///
-    /// False inside the trees the walk refuses — `node_modules`, a `.venv`, a cargo `target/`.
-    /// Those are listed because a file tree that leaves a folder out is one nobody can trust, but
-    /// they are read off the disk and nothing else in the app knows they are there: they are not
-    /// searched, not watched and not stored. So they list and open, and nothing may be created,
-    /// renamed, moved into or dragged out of them — a change the index never hears of would leave
-    /// the tree and the index disagreeing until the next rescan.
+    /// False inside every tree the walk refuses, whichever kind: those are read off the disk and
+    /// nothing else in the app knows they are there — they are not searched and not stored — so
+    /// the row is dimmed the way a gitignored one is.
     pub indexed: bool,
+    /// Whether the row is inside one of the **dependency** trees — a `node_modules`, a `.venv`, a
+    /// cargo `target/` — rather than a folder the reader gitignored.
+    ///
+    /// Both are listed, because a file tree that leaves a folder out is one nobody can trust, but
+    /// only this one is refused every edit: it is somebody else's tree, opened to look at. A
+    /// gitignored folder is the reader's own — a build output, an `mlruns/` — and being out of
+    /// the index stops it being *searched*, not edited. Implies `!indexed`.
+    pub dependency: bool,
 }
 
 impl Row {
@@ -50,24 +55,25 @@ impl Row {
     }
 }
 
-/// ponytail: rows are `gtk::StringObject`s holding `"<kind char><rel_path>"` instead of a custom
+/// ponytail: rows are `gtk::StringObject`s holding `"<kind><state><rel_path>"` instead of a custom
 /// GObject with typed properties. Saves ~40 lines of subclass boilerplate; if the tree ever needs
 /// more per-row state (git status, unsaved marker) define a real `FileItem` GObject then.
 ///
-/// The kind letter is upper case for a row the index does not hold, which is the one extra bit
-/// [`Row::indexed`] needs and costs no extra byte.
-fn encode(kind: FileKind, rel: &str, indexed: bool) -> String {
+/// `kind` is `d` or `f`; `state` is `i` for a row the index holds, `g` for one left out because
+/// git ignores its folder, and `x` for one inside a dependency tree ([`Row::dependency`]).
+fn encode(kind: FileKind, rel: &str, indexed: bool, dependency: bool) -> String {
     // What a file is — its icon, what it opens as — is read off its name, so a directory is the
     // one thing the row has to carry.
     let c = match kind {
         FileKind::Dir => 'd',
         _ => 'f',
     };
-    let c = match indexed {
-        true => c,
-        false => c.to_ascii_uppercase(),
+    let state = match (indexed, dependency) {
+        (true, _) => 'i',
+        (false, false) => 'g',
+        (false, true) => 'x',
     };
-    format!("{c}{rel}")
+    format!("{c}{state}{rel}")
 }
 
 pub fn decode(item: &glib::Object) -> Option<Row> {
@@ -78,10 +84,12 @@ pub fn decode(item: &glib::Object) -> Option<Row> {
 fn decode_str(s: &str) -> Option<Row> {
     let mut cs = s.chars();
     let kind = cs.next()?;
+    let state = cs.next()?;
     Some(Row {
-        kind: kind.to_ascii_lowercase(),
+        kind,
         rel: cs.as_str().to_string(),
-        indexed: kind.is_ascii_lowercase(),
+        indexed: state == 'i',
+        dependency: state == 'x',
     })
 }
 
@@ -179,7 +187,7 @@ fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>, show_hidden: b
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
         // the index.
         .filter(|r| !hidden(r.kind, &r.rel_path, r.id != 0, show_hidden))
-        .map(|r| encode(r.kind, &r.rel_path, r.id != 0))
+        .map(|r| encode(r.kind, &r.rel_path, r.id != 0, r.dependency))
         .collect();
     let Some((at, removed, added)) = changed_span(&current(store), &items) else {
         return;
@@ -600,15 +608,15 @@ fn toggle(marks: &mut Marks, row: &Row, cache: &RefCell<HashMap<String, gio::Lis
     }
 }
 
-/// The rows the tree lists in `dir`, as it has them, leaving out the ones the index does not
-/// hold: those are never marked.
+/// The rows the tree lists in `dir`, as it has them, leaving out the dependency trees: those are
+/// never marked.
 fn listed(cache: &RefCell<HashMap<String, gio::ListStore>>, dir: &str) -> Vec<(String, bool)> {
     let Some(store) = cache.borrow().get(dir).cloned() else {
         return Vec::new();
     };
     (0..store.n_items())
         .filter_map(|i| store.item(i).as_ref().and_then(decode))
-        .filter(|row| row.indexed)
+        .filter(|row| !row.dependency)
         .map(|row| (row.rel.clone(), row.is_dir()))
         .collect()
 }
@@ -623,7 +631,7 @@ fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &st
     let rows: Vec<(String, bool)> = (a.min(b)..=a.max(b))
         .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
         .filter_map(|item| decode(&item))
-        .filter(|row| row.indexed)
+        .filter(|row| !row.dependency)
         .map(|row| (row.rel.clone(), row.is_dir()))
         .collect();
     if !add {
@@ -969,9 +977,9 @@ pub fn build(
         source.connect_prepare(move |source, _, _| {
             let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
             let row = expander.list_row()?.item().as_ref().and_then(decode)?;
-            // Nothing is dragged out of a tree the index does not hold: the move would happen on
-            // disk and the index would go on listing the file where it used to be.
-            if !row.indexed {
+            // Nothing is dragged out of somebody else's dependency tree: it is opened to look
+            // at, never edited from here.
+            if row.dependency {
                 return None;
             }
             // A marked row carries the whole set, unless the set is that row alone.
@@ -1004,7 +1012,7 @@ pub fn build(
             let row = expander.list_row()?.item().as_ref().and_then(decode)?;
             // And nothing is dropped into one either, for the same reason. The row simply never
             // lights up.
-            row.indexed
+            (!row.dependency)
                 .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
         }));
         item.downcast_ref::<gtk::ListItem>()
@@ -1077,8 +1085,8 @@ pub fn build(
     // of its rows carries it. The gesture runs in the capture phase and claims those presses, so
     // the list never sees them and neither a note opens nor a folder toggles. A click with
     // nothing held is the reader saying "this one", so it forgets the set again — and so does a
-    // click on the blank area below the last row. Rows the index does not hold are never marked:
-    // nothing the menu offers may happen inside a tree nothing is watching.
+    // click on the blank area below the last row. Rows in a dependency tree are never marked:
+    // nothing the menu offers may happen inside somebody else's tree.
     let marking = gtk::GestureClick::builder()
         .button(gdk::BUTTON_PRIMARY)
         .propagation_phase(gtk::PropagationPhase::Capture)
@@ -1096,7 +1104,7 @@ pub fn build(
             let held = gesture.current_event_state();
             let ctrl = held.contains(gdk::ModifierType::CONTROL_MASK);
             let shift = held.contains(gdk::ModifierType::SHIFT_MASK);
-            let row = row_at(&view, x, y).filter(|row| row.indexed);
+            let row = row_at(&view, x, y).filter(|row| !row.dependency);
             let mut marks = marked.borrow_mut();
             match row {
                 Some(row) if shift => {
@@ -1315,18 +1323,24 @@ mod tests {
 
     #[test]
     fn a_row_carries_whether_the_index_holds_it() {
-        let row = |kind, rel, indexed| decode_str(&encode(kind, rel, indexed)).unwrap();
-        let note = row(FileKind::Markdown, "Notes/A.md", true);
+        let row = |kind, rel, indexed, dep| decode_str(&encode(kind, rel, indexed, dep)).unwrap();
+        let note = row(FileKind::Markdown, "Notes/A.md", true, false);
         assert_eq!(note.kind, 'f');
         assert_eq!(note.rel, "Notes/A.md");
         assert!(note.indexed);
+        assert!(!note.dependency);
         // A row read off the disk keeps its kind — the icon and the expander must not change —
         // and says the index has never heard of it.
-        let dep = row(FileKind::Dir, "node_modules", false);
+        let dep = row(FileKind::Dir, "node_modules", false, true);
         assert_eq!(dep.kind, 'd');
         assert!(dep.is_dir());
         assert_eq!(dep.rel, "node_modules");
         assert!(!dep.indexed);
+        assert!(dep.dependency);
+        // A gitignored folder is out of the index too, and is still the reader's own.
+        let ignored = row(FileKind::Dir, "mlruns", false, false);
+        assert!(!ignored.indexed);
+        assert!(!ignored.dependency);
     }
 
     #[test]
