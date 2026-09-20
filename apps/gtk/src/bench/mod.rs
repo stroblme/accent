@@ -26,8 +26,8 @@ use compare::{bench_compare, bench_compare_lines, bench_compare_pads};
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
-    bench_clip, bench_close, bench_expand, bench_hidden, bench_menu, bench_menu_press, bench_paths,
-    bench_templates,
+    bench_clip, bench_close, bench_drop, bench_expand, bench_hidden, bench_menu, bench_menu_press,
+    bench_paths, bench_templates, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -226,6 +226,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
+    let drop = std::env::var("ACCENT_BENCH_DROP").ok();
+    let watch = std::env::var("ACCENT_BENCH_WATCH").ok();
     let tags = std::env::var("ACCENT_BENCH_TAGS").ok();
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
@@ -239,6 +241,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && search.is_none()
         && clip.is_none()
         && menu.is_none()
+        && drop.is_none()
+        && watch.is_none()
         && diagram.is_none()
         && switcher.is_none()
         && style.is_none()
@@ -326,6 +330,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 return bench_menu_press(&app, rel);
             }
             return bench_menu(&app, &rel);
+        }
+        if let Some(arg) = drop {
+            return bench_drop(&app, &arg);
+        }
+        if let Some(arg) = watch {
+            return bench_watch(&app, &arg);
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);

@@ -108,8 +108,6 @@ pub struct Hooks {
     pub syncing: Box<dyn Fn(bool)>,
     /// Whether the changes list starts grouped by folder — `git_tree` in the config.
     pub tree: bool,
-    /// The in-pane toggle moved: write the preference the Preferences dialog also edits.
-    pub set_tree: Box<dyn Fn(bool)>,
 }
 
 /// What a close waiting for git does once the commands under way have ended, told whether they
@@ -422,10 +420,9 @@ impl Panel {
         self.changes.n_items()
     }
 
-    /// Whether the changes list is grouped by folder, and putting it either way. The preference
-    /// has two surfaces — this one is the Preferences switch, and the toggle in another window's
-    /// pane, both through `App::apply_config` — so nothing here writes the config back; only a
-    /// move really redraws.
+    /// Whether the changes list is grouped by folder, and putting it either way. The one surface
+    /// is the Preferences switch, which reaches every window's pane through `App::apply_config`,
+    /// so nothing here writes the config back; only a move really redraws.
     pub fn tree(&self) -> bool {
         self.tree.get()
     }

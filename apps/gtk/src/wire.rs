@@ -725,10 +725,11 @@ pub fn wire_tree(app: &Rc<App>) {
             let Some(tree) = app.tree.get() else { return };
             gesture.set_state(gtk::EventSequenceState::Claimed);
             // No row under the pointer is the blank area below the last one, and that gets a menu
-            // too: it is where a note is created in the vault root. A row the index does not hold
-            // gets none: nothing in that menu may happen inside a tree nothing is watching.
+            // too: it is where a note is created in the vault root. A row inside a dependency tree
+            // gets none: nothing in that menu may happen inside somebody else's tree. A gitignored
+            // folder is the reader's own and gets the whole menu like any other row.
             let row = tree.row_at(x, y);
-            if row.as_ref().is_some_and(|row| !row.indexed) {
+            if row.as_ref().is_some_and(|row| row.dependency) {
                 return;
             }
             // The menu hangs off the host box, so the click has to be translated out of the
@@ -773,10 +774,10 @@ pub fn wire_tree(app: &Rc<App>) {
                 fileops::trash_all(ops, marked.into_iter().map(|(rel, _)| rel).collect());
                 return glib::Propagation::Stop;
             }
-            // The same rule the pointer path follows: a row the index does not hold is listed and
+            // The same rule the pointer path follows: a row in a dependency tree is listed and
             // opened, never changed. Both keys stop here rather than falling through to the
             // vault-root menu an empty selection would get.
-            if row.as_ref().is_some_and(|row| !row.indexed) {
+            if row.as_ref().is_some_and(|row| row.dependency) {
                 return glib::Propagation::Proceed;
             }
             match key {

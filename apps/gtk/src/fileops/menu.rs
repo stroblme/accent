@@ -15,9 +15,9 @@ const GROUP: &str = "fileops";
 /// `anchor` is where to point the popover in that box's coordinates.
 ///
 /// `row` is the row that was clicked, as (path, is a directory), or `None` where the click landed
-/// on no row at all — the blank area below the last one. Creating is offered in all three cases,
-/// and everything else but [`listing`] needs a path, so a menu opened over nothing holds the create
-/// items and that alone.
+/// on no row at all — the blank area below the last one. Creating and pasting are offered in all
+/// three cases, since both name a folder rather than a row; everything else needs a path, so a menu
+/// opened over nothing holds those alone.
 ///
 /// `marked` is the set a Ctrl+click has built, and is empty unless the click landed on one of its
 /// rows — the caller decides that, since it is the tree that holds the marks. A menu over a marked
@@ -73,7 +73,6 @@ pub fn context_menu(
         // Nothing else names a path, but Paste names the folder it puts things in, and here that
         // is the vault root — the same target New File has just been given.
         menu.append_section(None, &clip_section(ops, None, dir));
-        menu.append_section(None, &listing());
         return popup(host, &menu, anchor, None);
     };
     // Rename is the move as well as the name: a path typed into it carries the file, which is
@@ -108,7 +107,6 @@ pub fn context_menu(
     let danger = gio::Menu::new();
     danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
-    menu.append_section(None, &listing());
     popup(host, &menu, anchor, None)
 }
 
@@ -132,7 +130,6 @@ fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     let danger = gio::Menu::new();
     danger.append_item(&many("Move to Trash", "trash-many", marked));
     menu.append_section(None, &danger);
-    menu.append_section(None, &listing());
     menu
 }
 
@@ -157,16 +154,6 @@ fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Men
     if can_paste(ops) {
         section.append_item(&item(GROUP, "Paste", "paste", dir));
     }
-    section
-}
-
-/// The section every tree menu ends with, blank area included, as GTK's own file chooser has it:
-/// how the listing looks, which is no single row's business. A window action, so it resolves up
-/// from the host and is the same preference the palette toggles.
-fn listing() -> gio::Menu {
-    let action = "win.show-hidden-files";
-    let section = gio::Menu::new();
-    section.append(Some(crate::actions::label_of(action)), Some(action));
     section
 }
 
@@ -352,12 +339,12 @@ mod tests {
         let marked = [("a.md".to_string(), false), ("Notes".to_string(), true)];
         assert_eq!(
             labels(marked_menu(&marked, "", true).upcast_ref()),
-            ["Cut", "Copy", "Paste", "Move to Trash", "Show Hidden Files"]
+            ["Cut", "Copy", "Paste", "Move to Trash"]
         );
         // Paste is drawn only where the clipboard holds something, as it is on the single-row menu.
         assert_eq!(
             labels(marked_menu(&marked, "", false).upcast_ref()),
-            ["Cut", "Copy", "Move to Trash", "Show Hidden Files"]
+            ["Cut", "Copy", "Move to Trash"]
         );
     }
 }

@@ -1146,11 +1146,11 @@ impl App {
         }
     }
 
-    /// The selected tree row, where it is one the app may act on. A row inside a tree the index
-    /// does not hold lists and opens but is never changed, so it is no target for a rename, a new
-    /// note or a trash (`tree::Row::indexed`).
+    /// The selected tree row, where it is one the app may act on. A row inside a dependency tree
+    /// lists and opens but is never changed, so it is no target for a rename, a new note or a
+    /// trash (`tree::Row::dependency`).
     fn selected_row(&self) -> Option<tree::Row> {
-        self.tree.get()?.selected().filter(|row| row.indexed)
+        self.tree.get()?.selected().filter(|row| !row.dependency)
     }
 
     /// The directory the tree selection points at: the folder itself, or the one a file sits in.
@@ -1170,9 +1170,9 @@ impl App {
 
     /// Put the config this window has just changed into effect in every open window, and write it
     /// a second later, so a run of ring picks is one write. The route for every surface that
-    /// writes a preference outside the dialog — Toggle Minimap, the Git pane's tree toggle, a
-    /// drawing ring pick, a rebound chord, Leave Out of Search — so none of them is left acting on
-    /// its own window alone.
+    /// writes a preference outside the dialog — Toggle Minimap, Show Hidden Files, a drawing ring
+    /// pick, a rebound chord, Leave Out of Search — so none of them is left acting on its own
+    /// window alone.
     fn config_changed(&self) {
         let config = self.config.borrow().clone();
         if let Some(shell) = self.shell.upgrade() {
