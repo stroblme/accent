@@ -446,7 +446,15 @@ impl Tab {
     /// number is still being typed.
     pub fn show_line(&self, line: i32) {
         let iter = self.line_iter(line, 1);
-        let opened = fold::reveal(self.text_buffer(), &iter);
+        // A comparison's collapsed run is opened through the comparison, as its own button opens
+        // it: both sides at once, and it stays open the next time the diff is laid. `fold::reveal`
+        // alone would take the tag off this buffer, leaving the lines under the other side's
+        // "unchanged lines" button — there is no caret moved here for the comparison to keep the
+        // run open around.
+        let laid = self
+            .comparison()
+            .is_some_and(|compare| compare.open_hiding(iter.offset()));
+        let opened = fold::reveal(self.text_buffer(), &iter) || laid;
         let line = iter.line();
         self.when_measured(opened, move |view| {
             if let Some(mut iter) = view.buffer().iter_at_line(line) {

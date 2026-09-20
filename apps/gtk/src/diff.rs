@@ -1367,6 +1367,43 @@ impl Compare {
         }
     }
 
+    /// The same, for the run hiding `offset` in the editable pane: `true` when one was opened.
+    ///
+    /// A jump that moves the caret needs none of this — [`Compare::lay`] leaves the run the caret
+    /// is in open — but Go to Line's preview moves no caret, and taking the tag off that side's
+    /// buffer alone would show the lines under the other side's "unchanged lines" button.
+    pub fn open_hiding(&self, offset: i32) -> bool {
+        let Some(side) = self.editable else {
+            return false;
+        };
+        let key = {
+            let (lines, rows, starts, hidden) = (
+                self.lines.borrow(),
+                self.rows.borrow(),
+                self.starts.borrow(),
+                self.hidden.borrow(),
+            );
+            let st = &starts[side.idx()];
+            let number = |r: usize| {
+                side.of(&rows[r])
+                    .and_then(|i| side.number(&lines[i]))
+                    .unwrap_or(1)
+            };
+            hidden
+                .iter()
+                .find(|(gap, _)| {
+                    (st[number(gap.start) - 1]..st[number(gap.end - 1)]).contains(&offset)
+                })
+                .map(|(_, key)| *key)
+        };
+        let Some(key) = key else {
+            return false;
+        };
+        self.opened.borrow_mut().insert(key);
+        self.refresh();
+        true
+    }
+
     /// Put the other side's lines of `hunk` into the editable buffer: in place of its own lines,
     /// or after them with `keep_own`. One undo step, and one edit like any the user makes, so
     /// the host's own change handling runs and lays the diff over the result.

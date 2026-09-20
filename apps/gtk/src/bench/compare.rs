@@ -57,8 +57,16 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                 bench_compare_line(&compare),
                 bench_banner_button(&tab)
             );
-            // Find Next into the run the comparison collapsed, which has to open on both sides
-            // rather than on the editor's alone, under the button still standing on Theirs.
+            // Go to Line's preview into the run the comparison collapsed. It moves no caret, so
+            // the comparison has to be laid again for the other side to open with it: a run still
+            // counted hidden here is one opened on the editor's side alone.
+            tab.show_line(25);
+            println!(
+                "bench compare_goto caret_line={} {}",
+                tab.cursor_line(),
+                bench_compare_line(&compare)
+            );
+            // Find Next into the same run, which by now is open: the caret's own way in.
             tab.buffer.place_cursor(&tab.buffer.start_iter());
             tab.set_query("line 25");
             tab.step(true, false);
