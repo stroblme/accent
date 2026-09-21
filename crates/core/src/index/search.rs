@@ -195,11 +195,8 @@ impl Index {
     }
 
     /// Every hit of `re` in an indexed body, in `rel_path` order: at most `limit` of them, plus
-    /// how many of them a Replace All would rewrite, so a truncated list can still say so.
-    ///
-    /// The rows reach every indexed body; the count is **markdown only**, like
-    /// [`grep_paths`](Self::grep_paths), which is what the rewrite actually visits. Counting a
-    /// source file's hits would have the button promise edits it never makes.
+    /// how many there are in all, which is what a Replace All would rewrite — it visits the same
+    /// bodies, through [`grep_paths`](Self::grep_paths) — so a truncated list can still say so.
     ///
     /// This is the exact-match counterpart of [`search`](Self::search): FTS5 answers "which files
     /// are about this", regexes answer "where exactly does this text occur". The bodies are
@@ -214,7 +211,7 @@ impl Index {
     ) -> Result<(Vec<Match>, usize)> {
         let mut st = self.conn.prepare_cached(GREP_SQL)?;
         let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
-        let (mut out, mut total, mut listed_only) = (Vec::new(), 0usize, 0usize);
+        let (mut out, mut total) = (Vec::new(), 0usize);
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
             // Tested before the other columns are fetched: most notes do not match, and their
@@ -223,13 +220,6 @@ impl Index {
                 continue;
             }
             let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
-            // A source file's hits are listed like any other and counted into nothing: the
-            // rewrite behind the count never opens one.
-            let notes = row.get::<_, i64>(3)? == FileKind::Markdown.as_i64();
-            let counter = match notes {
-                true => &mut total,
-                false => &mut listed_only,
-            };
             Self::matches_in(
                 &rel_path,
                 title.as_deref(),
@@ -237,7 +227,7 @@ impl Index {
                 re,
                 limit,
                 &mut out,
-                counter,
+                &mut total,
             );
         }
         Ok((out, total))
@@ -292,15 +282,13 @@ impl Index {
         }
     }
 
-    /// The notes whose body matches at all, in `rel_path` order. Uncapped on purpose: a global
-    /// replace has to visit every file, not only the ones the sidebar had room to list.
-    ///
-    /// Markdown only, unlike [`grep`](Self::grep), which now reaches every indexed body: Replace
-    /// All is Replace in Notes, and rewriting a source file from a notes app is not what the
-    /// button offers.
-    pub fn grep_paths(&self, re: &Regex) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(GREP_NOTES_SQL)?;
-        let mut rows = st.query([FileKind::Markdown.as_i64()])?;
+    /// The files whose indexed body matches at all, in `rel_path` order: the bodies
+    /// [`grep`](Self::grep) reads under the same `include_ignored`, so a Replace All rewrites
+    /// exactly what that count promised. Uncapped on purpose: a global replace has to visit every
+    /// file, not only the ones the sidebar had room to list.
+    pub fn grep_paths(&self, re: &Regex, include_ignored: bool) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(GREP_SQL)?;
+        let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let body: String = row.get(2)?;
@@ -316,18 +304,10 @@ impl Index {
 /// and an uncapped one agree on which matches they drop.
 ///
 /// `?1` drops the git-ignored exclusion, `?2` is [`FileKind::Markdown`] — the escape that keeps a
-/// note in the results whatever ignores it. The kind comes back as a column too, because the
-/// count [`grep`](Index::grep) returns beside the rows is markdown only.
-const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body, f.kind
+/// note in the results whatever ignores it.
+const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
      FROM notes n JOIN files f ON f.id = n.file_id
      WHERE ?1 OR f.git_ignored = 0 OR f.kind = ?2
-     ORDER BY f.rel_path";
-
-/// [`GREP_SQL`] narrowed to markdown (`?1` is [`FileKind::Markdown`]), for the one caller that
-/// rewrites what it finds.
-const GREP_NOTES_SQL: &str = "SELECT f.rel_path, f.title, n.body
-     FROM notes n JOIN files f ON f.id = n.file_id
-     WHERE f.kind = ?1
      ORDER BY f.rel_path";
 
 /// A walk down a body's matches, handing each one the line it starts on. Both searches walk their
@@ -840,7 +820,7 @@ mod tests {
         // The cap truncates the list but not the count a Replace All is measured against.
         let (few, total) = ix.grep(&re, 2, false).unwrap();
         assert_eq!((few.len(), total), (2, 4));
-        assert_eq!(ix.grep_paths(&re).unwrap(), ["a.md", "sub/Beta.md"]);
+        assert_eq!(ix.grep_paths(&re, false).unwrap(), ["a.md", "sub/Beta.md"]);
     }
 
     /// One file with a hundred matches used to be the whole list. It now gets [`PER_FILE`] rows

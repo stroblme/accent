@@ -703,7 +703,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         )),
         "replace_all" => {
             let re = compile(p, 0, 1)?;
-            any(vault.replace_all(&re, &arg::<String>(p, 2)?, arg(p, 3)?))
+            any(vault.replace_all(&re, &arg::<String>(p, 2)?, arg(p, 3)?, arg(p, 4)?))
         }
         "grep" => {
             let re = compile(p, 0, 1)?;
