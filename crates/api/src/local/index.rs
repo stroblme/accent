@@ -13,8 +13,9 @@ use accent_core::walk::{self, FileKind};
 use accent_core::{git, search::Regex};
 
 use super::{Local, Msg};
+use crate::language::notes;
 use crate::paths::conflict_pairs;
-use crate::{Backlink, FileRow, Match, PdfLink, Repo, SearchHit, fs, locked};
+use crate::{Backlink, FileRow, Location, Match, PdfLink, Repo, SearchHit, fs, locked};
 
 impl Local {
     /// Direct children of one directory ("" is the vault root): one level per call, so the tree
@@ -183,6 +184,17 @@ impl Local {
 
     pub fn backlinks(&self, rel: &str) -> Result<Vec<Backlink>> {
         self.index().backlinks(rel)
+    }
+
+    /// Every link that resolves to `rel`, where it is written, whatever kind of file `rel` is:
+    /// what the References pane lists wherever nothing else answers — a PDF, an image, a text
+    /// file no language server speaks for. A note's own come from its provider, which reads the
+    /// sources as the editor has them.
+    pub fn backlink_locations(&self, rel: &str) -> Result<Vec<Location>> {
+        let rows = self.index().backlinks(rel)?;
+        Ok(notes::placed(rows, |src| {
+            Ok(std::fs::read_to_string(Local::join(&self.root, src)?)?)
+        }))
     }
 
     pub(crate) fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {
@@ -512,6 +524,24 @@ mod tests {
         // Counted too: the count is what Replace All would rewrite, and it rewrites every
         // indexed body. (The NUL byte is what keeps bin.dat out of the rows.)
         assert_eq!(total, 1);
+    }
+
+    /// Any file has backlinks, placed where each link is written: what the References pane lists
+    /// for a PDF, an image or a text file, one row per note as for a note.
+    #[test]
+    fn a_file_that_is_not_a_note_has_its_backlinks_placed() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.txt", "text");
+        f.write("n.md", "# n\n\nsee [[a.txt]]\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let found = f.vault.backlink_locations("a.txt").unwrap();
+        let placed: Vec<_> = found
+            .iter()
+            .map(|l| (l.path.as_str(), l.range.start.line))
+            .collect();
+        assert_eq!(placed, [("n.md", 2)]);
     }
 
     #[test]

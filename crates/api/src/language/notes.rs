@@ -24,7 +24,7 @@ use super::{
     Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, Pos, Range,
     Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
-use crate::{Event, Local, locked};
+use crate::{Backlink, Event, Local, locked};
 
 /// Rows the popup offers before the user has to type more.
 const COMPLETIONS: usize = 20;
@@ -294,6 +294,28 @@ fn section_end(text: &str, headings: &[markdown::Heading], i: usize) -> usize {
         .map_or(text.len(), |next| next.range.start)
         .saturating_sub(1)
         .max(headings[i].range.end)
+}
+
+/// Where each backlink in `rows` is written, `text_of` reading its source. The rows arrive
+/// grouped by source, so each source's text is read once.
+pub(crate) fn placed(
+    rows: Vec<Backlink>,
+    text_of: impl Fn(&str) -> Result<String>,
+) -> Vec<Location> {
+    let mut out = Vec::with_capacity(rows.len());
+    let (mut read, mut source) = (String::new(), String::new());
+    for b in rows {
+        if read != b.src_rel_path {
+            // Unreadable is not an error here: the link is still worth listing, at 0:0.
+            source = text_of(&b.src_rel_path).unwrap_or_default();
+            read = b.src_rel_path.clone();
+        }
+        out.push(Location {
+            range: range_of(&source, &(b.byte_start as usize..b.byte_end as usize)),
+            path: b.src_rel_path,
+        });
+    }
+    out
 }
 
 // --------------------------------------------------------------------- the provider
@@ -720,24 +742,10 @@ impl Notes {
         Ok(folds_of(&text, &markdown::analyze(&text)))
     }
 
-    /// Every link that resolves to this note, where it is written. The rows arrive grouped by
-    /// source, so each source's text is read once.
+    /// Every link that resolves to this note, where it is written.
     fn references(&self, rel: &str) -> Result<Vec<Location>> {
         let rows = locked(&self.index).backlinks(rel)?;
-        let mut out = Vec::with_capacity(rows.len());
-        let (mut read, mut source) = (String::new(), String::new());
-        for b in rows {
-            if read != b.src_rel_path {
-                // Unreadable is not an error here: the link is still worth listing, at 0:0.
-                source = self.text_of(&b.src_rel_path).unwrap_or_default();
-                read = b.src_rel_path.clone();
-            }
-            out.push(Location {
-                range: range_of(&source, &(b.byte_start as usize..b.byte_end as usize)),
-                path: b.src_rel_path,
-            });
-        }
-        Ok(out)
+        Ok(placed(rows, |src| self.text_of(src)))
     }
 }
 
