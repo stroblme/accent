@@ -123,6 +123,13 @@ impl Tab {
             diff::Side::New => (companion, editor),
         };
         let compare = diff::Compare::new(old, new, Some(side), hunk_buttons);
+        // Every lay moves the hidden runs, and a message at the end of a collapsed line would be
+        // drawn on the row that stands for the run: the diagnostics are laid again with them.
+        compare.on_laid(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.paint_diagnostics()
+        ));
         compare.widget().set_vexpand(true);
         self.content.append(compare.widget());
         let mut shown = vec![compare.widget().clone()];
@@ -154,6 +161,9 @@ impl Tab {
             return;
         };
         comparing.compare.leave();
+        // The gap tags went with it, so the messages the collapsed lines were keeping quiet about
+        // belong back at the ends of their lines.
+        self.paint_diagnostics();
         comparing.holder.remove(&self.document);
         for widget in &comparing.shown {
             self.content.remove(widget);

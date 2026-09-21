@@ -96,8 +96,9 @@ pub struct Hooks {
     pub open_diff: Box<dyn Fn(&str, &str, &str, (&str, &str), (&str, &str)) -> Option<Rc<DiffTab>>>,
     /// Compare a file's working tree with the index, inside the file's own tab: key, the index
     /// side's title and text, and what to call once the comparison exists so a refresh can reach
-    /// it.
-    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
+    /// it. That call answers whether the comparison is worth keeping; `false` takes it down again
+    /// ([`Panel::show`]).
+    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
     /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
     /// leaves an untracked file outside the vault without a Discard button.
     pub trash: Box<dyn Fn(&[String])>,
@@ -146,10 +147,6 @@ pub struct Panel {
     root: gtk::Widget,
     /// Over the pane while the selected repository is part way through a merge or a rebase.
     banner: adw::Banner,
-    /// The pane's own box, and the only widget here a popover may hang off: GTK re-presents a
-    /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
-    /// (`fileops::context_menu` documents the symptom).
-    column: gtk::Box,
     names: gtk::StringList,
     chooser: gtk::DropDown,
     /// What the branch button says, which is the branch HEAD is on or where it is detached.
@@ -337,7 +334,6 @@ impl Panel {
             hooks,
             root: root.upcast(),
             banner,
-            column,
             names,
             chooser,
             branch_label,

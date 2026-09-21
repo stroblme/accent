@@ -120,6 +120,7 @@ fn bench_git_stage(app: &Rc<App>) {
         if let Some(list) = list.as_ref() {
             bench_git_hover(list, "src").await;
         }
+        bench_git_commit(&app, git.divider().end_child()).await;
         // The command's own refresh and the one its `.git` write schedules both land in this.
         let settle = || glib::timeout_future(Duration::from_millis(1500));
 
@@ -209,6 +210,60 @@ async fn bench_git_hover(list: &gtk::Widget, path: &str) {
             buttons.reveals_child()
         );
     }
+}
+
+/// A commit row's own two buttons, which used to be a secondary-click menu.
+///
+/// The same surface a changed file's actions have: what the row offers, held in a revealer that
+/// measures nothing until the pointer or the keyboard is on the row. PRELIGHT is set by hand for
+/// the reason [`bench_git_hover`] gives, and Copy Commit ID is then pressed, which is one toast.
+async fn bench_git_commit(app: &Rc<App>, list: Option<gtk::Widget>) {
+    let row = list.as_ref().and_then(|list| {
+        find_widget(list, &|w| {
+            w.downcast_ref::<gtk::Stack>()
+                .is_some_and(|s| s.visible_child_name().as_deref() == Some("commit"))
+        })
+    });
+    let revealer = row
+        .as_ref()
+        .and_then(|row| row.downcast_ref::<gtk::Stack>()?.visible_child())
+        .and_then(|shown| shown.last_child())
+        .and_downcast::<gtk::Revealer>();
+    let (Some(row), Some(revealer)) = (row, revealer) else {
+        return println!("bench git_commit_row none");
+    };
+    let Some(list_row) = row.parent() else {
+        return println!("bench git_commit_row unparented");
+    };
+    let mut tooltips = Vec::new();
+    let mut child = revealer.child().and_then(|box_| box_.first_child());
+    while let Some(button) = child {
+        tooltips.push(button.tooltip_text().map(|t| t.to_string()));
+        child = button.next_sibling();
+    }
+    println!("bench git_commit_row buttons={tooltips:?}");
+    for on in [false, true] {
+        match on {
+            true => list_row.set_state_flags(gtk::StateFlags::PRELIGHT, false),
+            false => list_row.unset_state_flags(gtk::StateFlags::PRELIGHT),
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench git_commit_row pointer={on} width={} revealed={}",
+            revealer.width(),
+            revealer.reveals_child()
+        );
+    }
+    let said = app.toasted.get();
+    match row_button(&row, "Copy Commit ID") {
+        Some(button) => button.emit_clicked(),
+        None => println!("bench git_commit_row no_copy_button"),
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    println!(
+        "bench git_commit_row copied toasts={}",
+        app.toasted.get() - said
+    );
 }
 
 /// Hold a real press on the Stage button of `path`'s row while the list changes under it. Prints

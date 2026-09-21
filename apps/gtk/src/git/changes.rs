@@ -162,6 +162,24 @@ impl Panel {
         self.changes.splice(at as u32, removed as u32, &items);
     }
 
+    /// Activate the row `path` is listed on, as a click on it does, and say which section it was
+    /// in. `ACCENT_BENCH_COMPARE=row:` and nothing else: the headless image has no pointer.
+    pub fn activate_change(self: &Rc<Self>, path: &str) -> Option<&'static str> {
+        let row = (0..self.changes.n_items())
+            .filter_map(|i| boxed::<Row>(self.changes.item(i)))
+            .find(|row| matches!(row, Row::Entry { entry, .. } if entry.path == path))?;
+        let Row::Entry { section, .. } = &row else {
+            return None;
+        };
+        let section = *section;
+        self.activate(&row);
+        Some(match section {
+            Section::Conflicts => "conflicts",
+            Section::Staged => "staged",
+            Section::Changes => "changes",
+        })
+    }
+
     fn activate(self: &Rc<Self>, row: &Row) {
         if let Row::Folder { path, section, .. } = row {
             let key = folder_key(*section, path);
@@ -289,7 +307,7 @@ enum Act {
 /// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
 /// the keyboard — and it is the one the keyboard lands on first, so Tab reveals the buttons it
 /// would otherwise never be able to reach.
-fn reveal_on_hover(row: &gtk::Widget) {
+pub(super) fn reveal_on_hover(row: &gtk::Widget) {
     // Once per list row widget, which is recycled and bound again and again. The class is the
     // marker, there being nowhere else to keep one bit on a widget GTK made for itself.
     // ponytail: it is also a hook if a row of this list ever wants styling of its own.

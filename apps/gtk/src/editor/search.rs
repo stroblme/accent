@@ -287,8 +287,12 @@ impl Tab {
     fn reveal_select(&self, start: &gtk::TextIter, end: &gtk::TextIter) -> bool {
         let opened = fold::reveal(self.text_buffer(), start);
         self.buffer.select_range(start, end);
-        if let (true, Some(compare)) = (opened, self.comparison()) {
-            compare.refresh();
+        if opened {
+            // The lines that came back out want their end-of-line messages back.
+            self.paint_diagnostics();
+            if let Some(compare) = self.comparison() {
+                compare.refresh();
+            }
         }
         opened
     }
@@ -454,7 +458,12 @@ impl Tab {
         let laid = self
             .comparison()
             .is_some_and(|compare| compare.open_hiding(iter.offset()));
-        let opened = fold::reveal(self.text_buffer(), &iter) || laid;
+        let revealed = fold::reveal(self.text_buffer(), &iter);
+        if revealed {
+            // As above: a fold opened here has lines back on screen to write on.
+            self.paint_diagnostics();
+        }
+        let opened = revealed || laid;
         let line = iter.line();
         self.when_measured(opened, move |view| {
             if let Some(mut iter) = view.buffer().iter_at_line(line) {

@@ -58,7 +58,7 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
     });
 }
 
-fn diagnostic(severity: Severity, line: u32, from: u32, to: u32) -> Diagnostic {
+pub(super) fn diagnostic(severity: Severity, line: u32, from: u32, to: u32) -> Diagnostic {
     Diagnostic {
         range: Range {
             start: Pos {
