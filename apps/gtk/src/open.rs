@@ -185,9 +185,7 @@ impl App {
             &prefs,
         );
         self.adopt(tab, how);
-        if flavour.is_note() {
-            self.sync_conflict_banner(key, None);
-        }
+        self.sync_conflict_banner(key, None);
     }
 
     /// A PDF, in the reader.

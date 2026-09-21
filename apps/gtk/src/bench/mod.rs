@@ -23,7 +23,8 @@ mod tags;
 
 use chrome::bench_chrome;
 use compare::{
-    bench_compare, bench_compare_diag, bench_compare_lines, bench_compare_pads, bench_compare_row,
+    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_lines,
+    bench_compare_pads, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -92,6 +93,9 @@ use tags::bench_tags;
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
 /// publishing anything: a fold's header keeps its own message, the lines under it do not.
+/// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
+/// and prints what the banner stands for: live, after the tab is opened again, and once the copy
+/// is gone.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
@@ -305,6 +309,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("diag:") {
                 return bench_compare_diag(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("conflict:") {
+                return bench_compare_conflict(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),
