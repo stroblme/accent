@@ -79,7 +79,7 @@ enum Cmd {
         #[arg(long)]
         show_skipped: bool,
     },
-    /// Full-text search over note bodies.
+    /// Full-text search over every indexed file.
     Search {
         #[command(flatten)]
         common: Common,
@@ -87,7 +87,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Notes linking to a note.
+    /// Notes linking to a file.
     Backlinks {
         #[command(flatten)]
         common: Common,

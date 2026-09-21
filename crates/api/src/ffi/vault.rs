@@ -170,10 +170,6 @@ impl Vault {
         Ok(self.inner.recent_files(limit as usize)?)
     }
 
-    pub fn note_paths(&self) -> Answer<Vec<String>> {
-        Ok(self.inner.note_paths()?)
-    }
-
     pub fn file_paths(&self, include_ignored: bool) -> Answer<Vec<String>> {
         Ok(self.inner.file_paths(include_ignored)?)
     }
