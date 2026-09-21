@@ -6,9 +6,9 @@
 //! (DESIGN.md "Keyboard": there is no shortcuts window until the libadwaita floor reaches 1.8), so
 //! every command row carries its accelerator.
 //!
-//! Opening must be instant, so file mode goes up showing the most recently modified notes (one
-//! indexed query, no matching at all) and only matches against the full note list once the user
-//! types something. Keystrokes are debounced, so holding a key down cannot queue up one full match
+//! Opening must be instant, so file mode goes up showing the files this window opened last and
+//! then the most recently modified ones (one indexed query, no matching at all), and only matches
+//! against the full file list once the user types something. Keystrokes are debounced, so holding a key down cannot queue up one full match
 //! per character.
 
 use crate::start;

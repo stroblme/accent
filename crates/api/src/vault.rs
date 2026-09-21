@@ -399,7 +399,9 @@ methods! {
     any note_paths() -> Vec<String>;
     any file_paths(include_ignored: val bool) -> Vec<String>;
     any set_excluded(entries: ref [String]) -> ();
-    any recent_notes(limit: val usize) -> Vec<String>;
+    /// A host whose `accent-cli serve` predates the name answers "no such method", which leaves
+    /// Go to File's empty query to the window's own history.
+    any recent_files(limit: val usize) -> Vec<String>;
     any resolve_link(target: ref str) -> Option<String>;
     /// What Go to File and `[[` completion offer to write. A host whose `accent-cli serve`
     /// predates it answers "no such method", which the palette takes as none.
