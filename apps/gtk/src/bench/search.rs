@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// The notes the drill writes and takes away again, so it rewrites nothing of the reader's.
+/// The files the drill writes and takes away again, so it rewrites nothing of the reader's.
 const NOTE: &str = "accent-bench-search";
 /// One watcher debounce (300 ms), the index batch behind it and the pane's own settle, with room
 /// for a large vault's worker to get to it.
@@ -11,15 +11,22 @@ const SETTLE: Duration = Duration::from_millis(2500);
 /// files and takes about half a minute.
 const INDEXED: Duration = Duration::from_secs(120);
 
-/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` notes
-/// holding it twice — one note unless the tail says otherwise — and takes them away again,
-/// printing what the pane lists at each step. The whole cycle runs twice: once under ranked full
-/// text, and once with the replace row open, which is the exact scan Replace All needs.
+/// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` files
+/// holding it twice — one note unless the tail says otherwise, every second file a `.txt` rather
+/// than a note — and takes them away again, printing what the pane lists at each step and what
+/// the Replace All button says. The whole cycle runs twice: once under ranked full text, and once
+/// with the replace row open, which is the exact scan Replace All needs.
 ///
 /// `before` and `removed` must match, and `added` must have `2n` rows more: a row is a match and
 /// not a file, in either mode. That is the pane following the vault without the box being
 /// touched. Pass a word the vault does not already hold and the steps read `rows=0`, `rows=2n`,
 /// `rows=0` in both modes.
+///
+/// The button counts only under the exact scan, where it must say what the rewrite would touch:
+/// with such a word, `Replace All (0)` at `grep`, `grep_removed` and `away_removed`, and
+/// `Replace All (2n)` at `grep_added` and `away_added`, the `.txt` files included — Replace All
+/// rewrites every indexed file, not only the notes. The ranked steps read `Replace All (0)`, not
+/// pressable.
 ///
 /// The last two steps stage the same batch with the *Files* pane in front instead, so
 /// `away_added` and `away_removed` are the catch-up a pane that was not on screen owes when it
@@ -92,7 +99,7 @@ fn bench_search_indexed(app: Rc<App>, query: String, count: usize, since: Instan
     });
 }
 
-/// Write the marker notes behind the pane's back — which is what an edit in another editor is, the
+/// Write the marker files behind the pane's back — which is what an edit in another editor is, the
 /// vault's own watcher being what has to carry it — then take them away again, printing the rows
 /// after each. `mode` names which mode the pane was in, and `then` is what the run does next.
 fn bench_search_cycle(
@@ -141,16 +148,20 @@ fn bench_search_away(
     });
 }
 
-/// Where the marker notes go: one per file of the batch the drill stages.
+/// Where the marker files go: one per file of the batch the drill stages, every second one a
+/// `.txt`, which the exact scan and Replace All reach just as they reach a note.
 fn bench_search_paths(app: &Rc<App>, count: usize) -> Vec<PathBuf> {
     (0..count)
-        .map(|i| app.root().join(format!("{NOTE}-{i}.md")))
+        .map(|i| {
+            let ext = if i % 2 == 1 { "txt" } else { "md" };
+            app.root().join(format!("{NOTE}-{i}.{ext}"))
+        })
         .collect()
 }
 
 fn bench_search_write(paths: &[PathBuf], query: &str) {
     for path in paths {
-        // Twice, on two lines: a row is a match and not a file, so each note written here is two
+        // Twice, on two lines: a row is a match and not a file, so each file written here is two
         // rows in both modes.
         let body = format!("a line holding {query} once\nand a second line holding {query}\n");
         if let Err(e) = std::fs::write(path, body) {
@@ -170,5 +181,8 @@ fn bench_search_print(app: &Rc<App>, step: &str) {
         return println!("bench search step={step} pane=none");
     };
     let (page, rows) = sidebar.search_state();
-    println!("bench search step={step} page={page} rows={rows}");
+    let (button, sensitive) = sidebar.replace_all_state();
+    println!(
+        "bench search step={step} page={page} rows={rows} button=\"{button}\" sensitive={sensitive}"
+    );
 }

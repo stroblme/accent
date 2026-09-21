@@ -123,7 +123,7 @@ impl App {
                 }
                 self.refresh_corpus();
                 self.sync_active();
-                // Conflicts on notes nobody has open have no banner to appear on, so the toast
+                // Conflicts on files nobody has open have no banner to appear on, so the toast
                 // that is already there says how many are waiting in the vault. Counted on a
                 // worker, the index being on the host for a remote vault.
                 let message = match stats.stopped {
@@ -210,7 +210,7 @@ impl App {
             }
             Event::FileRemoved(rel) => {
                 // A conflict copy is never a tab of its own; what its removal changes is the
-                // banner on the note it was a copy of.
+                // banner on the file it was a copy of.
                 if let Some(original) = accent_api::conflict_original_rel(&rel) {
                     self.sync_conflict_banner(&original, None);
                 }

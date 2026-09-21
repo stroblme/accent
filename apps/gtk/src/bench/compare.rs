@@ -466,6 +466,41 @@ fn bench_margins(widget: &gtk::Widget) -> Option<(i32, i32)> {
     None
 }
 
+/// The conflict banner on `rel`, which can be any text file: a `*.sync-conflict-*` copy is
+/// written beside it from outside the app while its tab is open, the tab is closed and opened
+/// again, and the copy is removed, printing what the tab's banner stands for after each step —
+/// the watcher's event, the question asked on opening, and the removal. It writes into the vault,
+/// so point it at a scratch copy.
+pub(super) fn bench_compare_conflict(app: &Rc<App>, rel: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return bench_quit(app);
+    };
+    let (dir, name) = (accent_core::path::parent_dir(rel), doc::file_name(rel));
+    let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
+    let copy = vault.root().join(dir).join(format!(
+        "{stem}.sync-conflict-20260903-101500-ABCDEFG.{ext}"
+    ));
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let alert = |app: &Rc<App>| app.tab_for(&rel).and_then(|tab| tab.alert());
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let _ = std::fs::write(&copy, "theirs\n");
+        glib::timeout_future(Duration::from_secs(3)).await;
+        println!("bench compare_conflict live={:?}", alert(&app));
+        for doc in app.docs() {
+            app.close_page(doc.page());
+        }
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!("bench compare_conflict reopened={:?}", alert(&app));
+        let _ = std::fs::remove_file(&copy);
+        glib::timeout_future(Duration::from_secs(3)).await;
+        println!("bench compare_conflict removed={:?}", alert(&app));
+        bench_quit(&app);
+    });
+}
+
 /// The banner's button as it reads on screen: `None` for none.
 fn bench_banner_button(tab: &Tab) -> Option<glib::GString> {
     tab.banner.button_label().filter(|label| !label.is_empty())

@@ -997,9 +997,8 @@ mod tests {
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
         let (matches, total) = ix.grep(&re, 10, false).unwrap();
         assert_eq!(matches[0].rel_path, "tool.py");
-        // Listed, not counted: the count is what a Replace All would rewrite, and it rewrites
-        // notes.
-        assert_eq!(total, 0);
+        // Counted too: the count is what a Replace All would rewrite, and it rewrites every body.
+        assert_eq!(total, 1);
 
         // Over the cap and binary: a stat row each, and nothing to match against.
         let body_count = |rel: &str| -> i64 {
@@ -1051,8 +1050,11 @@ mod tests {
             "the file stem is the title fallback"
         );
 
-        // Replace All stays notes-only: `a` is in all three bodies, only the notes come back.
+        // Replace All reaches the source file as well: `a` is in all three bodies.
         let re = crate::search::pattern("a", crate::search::Options::default()).unwrap();
-        assert_eq!(ix.grep_paths(&re).unwrap(), vec!["a.md", "sub/Beta.md"]);
+        assert_eq!(
+            ix.grep_paths(&re, false).unwrap(),
+            vec!["a.md", "sub/Beta.md", "tool.py"]
+        );
     }
 }

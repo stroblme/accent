@@ -536,6 +536,18 @@ impl Sidebar {
         }
     }
 
+    /// What the Replace All button says and whether it can be pressed. What
+    /// `ACCENT_BENCH_SEARCH` reads beside the rows.
+    pub fn replace_all_state(&self) -> (String, bool) {
+        match self.panes.as_ref() {
+            Some(panes) => (
+                panes.apply_replace.label().unwrap_or_default().to_string(),
+                panes.apply_replace.is_sensitive(),
+            ),
+            None => (String::new(), false),
+        }
+    }
+
     /// The vault moved under the rows on screen, so ask the question again a moment later.
     ///
     /// Called for every change the window hears about and for every save of its own, so the two

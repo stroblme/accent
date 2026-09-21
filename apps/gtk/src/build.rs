@@ -468,22 +468,24 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                 }
                 sidebar::Query::Grep { text, options, all } => {
                     // `total` is what Replace All would rewrite, not how many rows there are:
-                    // the walked trees below add rows and nothing to it, and neither does a
-                    // source file the index holds a body for. The button promises edits.
-                    let (mut hits, total) = vault
+                    // the walked trees below add rows and nothing to it. The button promises
+                    // edits.
+                    let (hits, total) = vault
                         .grep(&text, options, SEARCH_LIMIT, all)
                         .unwrap_or_default();
                     // What the index holds first, because that is what it can count; with
                     // All on, the trees it was never asked to hold get whatever room is left.
-                    if all {
-                        let room = SEARCH_LIMIT.saturating_sub(hits.len());
-                        hits.extend(
-                            vault
-                                .grep_unindexed(&text, options, room)
-                                .unwrap_or_default(),
-                        );
+                    let walked = match all {
+                        true => vault
+                            .grep_unindexed(&text, options, SEARCH_LIMIT.saturating_sub(hits.len()))
+                            .unwrap_or_default(),
+                        false => Vec::new(),
+                    };
+                    sidebar::Answer::Grep {
+                        hits,
+                        total,
+                        walked,
                     }
-                    sidebar::Answer::Grep(hits, total)
                 }
             }
         }),
@@ -494,8 +496,9 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                   options: accent_api::Options,
                   replacement: String,
                   literal: bool,
+                  include_ignored: bool,
                   done: Box<dyn FnOnce()>| {
-                app.replace_in_notes(query, options, replacement, literal, done)
+                app.replace_in_files(query, options, replacement, literal, include_ignored, done)
             }
         )),
     }

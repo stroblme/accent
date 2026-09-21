@@ -470,11 +470,17 @@ mod tests {
         );
 
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
-        // The rows are what the exclusion moves; grep's count is markdown only, so the one note
-        // is all of it either way.
+        // The rows are what the exclusion moves, and the count and the files a Replace All
+        // rewrites move with them.
         assert_eq!(ix.grep(&re, 10, false).unwrap().0.len(), 2);
         assert_eq!(ix.grep(&re, 10, true).unwrap().0.len(), 3);
-        assert_eq!(ix.grep(&re, 10, true).unwrap().1, 1);
+        assert_eq!(ix.grep(&re, 10, false).unwrap().1, 2);
+        assert_eq!(ix.grep(&re, 10, true).unwrap().1, 3);
+        assert_eq!(
+            ix.grep_paths(&re, false).unwrap(),
+            ["notes/a.md", "paper/main.tex"]
+        );
+        assert_eq!(ix.grep_paths(&re, true).unwrap().len(), 3);
 
         // Go to File follows the default; the tree is the escape hatch, not a toggle here.
         assert_eq!(

@@ -236,11 +236,11 @@ impl Vault {
 pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_secs(50);
 
 /// How long a vault-wide rewrite runs on the host before it stops. [`Local::replace_all`] reads,
-/// substitutes and fsyncs one note at a time — 1.9 s across 245 notes and 35 s across 3.3k of
+/// substitutes and fsyncs one file at a time — 1.9 s across 245 notes and 35 s across 3.3k of
 /// them — so this is room for some ten thousand and a cap on the thread either way.
 ///
-/// A cap, unlike [`MOVE_BOUND`], because a rewrite *is* resumable: it stops between notes, never
-/// inside one, the notes it did not reach are listed in the report, and the Search pane asks its
+/// A cap, unlike [`MOVE_BOUND`], because a rewrite *is* resumable: it stops between files, never
+/// inside one, the files it did not reach are listed in the report, and the Search pane asks its
 /// question again the moment it returns — so the remaining matches are on screen and Replace All
 /// finishes them.
 pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
@@ -509,7 +509,8 @@ impl Vault {
         }
     }
 
-    /// Replace every match in every note that has one.
+    /// Replace every match in every file whose indexed body has one: what [`grep`](Self::grep)
+    /// counts under the same `include_ignored`.
     ///
     /// The pattern crosses as what the user typed plus the three toggles, not as a compiled
     /// regex: a `Regex` cannot be serialised, and case-insensitivity lives in the builder rather
@@ -524,15 +525,19 @@ impl Vault {
         options: Options,
         replacement: &str,
         literal: bool,
+        include_ignored: bool,
     ) -> Result<ReplaceReport> {
         match &self.backend {
-            Backend::Local(v) => {
-                v.replace_all(&search::pattern(query, options)?, replacement, literal)
-            }
+            Backend::Local(v) => v.replace_all(
+                &search::pattern(query, options)?,
+                replacement,
+                literal,
+                include_ignored,
+            ),
             Backend::Remote(r) => r
                 .call_within(
                     "replace_all",
-                    json!([query, options, replacement, literal]),
+                    json!([query, options, replacement, literal, include_ignored]),
                     REPLACE_BOUND + rpc::DEADLINE,
                 )
                 .map_err(remote_err),

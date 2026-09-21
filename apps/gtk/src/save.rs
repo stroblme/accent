@@ -652,7 +652,7 @@ impl App {
     /// Raise or drop the conflict question on the tab showing `rel`, from what is on disk now.
     ///
     /// DESIGN.md, States: a conflict copy is a state that persists and needs a decision, so it is
-    /// a banner on the note it concerns rather than a toast that scrolls past. It queues behind a
+    /// a banner on the file it concerns rather than a toast that scrolls past. It queues behind a
     /// "changed on disk" question rather than displacing it, and taking it down again brings that
     /// one back instead of clearing the bar.
     ///
@@ -660,8 +660,8 @@ impl App {
     /// and a batch behind, so it still lists the file and the banner would otherwise linger until
     /// `FileRemoved` caught up a few hundred milliseconds later.
     ///
-    /// The index is asked on a worker, because every note that opens asks, and on a remote vault
-    /// the asking is a round trip. A failed question is not an answer and changes nothing.
+    /// The index is asked on a worker, because every text file that opens asks, and on a remote
+    /// vault the asking is a round trip. A failed question is not an answer and changes nothing.
     pub fn sync_conflict_banner(self: &Rc<Self>, rel: &str, trashed: Option<&str>) {
         // Conflict copies are a vault idea: they are found by the index.
         let Some(vault) = self.vault().cloned() else {

@@ -76,7 +76,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.replace", "Replace", &["<Control>h"]),
     (
         "win.replace-in-files",
-        "Replace in Notes",
+        "Replace in Files",
         &["<Control><Shift>h"],
     ),
     ("win.find-next", "Find Next", &["F3"]),
@@ -685,7 +685,7 @@ const CAPTURED: &[&str] = &[
 ///   key for the same reason: a fullscreen window has to be leavable from a focused shell.
 /// * every chord whose spelling carries both `<Control>` and `<Shift>` — the existing convention,
 ///   which no shell claims, and which already covers Copy and Paste in Terminal, the pane chords,
-///   the palette's second spelling and Replace in Notes.
+///   the palette's second spelling and Replace in Files.
 ///
 /// ponytail: matched on the accelerator's spelling. A `<Primary>` or `<Ctrl>` written by hand into
 /// the config is not recognised; `gtk::accelerator_parse` would settle it but needs an initialised

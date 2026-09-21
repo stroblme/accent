@@ -349,14 +349,15 @@ impl Local {
         Ok(true)
     }
 
-    /// Replace every match of `re` in every note that has one.
+    /// Replace every match of `re` in every file whose indexed body has one — the files
+    /// [`grep`](Self::grep) lists and counts under the same `include_ignored`, notes or not.
     ///
     /// `literal` takes `$1` in `replacement` as two characters rather than a capture group, which
-    /// is what the sidebar's non-regex modes mean. Same shape as [`rename`](Self::rename): a note
+    /// is what the sidebar's non-regex modes mean. Same shape as [`rename`](Self::rename): a file
     /// that could not be written is reported rather than fatal, because a vault where most of the
     /// replacements landed is a real outcome the user has to be told about.
     ///
-    /// It reads, substitutes and fsyncs one note at a time on the calling thread, which costs
+    /// It reads, substitutes and fsyncs one file at a time on the calling thread, which costs
     /// far more than a main loop can spend: 1.9 s across 245 notes and 35 s across 3.3k of them,
     /// measured on the 3.6k-note generated vault. Callers with a UI run it on a worker thread —
     /// the desktop app does, and the handle is `Send + Sync` so a binding can too. It is bounded
@@ -370,15 +371,22 @@ impl Local {
         re: &Regex,
         replacement: &str,
         literal: bool,
+        include_ignored: bool,
     ) -> Result<ReplaceReport> {
-        self.replace_within(re, replacement, literal, crate::vault::REPLACE_BOUND)
+        self.replace_within(
+            re,
+            replacement,
+            literal,
+            include_ignored,
+            crate::vault::REPLACE_BOUND,
+        )
     }
 
     /// [`replace_all`](Self::replace_all) under a budget, which is what makes the bound a remote
     /// caller waits for a promise rather than a guess.
     ///
-    /// It stops *between* notes, never inside one: each is read, substituted and written whole,
-    /// so the vault is consistent wherever it stops, and the notes it never reached are listed as
+    /// It stops *between* files, never inside one: each is read, substituted and written whole,
+    /// so the vault is consistent wherever it stops, and the files it never reached are listed as
     /// not written rather than passed over silently. Running it again finishes them — the pattern
     /// still matches exactly those.
     fn replace_within(
@@ -386,13 +394,14 @@ impl Local {
         re: &Regex,
         replacement: &str,
         literal: bool,
+        include_ignored: bool,
         budget: std::time::Duration,
     ) -> Result<ReplaceReport> {
         let deadline = std::time::Instant::now() + budget;
         let mut report = ReplaceReport::default();
-        // Collected before the first write: the guard must not still be held while notes are
+        // Collected before the first write: the guard must not still be held while files are
         // rewritten, and the worker reindexes them as they land.
-        for rel in self.searcher().grep_paths(re)? {
+        for rel in self.searcher().grep_paths(re, include_ignored)? {
             if std::time::Instant::now() >= deadline {
                 report
                     .failed
@@ -418,7 +427,7 @@ impl Local {
         Ok(report)
     }
 
-    /// How many matches this note lost. The count comes from the file rather than from the index,
+    /// How many matches this file lost. The count comes from the file rather than from the index,
     /// which may be a watcher debounce behind what is on disk.
     fn replace_one(
         &self,
@@ -638,7 +647,10 @@ mod tests {
         let plain = Options::default();
         assert_eq!(f.vault.grep("colour", plain, 10, false).unwrap().1, 3);
 
-        let report = f.vault.replace_all("colour", plain, "color", true).unwrap();
+        let report = f
+            .vault
+            .replace_all("colour", plain, "color", true, false)
+            .unwrap();
         assert_eq!(report.rewritten, ["a.md", "sub/b.md"]);
         assert_eq!(report.matches, 3);
         assert!(report.failed.is_empty());
@@ -671,7 +683,7 @@ mod tests {
         };
         let re = accent_core::search::pattern("colour", Options::default()).unwrap();
         let report = local
-            .replace_within(&re, "color", true, std::time::Duration::ZERO)
+            .replace_within(&re, "color", true, false, std::time::Duration::ZERO)
             .unwrap();
 
         assert!(report.rewritten.is_empty());
@@ -692,10 +704,10 @@ mod tests {
         );
     }
 
-    /// The Search pane's "Replace All (N)": N is what the rewrite touches, not what the list
-    /// shows. A source file's matches are rows without being edits.
+    /// The Search pane's "Replace All (N)": N is what the rewrite touches, and it touches every
+    /// file the list shows from the index, a source file as much as a note.
     #[test]
-    fn the_replace_count_is_notes_while_the_rows_are_every_text_file() {
+    fn the_replace_count_is_every_indexed_match_and_the_rewrite_touches_them_all() {
         let f = Fixture::open(VaultConfig::default());
         f.write("a.md", "zorblat once\n");
         f.write("tool.py", "zorblat\nzorblat again\n");
@@ -705,12 +717,15 @@ mod tests {
         let plain = Options::default();
         let (hits, total) = f.vault.grep("zorblat", plain, 10, false).unwrap();
         assert_eq!(hits.len(), 3, "the list shows both files: {hits:?}");
-        assert_eq!(total, 1, "only the note's match is a rewrite");
+        assert_eq!(total, 3, "every listed match is a rewrite");
         // And that is exactly what the rewrite then visits.
-        let report = f.vault.replace_all("zorblat", plain, "zzz", true).unwrap();
-        assert_eq!(report.rewritten, vec!["a.md".to_string()]);
-        assert_eq!(report.matches, 1);
-        assert_eq!(f.read("tool.py"), "zorblat\nzorblat again\n");
+        let report = f
+            .vault
+            .replace_all("zorblat", plain, "zzz", true, false)
+            .unwrap();
+        assert_eq!(report.rewritten, ["a.md", "tool.py"]);
+        assert_eq!(report.matches, 3);
+        assert_eq!(f.read("tool.py"), "zzz\nzzz again\n");
     }
 
     /// Only regex mode expands `$1`; a literal replacement is written as typed.
@@ -726,7 +741,7 @@ mod tests {
             ..Options::default()
         };
         f.vault
-            .replace_all(r"hello (\w+)", opts, "bye $1", false)
+            .replace_all(r"hello (\w+)", opts, "bye $1", false, false)
             .unwrap();
         assert_eq!(f.read("a.md"), "bye world\n");
     }

@@ -27,10 +27,10 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
 const PULSE: Duration = Duration::from_millis(80);
-/// How many notes Replace All rewrites without asking first. A rewrite cannot be undone and
-/// reaches notes nobody has open, which is the choice DESIGN.md's States section keeps an
-/// `AdwAlertDialog` for; the one note whose every match the pane is already showing struck
-/// through is the case where the preview *is* the confirmation.
+/// How many matches Replace All rewrites without asking first. A rewrite cannot be undone and
+/// reaches files nobody has open, which is the choice DESIGN.md's States section keeps an
+/// `AdwAlertDialog` for; the one match the pane is already showing struck through is the case
+/// where the preview *is* the confirmation.
 const CONFIRM_ABOVE: usize = 1;
 /// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
 /// Nothing else in the window starts a search, so a query the user did not ask for — the requery
@@ -58,12 +58,17 @@ pub enum Query {
     },
 }
 
-/// What a [`Query`] answered. The `usize` is how many of the matches a Replace All would rewrite,
-/// which the capped list cannot give and which is smaller than the list: the rewrite is notes
-/// only, while the rows reach every text file.
+/// What a [`Query`] answered.
 pub enum Answer {
     Fts(Vec<SearchHit>),
-    Grep(Vec<Match>, usize),
+    Grep {
+        /// The matches in the files the index holds a body for, which Replace All rewrites.
+        hits: Vec<Match>,
+        /// How many of those there are in all, which the capped list cannot say.
+        total: usize,
+        /// The matches All's walk found past the index. Listed, never rewritten.
+        walked: Vec<Match>,
+    },
 }
 
 /// What the Search pane asks of the index.
@@ -74,9 +79,10 @@ pub struct Data {
     /// Runs on a worker thread, so it may touch nothing the main loop owns.
     pub search: Arc<dyn Fn(Query) -> Answer + Send + Sync>,
     /// Rewrite every match in the vault. `literal` says whether `$1` in the replacement is a
-    /// capture group or two characters. It writes one note at a time, so it runs off the main
-    /// loop and calls `done` there once it has: the pane stays busy until then.
-    pub replace_all: Box<dyn Fn(String, Options, String, bool, Box<dyn FnOnce()>)>,
+    /// capture group or two characters, and the second flag is the All toggle, which the rewrite
+    /// reads the way the count beside the rows did. It writes one file at a time, so it runs off
+    /// the main loop and calls `done` there once it has: the pane stays busy until then.
+    pub replace_all: Box<dyn Fn(String, Options, String, bool, bool, Box<dyn FnOnce()>)>,
 }
 
 /// FTS5 wraps matched terms in `«` and `»` (see `Index::search`). Escape first, so a note holding a
@@ -368,20 +374,23 @@ impl Search {
                 self.set_total(0);
                 fts_rows(hits)
             }
-            Answer::Grep(hits, total) => {
+            Answer::Grep {
+                hits,
+                total,
+                walked,
+            } => {
                 self.set_total(total);
                 let Ok(re) = compile_regex(key) else {
                     return;
                 };
                 let replacement = self.replacement();
                 let accent = accent_markup_colour();
-                grep_rows(
-                    hits,
-                    &re,
-                    replacement.as_deref(),
-                    !key.options.regex,
-                    &accent,
-                )
+                let literal = !key.options.regex;
+                let mut rows = grep_rows(hits, &re, replacement.as_deref(), literal, &accent);
+                // No preview on a walked row: the rewrite never opens its file, so striking the
+                // match through would promise an edit that does not happen.
+                rows.extend(grep_rows(walked, &re, None, literal, &accent));
+                rows
             }
         };
         self.body
@@ -391,10 +400,9 @@ impl Search {
         self.results.splice(0, self.results.n_items(), &objects);
     }
 
-    /// How many matches the button would rewrite — not how many the query found. The list is
-    /// capped and spans every text file; the number is uncapped and counts notes, because that
-    /// is what Replace All opens. A vault of source files would otherwise be promised edits that
-    /// never happen.
+    /// How many matches the button would rewrite — not how many rows there are. The list is
+    /// capped and, with All on, reaches past the index; the number is uncapped and counts the
+    /// matches in the files the index holds a body for, because those are what Replace All opens.
     fn set_total(&self, total: usize) {
         self.total.set(total);
         self.apply.set_label(&format!("Replace All ({total})"));
@@ -419,8 +427,8 @@ impl Search {
         let total = self.total.get();
         if total > CONFIRM_ABOVE {
             let dialog = alert(
-                &format!("Replace in {total} Notes?"),
-                "Every match in these notes is rewritten where it stands. This cannot be undone.",
+                &format!("Replace {total} Matches?"),
+                "Every match is rewritten in the file it is in. This cannot be undone.",
                 &[
                     ("cancel", "Cancel", adw::ResponseAppearance::Default),
                     (
@@ -461,6 +469,7 @@ impl Search {
             key.options,
             replacement,
             !key.options.regex,
+            key.all,
             Box::new(move || {
                 search.replacing.set(false);
                 search.start();
