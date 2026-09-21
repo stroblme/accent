@@ -4,13 +4,13 @@
 //! the pointer turned into a hand over a `[[wikilink]]` and over nothing else, so on a source file
 //! every word looked the same as every other and the only way to find out was to click.
 //!
-//! A link is answered from the table the analysis already filled, so it underlines on the motion
-//! event itself. A word in code has to be asked about, and the only thing that truly knows is the
-//! language server — underlining every identifier would say nothing, since the question is whether
-//! *this* one leads anywhere. So the pointer resting on a word for [`PROBE`] asks for its
-//! definition and the underline follows the answer. That is one request per word rested on, the
-//! same shape as the hover beside it, and the answer is remembered for as long as the pointer
-//! stays inside the word it was asked about.
+//! A link is answered from the table the analysis already filled, and a bare URL from the line it
+//! is on, so either underlines on the motion event itself. A word in code has to be asked about,
+//! and the only thing that truly knows is the language server — underlining every identifier would
+//! say nothing, since the question is whether *this* one leads anywhere. So the pointer resting on
+//! a word for [`PROBE`] asks for its definition and the underline follows the answer. That is one
+//! request per word rested on, the same shape as the hover beside it, and the answer is remembered
+//! for as long as the pointer stays inside the word it was asked about.
 
 use super::Tab;
 use crate::lang;
@@ -57,7 +57,11 @@ impl Tab {
             return self.clear_follow();
         };
         // A link is already known: the analysis stored its range in characters for exactly this.
-        if let Some(range) = self.link_range_at(iter.offset()) {
+        // A bare URL is in the text itself, in any file.
+        if let Some(range) = self
+            .link_range_at(iter.offset())
+            .or_else(|| url_under(&iter).map(|(range, _)| range))
+        {
             return self.set_follow(range);
         }
         let Some(vault) = self.lang.vault() else {
@@ -206,16 +210,55 @@ impl Tab {
 /// The line around the pointer is read out and scanned, so the boundary rule is one pure function
 /// with a test rather than a walk over iterators that needs a display to run.
 fn word_at(at: &gtk::TextIter) -> Option<Range<i32>> {
+    let (base, line) = line_around(at);
+    let word = word_bounds(&line, at.line_offset() as usize)?;
+    Some(base + word.start as i32..base + word.end as i32)
+}
+
+/// The bare URL `at` sits in, in any text — a code comment, a `.txt`, a note's prose — as a range
+/// of buffer character offsets, and the URL itself.
+pub(super) fn url_under(at: &gtk::TextIter) -> Option<(Range<i32>, String)> {
+    let (base, line) = line_around(at);
+    let byte = line.char_indices().nth(at.line_offset() as usize)?.0;
+    let url = url_at(&line, byte)?;
+    let chars = |byte: usize| base + line[..byte].chars().count() as i32;
+    Some((chars(url.start)..chars(url.end), line[url].to_string()))
+}
+
+/// The buffer offset the line holding `at` starts at, and its text.
+fn line_around(at: &gtk::TextIter) -> (i32, String) {
     let mut start = *at;
     start.set_line_offset(0);
     let mut end = *at;
     if !end.ends_line() {
         end.forward_to_line_end();
     }
-    let line = start.slice(&end);
-    let word = word_bounds(&line, at.line_offset() as usize)?;
-    let base = start.offset();
-    Some(base + word.start as i32..base + word.end as i32)
+    (start.offset(), start.slice(&end).to_string())
+}
+
+/// The `http(s)://` or `mailto:` URL covering byte `at` of `line`, as a byte range.
+///
+/// The terminal's rule (`terminal::LINK`): anything up to a space, a quote or an angle bracket,
+/// less the punctuation that ends the sentence around it. Those three schemes and no others, so
+/// a `file:` path written into a file is never handed to the desktop by a Ctrl+click.
+fn url_at(line: &str, at: usize) -> Option<Range<usize>> {
+    const SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
+    let stop = |c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`');
+    let mut from = 0;
+    while let Some((start, scheme)) = SCHEMES
+        .iter()
+        .filter_map(|s| Some((from + line[from..].find(s)?, s.len())))
+        .min()
+    {
+        let run = &line[start..];
+        let run = &run[..run.find(stop).unwrap_or(run.len())];
+        let url = run.trim_end_matches(['.', ',', ':', ';', '!', '?', ')', ']', '}']);
+        if url.len() > scheme && (start..start + url.len()).contains(&at) {
+            return Some(start..start + url.len());
+        }
+        from = start + run.len().max(1);
+    }
+    None
 }
 
 /// The identifier covering character `at` of `line`, in characters.
@@ -242,7 +285,34 @@ fn word_bounds(line: &str, at: usize) -> Option<Range<usize>> {
 
 #[cfg(test)]
 mod tests {
-    use super::word_bounds;
+    use super::{url_at, word_bounds};
+
+    /// A bare URL anywhere in a line, a code comment's included, is the whole URL from any byte in
+    /// it, and stops before the punctuation that ends the sentence around it.
+    #[test]
+    fn a_url_is_found_from_any_byte_in_it() {
+        let line = "x = 1  # see https://e.org/a_(b)?q=1#f, then";
+        let url = 13..line.find(',').unwrap();
+        assert_eq!(&line[url.clone()], "https://e.org/a_(b)?q=1#f");
+        for at in url.clone() {
+            assert_eq!(url_at(line, at), Some(url.clone()), "at {at}");
+        }
+        assert_eq!(url_at(line, url.start - 1), None, "the space before it");
+        assert_eq!(url_at(line, url.end), None, "the comma after it");
+        assert_eq!(url_at("(mailto:a@b.org).", 3), Some(1..15));
+        assert_eq!(
+            url_at("<http://é.fr>", 1),
+            Some(1..13),
+            "past a multibyte character"
+        );
+    }
+
+    #[test]
+    fn a_scheme_alone_or_another_scheme_is_not_a_url() {
+        assert_eq!(url_at("https:// and", 2), None);
+        assert_eq!(url_at("file:///etc/passwd", 3), None);
+        assert_eq!(url_at("ftp://e.org", 3), None);
+    }
 
     #[test]
     fn a_word_is_the_whole_identifier_underscores_and_all() {

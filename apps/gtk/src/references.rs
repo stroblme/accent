@@ -87,15 +87,20 @@ impl App {
     ///
     /// A link under the caret is followed as a link, because that is what the reader pointed at:
     /// an external one in the browser, one into the vault through [`App::open_target`], as a click
-    /// in the preview is — which is what offers New File where nothing answers to it. Everything
-    /// else is a question for the language server, whether the tab holds a note or a source file.
+    /// in the preview is — which is what offers New File where nothing answers to it. A bare URL
+    /// in any text goes to the browser the same way, ahead of the server: it is not a symbol.
+    /// Everything else is a question for the language server, whether the tab holds a note or a
+    /// source file.
     pub fn go_to_definition(self: &Rc<Self>) {
         let Some(tab) = self.active() else {
             return;
         };
         let link = tab.link_at_cursor();
-        if let Some(link) = link.as_ref().filter(|l| l.kind == LinkKind::External) {
-            return self.launch(&link.target);
+        if let Some(url) = match &link {
+            Some(link) => (link.kind == LinkKind::External).then(|| link.target.clone()),
+            None => tab.url_at_cursor(),
+        } {
+            return self.launch(&url);
         }
         let Some(vault) = tab.lang.vault() else {
             return self.needs_vault("go to a definition");
