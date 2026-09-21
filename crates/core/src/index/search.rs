@@ -5,7 +5,7 @@ use super::{Index, Match, SearchHit};
 use crate::search::Regex;
 use crate::walk::FileKind;
 use anyhow::Result;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::ops::Range;
 
 /// Bytes of a matched line [`Index::grep`] keeps before and after the match. A note can hold a
@@ -103,10 +103,47 @@ impl Index {
             |r| hit(r, &phrase),
         )?;
         let hits: Vec<SearchHit> = rows.collect::<rusqlite::Result<_>>()?;
-        match hits.is_empty() {
-            true => self.infix(query, limit, include_ignored),
-            false => Ok(hits),
+        let hits = match hits.is_empty() {
+            true => self.infix(query, limit, include_ignored)?,
+            false => hits,
+        };
+        self.per_match(hits, &phrase, limit)
+    }
+
+    /// The ranked files as one row per occurrence rather than one per file.
+    ///
+    /// The query above says which files answer the question and in what order; this reads their
+    /// bodies in that order and lists every occurrence of the phrase in them, at most
+    /// [`PER_FILE`] from one file — the rest counted onto its last row — and at most `limit`
+    /// rows in all. A hit whose body does not hold the phrase at all, a title's, stays the one
+    /// row the ranked query made of it, quoting the head of the note.
+    ///
+    /// A body per listed file rather than a body per ranked file: the bodies are read here, one
+    /// keyed lookup each, instead of being selected alongside the ranking, where the sorter would
+    /// carry every one of them whether its file ended up on screen or not.
+    fn per_match(
+        &self,
+        hits: Vec<SearchHit>,
+        phrase: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT n.body FROM notes n JOIN files f ON f.id = n.file_id WHERE f.rel_path = ?1",
+        )?;
+        let mut out: Vec<SearchHit> = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let room = limit.saturating_sub(out.len());
+            if room == 0 {
+                break;
+            }
+            let body: Option<String> = st.query_row([&hit.rel_path], |r| r.get(0)).optional()?;
+            let rows = body.map_or_else(Vec::new, |body| phrase_hits(&hit, &body, phrase, room));
+            match rows.is_empty() {
+                true => out.push(hit),
+                false => out.extend(rows),
+            }
         }
+        Ok(out)
     }
 
     /// The notes a mid-word query finds, which the ranked path cannot: `notes_fts` indexes terms
@@ -231,7 +268,7 @@ impl Index {
     ) {
         // `find_iter` walks forward, so the line number follows it instead of being counted
         // from the start of the note for every hit.
-        let (mut cursor, mut line, mut line_start) = (0usize, 1u32, 0usize);
+        let mut lines = Lines::new(body);
         let (first, mut listed) = (out.len(), 0usize);
         for m in re.find_iter(body) {
             *total += 1;
@@ -242,22 +279,7 @@ impl Index {
                 continue;
             }
             listed += 1;
-            while cursor < m.start() {
-                if body.as_bytes()[cursor] == b'\n' {
-                    line += 1;
-                    line_start = cursor + 1;
-                }
-                cursor += 1;
-            }
-            let rest = &body[line_start..];
-            let line_text = rest
-                .split('\n')
-                .next()
-                .unwrap_or(rest)
-                .trim_end_matches('\r');
-            let start = m.start() - line_start;
-            let end = (m.end() - line_start).min(line_text.len());
-            let (line_text, range) = clip(line_text, start..end);
+            let (line, line_text, range) = lines.at(m.start(), m.end());
             out.push(Match {
                 rel_path: rel.to_string(),
                 title: title.map(str::to_string),
@@ -308,6 +330,91 @@ const GREP_NOTES_SQL: &str = "SELECT f.rel_path, f.title, n.body
      WHERE f.kind = ?1
      ORDER BY f.rel_path";
 
+/// A walk down a body's matches, handing each one the line it starts on. Both searches walk their
+/// matches forward, so the line number follows the walk instead of being counted from the top of
+/// the note for every one of them.
+struct Lines<'a> {
+    body: &'a str,
+    /// How far the line counter has read. Matches arrive in order, so it never reads twice.
+    cursor: usize,
+    line: u32,
+    line_start: usize,
+}
+
+impl<'a> Lines<'a> {
+    fn new(body: &'a str) -> Self {
+        Self {
+            body,
+            cursor: 0,
+            line: 1,
+            line_start: 0,
+        }
+    }
+
+    /// The 1-based line the match at `start..end` begins on, that line clipped to what a sidebar
+    /// row can show, and where the match sits in the clipped text. A match running past the end
+    /// of its line — a phrase the note wrote across two — is marked to the end of the line.
+    fn at(&mut self, start: usize, end: usize) -> (u32, String, Range<usize>) {
+        while self.cursor < start {
+            if self.body.as_bytes()[self.cursor] == b'\n' {
+                self.line += 1;
+                self.line_start = self.cursor + 1;
+            }
+            self.cursor += 1;
+        }
+        let rest = &self.body[self.line_start..];
+        let line_text = rest
+            .split('\n')
+            .next()
+            .unwrap_or(rest)
+            .trim_end_matches('\r');
+        let from = start - self.line_start;
+        let to = (end - self.line_start).min(line_text.len());
+        let (text, range) = clip(line_text, from..to);
+        (self.line, text, range)
+    }
+}
+
+/// Every occurrence of the folded `phrase` in `body` as a hit of its own: the line it sits on,
+/// clipped the way an exact search clips one, with that occurrence alone marked in it. At most
+/// `room` rows and at most [`PER_FILE`], the occurrences past that counted onto the last row.
+///
+/// Empty where the body does not hold the phrase — a hit on the title, or one folded across a
+/// stretch [`folded_find`] cannot put back together — and the caller keeps its file row then.
+fn phrase_hits(hit: &SearchHit, body: &str, phrase: &str, room: usize) -> Vec<SearchHit> {
+    let mut out: Vec<SearchHit> = Vec::new();
+    let mut lines = Lines::new(body);
+    let mut from = 0usize;
+    // A zero-length match would never advance, so an empty query lists nothing rather than looping.
+    while let Some((at, len)) = folded_find(&body[from..], phrase).filter(|&(_, len)| len > 0) {
+        let start = from + at;
+        from = start + len;
+        if out.len() >= room.min(PER_FILE) {
+            if let Some(last) = out.last_mut() {
+                last.more += 1;
+            }
+            continue;
+        }
+        let (line, text, range) = lines.at(start, start + len);
+        out.push(SearchHit {
+            rel_path: hit.rel_path.clone(),
+            title: hit.title.clone(),
+            // The guillemets the UI turns into bold, around this occurrence and not around every
+            // one on the line: two matches on one line are two rows, and each says which it is.
+            snippet: format!(
+                "{}«{}»{}",
+                &text[..range.start],
+                &text[range.clone()],
+                &text[range.end..]
+            ),
+            at: Some(start..start + len),
+            line: Some(line),
+            more: 0,
+        });
+    }
+    out
+}
+
 /// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
 /// An elided end is marked with an ellipsis, so a clipped line does not read as the whole line.
 fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
@@ -352,6 +459,10 @@ fn hit(r: &rusqlite::Row<'_>, phrase: &str) -> rusqlite::Result<SearchHit> {
             s..s + len
         }),
         snippet: mark_phrase(&window, phrase),
+        // A file row until [`Index::per_match`] has read the body and found where in it the
+        // phrase occurs; what is left of one is the hit whose body does not hold it at all.
+        line: None,
+        more: 0,
     })
 }
 
@@ -632,16 +743,74 @@ mod tests {
 
         let hits = ix.search("cafe", 10, false).unwrap();
         assert_eq!(hits.len(), 1, "the fold has to find it: {hits:?}");
-        assert!(
-            hits[0].snippet.contains("«café»"),
-            "quoted but not marked: {:?}",
+        // The row is the line the word sits on, with the word marked as the note spells it.
+        assert_eq!(
+            hits[0].snippet, "un «café» au coin",
+            "{:?}",
             hits[0].snippet
         );
-        assert!(
-            hits[0].snippet.starts_with('…'),
-            "a window cut out of the middle says so: {:?}",
-            hits[0].snippet
+        assert_eq!(hits[0].line, Some(3));
+    }
+
+    /// The ranked search lists what an exact one lists: a row per occurrence, not a row per file.
+    #[test]
+    fn a_ranked_search_lists_one_row_per_occurrence() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("a.md"),
+            "# Alpha\nferris and ferris\nlater ferris\n",
+        )
+        .unwrap();
+        // A title nothing in the body repeats, which is the hit that stays one row per file.
+        fs::write(vault.path().join("b.md"), "# Ferris\nnothing else here\n").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("ferris", 10, false).unwrap();
+        let rows: Vec<_> = hits
+            .iter()
+            .map(|h| (h.rel_path.as_str(), h.line, h.snippet.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("b.md", Some(1), "# «Ferris»"),
+                ("a.md", Some(2), "«ferris» and ferris"),
+                ("a.md", Some(2), "ferris and «ferris»"),
+                ("a.md", Some(3), "later «ferris»"),
+            ],
+            "{hits:?}"
         );
+        // The range still addresses the note, so each row opens on its own occurrence.
+        let body = fs::read_to_string(vault.path().join("a.md")).unwrap();
+        for hit in hits.iter().filter(|h| h.rel_path == "a.md") {
+            let at = hit.at.clone().expect("a row is a place in the body");
+            assert_eq!(&body[at], "ferris");
+        }
+
+        // The list's own cap counts rows, not files.
+        let few = ix.search("ferris", 2, false).unwrap();
+        assert_eq!(few.len(), 2, "{few:?}");
+    }
+
+    /// One file saying the query a hundred times is [`PER_FILE`] rows and a count, the way an
+    /// exact search caps one: the rest of the ranking has to have room left.
+    #[test]
+    fn one_ranked_file_cannot_fill_the_list_on_its_own() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(
+            vault.path().join("generated.md"),
+            "ferris\n".repeat(100).as_str(),
+        )
+        .unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("ferris", 100, false).unwrap();
+        assert_eq!(hits.len(), PER_FILE, "{hits:?}");
+        assert_eq!(hits.last().map(|h| h.more), Some(100 - PER_FILE));
     }
 
     #[test]
@@ -757,9 +926,10 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
+        // Ranking is over files; the rows are the matches in them, so the files are read off the
+        // rows without their repeats.
         let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
-        assert_eq!(hits.len(), 2, "{hits:?}");
-        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+        assert_eq!(files(&hits), ["target.md", "spam.md"], "{hits:?}");
 
         // Case and stray whitespace must not lose the exact-title match.
         let hits = ix.search("  quantum COHERENCE ledger ", 10, false).unwrap();
@@ -774,8 +944,19 @@ mod tests {
 
         // Not the whole title, so only the bm25 title weight can decide this one.
         let hits = ix.search("coherence ledger", 10, false).unwrap();
-        assert_eq!(hits.len(), 2, "{hits:?}");
-        assert_eq!(hits[0].rel_path, "target.md", "{hits:?}");
+        assert_eq!(files(&hits), ["target.md", "spam.md"], "{hits:?}");
+    }
+
+    /// The files a search answered with, in the order it ranked them and without the repeats the
+    /// per-match rows make of one file.
+    fn files(hits: &[SearchHit]) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for hit in hits {
+            if out.last() != Some(&hit.rel_path.as_str()) {
+                out.push(&hit.rel_path);
+            }
+        }
+        out
     }
 
     /// The `notes_tri` half of the schema: a term index answers "starts with", so `oggle split`
@@ -830,14 +1011,14 @@ mod tests {
         );
         let hits = ix.search("Quantum Coherence Ledger", 10, false).unwrap();
         assert_eq!(
-            hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            files(&hits),
             ["spam.md"],
             "the old title is still in the index"
         );
         // And no stale trigram either, which is what would answer the old title mid-word.
         let mid = ix.search("oherence Ledger", 10, false).unwrap();
         assert_eq!(
-            mid.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
+            files(&mid),
             ["spam.md"],
             "the old title is still in the trigram index"
         );
