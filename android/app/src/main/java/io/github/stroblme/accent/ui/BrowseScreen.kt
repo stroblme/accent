@@ -148,7 +148,9 @@ fun BrowseScreen(
                         )
                     }
                     query.isBlank() -> rows(children, expanded, "", 0, model, onOpen)
-                    else -> items(results, key = { it.relPath }) { hit ->
+                    // A file answers with one hit per occurrence, so the path alone is not a key:
+                    // where in the file the hit sits is what tells two rows of one note apart.
+                    else -> items(results, key = { "${it.relPath}:${it.at?.start}" }) { hit ->
                         ListItem(
                             headlineContent = { Text(hit.title ?: File(hit.relPath).name) },
                             supportingContent = {

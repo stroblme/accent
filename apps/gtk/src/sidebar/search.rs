@@ -142,13 +142,31 @@ fn match_markup(line: &str, range: Range<usize>, replaced: Option<&str>, accent:
     }
 }
 
-/// The folder a result row sits in, with the trailing slash that says it is one; "" at the vault
-/// root. A row names the file — `design.md` and the folder holding it — rather than the note's
-/// title: the title hides the extension, and two notes titled the same are then one row twice.
-fn dir_label(rel_path: &str) -> String {
-    match parent_dir(rel_path) {
+/// A row's dim half: the folder it sits in, with the trailing slash that says it is one, and the
+/// line the match is on where the row is one match — "notes/deep/ — line 12". A row names the
+/// file — `design.md` and the folder holding it — rather than the note's title: the title hides
+/// the extension, and two notes titled the same are then one row twice.
+fn dir_label(rel_path: &str, line: Option<u32>) -> String {
+    let dir = match parent_dir(rel_path) {
         "" => String::new(),
         dir => format!("{dir}/"),
+    };
+    match (line, dir.is_empty()) {
+        (None, _) => dir,
+        (Some(line), true) => format!("line {line}"),
+        (Some(line), false) => format!("{dir} — line {line}"),
+    }
+}
+
+/// The row under a file whose matches the per-file cap cut short. The dim line alone, and it
+/// opens the file where that file's first listed match is.
+fn more_row(rel_path: &str, more: usize, first: Option<Range<usize>>) -> Row {
+    Row {
+        rel_path: rel_path.to_string(),
+        at: first,
+        name: String::new(),
+        dir: format!("+{more} more in this file"),
+        snippet: String::new(),
     }
 }
 
@@ -348,15 +366,7 @@ impl Search {
         let rows = match answer {
             Answer::Fts(hits) => {
                 self.set_total(0);
-                hits.into_iter()
-                    .map(|hit| Row {
-                        name: basename(&hit.rel_path).to_string(),
-                        dir: dir_label(&hit.rel_path),
-                        snippet: snippet_markup(&hit.snippet),
-                        at: hit.at,
-                        rel_path: hit.rel_path,
-                    })
-                    .collect()
+                fts_rows(hits)
             }
             Answer::Grep(hits, total) => {
                 self.set_total(total);
@@ -478,6 +488,37 @@ fn compile_regex(key: &Key) -> Result<Regex, search::Error> {
     search::pattern(&key.text, key.options)
 }
 
+/// One row per hit of the ranked search, which is one per occurrence: the line the match sits on
+/// with the match marked in it, the file and that line as the dim half, and the same tail row a
+/// grep row gets where the per-file cap cut a file short. A hit whose body does not hold the
+/// query — a note found by its title — carries no line and quotes the head of the note instead.
+fn fts_rows(hits: Vec<SearchHit>) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::with_capacity(hits.len());
+    // A file's hits arrive together, so the row under a new path is that file's first — which is
+    // where its tail row opens it.
+    let mut first: Option<(String, Option<Range<usize>>)> = None;
+    for hit in hits {
+        if first.as_ref().is_none_or(|(rel, _)| *rel != hit.rel_path) {
+            first = Some((hit.rel_path.clone(), hit.at.clone()));
+        }
+        rows.push(Row {
+            name: basename(&hit.rel_path).to_string(),
+            dir: dir_label(&hit.rel_path, hit.line),
+            snippet: snippet_markup(&hit.snippet),
+            at: hit.at,
+            rel_path: hit.rel_path.clone(),
+        });
+        if hit.more > 0 {
+            rows.push(more_row(
+                &hit.rel_path,
+                hit.more,
+                first.as_ref().and_then(|(_, at)| at.clone()),
+            ));
+        }
+    }
+    rows
+}
+
 /// One row per match, with the diff against the replacement when there is one, and a tail row
 /// under a file whose matches the per-file cap cut short.
 ///
@@ -505,26 +546,19 @@ fn grep_rows(
         if first.as_ref().is_none_or(|(rel, _)| *rel != m.rel_path) {
             first = Some((m.rel_path.clone(), at.clone()));
         }
-        let dir = dir_label(&m.rel_path);
         rows.push(Row {
             name: basename(&m.rel_path).to_string(),
-            // "notes/deep/ — line 12"; a file at the vault root has no folder to name.
-            dir: match dir.is_empty() {
-                true => format!("line {}", m.line),
-                false => format!("{dir} — line {}", m.line),
-            },
+            dir: dir_label(&m.rel_path, Some(m.line)),
             snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
             at: Some(at),
             rel_path: m.rel_path.clone(),
         });
         if m.more > 0 {
-            rows.push(Row {
-                name: String::new(),
-                dir: format!("+{} more in this file", m.more),
-                snippet: String::new(),
-                at: first.as_ref().map(|(_, at)| at.clone()),
-                rel_path: m.rel_path,
-            });
+            rows.push(more_row(
+                &m.rel_path,
+                m.more,
+                first.as_ref().map(|(_, at)| at.clone()),
+            ));
         }
     }
     rows
@@ -937,8 +971,54 @@ mod tests {
     #[test]
     fn a_row_is_named_by_its_file_and_its_folder() {
         assert_eq!(basename("notes/deep/thought.md"), "thought.md");
-        assert_eq!(dir_label("notes/deep/thought.md"), "notes/deep/");
-        assert_eq!(dir_label("top.md"), "");
+        assert_eq!(dir_label("notes/deep/thought.md", None), "notes/deep/");
+        assert_eq!(dir_label("top.md", None), "");
+        // A row that is one match says which line it is, wherever the file sits.
+        assert_eq!(
+            dir_label("notes/deep/thought.md", Some(12)),
+            "notes/deep/ — line 12"
+        );
+        assert_eq!(dir_label("top.md", Some(3)), "line 3");
+    }
+
+    #[test]
+    fn a_ranked_answer_is_one_row_per_match_and_a_tail_row() {
+        let hit = |line: Option<u32>, snippet: &str, at: Range<usize>, more: usize| SearchHit {
+            rel_path: "notes/a.md".into(),
+            title: None,
+            snippet: snippet.into(),
+            at: Some(at),
+            line,
+            more,
+        };
+        let rows = fts_rows(vec![
+            hit(Some(2), "one «ferris» here", 4..10, 0),
+            hit(Some(7), "and «ferris» again", 40..46, 3),
+            SearchHit {
+                rel_path: "b.md".into(),
+                title: Some("Ferris".into()),
+                snippet: "# «Ferris»".into(),
+                at: None,
+                line: None,
+                more: 0,
+            },
+        ]);
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| (r.name.as_str(), r.dir.as_str(), r.at.clone()))
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("a.md", "notes/ — line 2", Some(4..10)),
+                ("a.md", "notes/ — line 7", Some(40..46)),
+                // The tail row opens the file where its first listed match is.
+                ("", "+3 more in this file", Some(4..10)),
+                // A hit on a title alone has no line and no place in the body.
+                ("b.md", "", None),
+            ]
+        );
+        assert_eq!(rows[0].snippet, "one <b>ferris</b> here");
     }
 
     #[test]

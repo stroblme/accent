@@ -54,8 +54,50 @@ pub(super) fn bench_diagnostics(app: &Rc<App>, rel: &str) {
             count.emit_clicked();
             bench_pump();
         }
+        bench_gutter(&tab);
         bench_quit(&app);
     });
+}
+
+/// Where the gutter last drew the caret's highlight, beside where the caret really is: the
+/// line-number column's own current-line mark, which a code tab has and which has to follow every
+/// way the caret moves.
+///
+/// `caret` and `gutter` must name the same line in all four steps. They did not before the
+/// renderer was told to redraw itself on a caret move: GTK4 keeps a widget's render node until
+/// that widget is invalidated, a caret move invalidates the view and not the gutter renderer
+/// inside it, and the highlight stayed on the line the caret had left until the pointer entered
+/// the column and changed its opacity.
+fn bench_gutter(tab: &Rc<Tab>) {
+    let step = |label: &str| {
+        bench_frame();
+        println!(
+            "bench diag gutter case={label} caret={} gutter={:?}",
+            tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line(),
+            tab.gutter_cursor()
+        );
+    };
+    step("opened");
+    // What a click in the text, or a Go to Line, does to the caret.
+    if let Some(line) = tab.buffer.iter_at_line(3) {
+        tab.buffer.place_cursor(&line);
+    }
+    step("placed");
+    // And what Down does. The signal is the key binding's own handler, so no key is pressed.
+    tab.view
+        .emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
+    step("arrow");
+    tab.buffer.place_cursor(&tab.buffer.start_iter());
+    step("home");
+}
+
+/// Wait for a frame. The frame clock ticks on a timer, so pumping the main loop alone paints
+/// nothing and a probe that reads what was painted would read the frame before the move.
+fn bench_frame() {
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(10));
+        bench_pump();
+    }
 }
 
 pub(super) fn diagnostic(severity: Severity, line: u32, from: u32, to: u32) -> Diagnostic {

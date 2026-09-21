@@ -212,8 +212,11 @@ fn main() -> Result<()> {
             let ix = common.open()?;
             // Everything, always: the CLI is a diagnostic tool with no All toggle to offer, and
             // the ignore set is only ever written by the desktop app's git refresh.
+            // A row is an occurrence, so a file says itself once per match: the line is what
+            // tells two of its rows apart.
             for h in ix.search(&query.join(" "), limit, true)? {
-                println!("{}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
+                let at = h.line.map(|l| format!(":{l}")).unwrap_or_default();
+                println!("{}{at}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
             }
         }
         Cmd::Backlinks { common, rel_path } => {
