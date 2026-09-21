@@ -2,7 +2,7 @@
 
 use super::diagnostics::diagnostic;
 use super::*;
-use accent_api::Severity;
+use accent_api::{Fold, Severity};
 
 /// The note is given fifty lines, written out, then edited in two places: a rewrite near the
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
@@ -260,6 +260,12 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
 /// hidden the claim is 1, with it opened 4, and 4 again once the comparison has gone. The gutter
 /// marks stay at 4 throughout, which is the icon on the left the hidden ones are left with.
 ///
+/// Then the editor's own fold over the same file, which hides lines the same way: a block whose
+/// header carries a warning of its own and whose two hidden lines carry one each. Nothing is
+/// published between the fold and the reading, so what is printed is what folding alone laid: 2
+/// while it is shut — the header's message and the one at the top of the file — and 4 once it is
+/// open, the marks staying at 4 throughout.
+///
 /// Point it at a scratch text file no language server answers for — `n.txt` — since a publish
 /// would replace what it hands over.
 pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
@@ -299,6 +305,15 @@ pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
                 }
             );
         };
+        // The same numbers with nothing published in between, which is what a fold has to lay
+        // by itself.
+        let stood = |what: &str| {
+            println!(
+                "bench compare_diag {what} annotations={} marks={}",
+                tab.annotated(),
+                crate::diagnostics::painted(&tab.buffer).1
+            );
+        };
         say("published");
         app.compare_with_disk(&tab);
         wait(800).await;
@@ -313,6 +328,17 @@ pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
         tab.leave_compare();
         wait(400).await;
         say("left");
+        // A block whose header is the warned line 20 and whose body holds the other two.
+        tab.set_folds(vec![Fold {
+            start_line: 20,
+            end_line: 22,
+        }]);
+        tab.toggle_fold(20);
+        wait(400).await;
+        stood("folded");
+        tab.toggle_fold(20);
+        wait(400).await;
+        stood("unfolded");
         bench_quit(&app);
     });
 }

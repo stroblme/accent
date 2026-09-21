@@ -1140,7 +1140,16 @@ impl Tab {
             true => fold::unfold(self.text_buffer(), line),
             false => self.fold_line(line),
         }
+        self.folds_changed();
+    }
+
+    /// What every fold command ends with: the chevrons redrawn, and the diagnostics laid again.
+    /// A line that has just gone behind a header has no row of its own to put a message on, and
+    /// one that has come back out wants its message back — the same rule a comparison's collapsed
+    /// runs follow, and the same pass.
+    fn folds_changed(&self) {
         self.fold_renderer.queue_draw();
+        self.paint_diagnostics();
     }
 
     fn fold_line(&self, line: i32) {
@@ -1164,7 +1173,7 @@ impl Tab {
         let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
         if let Some(f) = found {
             fold::fold(self.text_buffer(), f);
-            self.fold_renderer.queue_draw();
+            self.folds_changed();
         }
     }
 
@@ -1173,7 +1182,7 @@ impl Tab {
         let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
         if let Some(f) = found {
             fold::unfold(self.text_buffer(), f.start_line as i32);
-            self.fold_renderer.queue_draw();
+            self.folds_changed();
         }
     }
 
@@ -1185,12 +1194,12 @@ impl Tab {
         for f in folds {
             fold::fold(self.text_buffer(), f);
         }
-        self.fold_renderer.queue_draw();
+        self.folds_changed();
     }
 
     pub fn unfold_all(&self) {
         fold::unfold_all(self.text_buffer());
-        self.fold_renderer.queue_draw();
+        self.folds_changed();
     }
 
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing

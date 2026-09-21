@@ -89,7 +89,9 @@ use tags::bench_tags;
 /// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
 /// not touch it. `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
-/// each state drew: the messages of a hidden run go, the icons stay.
+/// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
+/// the same file, which hides lines the same way, and reads the two numbers again without
+/// publishing anything: a fold's header keeps its own message, the lines under it do not.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's

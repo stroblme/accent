@@ -123,10 +123,10 @@ pub fn render(
         let mut line_start = from;
         line_start.set_line_offset(0);
         buffer.create_source_mark(None, category, &line_start);
-        // A line a comparison has collapsed has no row of its own to write on: every message in
-        // a hidden run would be drawn at the one row that stands for the lot, piling up under it.
-        // The gutter icon is left to say there is something in there.
-        if collapsed(&line_start) {
+        // A line nothing on screen stands for has no row of its own to write on: every message
+        // in a hidden run would be drawn at the one row that does, piling up under it. The
+        // gutter icon is left to say there is something in there.
+        if out_of_sight(&line_start) {
             continue;
         }
         // One annotation a line, or the messages draw over each other at the line end: the most
@@ -160,13 +160,13 @@ pub fn render(
     annotated
 }
 
-/// Whether a comparison has folded the line starting at `at` away behind its "N unchanged lines"
-/// button. The editor's own folds keep their messages: a fold is one header with its block under
-/// it, where a hidden run is a stretch of lines with nothing of its own on screen at all.
-fn collapsed(at: &gtk::TextIter) -> bool {
-    at.tags()
-        .iter()
-        .any(|tag| tag.name().is_some_and(|name| name == crate::diff::TAG_GAP))
+/// Whether the line starting at `at` is hidden — by a comparison's "N unchanged lines" button or
+/// by a fold. [`crate::fold::hiding`] is the one list of what hides text in this window, so a
+/// third way of hiding it would be answered here without this having to learn about it.
+///
+/// A fold's header line is outside the run it hides, so it keeps its own message.
+fn out_of_sight(at: &gtk::TextIter) -> bool {
+    !crate::fold::hiding(&at.buffer(), at).is_empty()
 }
 
 /// How much of `buffer` the diagnostics are painted over: how many underlined runs it carries and
