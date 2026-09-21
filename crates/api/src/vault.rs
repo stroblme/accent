@@ -18,9 +18,9 @@ use accent_core::search;
 
 use crate::local::Local;
 use crate::{
-    Backlink, Commit, DiffLine, Etag, Event, FileRow, Match, Options, PdfLink, RenamePlan,
-    RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status, Submodule,
-    VaultConfig, fs, git, remote, rpc, ssh,
+    Backlink, Commit, DiffLine, Etag, Event, FileRow, Location, Match, Options, PdfLink,
+    RenamePlan, RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status,
+    Submodule, VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -390,6 +390,9 @@ methods! {
     any tags() -> Vec<(String, i64)>;
     any files_with_tag(tag: ref str) -> Vec<FileRow>;
     any backlinks(rel: ref str) -> Vec<Backlink>;
+    /// A host whose `accent-cli serve` predates it answers "no such method", which the
+    /// References pane takes as none.
+    any backlink_locations(rel: ref str) -> Vec<Location>;
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
     /// because that is where the notes and the index are.
     any pdf_links(rel: ref str) -> Vec<PdfLink>;

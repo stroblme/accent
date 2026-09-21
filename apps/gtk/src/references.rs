@@ -9,8 +9,9 @@ use accent_core::path::{parent_dir, resolve};
 const REFERENCES: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Fill the References pane for the active tab: a note's backlinks, or what refers to the
-    /// symbol under the caret.
+    /// Fill the References pane for the active document: a note's backlinks, what refers to the
+    /// symbol under the caret in any other text, and wherever that is nothing — a PDF, an image,
+    /// a diagram, a text file no language server answers for — the files that link to this one.
     ///
     /// Debounced and cancellable, because on a code tab it follows the caret: the previous
     /// request is dropped, which is what cancels it at the server rather than leaving it to be
@@ -22,22 +23,41 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let tab = self.active();
-        let empty = references_empty(tab.as_ref());
+        let doc = self.active_doc();
+        let empty = references_empty(doc.as_ref());
         // Emptied at once, so the pane never shows the last file's answer while this one's is
         // still coming.
         sidebar.set_references(&[], empty);
-        let (Some(tab), Some(vault)) = (tab.clone(), tab.as_ref().and_then(|tab| tab.lang.vault()))
-        else {
+        // A diff, a shell and a file from outside the vault are nothing the index links to.
+        let (Some(doc), Some(vault)) = (
+            doc.filter(|doc| !doc.is_transient() && !doc.is_loose()),
+            self.vault().cloned(),
+        ) else {
             return;
         };
-        let (key, note) = (tab.rel(), tab.flavour().is_note());
-        let pos = lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert()));
+        let (key, tab) = (doc.key(), doc.tab().cloned());
+        let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
+        let pos = tab
+            .as_ref()
+            .map(|tab| lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())));
         let weak = Rc::downgrade(self);
         let handle = glib::spawn_future_local(async move {
             glib::timeout_future(REFERENCES).await;
-            lang::flush(tab.clone()).await;
-            let found = vault.references(&key, pos).await.unwrap_or_default();
+            let mut found = Vec::new();
+            if let (Some(tab), Some(pos)) = (tab, pos) {
+                lang::flush(tab.clone()).await;
+                found = vault.references(&key, pos).await.unwrap_or_default();
+            }
+            // A note's answer is its backlinks already.
+            let backlinks = found.is_empty() && !note;
+            if backlinks {
+                let asked = key.clone();
+                found = gio::spawn_blocking(move || vault.backlink_locations(&asked))
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or_default();
+            }
             let Some(app) = weak.upgrade() else { return };
             // The user may have moved on while we were asking; a stale answer must not replace
             // the pane the current tab put there.
@@ -45,7 +65,7 @@ impl App {
                 return;
             }
             if let Some(sidebar) = app.sidebar.get() {
-                sidebar.set_references(&reference_rows(&found, note), empty);
+                sidebar.set_references(&reference_rows(&found, note || backlinks), empty);
             }
         });
         *self.references.borrow_mut() = Some(handle);
@@ -195,17 +215,22 @@ pub fn reference_icon(row: &str) -> &'static str {
     crate::doc::icon_for(row.rsplit_once(':').map_or(row, |(path, _)| path))
 }
 
-/// What the References pane says when it has nothing to list. A note has backlinks; a source file
-/// has references to whatever the caret is on.
-fn references_empty(tab: Option<&Rc<Tab>>) -> (&'static str, &'static str) {
-    match tab.map(|tab| tab.flavour().is_note()) {
-        Some(true) => ("No Backlinks", "No note links to the open one."),
-        Some(false) => (
+/// What the References pane says when it has nothing to list. Any file in the vault has
+/// backlinks; any other text has references to whatever the caret is on as well.
+fn references_empty(doc: Option<&Doc>) -> (&'static str, &'static str) {
+    match doc {
+        Some(Doc::Text(tab)) if !tab.flavour().is_note() => (
             "No References",
-            "Nothing refers to the symbol under the caret.",
+            "Nothing refers to the symbol under the caret, and no note links to this file.",
         ),
-        // A PDF, an image, or nothing open at all: no note whose backlinks these could be.
-        None => ("No References", "Open a note to see what links to it."),
+        Some(doc) if !doc.is_transient() && !doc.is_loose() => {
+            ("No Backlinks", "No note links to the open file.")
+        }
+        // A diff, a shell, a file from outside the vault, or nothing open at all.
+        _ => (
+            "No References",
+            "Open a file from this vault to see what links to it.",
+        ),
     }
 }
 
