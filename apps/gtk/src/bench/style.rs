@@ -195,7 +195,8 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
 /// well inside the one-second autosave.
 /// What a Ctrl+hover underlines, and what following the same link does when nothing answers to
 /// it. The underline's link half only: a plain word is a question for a language server, and the
-/// vault a drill runs against holds notes rather than code.
+/// vault a drill runs against holds notes rather than code. A bare URL underlines in any text
+/// file, so pointed at a `.txt` the drill still underlines it, and only it.
 pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -204,7 +205,8 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         // ASCII throughout, so `find` gives the character offset the buffer counts in.
-        let text = "See [[Other Note]] and a plain word here.\n[[Nowhere/Other Note#Part|there]]\n";
+        let text = "See [[Other Note]] and a plain word here, https://e.org/a.\n\
+                    [[Nowhere/Other Note#Part|there]]\n";
         tab.set_text(text);
         // The link table is filled by the analysis debounce, not by the edit.
         glib::timeout_add_local_once(Duration::from_millis(400), move || {
@@ -225,6 +227,11 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             probe("wikilink", "Other", true);
             probe("plain_word", "plain", true);
             probe("wikilink_again", "Other", true);
+            // A bare URL is a link in any text, and what the caret is on is what F12 would open.
+            probe("url", "e.org", true);
+            tab.buffer
+                .place_cursor(&tab.buffer.iter_at_offset(at("e.org")));
+            println!("bench follow url_at_caret={:?}", tab.url_at_cursor());
             // Ctrl up over the same link takes it off again.
             probe("ctrl_released", "Other", false);
             let caret = tab.buffer.iter_at_offset(at("Nowhere"));

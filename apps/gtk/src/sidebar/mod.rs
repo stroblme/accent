@@ -622,7 +622,7 @@ fn references_body(
     let empty = status_page(
         BACKLINK_ICON,
         "No References",
-        "Open a note to see what links to it.",
+        "Open a file from this vault to see what links to it.",
     );
     stack.add_named(&empty, Some("empty"));
     let list = path_list(model, crate::references::reference_icon, on_reference);

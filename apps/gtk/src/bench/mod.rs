@@ -130,10 +130,11 @@ use tags::bench_tags;
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
 /// eye first, and its title and indicator are printed either side of that.
-/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink and on a plain word with Ctrl
-/// held, and prints what the Ctrl+hover underline covers; then it follows a link nothing answers
-/// to from the caret, as F12 does, and prints the dialog that offers to create it, with the name
-/// it arrives prefilled with.
+/// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
+/// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
+/// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
+/// that offers to create it, with the name it arrives prefilled with. Any text file will do: a
+/// `.txt` has no wikilinks, and its URL underlines all the same.
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a

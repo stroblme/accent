@@ -1338,6 +1338,12 @@ impl Tab {
         self.link_at_iter(&caret(&self.buffer))
     }
 
+    /// The bare `http(s)://` or `mailto:` URL under the caret, in any text: what a `.txt` or a
+    /// code comment has for links, and what a note has outside its markdown ones.
+    pub fn url_at_cursor(&self) -> Option<String> {
+        follow::url_under(&caret(&self.buffer)).map(|(_, url)| url)
+    }
+
     /// The link under a pointer position in the view's own coordinates.
     pub fn link_at(&self, x: f64, y: f64) -> Option<Link> {
         let (bx, by) =
