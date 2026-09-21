@@ -12,17 +12,18 @@ const SETTLE: Duration = Duration::from_millis(2500);
 const INDEXED: Duration = Duration::from_secs(120);
 
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` notes
-/// holding it — one unless the tail says otherwise — and takes them away again, printing what the
-/// pane lists at each step. The whole cycle runs twice: once under ranked full text, and once with
-/// the replace row open, which is the exact scan Replace All needs.
+/// holding it twice — one note unless the tail says otherwise — and takes them away again,
+/// printing what the pane lists at each step. The whole cycle runs twice: once under ranked full
+/// text, and once with the replace row open, which is the exact scan Replace All needs.
 ///
-/// `before` and `removed` must match, and `added` must have `n` rows more: that is the pane
-/// following the vault without the box being touched. Pass a word the vault does not already
-/// hold and the steps read `rows=0`, `rows=n`, `rows=0` in both modes.
+/// `before` and `removed` must match, and `added` must have `2n` rows more: a row is a match and
+/// not a file, in either mode. That is the pane following the vault without the box being
+/// touched. Pass a word the vault does not already hold and the steps read `rows=0`, `rows=2n`,
+/// `rows=0` in both modes.
 ///
 /// The last two steps stage the same batch with the *Files* pane in front instead, so
 /// `away_added` and `away_removed` are the catch-up a pane that was not on screen owes when it
-/// comes back: `rows=n` and `rows=0` again, not the rows it was left with.
+/// comes back: `rows=2n` and `rows=0` again, not the rows it was left with.
 ///
 /// `RUST_LOG=accent=debug` prints `sidebar query … grep=… ms=…` for every query the run makes, so
 /// the `grep=true` lines after the `grep` step are what a requery nobody asked for costs in exact
@@ -149,7 +150,10 @@ fn bench_search_paths(app: &Rc<App>, count: usize) -> Vec<PathBuf> {
 
 fn bench_search_write(paths: &[PathBuf], query: &str) {
     for path in paths {
-        if let Err(e) = std::fs::write(path, format!("a line holding {query} once\n")) {
+        // Twice, on two lines: a row is a match and not a file, so each note written here is two
+        // rows in both modes.
+        let body = format!("a line holding {query} once\nand a second line holding {query}\n");
+        if let Err(e) = std::fs::write(path, body) {
             println!("bench search wrote=false {e}");
         }
     }
