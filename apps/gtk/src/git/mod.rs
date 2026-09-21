@@ -96,8 +96,9 @@ pub struct Hooks {
     pub open_diff: Box<dyn Fn(&str, &str, &str, (&str, &str), (&str, &str)) -> Option<Rc<DiffTab>>>,
     /// Compare a file's working tree with the index, inside the file's own tab: key, the index
     /// side's title and text, and what to call once the comparison exists so a refresh can reach
-    /// it.
-    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>)>)>,
+    /// it. That call answers whether the comparison is worth keeping; `false` takes it down again
+    /// ([`Panel::show`]).
+    pub compare_file: Box<dyn Fn(&str, &str, &str, Box<dyn FnOnce(Weak<Compare>) -> bool>)>,
     /// Move vault files to the trash, with one toast for the lot. Vault keys only, which is what
     /// leaves an untracked file outside the vault without a Discard button.
     pub trash: Box<dyn Fn(&[String])>,

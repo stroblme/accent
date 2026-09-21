@@ -162,6 +162,24 @@ impl Panel {
         self.changes.splice(at as u32, removed as u32, &items);
     }
 
+    /// Activate the row `path` is listed on, as a click on it does, and say which section it was
+    /// in. `ACCENT_BENCH_COMPARE=row:` and nothing else: the headless image has no pointer.
+    pub fn activate_change(self: &Rc<Self>, path: &str) -> Option<&'static str> {
+        let row = (0..self.changes.n_items())
+            .filter_map(|i| boxed::<Row>(self.changes.item(i)))
+            .find(|row| matches!(row, Row::Entry { entry, .. } if entry.path == path))?;
+        let Row::Entry { section, .. } = &row else {
+            return None;
+        };
+        let section = *section;
+        self.activate(&row);
+        Some(match section {
+            Section::Conflicts => "conflicts",
+            Section::Staged => "staged",
+            Section::Changes => "changes",
+        })
+    }
+
     fn activate(self: &Rc<Self>, row: &Row) {
         if let Row::Folder { path, section, .. } = row {
             let key = folder_key(*section, path);

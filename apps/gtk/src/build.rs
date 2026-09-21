@@ -593,7 +593,9 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
                     None,
                     "Working Tree",
                 );
-                register(Rc::downgrade(&compare));
+                if !register(Rc::downgrade(&compare)) {
+                    tab.leave_compare();
+                }
             });
         }),
         trash: Box::new(move |keys| {

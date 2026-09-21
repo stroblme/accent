@@ -50,12 +50,25 @@ impl Panel {
             Sides::Worktree => {
                 let (panel, key) = (Rc::downgrade(self), what.key.clone());
                 let register = move |compare: Weak<Compare>| {
-                    if let Some(panel) = panel.upgrade() {
-                        if let Some(compare) = compare.upgrade() {
-                            panel.offer_lines(&compare, &what);
+                    let Some(panel) = panel.upgrade() else {
+                        return false;
+                    };
+                    if let Some(compare) = compare.upgrade() {
+                        // A row names a path; it does not hold what git said about it. By the
+                        // time the comparison is read the file may have been staged, discarded
+                        // or committed — from the pane itself, or from a terminal — and then the
+                        // two sides carry the same text and the comparison shows nothing. Two
+                        // identical columns are not an answer: say so and ask git again, so the
+                        // row goes as well.
+                        if compare.counts().1 == 0 {
+                            (panel.hooks.toast)(&format!("{name} has no unstaged changes"));
+                            panel.schedule_refresh(Depth::Everything);
+                            return false;
                         }
-                        panel.watch(what, Target::Tab(compare));
+                        panel.offer_lines(&compare, &what);
                     }
+                    panel.watch(what, Target::Tab(compare));
+                    true
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, Box::new(register));
             }
