@@ -1021,7 +1021,7 @@ mod tests {
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
         assert_eq!(
-            f.vault.note_paths().unwrap(),
+            f.vault.file_paths(false).unwrap(),
             ["a/b/note.md", "a/b/sub/x.md"]
         );
 
@@ -1030,11 +1030,11 @@ mod tests {
 
         assert!(
             poll_until(
-                || f.vault.note_paths().unwrap() == ["a/c/note.md", "a/c/sub/x.md"],
+                || f.vault.file_paths(false).unwrap() == ["a/c/note.md", "a/c/sub/x.md"],
                 BUDGET
             ),
             "the subtree is gone from the index: {:?}",
-            f.vault.note_paths().unwrap()
+            f.vault.file_paths(false).unwrap()
         );
         assert_eq!(
             names(&f.vault.list_dir("a/c").unwrap()),

@@ -101,17 +101,6 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every markdown note's rel_path, for the file switcher's fuzzy match. What `[[` completes
-    /// against is [`note_and_pdf_paths`](Self::note_and_pdf_paths), a wikilink naming a PDF as
-    /// readily as a note.
-    pub fn note_paths(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
-        )?;
-        let rows = st.query_map([FileKind::Markdown.as_i64()], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// Every note's and PDF's rel_path, notes first and then the PDFs by path: what `[[` offers.
     ///
     /// A wikilink points at something to read, which is a note or a PDF; anything else is reached
@@ -160,14 +149,24 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The `limit` most recently modified notes: what the switcher lists before the user types.
-    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
+    /// The `limit` most recently modified files: what the switcher lists before the user types.
+    /// The files [`file_paths`](Self::file_paths) offers, so a script edited in another editor
+    /// is there as readily as a note, and a git-ignored build output is not.
+    pub fn recent_files(&self, limit: usize) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY mtime_ns DESC LIMIT ?2",
+            "SELECT rel_path FROM files
+              WHERE kind IN (?1, ?2, ?3) AND (git_ignored = 0 OR kind = ?1)
+              ORDER BY mtime_ns DESC LIMIT ?4",
         )?;
-        let rows = st.query_map(params![FileKind::Markdown.as_i64(), limit as i64], |r| {
-            r.get(0)
-        })?;
+        let rows = st.query_map(
+            params![
+                FileKind::Markdown.as_i64(),
+                FileKind::Pdf.as_i64(),
+                FileKind::Other.as_i64(),
+                limit as i64,
+            ],
+            |r| r.get(0),
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -336,16 +335,28 @@ mod tests {
         assert_eq!(ix.list_files("nope").unwrap().len(), 0);
     }
 
+    /// What Go to File shows before anything is typed: the files touched last, of any kind it
+    /// opens, and never a conflict copy or a directory.
     #[test]
-    fn note_paths_and_recent_notes_list_markdown_only() {
+    fn recent_files_are_any_openable_file_newest_first() {
         let (vault, db) = fixture();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        fs::write(vault.path().join("tool.py"), "print('hi')\n").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(vault.path().join("tool.py"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        // c.pdf, the conflict copy and the `sub` directory are not notes.
-        assert_eq!(ix.note_paths().unwrap(), vec!["a.md", "sub/Beta.md"]);
-        assert_eq!(ix.recent_notes(50).unwrap().len(), 2);
-        assert_eq!(ix.recent_notes(1).unwrap().len(), 1, "limit is honoured");
+        let recent = ix.recent_files(50).unwrap();
+        assert_eq!(recent[0], "tool.py");
+        let mut sorted = recent.clone();
+        sorted.sort();
+        assert_eq!(sorted, ["a.md", "c.pdf", "sub/Beta.md", "tool.py"]);
+        assert_eq!(ix.recent_files(1).unwrap().len(), 1, "limit is honoured");
     }
 
     /// `[[` completes against notes and PDFs; a source file is `![[`'s and a markdown link's.

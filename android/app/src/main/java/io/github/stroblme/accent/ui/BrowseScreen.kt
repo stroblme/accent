@@ -32,7 +32,7 @@ private enum class Mode { Search, Files, Command }
  * The vault's files, on a screen of their own.
  *
  * The desktop's eight sidebar panes and its palette collapse into one list: what the field means is
- * a chip away. Search reads the notes and falls back to the tree while there is nothing to search
+ * a chip away. Search reads the files and falls back to the tree while there is nothing to search
  * for; Files matches names against the recent ones, and Command against what the palette can do.
  * A screen rather than a drawer because a drawer is an edge swipe, and a gesture nothing announces
  * is a gesture nobody finds.
@@ -185,7 +185,7 @@ fun BrowseScreen(
             value = query,
             onValue = { query = it; if (mode == Mode.Search) model.search(it) },
             placeholder = when (mode) {
-                Mode.Search -> "Search notes"
+                Mode.Search -> "Search"
                 Mode.Files -> "Go to a file"
                 Mode.Command -> "Run a command"
             },

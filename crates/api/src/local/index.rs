@@ -201,13 +201,9 @@ impl Local {
         self.index().pdf_links(rel)
     }
 
-    pub fn note_paths(&self) -> Result<Vec<String>> {
-        self.index().note_paths()
-    }
-
     /// Every file the app can open, notes first: what the palette's switcher lists, now that a
-    /// tab is not necessarily a note. [`note_paths`](Self::note_paths) stays markdown-only,
-    /// because `[[` completion may only offer notes.
+    /// tab is not necessarily a note. `[[` completion asks the index for notes and PDFs alone
+    /// (`Index::note_and_pdf_paths`), those being what a wikilink may name.
     ///
     /// The palette has no All toggle of its own, so it asks with `include_ignored` false and the
     /// build output stays out of Go to File. The tree still lists an ignored file, dimmed, which
@@ -242,8 +238,8 @@ impl Local {
             .context("the vault worker stopped before it recorded the exclusion set")?
     }
 
-    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
-        self.index().recent_notes(limit)
+    pub fn recent_files(&self, limit: usize) -> Result<Vec<String>> {
+        self.index().recent_files(limit)
     }
 
     /// The note a wikilink target points at, or `None` when it dangles and the UI can offer to

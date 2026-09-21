@@ -75,7 +75,7 @@ impl App {
                         .into_iter()
                         .map(|(name, _)| name)
                         .collect::<Vec<_>>(),
-                    vault.recent_notes(RECENT_NOTES).unwrap_or_default(),
+                    vault.recent_files(RECENT_NOTES).unwrap_or_default(),
                 )
             })
             .await;
