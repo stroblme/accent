@@ -51,6 +51,14 @@ pub const SILENCE: Duration = Duration::from_secs(90);
 /// `TRANSFER_TIMEOUT` — and a little over for the process group to be stopped.
 const LINGER: Duration = Duration::from_secs(2 * accent_core::git::TRANSFER_TIMEOUT.as_secs() + 10);
 
+/// A call the host bounds must finish inside [`LINGER`], or a server whose client has gone would
+/// stop while still rewriting the vault. Checked where the two are written rather than left to a
+/// run that would only show it on a slow link.
+const _: () = assert!(
+    crate::vault::REPLACE_BOUND.as_secs() <= LINGER.as_secs(),
+    "a rewrite may outlast the wait a server gives the requests it is running"
+);
+
 /// A save refused because the file changed under it. Its `data` is the current [`Etag`], so the
 /// client can rebuild [`SaveError::ChangedOnDisk`] and the UI can offer the same comparison it
 /// offers locally.

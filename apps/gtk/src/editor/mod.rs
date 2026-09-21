@@ -304,6 +304,10 @@ pub struct Tab {
     /// no messages at the ends of the lines. What the server said is still held above, so the
     /// hover still answers for a line and the status bar still counts them.
     diagnostics_hidden: Cell<bool>,
+    /// How many end-of-line messages the last paint put up, which is fewer than the lines with
+    /// one whenever a comparison has collapsed some of them. Only `ACCENT_BENCH_COMPARE` reads
+    /// it: the provider cannot be counted back.
+    annotated: Cell<usize>,
     /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
@@ -612,6 +616,7 @@ pub fn open(
         diagnostics: RefCell::new(Vec::new()),
         annotations,
         diagnostics_hidden: Cell::new(false),
+        annotated: Cell::new(0),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         font: RefCell::new(None),
@@ -1083,13 +1088,22 @@ impl Tab {
     /// Lay the stored answer over the text, or nothing at all while it is hidden — which is the
     /// same pass, so hiding and showing go through the code a publish does rather than a second
     /// way of lifting the same tags.
-    fn paint_diagnostics(&self) {
+    pub(super) fn paint_diagnostics(&self) {
         let items = self.diagnostics.borrow();
         let painted: &[Diagnostic] = match self.diagnostics_hidden.get() {
             true => &[],
             false => &items,
         };
-        diagnostics::render(&self.buffer, &self.annotations, painted);
+        self.annotated.set(diagnostics::render(
+            &self.buffer,
+            &self.annotations,
+            painted,
+        ));
+    }
+
+    /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
+    pub fn annotated(&self) -> usize {
+        self.annotated.get()
     }
 
     /// What the server said, painted or not: what the status bar counts and the hover reads back.
@@ -1126,7 +1140,16 @@ impl Tab {
             true => fold::unfold(self.text_buffer(), line),
             false => self.fold_line(line),
         }
+        self.folds_changed();
+    }
+
+    /// What every fold command ends with: the chevrons redrawn, and the diagnostics laid again.
+    /// A line that has just gone behind a header has no row of its own to put a message on, and
+    /// one that has come back out wants its message back — the same rule a comparison's collapsed
+    /// runs follow, and the same pass.
+    fn folds_changed(&self) {
         self.fold_renderer.queue_draw();
+        self.paint_diagnostics();
     }
 
     fn fold_line(&self, line: i32) {
@@ -1150,7 +1173,7 @@ impl Tab {
         let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
         if let Some(f) = found {
             fold::fold(self.text_buffer(), f);
-            self.fold_renderer.queue_draw();
+            self.folds_changed();
         }
     }
 
@@ -1159,7 +1182,7 @@ impl Tab {
         let found = fold::containing(&self.folds.borrow(), self.caret_line() as u32).copied();
         if let Some(f) = found {
             fold::unfold(self.text_buffer(), f.start_line as i32);
-            self.fold_renderer.queue_draw();
+            self.folds_changed();
         }
     }
 
@@ -1171,12 +1194,12 @@ impl Tab {
         for f in folds {
             fold::fold(self.text_buffer(), f);
         }
-        self.fold_renderer.queue_draw();
+        self.folds_changed();
     }
 
     pub fn unfold_all(&self) {
         fold::unfold_all(self.text_buffer());
-        self.fold_renderer.queue_draw();
+        self.folds_changed();
     }
 
     /// The user chose to lose this buffer's unsaved edits: it stops counting as dirty, so nothing

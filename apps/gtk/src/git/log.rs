@@ -2,13 +2,9 @@
 
 use super::compare::Sides;
 use super::*;
-use crate::fileops;
 
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;
-
-/// The action group the history's context menu resolves its items against.
-const MENU_GROUP: &str = "gitlog";
 
 /// How far a commit the remote has and HEAD does not is faded. Enough to read as "this is not
 /// here yet" beside a commit that is, and not so far that the summary stops being legible.
@@ -222,77 +218,14 @@ impl Panel {
         });
     }
 
-    /// What can be done with the commit under the pointer.
-    ///
-    /// The menu is built here and shown by `fileops::popup`, which is where the mechanics are
-    /// documented: the popover hangs off a layout-managed box rather than off the list, the
-    /// actions live on that same box so an item can resolve them, and the unparent waits for an
-    /// idle. The style class is this menu's own — the sidebar behind it is a list, so it needs a
-    /// background the file tree's menu gets from its host.
-    fn commit_menu(self: &Rc<Self>, commit: &Commit, anchor: gdk::Rectangle) {
-        self.column
-            .insert_action_group(MENU_GROUP, Some(&self.commit_actions()));
-
-        let menu = gio::Menu::new();
-        // The branches on this commit lead: moving onto one of them keeps HEAD on a branch,
-        // which checking out the commit itself does not.
-        let branches = gio::Menu::new();
-        for (label, action, target) in ref_items(&commit.refs, &self.state.borrow().branches.local)
-        {
-            branches.append_item(&fileops::item(MENU_GROUP, &label, action, &target));
-        }
-        if branches.n_items() > 0 {
-            menu.append_section(None, &branches);
-        }
-        let checkout = gio::Menu::new();
-        checkout.append_item(&fileops::item(
-            MENU_GROUP,
-            "Check Out Commit",
-            "checkout-commit",
-            &commit.id,
-        ));
-        menu.append_section(None, &checkout);
-        // Its own section: reading an id out is not a thing that moves HEAD.
-        let copy = gio::Menu::new();
-        copy.append_item(&fileops::item(
-            MENU_GROUP,
-            "Copy Commit ID",
-            "copy-id",
-            &commit.id,
-        ));
-        menu.append_section(None, &copy);
-
-        fileops::popup(self.column.upcast_ref(), &menu, anchor, Some("git-menu"));
+    /// Put a commit's id on the clipboard. No toast for the clipboard alone would be truer to
+    /// DESIGN.md, but nothing else on screen says the id was taken: the row looks the same either
+    /// way.
+    fn copy_id(&self, oid: &str) {
+        self.hooks.window.clipboard().set_text(oid);
+        (self.hooks.toast)(&format!("Copied {}", short(oid)));
     }
 
-    /// The actions the menu items name, each taking the commit's id or a branch's name as its
-    /// parameter.
-    fn commit_actions(self: &Rc<Self>) -> gio::SimpleActionGroup {
-        let group = gio::SimpleActionGroup::new();
-        for name in ["switch", "track", "checkout-commit", "copy-id"] {
-            let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
-            let weak = Rc::downgrade(self);
-            action.connect_activate(move |_, target| {
-                let (Some(panel), Some(target)) = (weak.upgrade(), target.and_then(|t| t.str()))
-                else {
-                    return;
-                };
-                match name {
-                    "switch" => panel.checkout(target.to_string()),
-                    "track" => panel.track(target.to_string()),
-                    "checkout-commit" => panel.detach(target.to_string()),
-                    // No toast for the clipboard alone would be truer to DESIGN.md, but nothing
-                    // else on screen says the id was taken: the row looks the same either way.
-                    _ => {
-                        panel.hooks.window.clipboard().set_text(target);
-                        (panel.hooks.toast)(&format!("Copied {}", short(target)));
-                    }
-                }
-            });
-            group.add_action(&action);
-        }
-        group
-    }
     /// How many history rows are drawn as not pulled yet. `ACCENT_BENCH_GIT` and nothing else:
     /// the marking is otherwise only visible as a faded row.
     pub fn not_pulled_rows(&self) -> usize {
@@ -381,6 +314,7 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     let commit = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     commit.append(&area);
     commit.append(&text);
+    commit.append(&commit_actions(item, panel));
 
     // A file of the expanded commit, indented past the graph so it reads as belonging above it.
     let file = file_line();
@@ -408,37 +342,46 @@ fn log_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
     stack.add_named(&file, Some("file"));
     stack.add_named(&more, Some("more"));
 
-    // A secondary click on a commit opens its menu. The gesture holds the `GtkListItem` rather
-    // than the row's data, for the reason `change_row`'s buttons do: the data under a recycled
-    // row is replaced without the widgets being rebuilt.
-    let click = gtk::GestureClick::builder()
-        .button(gdk::BUTTON_SECONDARY)
-        .build();
-    let weak = panel.clone();
-    click.connect_pressed(glib::clone!(
-        #[weak]
-        item,
-        move |gesture, _, x, y| {
-            let (Some(panel), Some(LogItem::Commit(row))) = (weak.upgrade(), boxed(item.item()))
-            else {
-                return;
-            };
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-            // Out of the row's coordinates and into the host box's, or the menu would point at
-            // wherever that row happened to be when the list was last scrolled.
-            let point = gtk::graphene::Point::new(x as f32, y as f32);
-            let Some(at) = item
-                .child()
-                .and_then(|child| child.compute_point(&panel.column, &point))
-            else {
-                return;
-            };
-            let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
-            panel.commit_menu(&row.commit, anchor);
-        }
-    ));
-    stack.add_controller(click);
     stack
+}
+
+/// A commit row's Check Out Commit and Copy Commit ID buttons, the two things a commit offers.
+///
+/// The same surface a changed file's actions have: hidden until the pointer or the keyboard is on
+/// the row (`.git-actions` and `changes::reveal_on_hover`), in a revealer so they measure nothing
+/// while they are away and the summary reads out to the whole width of the pane. Like those, they
+/// hold the `GtkListItem` rather than the row's data, because the data under a recycled row is
+/// replaced without the widgets being rebuilt.
+fn commit_actions(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Revealer {
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    actions.add_css_class("git-actions");
+    for (icon, tooltip, detach) in [
+        ("go-jump-symbolic", "Check Out Commit", true),
+        ("edit-copy-symbolic", "Copy Commit ID", false),
+    ] {
+        let button = icon_button(icon, tooltip);
+        let weak = panel.clone();
+        button.connect_clicked(glib::clone!(
+            #[weak]
+            item,
+            move |_| {
+                let (Some(panel), Some(LogItem::Commit(row))) =
+                    (weak.upgrade(), boxed(item.item()))
+                else {
+                    return;
+                };
+                match detach {
+                    true => panel.detach(row.commit.id.clone()),
+                    false => panel.copy_id(&row.commit.id),
+                }
+            }
+        ));
+        actions.append(&button);
+    }
+    gtk::Revealer::builder()
+        .child(&actions)
+        .transition_type(gtk::RevealerTransitionType::SlideLeft)
+        .build()
 }
 
 fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
@@ -454,6 +397,14 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     ) else {
         return;
     };
+    // The list row itself, which only exists once the item is first bound, and from an idle for
+    // the reason `changes::bind_change` gives.
+    let list_row = stack.parent();
+    glib::idle_add_local_once(move || {
+        if let Some(list_row) = list_row {
+            changes::reveal_on_hover(&list_row);
+        }
+    });
 
     let row = match item_row {
         LogItem::Commit(row) => row,
@@ -472,10 +423,11 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
     };
 
     stack.set_visible_child_name("commit");
-    let (Some(area), Some(text)) = (
-        commit.first_child().and_downcast::<gtk::DrawingArea>(),
-        commit.last_child().and_downcast::<gtk::Box>(),
-    ) else {
+    // Next sibling and not `last_child`: the row's action buttons sit after the text.
+    let Some(area) = commit.first_child().and_downcast::<gtk::DrawingArea>() else {
+        return;
+    };
+    let Some(text) = area.next_sibling().and_downcast::<gtk::Box>() else {
         return;
     };
     let Some(line) = text.first_child().and_downcast::<gtk::Box>() else {
@@ -618,26 +570,6 @@ fn lane_width(row: &LogRow) -> i32 {
     (widest as i32 + 1) * LANE + LANE
 }
 
-/// The commit menu's branch items, as (label, action, branch): Switch to each local branch here
-/// that HEAD is not already on, and Check Out each remote one no local branch has the name of,
-/// which makes it one. A tag names no branch to be on, so it offers nothing.
-fn ref_items(refs: &[git::Ref], local: &[String]) -> Vec<(String, &'static str, String)> {
-    refs.iter()
-        .filter_map(|r| {
-            let (label, action) = match r.kind {
-                git::RefKind::LocalBranch if !r.head => ("Switch to", "switch"),
-                git::RefKind::RemoteBranch if !local.iter().any(|b| b == local_name(&r.name)) => {
-                    ("Check Out", "track")
-                }
-                _ => return None,
-            };
-            // A menu label is read for mnemonics, so a branch's own underscores are doubled.
-            let name = r.name.replace('_', "__");
-            Some((format!("{label} {name}"), action, r.name.clone()))
-        })
-        .collect()
-}
-
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -773,31 +705,6 @@ mod tests {
         assert_eq!(
             commit_tooltip(&placed(&c, Some("main"))),
             "HEAD -> main, origin/main, tag: v1\nabcdef1\nOn main\n\nsubject\n\nwhy it happened\nand a second line"
-        );
-    }
-
-    #[test]
-    fn the_commit_menu_offers_only_the_branches_there_is_somewhere_to_go_with() {
-        use git::RefKind::*;
-        let refs = [
-            ref_to("main", LocalBranch, true),
-            ref_to("side", LocalBranch, false),
-            ref_to("origin/main", RemoteBranch, false),
-            ref_to("origin/my_topic", RemoteBranch, false),
-            ref_to("v1", Tag, false),
-        ];
-        let local = ["main".to_string(), "side".to_string()];
-        assert_eq!(
-            ref_items(&refs, &local),
-            [
-                ("Switch to side".to_string(), "switch", "side".to_string()),
-                (
-                    "Check Out origin/my__topic".to_string(),
-                    "track",
-                    "origin/my_topic".to_string()
-                ),
-            ],
-            "not the branch HEAD is on, a remote one with a local twin, or a tag"
         );
     }
 

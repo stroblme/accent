@@ -16,7 +16,7 @@ mod paths;
 mod transfer;
 
 pub use clipboard::Clip;
-pub use menu::{context_menu, item, labels, popup, row_dir};
+pub use menu::{context_menu, labels, row_dir};
 pub use paths::{move_dest, topmost};
 pub use transfer::{download, import, upload};
 

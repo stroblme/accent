@@ -22,7 +22,9 @@ mod style;
 mod tags;
 
 use chrome::bench_chrome;
-use compare::{bench_compare, bench_compare_lines, bench_compare_pads};
+use compare::{
+    bench_compare, bench_compare_diag, bench_compare_lines, bench_compare_pads, bench_compare_row,
+};
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
@@ -51,8 +53,9 @@ use tags::bench_tags;
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
-/// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
-/// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
+/// until the pointer is on the row, and then the changes list's splices across a refresh that
+/// changes nothing and two Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
@@ -78,7 +81,17 @@ use tags::bench_tags;
 /// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
 /// long paragraphs in a repository it makes itself and types at the start of the two lines whose
 /// padding tag does not begin at the newline before them, and `=lines:<rel_path>` stages and
-/// unstages one line of a note it commits in a repository of its own.
+/// unstages one line of a note it commits in a repository of its own. `=row:<repo_rel>` activates
+/// that file's Changes row, as a click on it does, and prints what the comparison it opened holds;
+/// `=row:stale:<repo_rel>` stages the file behind the pane's back first, so the row it activates
+/// is one git has outgrown and the comparison would have nothing to show. `=row:staged:<repo_rel>`
+/// and `=row:commit:<repo_rel>` are the same shape for the two that open a tab of their own: a
+/// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
+/// not touch it. `=diag:<rel_text_file>`
+/// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
+/// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
+/// the same file, which hides lines the same way, and reads the two numbers again without
+/// publishing anything: a fold's header keeps its own message, the lines under it do not.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
@@ -286,6 +299,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = compare {
             if let Some(rel) = rel.strip_prefix("lines:") {
                 return bench_compare_lines(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("row:") {
+                return bench_compare_row(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("diag:") {
+                return bench_compare_diag(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),

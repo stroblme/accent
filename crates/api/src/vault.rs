@@ -228,7 +228,22 @@ impl Vault {
 
 /// How much longer than a round trip a remote move may take: a folder of a few thousand notes
 /// is an index query and a read each to plan, and an fsync per rewritten note to apply.
-const MOVE_BOUND: std::time::Duration = std::time::Duration::from_secs(50);
+///
+/// An estimate of the work rather than a cap on it. The host runs a move to the end whatever
+/// happens, because the files have already moved by the time the links are being rewritten and
+/// there is no second run that could finish them: a move cut half way through would leave links
+/// naming the wrong place with nothing left to fix them from.
+pub(crate) const MOVE_BOUND: std::time::Duration = std::time::Duration::from_secs(50);
+
+/// How long a vault-wide rewrite runs on the host before it stops. [`Local::replace_all`] reads,
+/// substitutes and fsyncs one note at a time — 1.9 s across 245 notes and 35 s across 3.3k of
+/// them — so this is room for some ten thousand and a cap on the thread either way.
+///
+/// A cap, unlike [`MOVE_BOUND`], because a rewrite *is* resumable: it stops between notes, never
+/// inside one, the notes it did not reach are listed in the report, and the Search pane asks its
+/// question again the moment it returns — so the remaining matches are on screen and Replace All
+/// finishes them.
+pub(crate) const REPLACE_BOUND: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Turn an RPC failure into the `anyhow` error every caller of the façade already handles.
 pub(crate) fn remote_err(e: rpc::RpcError) -> anyhow::Error {
@@ -499,6 +514,10 @@ impl Vault {
     /// The pattern crosses as what the user typed plus the three toggles, not as a compiled
     /// regex: a `Regex` cannot be serialised, and case-insensitivity lives in the builder rather
     /// than in the pattern string, so sending the string alone would quietly change the search.
+    ///
+    /// Not in the table above for that reason, so its [`REPLACE_BOUND`] is spelled out here: the
+    /// host stops at the bound, and a remote caller waits for it plus a round trip rather than
+    /// giving up after [`rpc::DEADLINE`] while the host is still rewriting.
     pub fn replace_all(
         &self,
         query: &str,
@@ -511,7 +530,11 @@ impl Vault {
                 v.replace_all(&search::pattern(query, options)?, replacement, literal)
             }
             Backend::Remote(r) => r
-                .call("replace_all", json!([query, options, replacement, literal]))
+                .call_within(
+                    "replace_all",
+                    json!([query, options, replacement, literal]),
+                    REPLACE_BOUND + rpc::DEADLINE,
+                )
                 .map_err(remote_err),
         }
     }

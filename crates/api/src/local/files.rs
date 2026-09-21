@@ -206,6 +206,10 @@ impl Local {
     /// the first move fails the call; a move or a file that could not be done is reported
     /// instead, because a half-renamed vault is worse than one whose report says exactly what
     /// happened.
+    ///
+    /// Not cut off at [`crate::vault::MOVE_BOUND`] the way a rewrite is, for the same reason: by
+    /// the time the links are being rewritten the files have already moved, and there is no second
+    /// run that could finish them. The bound is what a remote caller waits, not a cap here.
     pub fn rename(&self, plan: &RenamePlan, update: bool) -> Result<RenameReport> {
         // Which file each link names is a question only the index can answer, and only while it
         // still describes the vault as it was: ask before the first move.
@@ -355,7 +359,9 @@ impl Local {
     /// It reads, substitutes and fsyncs one note at a time on the calling thread, which costs
     /// far more than a main loop can spend: 1.9 s across 245 notes and 35 s across 3.3k of them,
     /// measured on the 3.6k-note generated vault. Callers with a UI run it on a worker thread —
-    /// the desktop app does, and the handle is `Send + Sync` so a binding can too.
+    /// the desktop app does, and the handle is `Send + Sync` so a binding can too. It is bounded
+    /// by [`crate::vault::REPLACE_BOUND`], which is what a remote caller waits for: without it the
+    /// caller gave up after ten seconds while the host went on rewriting.
     ///
     /// ponytail: no progress callback. The one caller shows an indeterminate bar, and a fraction
     /// nothing renders would be machinery for its own sake. Nor is it undoable — see NOTEPAD.
@@ -365,10 +371,34 @@ impl Local {
         replacement: &str,
         literal: bool,
     ) -> Result<ReplaceReport> {
+        self.replace_within(re, replacement, literal, crate::vault::REPLACE_BOUND)
+    }
+
+    /// [`replace_all`](Self::replace_all) under a budget, which is what makes the bound a remote
+    /// caller waits for a promise rather than a guess.
+    ///
+    /// It stops *between* notes, never inside one: each is read, substituted and written whole,
+    /// so the vault is consistent wherever it stops, and the notes it never reached are listed as
+    /// not written rather than passed over silently. Running it again finishes them — the pattern
+    /// still matches exactly those.
+    fn replace_within(
+        &self,
+        re: &Regex,
+        replacement: &str,
+        literal: bool,
+        budget: std::time::Duration,
+    ) -> Result<ReplaceReport> {
+        let deadline = std::time::Instant::now() + budget;
         let mut report = ReplaceReport::default();
         // Collected before the first write: the guard must not still be held while notes are
         // rewritten, and the worker reindexes them as they land.
         for rel in self.searcher().grep_paths(re)? {
+            if std::time::Instant::now() >= deadline {
+                report
+                    .failed
+                    .push((rel, format!("the rewrite stopped after {budget:?}")));
+                continue;
+            }
             match self.replace_one(&rel, re, replacement, literal) {
                 Ok(0) => {}
                 Ok(n) => {
@@ -622,6 +652,43 @@ mod tests {
             f.vault.grep("colour", plain, 10, false).unwrap().1,
             0,
             "the rewrites must be in the index by the time replace_all returns"
+        );
+    }
+
+    /// The host's own bound, which is what a remote caller's wait is derived from: the rewrite
+    /// stops between notes and says which it never reached, rather than running past the moment
+    /// the caller has stopped waiting. Driven with no budget at all, so it stops before the first.
+    #[test]
+    fn a_rewrite_out_of_time_stops_between_notes_and_reports_the_rest() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "colour\n");
+        f.write("b.md", "colour\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            panic!("the fixture opens a local vault");
+        };
+        let re = accent_core::search::pattern("colour", Options::default()).unwrap();
+        let report = local
+            .replace_within(&re, "color", true, std::time::Duration::ZERO)
+            .unwrap();
+
+        assert!(report.rewritten.is_empty());
+        assert_eq!(report.matches, 0);
+        assert_eq!(
+            report.failed.iter().map(|(rel, _)| rel).collect::<Vec<_>>(),
+            ["a.md", "b.md"],
+            "every note it did not reach is named: {report:?}"
+        );
+        assert_eq!(f.read("a.md"), "colour\n", "no note is left half written");
+        // The pattern still matches them, so asking again finishes the job.
+        assert_eq!(
+            f.vault
+                .grep("colour", Options::default(), 10, false)
+                .unwrap()
+                .1,
+            2
         );
     }
 

@@ -1,6 +1,8 @@
 //! Drills over comparisons: a note against its disk copy, two blobs, and the working tree.
 
+use super::diagnostics::diagnostic;
 use super::*;
+use accent_api::{Fold, Severity};
 
 /// The note is given fifty lines, written out, then edited in two places: a rewrite near the
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
@@ -149,6 +151,195 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                 });
             });
         });
+    });
+}
+
+/// A file opened the way the Git pane opens one: its Changes row activated, with no tab holding
+/// the file yet. Prints which section the row was in, whether a tab came up comparing, and what
+/// the comparison holds. Point it at a repository whose `<rel>` is modified in the working tree.
+///
+/// Three of them are the bug this covers, each a row that is older than what git now says, so
+/// both sides carry the same text. `stale:<rel>` stages the file behind the pane's back and
+/// activates the Changes row that has not caught up; the comparison it used to open had
+/// `hunks=0` — two identical columns, while the editor's own gutter went on marking the change
+/// against HEAD. `staged:<rel>` stages it, waits for the Staged row, unstages behind the pane's
+/// back and activates that row. `commit:<rel>` asks for the file at HEAD against HEAD~1, where
+/// HEAD did not touch it — the shape a commit's file list has once history has moved under it.
+/// All three now say so and ask git again instead of opening a tab of two identical columns.
+pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
+    app.show_pane("git");
+    let (mode, rel) = match rel.split_once(':') {
+        Some((mode @ ("stale" | "staged" | "commit"), rel)) => (mode, rel),
+        _ => ("", rel),
+    };
+    let (app, mode, rel) = (app.clone(), mode.to_string(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let root = app.root();
+        let git_cmd = move |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
+        // The debounced refresh and its `git status`.
+        wait(2500).await;
+        let Some(git) = app.git.get().filter(|git| git.has_repos()).cloned() else {
+            println!("bench compare_row no_repo");
+            return bench_quit(&app);
+        };
+        // A Staged row needs one refresh to exist before it can be made stale.
+        if mode == "staged" {
+            git_cmd(&["add", "--", &rel]);
+            wait(2500).await;
+        }
+        match mode.as_str() {
+            "stale" => println!(
+                "bench compare_row staged={:?}",
+                git_cmd(&["add", "--", &rel])
+            ),
+            "staged" => println!(
+                "bench compare_row unstaged={:?}",
+                git_cmd(&["restore", "--staged", "--", &rel])
+            ),
+            _ => {}
+        }
+        let said = app.toasted.get();
+        let key = match mode.as_str() {
+            "commit" => {
+                // Abbreviated to the seven characters the tab key is built from, so the key
+                // below is the one the comparison would open under.
+                let oid = git_cmd(&["rev-parse", "--short=7", "HEAD"]);
+                let parent = git_cmd(&["rev-parse", "--short=7", "HEAD~1"]);
+                println!("bench compare_row commit oid={oid:?} parent={parent:?}");
+                git.compare_commit(&rel, &oid, &parent);
+                format!("diff:commit:{oid}:{rel}")
+            }
+            _ => {
+                println!(
+                    "bench compare_row rows={} section={:?}",
+                    git.changes_rows(),
+                    git.activate_change(&rel)
+                );
+                format!("diff:index:{rel}")
+            }
+        };
+        wait(1500).await;
+        let tabs = app.open_tabs();
+        let comparing = tabs.iter().find_map(|tab| Some((tab, tab.comparison()?)));
+        match (comparing, app.doc_for(&key)) {
+            (Some((tab, compare)), _) => println!(
+                "bench compare_row opened rel={:?} {}",
+                tab.rel(),
+                bench_compare_line(&compare)
+            ),
+            // A Staged row and a commit's file open a tab of two read-only panes instead.
+            (None, Some(Doc::Diff(diff))) => println!(
+                "bench compare_row opened key={key:?} {}",
+                bench_compare_line(diff.comparison())
+            ),
+            // The refusal is a toast, and it asks git again, so the row it refused goes too.
+            (None, _) => println!(
+                "bench compare_row opened tabs={:?} comparing=false toasts={}",
+                tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
+                app.toasted.get() - said
+            ),
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The end-of-line diagnostics of a comparison's collapsed runs: they used to be drawn all the
+/// same, one under the other on the single row the run stands for.
+///
+/// The file is given fifty lines, written out, then changed near the top and near the bottom so
+/// the middle collapses, and handed four warnings — one on the changed line and three inside the
+/// run that is about to be hidden. It prints how many messages each state put up: with the run
+/// hidden the claim is 1, with it opened 4, and 4 again once the comparison has gone. The gutter
+/// marks stay at 4 throughout, which is the icon on the left the hidden ones are left with.
+///
+/// Then the editor's own fold over the same file, which hides lines the same way: a block whose
+/// header carries a warning of its own and whose two hidden lines carry one each. Nothing is
+/// published between the fold and the reading, so what is printed is what folding alone laid: 2
+/// while it is shut — the header's message and the one at the top of the file — and 4 once it is
+/// open, the marks staying at 4 throughout.
+///
+/// Point it at a scratch text file no language server answers for — `n.txt` — since a publish
+/// would replace what it hands over.
+pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        tab.set_text(&body);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_diag write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(
+            &body
+                .replace("line 3\n", "line three\n")
+                .replace("line 45\n", "line forty-five\n"),
+        );
+        // One on the changed line, three in the run between the two changes. Published again at
+        // every step, as a server would: what a paint makes of them is what is being read.
+        let items: Vec<_> = [2, 20, 21, 22]
+            .map(|line| diagnostic(Severity::Warning, line, 0, 4))
+            .to_vec();
+        let say = |what: &str| {
+            tab.set_diagnostics(items.clone());
+            println!(
+                "bench compare_diag {what} annotations={} marks={} {}",
+                tab.annotated(),
+                crate::diagnostics::painted(&tab.buffer).1,
+                match tab.comparison() {
+                    Some(compare) => bench_compare_line(&compare),
+                    None => "comparing=false".to_string(),
+                }
+            );
+        };
+        // The same numbers with nothing published in between, which is what a fold has to lay
+        // by itself.
+        let stood = |what: &str| {
+            println!(
+                "bench compare_diag {what} annotations={} marks={}",
+                tab.annotated(),
+                crate::diagnostics::painted(&tab.buffer).1
+            );
+        };
+        say("published");
+        app.compare_with_disk(&tab);
+        wait(800).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_diag none");
+            return bench_quit(&app);
+        };
+        say("collapsed");
+        compare.open_gap(0);
+        wait(400).await;
+        say("opened");
+        tab.leave_compare();
+        wait(400).await;
+        say("left");
+        // A block whose header is the warned line 20 and whose body holds the other two.
+        tab.set_folds(vec![Fold {
+            start_line: 20,
+            end_line: 22,
+        }]);
+        tab.toggle_fold(20);
+        wait(400).await;
+        stood("folded");
+        tab.toggle_fold(20);
+        wait(400).await;
+        stood("unfolded");
+        bench_quit(&app);
     });
 }
 
