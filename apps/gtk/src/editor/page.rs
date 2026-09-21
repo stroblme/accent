@@ -94,6 +94,17 @@ pub(super) fn line_numbers(
             renderer.set_text(&format!("{:>width$}", line + 1));
         }
     ));
+    // A caret move repaints the column. GTK4 keeps a widget's render node until that widget is
+    // invalidated, and moving the caret invalidates the view rather than the gutter renderer
+    // inside it: the highlight the renderer draws under the caret's number stayed on the line the
+    // caret had left, and nothing but the pointer entering the column — which sets the opacity —
+    // ever brought it along. An edit and a scroll already relay the gutter out, so this is the one
+    // thing missing.
+    buffer.connect_cursor_moved(glib::clone!(
+        #[weak]
+        renderer,
+        move |_| renderer.queue_draw()
+    ));
     buffer.connect_changed(glib::clone!(
         #[weak]
         renderer,
@@ -130,6 +141,14 @@ pub(super) fn line_numbers(
     renderer
 }
 
+/// Which line `renderer` last drew the caret's highlight on — what `ACCENT_BENCH_DIAG` prints
+/// beside the line the caret is really on.
+pub(super) fn painted_cursor(renderer: &sourceview5::GutterRendererText) -> Option<u32> {
+    renderer
+        .downcast_ref::<numbers::Numbers>()
+        .and_then(numbers::Numbers::painted_cursor)
+}
+
 /// The line numbers, drawn level with the first line of their text rather than at the top of the
 /// line's cell.
 ///
@@ -150,6 +169,15 @@ mod numbers {
             @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
     }
 
+    impl Numbers {
+        /// The line the last pass over the gutter drew as the caret's, or `None` where the caret
+        /// was not among the lines it drew.
+        pub(super) fn painted_cursor(&self) -> Option<u32> {
+            use gtk::subclass::prelude::ObjectSubclassIsExt;
+            self.imp().cursor.get()
+        }
+    }
+
     // The bindings make only `GutterRenderer` subclassable. `GutterRendererText` is derivable in C
     // and adds no virtual methods of its own, its class being `GutterRendererClass` and padding,
     // so the parent's class setup is all it needs.
@@ -164,9 +192,15 @@ mod numbers {
 
     mod imp {
         use super::*;
+        use std::cell::Cell;
 
         #[derive(Default)]
-        pub struct Numbers;
+        pub struct Numbers {
+            /// Which line this renderer last drew as the caret's. Read by `ACCENT_BENCH_DIAG`,
+            /// where the point is that a gutter nothing invalidated still says the line the
+            /// caret has left.
+            pub cursor: Cell<Option<u32>>,
+        }
 
         #[glib::object_subclass]
         impl ObjectSubclass for Numbers {
@@ -179,6 +213,14 @@ mod numbers {
         impl WidgetImpl for Numbers {}
 
         impl GutterRendererImpl for Numbers {
+            /// Once per pass over the gutter, before any line is drawn: the caret's line as this
+            /// pass sees it, which is the one the parent paints its background under.
+            fn begin(&self, lines: &sourceview5::GutterLines) {
+                self.cursor
+                    .set((lines.first()..=lines.last()).find(|&line| lines.is_cursor(line)));
+                self.parent_begin(lines);
+            }
+
             fn snapshot_line(
                 &self,
                 snapshot: &gtk::Snapshot,
@@ -379,6 +421,13 @@ impl Tab {
         // The preference is about prose, where a number beside every line is clutter. Code is
         // read by line number — a compiler error names one — so it always has them.
         self.numbers.set_visible(on || !self.flavour.is_note());
+    }
+
+    /// Which line the gutter drew the caret's highlight on when it last painted, 0-based. Beside
+    /// the caret's own line this says whether the column is following it; `ACCENT_BENCH_DIAG`
+    /// prints the pair.
+    pub fn gutter_cursor(&self) -> Option<u32> {
+        painted_cursor(&self.numbers)
     }
 
     /// The minimap stands in for the scrollbar rather than sitting next to it, which is what
