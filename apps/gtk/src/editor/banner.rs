@@ -14,7 +14,7 @@ pub enum Alert {
     Compare,
     /// The file is gone and this buffer is the only copy left. The button writes it back.
     Restore,
-    /// Syncthing left a `*.sync-conflict-*` copy of this note beside it. The button opens the
+    /// Syncthing left a `*.sync-conflict-*` copy of this file beside it. The button opens the
     /// same side-by-side resolver the tree offers, on the copy the vault reports.
     Conflict,
     /// The bytes are not valid UTF-8, so what is on screen is a lossy reading of them. There is
@@ -25,9 +25,9 @@ pub enum Alert {
 impl Alert {
     fn title(self) -> &'static str {
         match self {
-            Alert::Compare => "This note changed on disk",
-            Alert::Restore => "This note was deleted on disk",
-            Alert::Conflict => "A sync conflict copy of this note exists",
+            Alert::Compare => "This file changed on disk",
+            Alert::Restore => "This file was deleted on disk",
+            Alert::Conflict => "A sync conflict copy of this file exists",
             Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
         }
     }

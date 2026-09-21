@@ -101,17 +101,6 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Every markdown note's rel_path, for the file switcher's fuzzy match. What `[[` completes
-    /// against is [`note_and_pdf_paths`](Self::note_and_pdf_paths), a wikilink naming a PDF as
-    /// readily as a note.
-    pub fn note_paths(&self) -> Result<Vec<String>> {
-        let mut st = self.conn.prepare_cached(
-            "SELECT rel_path FROM files WHERE kind = ?1 ORDER BY rel_path COLLATE NOCASE",
-        )?;
-        let rows = st.query_map([FileKind::Markdown.as_i64()], |r| r.get(0))?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
-    }
-
     /// Every note's and PDF's rel_path, notes first and then the PDFs by path: what `[[` offers.
     ///
     /// A wikilink points at something to read, which is a note or a PDF; anything else is reached
@@ -344,16 +333,6 @@ mod tests {
         }
 
         assert_eq!(ix.list_files("nope").unwrap().len(), 0);
-    }
-
-    #[test]
-    fn note_paths_list_markdown_only() {
-        let (vault, db) = fixture();
-        let mut ix = open(&db);
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-
-        // c.pdf, the conflict copy and the `sub` directory are not notes.
-        assert_eq!(ix.note_paths().unwrap(), vec!["a.md", "sub/Beta.md"]);
     }
 
     /// What Go to File shows before anything is typed: the files touched last, of any kind it

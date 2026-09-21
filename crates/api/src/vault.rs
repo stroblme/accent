@@ -396,7 +396,6 @@ methods! {
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,
     /// because that is where the notes and the index are.
     any pdf_links(rel: ref str) -> Vec<PdfLink>;
-    any note_paths() -> Vec<String>;
     any file_paths(include_ignored: val bool) -> Vec<String>;
     any set_excluded(entries: ref [String]) -> ();
     /// A host whose `accent-cli serve` predates the name answers "no such method", which leaves
