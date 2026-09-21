@@ -84,7 +84,10 @@ use tags::bench_tags;
 /// unstages one line of a note it commits in a repository of its own. `=row:<repo_rel>` activates
 /// that file's Changes row, as a click on it does, and prints what the comparison it opened holds;
 /// `=row:stale:<repo_rel>` stages the file behind the pane's back first, so the row it activates
-/// is one git has outgrown and the comparison would have nothing to show. `=diag:<rel_text_file>`
+/// is one git has outgrown and the comparison would have nothing to show. `=row:staged:<repo_rel>`
+/// and `=row:commit:<repo_rel>` are the same shape for the two that open a tab of their own: a
+/// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
+/// not touch it. `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
 /// each state drew: the messages of a hidden run go, the icons stay.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of

@@ -44,6 +44,7 @@ impl Panel {
         };
         let left_title = format!("{name} ({})", what.sides.left_title());
         let right_title = format!("{name} ({})", what.sides.right_title());
+        let nothing = what.sides.nothing_to_show();
         match what.sides.clone() {
             // The working tree is the file itself, so the comparison lives in its tab and the
             // refresh only ever has the index side to re-read.
@@ -61,7 +62,7 @@ impl Panel {
                         // identical columns are not an answer: say so and ask git again, so the
                         // row goes as well.
                         if compare.counts().1 == 0 {
-                            (panel.hooks.toast)(&format!("{name} has no unstaged changes"));
+                            (panel.hooks.toast)(&format!("{name} {nothing}"));
                             panel.schedule_refresh(Depth::Everything);
                             return false;
                         }
@@ -73,6 +74,14 @@ impl Panel {
                 (self.hooks.compare_file)(&key, &left_title, &left, Box::new(register));
             }
             Sides::Staged | Sides::Deleted | Sides::Commit { .. } => {
+                // The same test, made where this side can make it: before the tab is opened
+                // rather than once it holds a comparison. A Staged row the index has outgrown
+                // and a file listed under a commit that did not change it both read the same
+                // text twice, and a tab of two identical columns is not an answer.
+                if left == right {
+                    (self.hooks.toast)(&format!("{name} {nothing}"));
+                    return self.schedule_refresh(Depth::Everything);
+                }
                 let key = format!("diff:{}:{}", what.sides.tag(), what.key);
                 let tab = (self.hooks.open_diff)(
                     &key,
@@ -126,6 +135,15 @@ impl Panel {
     /// The staged comparison of `key`, HEAD against the index, likewise.
     pub fn compare_staged(self: &Rc<Self>, key: &str) {
         self.compare(key, key, Sides::Staged);
+    }
+
+    /// The comparison a file under a history row opens: `oid` against `parent`, likewise.
+    pub fn compare_commit(self: &Rc<Self>, key: &str, oid: &str, parent: &str) {
+        let sides = Sides::Commit {
+            oid: oid.to_string(),
+            parent: Some(parent.to_string()),
+        };
+        self.compare(key, key, sides);
     }
 
     /// One watch per comparison: asking for the same one again replaces the old entry.
@@ -217,6 +235,17 @@ impl Sides {
             Sides::Worktree => "Working Tree".to_string(),
             Sides::Deleted => "Deleted".to_string(),
             Sides::Commit { oid, .. } => short(oid),
+        }
+    }
+
+    /// What a comparison whose two sides carry the same text says instead of showing them. A row
+    /// names a path; it does not hold what git said about it, and a commit's file list is read
+    /// once and stays where it is, so either can be older than the repository it describes.
+    fn nothing_to_show(&self) -> &'static str {
+        match self {
+            Sides::Staged => "has no staged changes",
+            Sides::Worktree | Sides::Deleted => "has no unstaged changes",
+            Sides::Commit { .. } => "is unchanged in this commit",
         }
     }
 
@@ -328,5 +357,25 @@ fn side(read: anyhow::Result<Option<Blob>>) -> Blob {
             tracing::debug!("git show: {e:#}");
             Blob::Text(String::new())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_comparison_with_nothing_in_it_names_the_side_the_row_came_from() {
+        let commit = Sides::Commit {
+            oid: "abc1234".to_string(),
+            parent: None,
+        };
+        assert_eq!(Sides::Staged.nothing_to_show(), "has no staged changes");
+        assert_eq!(commit.nothing_to_show(), "is unchanged in this commit");
+        // A deleted file's row sits in the same section as a modified one, and says the same.
+        assert_eq!(
+            Sides::Deleted.nothing_to_show(),
+            Sides::Worktree.nothing_to_show()
+        );
     }
 }

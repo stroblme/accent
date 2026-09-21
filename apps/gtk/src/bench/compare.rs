@@ -158,50 +158,90 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
 /// the file yet. Prints which section the row was in, whether a tab came up comparing, and what
 /// the comparison holds. Point it at a repository whose `<rel>` is modified in the working tree.
 ///
-/// `stale:<rel>` is the bug this covers: the file is staged behind the pane's back and the row
-/// that has not caught up is activated, so the working tree and the index carry the same text.
-/// The comparison it used to open had `hunks=0` — two identical columns, while the editor's own
-/// gutter went on marking the change against HEAD. It now says so and asks git again instead.
+/// Three of them are the bug this covers, each a row that is older than what git now says, so
+/// both sides carry the same text. `stale:<rel>` stages the file behind the pane's back and
+/// activates the Changes row that has not caught up; the comparison it used to open had
+/// `hunks=0` — two identical columns, while the editor's own gutter went on marking the change
+/// against HEAD. `staged:<rel>` stages it, waits for the Staged row, unstages behind the pane's
+/// back and activates that row. `commit:<rel>` asks for the file at HEAD against HEAD~1, where
+/// HEAD did not touch it — the shape a commit's file list has once history has moved under it.
+/// All three now say so and ask git again instead of opening a tab of two identical columns.
 pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
-    let (stale, rel) = match rel.strip_prefix("stale:") {
-        Some(rel) => (true, rel),
-        None => (false, rel),
+    let (mode, rel) = match rel.split_once(':') {
+        Some((mode @ ("stale" | "staged" | "commit"), rel)) => (mode, rel),
+        _ => ("", rel),
     };
-    let (app, rel) = (app.clone(), rel.to_string());
+    let (app, mode, rel) = (app.clone(), mode.to_string(), rel.to_string());
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let root = app.root();
+        let git_cmd = move |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+                .unwrap_or_default()
+        };
         // The debounced refresh and its `git status`.
         wait(2500).await;
         let Some(git) = app.git.get().filter(|git| git.has_repos()).cloned() else {
             println!("bench compare_row no_repo");
             return bench_quit(&app);
         };
-        if stale {
-            let ok = std::process::Command::new("git")
-                .args(["add", "--", &rel])
-                .current_dir(app.root())
-                .status()
-                .is_ok_and(|s| s.success());
-            println!("bench compare_row staged={ok}");
+        // A Staged row needs one refresh to exist before it can be made stale.
+        if mode == "staged" {
+            git_cmd(&["add", "--", &rel]);
+            wait(2500).await;
+        }
+        match mode.as_str() {
+            "stale" => println!(
+                "bench compare_row staged={:?}",
+                git_cmd(&["add", "--", &rel])
+            ),
+            "staged" => println!(
+                "bench compare_row unstaged={:?}",
+                git_cmd(&["restore", "--staged", "--", &rel])
+            ),
+            _ => {}
         }
         let said = app.toasted.get();
-        println!(
-            "bench compare_row rows={} section={:?}",
-            git.changes_rows(),
-            git.activate_change(&rel)
-        );
+        let key = match mode.as_str() {
+            "commit" => {
+                // Abbreviated to the seven characters the tab key is built from, so the key
+                // below is the one the comparison would open under.
+                let oid = git_cmd(&["rev-parse", "--short=7", "HEAD"]);
+                let parent = git_cmd(&["rev-parse", "--short=7", "HEAD~1"]);
+                println!("bench compare_row commit oid={oid:?} parent={parent:?}");
+                git.compare_commit(&rel, &oid, &parent);
+                format!("diff:commit:{oid}:{rel}")
+            }
+            _ => {
+                println!(
+                    "bench compare_row rows={} section={:?}",
+                    git.changes_rows(),
+                    git.activate_change(&rel)
+                );
+                format!("diff:index:{rel}")
+            }
+        };
         wait(1500).await;
         let tabs = app.open_tabs();
         let comparing = tabs.iter().find_map(|tab| Some((tab, tab.comparison()?)));
-        match comparing {
-            Some((tab, compare)) => println!(
+        match (comparing, app.doc_for(&key)) {
+            (Some((tab, compare)), _) => println!(
                 "bench compare_row opened rel={:?} {}",
                 tab.rel(),
                 bench_compare_line(&compare)
             ),
+            // A Staged row and a commit's file open a tab of two read-only panes instead.
+            (None, Some(Doc::Diff(diff))) => println!(
+                "bench compare_row opened key={key:?} {}",
+                bench_compare_line(diff.comparison())
+            ),
             // The refusal is a toast, and it asks git again, so the row it refused goes too.
-            None => println!(
+            (None, _) => println!(
                 "bench compare_row opened tabs={:?} comparing=false toasts={}",
                 tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
                 app.toasted.get() - said
