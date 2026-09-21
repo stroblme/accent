@@ -307,7 +307,7 @@ enum Act {
 /// PRELIGHT while the pointer is anywhere on it and with FOCUS_WITHIN while one of its buttons has
 /// the keyboard — and it is the one the keyboard lands on first, so Tab reveals the buttons it
 /// would otherwise never be able to reach.
-fn reveal_on_hover(row: &gtk::Widget) {
+pub(super) fn reveal_on_hover(row: &gtk::Widget) {
     // Once per list row widget, which is recycled and bound again and again. The class is the
     // marker, there being nowhere else to keep one bit on a widget GTK made for itself.
     // ponytail: it is also a hook if a row of this list ever wants styling of its own.

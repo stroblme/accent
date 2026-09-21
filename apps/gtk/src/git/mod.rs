@@ -147,10 +147,6 @@ pub struct Panel {
     root: gtk::Widget,
     /// Over the pane while the selected repository is part way through a merge or a rebase.
     banner: adw::Banner,
-    /// The pane's own box, and the only widget here a popover may hang off: GTK re-presents a
-    /// popover from its parent's `allocate_native_children`, which a `GtkListView` never reaches
-    /// (`fileops::context_menu` documents the symptom).
-    column: gtk::Box,
     names: gtk::StringList,
     chooser: gtk::DropDown,
     /// What the branch button says, which is the branch HEAD is on or where it is detached.
@@ -338,7 +334,6 @@ impl Panel {
             hooks,
             root: root.upcast(),
             banner,
-            column,
             names,
             chooser,
             branch_label,

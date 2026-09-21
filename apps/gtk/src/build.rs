@@ -954,7 +954,6 @@ fn install_chrome_css() {
              .git-ref.remote {{ opacity: 0.6; }} \
              .git-ref.tag {{ background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent); }} \
-             popover.git-menu > contents {{ background-color: var(--popover-bg-color); }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
                background-color: var(--border-color); }} \
              paned > separator:hover {{ box-shadow: none; \

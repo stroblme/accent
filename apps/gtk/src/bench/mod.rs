@@ -53,8 +53,9 @@ use tags::bench_tags;
 /// than a claim in a commit message. `RUST_LOG=accent=debug` adds the per-query breakdown.
 /// `ACCENT_BENCH_GIT=1` is the same idea for the Git pane, and prints row counts rather than
 /// times, plus the branch readout and how many history rows a background fetch marked as not
-/// pulled yet, and then the changes list's splices across a refresh that changes nothing and two
-/// Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
+/// until the pointer is on the row, and then the changes list's splices across a refresh that
+/// changes nothing and two Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
