@@ -165,9 +165,9 @@ impl Vault {
         Ok(convert::all(self.inner.pdf_links(&rel)?))
     }
 
-    /// The notes the filesystem touched most recently, which is what an empty switcher shows.
-    pub fn recent_notes(&self, limit: u32) -> Answer<Vec<String>> {
-        Ok(self.inner.recent_notes(limit as usize)?)
+    /// The files the filesystem touched most recently, which is what an empty switcher shows.
+    pub fn recent_files(&self, limit: u32) -> Answer<Vec<String>> {
+        Ok(self.inner.recent_files(limit as usize)?)
     }
 
     pub fn note_paths(&self) -> Answer<Vec<String>> {

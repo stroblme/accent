@@ -242,8 +242,8 @@ impl Local {
             .context("the vault worker stopped before it recorded the exclusion set")?
     }
 
-    pub fn recent_notes(&self, limit: usize) -> Result<Vec<String>> {
-        self.index().recent_notes(limit)
+    pub fn recent_files(&self, limit: usize) -> Result<Vec<String>> {
+        self.index().recent_files(limit)
     }
 
     /// The note a wikilink target points at, or `None` when it dangles and the UI can offer to
