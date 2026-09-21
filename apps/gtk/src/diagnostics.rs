@@ -82,7 +82,8 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     set(HINT, crate::highlight::with_alpha(fg, HINT_ALPHA));
 }
 
-/// Paint `items` over the buffer, replacing whatever was there.
+/// Paint `items` over the buffer, replacing whatever was there, and say how many end-of-line
+/// messages went up.
 ///
 /// Everything is removed first rather than diffed: a publish is the server's whole answer for the
 /// file, and a buffer-wide tag lift is one pass over a text nobody has scrolled through yet.
@@ -90,7 +91,7 @@ pub fn render(
     buffer: &sourceview5::Buffer,
     provider: &sourceview5::AnnotationProvider,
     items: &[Diagnostic],
-) {
+) -> usize {
     let (start, end) = buffer.bounds();
     for name in TAGS {
         buffer.remove_tag_by_name(name, &start, &end);
@@ -122,6 +123,12 @@ pub fn render(
         let mut line_start = from;
         line_start.set_line_offset(0);
         buffer.create_source_mark(None, category, &line_start);
+        // A line a comparison has collapsed has no row of its own to write on: every message in
+        // a hidden run would be drawn at the one row that stands for the lot, piling up under it.
+        // The gutter icon is left to say there is something in there.
+        if collapsed(&line_start) {
+            continue;
+        }
         // One annotation a line, or the messages draw over each other at the line end: the most
         // severe one is shown and the rest are counted, and the hover lists them all.
         match lines.entry(from.line()) {
@@ -137,6 +144,7 @@ pub fn render(
             }
         }
     }
+    let annotated = lines.len();
     for (line, (style, message, more)) in lines {
         let text = match more {
             0 => message,
@@ -149,6 +157,16 @@ pub fn render(
             style,
         ));
     }
+    annotated
+}
+
+/// Whether a comparison has folded the line starting at `at` away behind its "N unchanged lines"
+/// button. The editor's own folds keep their messages: a fold is one header with its block under
+/// it, where a hidden run is a stretch of lines with nothing of its own on screen at all.
+fn collapsed(at: &gtk::TextIter) -> bool {
+    at.tags()
+        .iter()
+        .any(|tag| tag.name().is_some_and(|name| name == crate::diff::TAG_GAP))
 }
 
 /// How much of `buffer` the diagnostics are painted over: how many underlined runs it carries and

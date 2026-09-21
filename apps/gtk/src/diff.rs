@@ -666,6 +666,10 @@ pub struct Compare {
     /// Each pane's context menu as [`Compare::offer`] left it, and the one it replaced, to put
     /// back when the comparison goes. Empty until something is offered.
     offered: RefCell<Vec<(gio::Menu, Option<gio::MenuModel>)>>,
+    /// What to run once the rows have been laid again. The hidden runs move with every lay — a
+    /// keystroke, a side re-read, a run opened — and what is drawn per line rather than per
+    /// character has to follow them: see [`Compare::on_laid`].
+    laid: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl Compare {
@@ -722,6 +726,7 @@ impl Compare {
             first_view: Cell::new(true),
             handlers: RefCell::new(Vec::new()),
             offered: RefCell::new(Vec::new()),
+            laid: RefCell::new(None),
         });
 
         // Weak throughout: every handler below is connected to something the comparison owns or
@@ -1019,6 +1024,17 @@ impl Compare {
         if self.first_view.get() {
             self.reveal_first_hunk();
         }
+        if let Some(laid) = self.laid.borrow().as_ref() {
+            laid();
+        }
+    }
+
+    /// Run `f` whenever the rows have been laid again, and once now: the hidden runs have just
+    /// moved, and anything drawn per line — the editor's end-of-line diagnostics — has to be laid
+    /// again over the lines that are left. One at a time; asking again replaces it.
+    pub fn on_laid(&self, f: impl Fn() + 'static) {
+        f();
+        *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
     /// Put the first hunk on screen, once. Both panes share a vertical adjustment, so scrolling

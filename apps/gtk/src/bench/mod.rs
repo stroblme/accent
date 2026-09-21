@@ -22,7 +22,9 @@ mod style;
 mod tags;
 
 use chrome::bench_chrome;
-use compare::{bench_compare, bench_compare_lines, bench_compare_pads, bench_compare_row};
+use compare::{
+    bench_compare, bench_compare_diag, bench_compare_lines, bench_compare_pads, bench_compare_row,
+};
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
@@ -81,7 +83,9 @@ use tags::bench_tags;
 /// unstages one line of a note it commits in a repository of its own. `=row:<repo_rel>` activates
 /// that file's Changes row, as a click on it does, and prints what the comparison it opened holds;
 /// `=row:stale:<repo_rel>` stages the file behind the pane's back first, so the row it activates
-/// is one git has outgrown and the comparison would have nothing to show.
+/// is one git has outgrown and the comparison would have nothing to show. `=diag:<rel_text_file>`
+/// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
+/// each state drew: the messages of a hidden run go, the icons stay.
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms an image and replaces its file with one of
 /// another size, printing what the picture asks for and says either side of the reload.
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
@@ -292,6 +296,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("row:") {
                 return bench_compare_row(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("diag:") {
+                return bench_compare_diag(&app, rel);
             }
             return match rel.strip_prefix("pads:") {
                 Some(rel) => bench_compare_pads(&app, rel),

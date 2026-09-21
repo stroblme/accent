@@ -304,6 +304,10 @@ pub struct Tab {
     /// no messages at the ends of the lines. What the server said is still held above, so the
     /// hover still answers for a line and the status bar still counts them.
     diagnostics_hidden: Cell<bool>,
+    /// How many end-of-line messages the last paint put up, which is fewer than the lines with
+    /// one whenever a comparison has collapsed some of them. Only `ACCENT_BENCH_COMPARE` reads
+    /// it: the provider cannot be counted back.
+    annotated: Cell<usize>,
     /// The blocks the server says can be hidden, and the chevrons beside their headers. What is
     /// hidden right now lives in the buffer's own tag, not here.
     folds: RefCell<Vec<Fold>>,
@@ -612,6 +616,7 @@ pub fn open(
         diagnostics: RefCell::new(Vec::new()),
         annotations,
         diagnostics_hidden: Cell::new(false),
+        annotated: Cell::new(0),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         font: RefCell::new(None),
@@ -1083,13 +1088,22 @@ impl Tab {
     /// Lay the stored answer over the text, or nothing at all while it is hidden — which is the
     /// same pass, so hiding and showing go through the code a publish does rather than a second
     /// way of lifting the same tags.
-    fn paint_diagnostics(&self) {
+    pub(super) fn paint_diagnostics(&self) {
         let items = self.diagnostics.borrow();
         let painted: &[Diagnostic] = match self.diagnostics_hidden.get() {
             true => &[],
             false => &items,
         };
-        diagnostics::render(&self.buffer, &self.annotations, painted);
+        self.annotated.set(diagnostics::render(
+            &self.buffer,
+            &self.annotations,
+            painted,
+        ));
+    }
+
+    /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
+    pub fn annotated(&self) -> usize {
+        self.annotated.get()
     }
 
     /// What the server said, painted or not: what the status bar counts and the hover reads back.

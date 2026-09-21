@@ -1,6 +1,8 @@
 //! Drills over comparisons: a note against its disk copy, two blobs, and the working tree.
 
+use super::diagnostics::diagnostic;
 use super::*;
+use accent_api::Severity;
 
 /// The note is given fifty lines, written out, then edited in two places: a rewrite near the
 /// top and a line added at the end. The comparison with the disk copy is then read back — rows,
@@ -205,6 +207,72 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 app.toasted.get() - said
             ),
         }
+        bench_quit(&app);
+    });
+}
+
+/// The end-of-line diagnostics of a comparison's collapsed runs: they used to be drawn all the
+/// same, one under the other on the single row the run stands for.
+///
+/// The file is given fifty lines, written out, then changed near the top and near the bottom so
+/// the middle collapses, and handed four warnings — one on the changed line and three inside the
+/// run that is about to be hidden. It prints how many messages each state put up: with the run
+/// hidden the claim is 1, with it opened 4, and 4 again once the comparison has gone. The gutter
+/// marks stay at 4 throughout, which is the icon on the left the hidden ones are left with.
+///
+/// Point it at a scratch text file no language server answers for — `n.txt` — since a publish
+/// would replace what it hands over.
+pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        tab.set_text(&body);
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_diag write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(
+            &body
+                .replace("line 3\n", "line three\n")
+                .replace("line 45\n", "line forty-five\n"),
+        );
+        // One on the changed line, three in the run between the two changes. Published again at
+        // every step, as a server would: what a paint makes of them is what is being read.
+        let items: Vec<_> = [2, 20, 21, 22]
+            .map(|line| diagnostic(Severity::Warning, line, 0, 4))
+            .to_vec();
+        let say = |what: &str| {
+            tab.set_diagnostics(items.clone());
+            println!(
+                "bench compare_diag {what} annotations={} marks={} {}",
+                tab.annotated(),
+                crate::diagnostics::painted(&tab.buffer).1,
+                match tab.comparison() {
+                    Some(compare) => bench_compare_line(&compare),
+                    None => "comparing=false".to_string(),
+                }
+            );
+        };
+        say("published");
+        app.compare_with_disk(&tab);
+        wait(800).await;
+        let Some(compare) = tab.comparison() else {
+            println!("bench compare_diag none");
+            return bench_quit(&app);
+        };
+        say("collapsed");
+        compare.open_gap(0);
+        wait(400).await;
+        say("opened");
+        tab.leave_compare();
+        wait(400).await;
+        say("left");
         bench_quit(&app);
     });
 }
