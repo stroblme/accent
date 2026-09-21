@@ -67,9 +67,9 @@ impl Local {
         self.searcher().search(query, limit, include_ignored)
     }
 
-    /// Exact search: one row per match of `re`, capped at `limit`, plus how many of them a
-    /// [`replace_all`](Self::replace_all) would rewrite — markdown only, since that is all it
-    /// visits. `include_ignored` means what it does in [`search`](Self::search).
+    /// Exact search: one row per match of `re`, capped at `limit`, plus how many there are in
+    /// all, which is what a [`replace_all`](Self::replace_all) under the same `include_ignored`
+    /// would rewrite. `include_ignored` means what it does in [`search`](Self::search).
     pub fn grep(
         &self,
         re: &Regex,
@@ -106,7 +106,7 @@ impl Local {
     /// the price of not reading every file, and the pane already says the list is capped.
     ///
     /// Rows only, no count beside them: nothing here can be rewritten by Replace All, which
-    /// visits the indexed notes, so a number of matches past `limit` would have no reader.
+    /// visits the indexed files, so a number of matches past `limit` would have no reader.
     ///
     /// ponytail: the walk runs per query, with no cache, for as long as All is on.
     pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<Vec<Match>> {
@@ -509,9 +509,9 @@ mod tests {
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "tool.py");
         assert_eq!(hits[0].line, 2);
-        // Listed, but not counted: the count is what Replace All would rewrite, and it rewrites
-        // notes. (The NUL byte is what keeps bin.dat out of the rows.)
-        assert_eq!(total, 0);
+        // Counted too: the count is what Replace All would rewrite, and it rewrites every
+        // indexed body. (The NUL byte is what keeps bin.dat out of the rows.)
+        assert_eq!(total, 1);
     }
 
     #[test]

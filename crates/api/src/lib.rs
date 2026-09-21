@@ -142,7 +142,7 @@ pub struct FileEdits {
 }
 
 /// What a global replace wrote, in the shape [`RenameReport`] has: what worked is counted, what
-/// failed is named, and a note the replace could not write never fails the whole call.
+/// failed is named, and a file the replace could not write never fails the whole call.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ReplaceReport {
     pub rewritten: Vec<String>,

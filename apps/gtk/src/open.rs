@@ -972,20 +972,21 @@ impl App {
     /// Open tabs are saved first: the vault writes through the etag gate, so an unsaved buffer
     /// would come back as a changed-on-disk banner instead of a replacement. That part is the
     /// main loop's, and so is the reload afterwards; the rewrite between them is not. It is a
-    /// read, a substitution and an fsync per note — 1.9 s across 245 notes and 35 s across 3.3k
+    /// read, a substitution and an fsync per file — 1.9 s across 245 notes and 35 s across 3.3k
     /// of them, measured on the generated vault — so it goes to a worker thread and `done` hands
     /// the sidebar back its pane when it lands.
-    pub fn replace_in_notes(
+    pub fn replace_in_files(
         self: &Rc<Self>,
         query: String,
         options: accent_api::Options,
         replacement: String,
         literal: bool,
+        include_ignored: bool,
         done: Box<dyn FnOnce()>,
     ) {
         let Some(vault) = self.vault().cloned() else {
             done();
-            return self.needs_vault("replace across notes");
+            return self.needs_vault("replace across files");
         };
         let Some(ops) = self.ops().cloned() else {
             done();
@@ -996,7 +997,7 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let outcome = gio::spawn_blocking(move || {
-                vault.replace_all(&query, options, &replacement, literal)
+                vault.replace_all(&query, options, &replacement, literal, include_ignored)
             })
             .await;
             if let Some(app) = weak.upgrade() {
@@ -1391,7 +1392,7 @@ fn human(bytes: u64) -> String {
 
 /// What the toast says after a Replace All: what it wrote, what it could not, and what is still
 /// showing the old text because its tab has unsaved edits. Same shape as `fileops::rename_message`.
-fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) -> String {
+fn replace_message(matches: usize, files: usize, failed: usize, unsaved: usize) -> String {
     let plural = |n: usize, one: &str, many: &str| match n {
         1 => format!("1 {one}"),
         n => format!("{n} {many}"),
@@ -1401,7 +1402,7 @@ fn replace_message(matches: usize, notes: usize, failed: usize, unsaved: usize) 
         _ => format!(
             "Replaced {} in {}",
             plural(matches, "match", "matches"),
-            plural(notes, "note", "notes")
+            plural(files, "file", "files")
         ),
     };
     if failed > 0 {
@@ -1420,13 +1421,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn replace_toast_counts_matches_notes_and_what_went_wrong() {
+    fn replace_toast_counts_matches_files_and_what_went_wrong() {
         assert_eq!(replace_message(0, 0, 0, 0), "Nothing to replace");
-        assert_eq!(replace_message(1, 1, 0, 0), "Replaced 1 match in 1 note");
-        assert_eq!(replace_message(7, 3, 0, 0), "Replaced 7 matches in 3 notes");
+        assert_eq!(replace_message(1, 1, 0, 0), "Replaced 1 match in 1 file");
+        assert_eq!(replace_message(7, 3, 0, 0), "Replaced 7 matches in 3 files");
         assert_eq!(
             replace_message(7, 3, 1, 2),
-            "Replaced 7 matches in 3 notes; 1 could not be written; 2 have unsaved changes and were not reloaded"
+            "Replaced 7 matches in 3 files; 1 could not be written; 2 have unsaved changes and were not reloaded"
         );
     }
 }
