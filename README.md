@@ -1,7 +1,7 @@
 # Accent
 
 An opinionated text editor which can serve as a knowledge management system and IDE in one software as a result of my personal frustration with other software.
-The core engine is written in [Rust]() ensuring that Accent never takes longer than a second to start and stays stable even when being faced with huge vaults.
+The core engine is written in [Rust](https://rust-lang.org/) ensuring that Accent never takes longer than a second to start and stays stable even when being faced with huge vaults.
 UI and UX focus on efficiency paired with a aggressively minimal design aimed to remove all the clutter.
 
 Some features:
@@ -11,10 +11,7 @@ Some features:
 - Git management and diff. view for resolving file conflicts
 - Remote vaults via dedicated ssh server
 - Integrated terminal
-- Multi-pane support, Android app and much more (see [Roadmap](#Roadmap))
-
-TOOD: some screenshots or gif
-
+- Multi-pane support, Android app and much more
 
 This project was formally known as "UNote" (PDF Editor) and is now rewritten from scratch.
 Accent can do everything UNote did (and much more) and I didn't saw a reason for having two times the same app.
@@ -56,5 +53,5 @@ make apk               # cross-builds the core, generates the bindings, packs th
 
 Accent is licensed under GPL-3.0-or-later.
 
-References and inspiration from: [Apostrophe](), [Obsidian](), [VSCodium]()
+References and inspiration from: [Apostrophe](https://github.com/ApostropheEditor/Apostrophe), [Obsidian](https://obsidian.md/), [VSCodium](https://code.visualstudio.com/)
 Icons from: [Tabler](https://github.com/tabler/tabler-icons)
