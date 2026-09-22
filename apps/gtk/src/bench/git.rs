@@ -300,6 +300,142 @@ pub(super) fn bench_git_press(app: &Rc<App>, path: &str) {
     });
 }
 
+/// Whether a real click leaves a row's buttons out once the pointer has gone, against what the
+/// keyboard does, driven through XTEST (`build-aux/xtest.py`, spawned per step): the first commit
+/// row hovered, clicked open and shut with the pointer moved off each time, the keyboard walked
+/// off it and back, left there past GTK's three seconds of visible focus, Tabbed into its first
+/// button and back, its Copy Commit ID clicked and the row clicked once more; then the Changes
+/// list's `src` folder pressed, walked back to and clicked. Point it at the repository the default
+/// drill wants. Every pointer step but the hover and a press still held ends `commit=false
+/// folder=false`, and every keyboard step on a row prints that row's buttons out.
+pub(super) fn bench_git_focus(app: &Rc<App>) {
+    app.show_pane("git");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        let Some(git) = app.git.get() else {
+            return bench_quit(&app);
+        };
+        app.show_pane("git");
+        git.set_tree(true);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // Looked for afresh each time: a folder that collapses rebuilds the rows it is drawn in.
+        let (history, changes) = (git.divider().end_child(), git.divider().start_child());
+        // Only a mapped row: the list keeps the widgets it has no item for, with their old names.
+        let find = |list: &Option<gtk::Widget>, name: &str, tooltip: Option<&str>| {
+            list.as_ref().and_then(|list| {
+                find_widget(list, &|w| {
+                    w.is_mapped()
+                        && w.downcast_ref::<gtk::Stack>()
+                            .is_some_and(|s| s.visible_child_name().as_deref() == Some(name))
+                        && tooltip.is_none_or(|t| w.tooltip_text().as_deref() == Some(t))
+                })
+            })
+        };
+        let commit = || find(&history, "commit", None);
+        let folder = || find(&changes, "folder", Some("src"));
+        if commit().is_none() || folder().is_none() {
+            println!("bench git_focus none");
+            return bench_quit(&app);
+        }
+        // Screen coordinates, left of the row's name: no window manager places the window.
+        let (dx, dy) = app.window.surface_transform();
+        let spot = |w: Option<gtk::Widget>| {
+            let at = w.and_then(|w| {
+                let at = graphene::Point::new(20.0, w.height() as f32 / 2.0);
+                w.compute_point(&app.window, &at)
+            });
+            at.map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+                .unwrap_or_default()
+        };
+        let off = format!("{} {}", app.window.width() - 40, app.window.height() / 2);
+        let revealed = |stack: Option<gtk::Widget>| {
+            stack
+                .and_downcast::<gtk::Stack>()
+                .and_then(|s| s.visible_child()?.last_child())
+                .and_downcast::<gtk::Revealer>()
+                .is_some_and(|r| r.reveals_child())
+        };
+        let say = |step: &str| {
+            let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+            let within = |row: Option<gtk::Widget>| {
+                let row = row.and_then(|stack| stack.parent());
+                focus
+                    .as_ref()
+                    .zip(row)
+                    .is_some_and(|(f, row)| f == &row || f.is_ancestor(&row))
+            };
+            let on = match (within(commit()), within(folder())) {
+                (true, _) => "commit",
+                (_, true) => "folder",
+                _ => "other",
+            };
+            // The buttons of whichever row holds the keyboard, which after a rebuild can be one
+            // bound to another item since.
+            let row = focus.as_ref().and_then(|f| {
+                std::iter::successors(Some(f.clone()), |w| w.parent())
+                    .find(|w| w.first_child().is_some_and(|c| c.is::<gtk::Stack>()))
+            });
+            println!(
+                "bench git_focus {step} commit={} folder={} focus={} on={on} focused_row={} \
+                 visible={} toasts={} history_rows={}",
+                revealed(commit()),
+                revealed(folder()),
+                focus.as_ref().map_or("none", |f| f.type_().name()),
+                revealed(row.and_then(|r| r.first_child())),
+                app.window.gets_focus_visible(),
+                app.toasted.get(),
+                git.log_rows()
+            );
+        };
+        let click = |w| format!("move {}; down; up; sleep 0.3; move {off}", spot(w));
+        xtest(&format!("move {}; focus", spot(commit()))).await;
+        say("commit_hover");
+        xtest(&click(commit())).await;
+        say("commit_click_open");
+        xtest(&click(commit())).await;
+        say("commit_click_shut");
+        xtest("key Down").await;
+        say("key_down");
+        xtest("key Up").await;
+        say("key_up");
+        glib::timeout_future(Duration::from_millis(3500)).await;
+        say("key_idle");
+        xtest("key Tab").await;
+        say("key_tab");
+        xtest("key shift+Tab").await;
+        say("key_back");
+        // The pointer pressing one of those buttons while the keyboard is on the row.
+        let copy = commit().and_then(|row| row_button(&row, "Copy Commit ID"));
+        xtest(&click(copy.map(|b| b.upcast()))).await;
+        say("commit_button_click");
+        xtest(&click(commit())).await;
+        say("commit_click_after_keys");
+        // A press let go of off the row, which focuses it without folding it until the release;
+        // the release redraws the list, which hands the focus to its header.
+        xtest(&format!("move {}; down", spot(folder()))).await;
+        say("folder_down");
+        xtest(&format!("move {off}; up")).await;
+        say("folder_press");
+        xtest("key Down").await;
+        say("folder_key");
+        xtest(&click(folder())).await;
+        say("folder_click");
+        bench_quit(&app);
+    });
+}
+
+/// Run `build-aux/xtest.py` on this display, then wait out the buttons' 250 ms slide.
+async fn xtest(steps: &str) {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/xtest.py");
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    let argv = ["python3", script, &display, steps].map(std::ffi::OsStr::new);
+    if let Ok(run) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
+        let _ = run.wait_future().await;
+    }
+    glib::timeout_future(Duration::from_millis(600)).await;
+}
+
 /// The changes list's row for `path`, a file or a folder. A header row keeps whatever tooltip its
 /// widget last had, so the layout it shows is asked as well.
 fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
