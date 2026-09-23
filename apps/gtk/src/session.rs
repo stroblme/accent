@@ -266,6 +266,8 @@ impl App {
                 }
                 places
             },
+            // Shells are not written yet.
+            terminals: Default::default(),
         };
         let Some(vault) = self.vault() else {
             // Nothing to key a session file on, and nothing worth restoring: a window opened on
