@@ -434,7 +434,7 @@ fn rebasing(repo: &Repo) -> bool {
 ///
 /// Paths arrive as raw bytes under `-z` (no quoting), so one that is not UTF-8 comes through
 /// lossily rather than being dropped: a note the user can see must not go missing from the list.
-pub fn parse_status(bytes: &[u8]) -> Status {
+fn parse_status(bytes: &[u8]) -> Status {
     let mut status = Status::default();
     let mut tokens = bytes.split(|b| *b == 0).filter(|t| !t.is_empty());
     while let Some(token) = tokens.next() {
@@ -760,7 +760,7 @@ pub fn log(repo: &Repo, skip: usize, n: usize) -> Result<Vec<Commit>, Error> {
     Ok(parse_log(&out))
 }
 
-pub fn parse_log(bytes: &[u8]) -> Vec<Commit> {
+fn parse_log(bytes: &[u8]) -> Vec<Commit> {
     String::from_utf8_lossy(bytes)
         .split('\x1e')
         // git ends every record with a newline of its own, which lands before the next record.
@@ -796,7 +796,7 @@ pub fn parse_log(bytes: &[u8]) -> Vec<Commit> {
 /// Only branches, tags and HEAD are kept: `origin/HEAD` points at a branch rather than being one,
 /// and the stash and notes are refs no row has anything to say about. Sorted HEAD's first, then by
 /// [`RefKind`], git's own order kept within each kind.
-pub fn parse_refs(decorations: &str) -> Vec<Ref> {
+fn parse_refs(decorations: &str) -> Vec<Ref> {
     let mut refs: Vec<Ref> = decorations
         .split(", ")
         .filter_map(|decoration| {
@@ -999,7 +999,7 @@ pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Erro
 /// Parse `--name-status -z`: a status token, then its path — except a rename or a copy, whose
 /// token is followed by *two* paths. That is the same trap [`parse_status`] handles for porcelain
 /// records, and it gets the same answer: the new path is the one the row is about.
-pub fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
+fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
     let mut files = Vec::new();
     let mut tokens = bytes.split(|b| *b == 0).filter(|t| !t.is_empty());
     while let Some(token) = tokens.next() {
@@ -1030,7 +1030,7 @@ pub enum Blob {
 }
 
 impl Blob {
-    pub fn of(bytes: &[u8]) -> Blob {
+    fn of(bytes: &[u8]) -> Blob {
         match bytes.contains(&0) {
             true => Blob::Binary,
             false => Blob::Text(String::from_utf8_lossy(bytes).into_owned()),
@@ -1096,7 +1096,7 @@ pub fn branches(repo: &Repo) -> Result<Branches, Error> {
 /// which is the only way a local branch called `origin/x` stays apart from the remote one. A
 /// symbolic ref — `origin/HEAD`, which a clone sets — names another branch rather than being one,
 /// so it goes. `%(HEAD)` is `*` on the branch HEAD is on and a space everywhere else.
-pub fn parse_branches(bytes: &[u8]) -> Branches {
+fn parse_branches(bytes: &[u8]) -> Branches {
     let mut branches = Branches::default();
     for line in String::from_utf8_lossy(bytes).lines() {
         let mut fields = line.split('\0');

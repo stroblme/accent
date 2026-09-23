@@ -27,4 +27,4 @@ cli = ["uniffi/cli"]
 
 [dependencies]
 accent-api = { workspace = true, features = ["android"] }
-uniffi = "0.32"
+uniffi.workspace = true

@@ -176,7 +176,7 @@ pub struct Panel {
     has_more: Cell<bool>,
     state: RefCell<State>,
     /// The debounce timer, replaced rather than stacked.
-    pending: RefCell<Option<glib::SourceId>>,
+    pending: crate::widgets::Debounce,
     busy: Cell<bool>,
     /// Something asked for a refresh while one was in flight; run once more when it lands, for
     /// the deepest of whatever asked.
@@ -353,7 +353,7 @@ impl Panel {
             log_view: log_view.clone(),
             has_more: Cell::new(false),
             state: RefCell::new(State::default()),
-            pending: RefCell::new(None),
+            pending: crate::widgets::Debounce::new(DEBOUNCE),
             busy: Cell::new(false),
             again: Cell::new(None),
             pending_depth: Cell::new(None),
@@ -438,16 +438,11 @@ impl Panel {
     pub fn schedule_refresh(self: &Rc<Self>, depth: Depth) {
         self.pending_depth
             .set(self.pending_depth.get().max(Some(depth)));
-        if let Some(id) = self.pending.borrow_mut().take() {
-            id.remove();
-        }
         let panel = self.clone();
-        let id = glib::timeout_add_local_once(DEBOUNCE, move || {
-            panel.pending.replace(None);
+        self.pending.call(move || {
             let depth = panel.pending_depth.take().unwrap_or(Depth::Status);
             panel.refresh(depth);
         });
-        self.pending.replace(Some(id));
     }
 
     /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
@@ -565,12 +560,13 @@ impl Panel {
         };
         let panel = self.clone();
         glib::spawn_future_local(async move {
-            let fetched =
-                gio::spawn_blocking(move || fetch::fetch(&vault, selected, depth, known)).await;
+            let fetched = crate::work::off_thread("git", move || {
+                fetch::fetch(&vault, selected, depth, known)
+            })
+            .await;
             panel.busy.set(false);
-            match fetched {
-                Ok(fetched) => panel.apply(fetched),
-                Err(_) => tracing::warn!("the git worker panicked"),
+            if let Some(fetched) = fetched {
+                panel.apply(fetched);
             }
             if let Some(depth) = panel.again.take() {
                 panel.refresh(depth);
@@ -978,9 +974,10 @@ impl Panel {
         };
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let blob = gio::spawn_blocking(move || vault.git_show(&repo, "HEAD", &rel)).await;
+            let blob =
+                crate::work::off_thread("git", move || vault.git_show(&repo, "HEAD", &rel)).await;
             done(match blob {
-                Ok(Ok(Some(Blob::Text(text)))) => Some(text),
+                Some(Ok(Some(Blob::Text(text)))) => Some(text),
                 _ => None,
             });
         });
@@ -1244,28 +1241,15 @@ fn build_message_box() -> MessageBox {
 /// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
 /// and whole where it does not.
 fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(move |_, item| {
-        let label = gtk::Label::builder().xalign(0.0).build();
-        if ellipsize {
-            label.set_ellipsize(pango::EllipsizeMode::End);
-        }
-        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            item.set_child(Some(&label));
-        }
-    });
-    factory.connect_bind(|_, item| {
-        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        if let (Some(label), Some(name)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::StringObject>(),
-        ) {
+    let ellipsize = match ellipsize {
+        true => pango::EllipsizeMode::End,
+        false => pango::EllipsizeMode::None,
+    };
+    crate::widgets::label_factory(ellipsize, |label, item| {
+        if let Some(name) = item.item().and_downcast::<gtk::StringObject>() {
             label.set_text(&name.string());
         }
-    });
-    factory
+    })
 }
 
 /// The heading over the branch popover's remote rows. A row that is not a branch, so nothing

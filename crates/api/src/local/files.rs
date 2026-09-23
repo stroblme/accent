@@ -8,13 +8,12 @@ use std::io;
 use anyhow::{Context, Result};
 
 use accent_core::path::{basename, stem};
-use accent_core::{diff, markdown, search, template};
+use accent_core::{markdown, search, template};
 
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    DiffLine, Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError,
-    fs,
+    Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError, fs,
 };
 
 impl Local {
@@ -487,15 +486,6 @@ impl Local {
         Ok(written)
     }
 
-    /// Side-by-side rows for the conflict UI: mine on the left, theirs on the right.
-    pub fn conflict_diff(&self, original: &str, conflict: &str) -> Result<Vec<DiffLine>> {
-        let (mine, _) = fs::read_note(&self.resolve(original)?)
-            .with_context(|| format!("reading {original}"))?;
-        let (theirs, _) = fs::read_note(&self.resolve(conflict)?)
-            .with_context(|| format!("reading {conflict}"))?;
-        Ok(diff::lines(&mine, &theirs))
-    }
-
     /// Where a template says its notes go today, or `None` when it does not say.
     ///
     /// The `accent-target:` directive goes through the same renderer the body does, so
@@ -587,7 +577,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::tests::*;
-    use crate::{Etag, Event, Op, Options, VaultConfig, fs};
+    use crate::{Etag, Event, Options, VaultConfig, fs};
 
     /// `a.md` links to `B.md`; renaming it to `C.md` must move the link with it.
     fn linked_vault() -> Fixture {
@@ -947,23 +937,6 @@ mod tests {
         assert!(
             f.vault.root().join(CONFLICT).exists(),
             "deleting the copy is the UI's job, through the trash"
-        );
-    }
-
-    #[test]
-    fn conflict_diff_reports_the_changed_line() {
-        let f = Fixture::open(VaultConfig::default());
-        f.write("Note.md", "alpha\nbravo\n");
-        f.write(CONFLICT, "alpha\nbravo two\n");
-
-        let d = f.vault.conflict_diff("Note.md", CONFLICT).unwrap();
-
-        assert_eq!(
-            d.iter()
-                .filter(|l| l.op != Op::Equal)
-                .map(|l| (l.op, l.text.as_str()))
-                .collect::<Vec<_>>(),
-            [(Op::Delete, "bravo"), (Op::Insert, "bravo two")]
         );
     }
 

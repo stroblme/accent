@@ -483,26 +483,22 @@ fn reset_group(
             let Some(dialog) = dialog.upgrade() else {
                 return;
             };
-            let confirm = crate::dialogs::alert(
+            let (config, root, save, on_change) = (
+                config.clone(),
+                root.clone(),
+                save.clone(),
+                on_change.clone(),
+            );
+            let (weak, parent) = (dialog.downgrade(), parent.clone());
+            crate::dialogs::confirm(
+                &dialog,
                 "Restore Default Preferences?",
                 "Theme, fonts, editor options, every vault's folders and any shortcuts you \
                  changed go back to their defaults. Your recent vaults are kept.",
-                &[
-                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                    ("restore", "Restore", adw::ResponseAppearance::Destructive),
-                ],
-                "cancel",
-            );
-            confirm.connect_response(Some("restore"), {
-                let (config, root, save, on_change) = (
-                    config.clone(),
-                    root.clone(),
-                    save.clone(),
-                    on_change.clone(),
-                );
-                let (dialog, parent) = (dialog.downgrade(), parent.clone());
-                move |_, _| {
-                    let Some(dialog) = dialog.upgrade() else {
+                "Restore",
+                true,
+                move || {
+                    let Some(dialog) = weak.upgrade() else {
                         return;
                     };
                     {
@@ -516,9 +512,8 @@ fn reset_group(
                     save();
                     dialog.close();
                     page(&parent, config.clone(), root.clone(), on_change.clone());
-                }
-            });
-            confirm.present(Some(&dialog));
+                },
+            );
         }
     });
     group.add(&row);

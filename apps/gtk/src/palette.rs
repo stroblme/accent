@@ -325,113 +325,107 @@ fn row_factory(
     forget: Rc<dyn Fn(&str)>,
     conflicts: Rc<RefCell<HashSet<String>>>,
 ) -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .build();
-        let name = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::End)
-            .build();
-        let dir = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(pango::EllipsizeMode::Middle)
-            .css_classes(["dim-label"])
-            .build();
-        let slot = gtk::Box::builder().valign(gtk::Align::Center).build();
-        row.append(&gtk::Image::new());
-        row.append(&name);
-        row.append(&dir);
-        row.append(&slot);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&row));
-    });
     let home = glib::home_dir();
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        let (Some(row), Some(boxed)) = (
-            item.child().and_downcast::<gtk::Box>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-        let Some(icon) = row.first_child().and_downcast::<gtk::Image>() else {
-            return;
-        };
-        let (Some(name), Some(dir), Some(slot)) = (
-            icon.next_sibling().and_downcast::<gtk::Label>(),
-            icon.next_sibling()
-                .and_then(|w| w.next_sibling())
-                .and_downcast::<gtk::Label>(),
-            row.last_child().and_downcast::<gtk::Box>(),
-        ) else {
-            return;
-        };
-        while let Some(child) = slot.first_child() {
-            slot.remove(&child);
-        }
-        let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
-        // Only a file has an icon: the Files tree's, so a row reads the same in both places.
-        icon.set_visible(matches!(
-            &*entry,
-            Item::File(_) | Item::Missing(_) | Item::Alias { .. }
-        ));
-        match &*entry {
-            // A note row reads as basename first, directory after: a vault full of `index.md`
-            // files is unreadable the other way round.
-            Item::File(rel) => {
-                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
-                name.set_text(basename(rel));
-                dir.set_text(parent_dir(rel));
+    crate::widgets::factory(
+        |_| {
+            let row = gtk::Box::builder()
+                .orientation(gtk::Orientation::Horizontal)
+                .spacing(6)
+                .build();
+            let name = gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::End)
+                .build();
+            let dir = gtk::Label::builder()
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(pango::EllipsizeMode::Middle)
+                .css_classes(["dim-label"])
+                .build();
+            let slot = gtk::Box::builder().valign(gtk::Align::Center).build();
+            row.append(&gtk::Image::new());
+            row.append(&name);
+            row.append(&dir);
+            row.append(&slot);
+            row
+        },
+        move |row: &gtk::Box, item| {
+            let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+            let Some(icon) = row.first_child().and_downcast::<gtk::Image>() else {
+                return;
+            };
+            let (Some(name), Some(dir), Some(slot)) = (
+                icon.next_sibling().and_downcast::<gtk::Label>(),
+                icon.next_sibling()
+                    .and_then(|w| w.next_sibling())
+                    .and_downcast::<gtk::Label>(),
+                row.last_child().and_downcast::<gtk::Box>(),
+            ) else {
+                return;
+            };
+            while let Some(child) = slot.first_child() {
+                slot.remove(&child);
             }
-            // The same row, and at its end, where a command keeps its shortcut, what it is not.
-            Item::Missing(rel) => {
-                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
-                name.set_text(basename(rel));
-                dir.set_text(parent_dir(rel));
-                slot.append(
-                    &gtk::Label::builder()
-                        .label("Not created")
-                        .css_classes(["dim-label"])
-                        .build(),
-                );
+            let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
+            // Only a file has an icon: the Files tree's, so a row reads the same in both places.
+            icon.set_visible(matches!(
+                &*entry,
+                Item::File(_) | Item::Missing(_) | Item::Alias { .. }
+            ));
+            match &*entry {
+                // A note row reads as basename first, directory after: a vault full of `index.md`
+                // files is unreadable the other way round.
+                Item::File(rel) => {
+                    icon.set_icon_name(Some(crate::doc::icon_for(rel)));
+                    name.set_text(basename(rel));
+                    dir.set_text(parent_dir(rel));
+                }
+                // The same row, and at its end, where a command keeps its shortcut, what it is not.
+                Item::Missing(rel) => {
+                    icon.set_icon_name(Some(crate::doc::icon_for(rel)));
+                    name.set_text(basename(rel));
+                    dir.set_text(parent_dir(rel));
+                    slot.append(
+                        &gtk::Label::builder()
+                            .label("Not created")
+                            .css_classes(["dim-label"])
+                            .build(),
+                    );
+                }
+                // The alias that matched, then the note it names, whole: the alias says nothing of
+                // where the note is.
+                Item::Alias { name: alias, rel } => {
+                    icon.set_icon_name(Some(crate::doc::icon_for(rel)));
+                    name.set_text(alias);
+                    dir.set_text(rel);
+                }
+                Item::Command {
+                    action,
+                    label,
+                    accels,
+                    ..
+                } => {
+                    name.set_text(label);
+                    dir.set_text("");
+                    slot.append(&accel_button(action, accels, &conflicts.borrow(), &rebind));
+                }
+                Item::Tag(tag) => {
+                    name.set_text(tag);
+                    dir.set_text("");
+                }
+                // The reading the start screen's recent list gives a vault: a local one named by its
+                // folder and placed by its path, a remote one by its host and the path on that host.
+                Item::Vault(key) => {
+                    let (title, subtitle) = start::labels(Path::new(key), Some(home.as_path()));
+                    name.set_text(&title);
+                    dir.set_text(&subtitle);
+                    slot.append(&forget_button(key, &forget));
+                }
             }
-            // The alias that matched, then the note it names, whole: the alias says nothing of
-            // where the note is.
-            Item::Alias { name: alias, rel } => {
-                icon.set_icon_name(Some(crate::doc::icon_for(rel)));
-                name.set_text(alias);
-                dir.set_text(rel);
-            }
-            Item::Command {
-                action,
-                label,
-                accels,
-                ..
-            } => {
-                name.set_text(label);
-                dir.set_text("");
-                slot.append(&accel_button(action, accels, &conflicts.borrow(), &rebind));
-            }
-            Item::Tag(tag) => {
-                name.set_text(tag);
-                dir.set_text("");
-            }
-            // The reading the start screen's recent list gives a vault: a local one named by its
-            // folder and placed by its path, a remote one by its host and the path on that host.
-            Item::Vault(key) => {
-                let (title, subtitle) = start::labels(Path::new(key), Some(home.as_path()));
-                name.set_text(&title);
-                dir.set_text(&subtitle);
-                slot.append(&forget_button(key, &forget));
-            }
-        }
-    });
-    factory
+        },
+    )
 }
 
 /// What the never-bind list of DESIGN.md's Keyboard section comes down to for someone standing in

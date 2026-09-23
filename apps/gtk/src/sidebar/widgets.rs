@@ -11,33 +11,29 @@ pub(super) fn path_list(
     icon: fn(&str) -> &'static str,
     on_activate: impl Fn(&str) + 'static,
 ) -> gtk::ListView {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::Middle)
-            .build();
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.append(&gtk::Image::new());
-        row.append(&label);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&row));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        let (Some(text), Some(row)) = (row_text(item), item.child()) else {
-            return;
-        };
-        let (Some(image), Some(label)) = (
-            row.first_child().and_downcast::<gtk::Image>(),
-            row.last_child().and_downcast::<gtk::Label>(),
-        ) else {
-            return;
-        };
-        image.set_icon_name(Some(icon(&text)));
-        label.set_text(&text);
-    });
+    let factory = crate::widgets::factory(
+        |_| {
+            let label = gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::Middle)
+                .build();
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.append(&gtk::Image::new());
+            row.append(&label);
+            row
+        },
+        move |row: &gtk::Box, item| {
+            let (Some(text), Some(image), Some(label)) = (
+                row_text(item),
+                row.first_child().and_downcast::<gtk::Image>(),
+                row.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            image.set_icon_name(Some(icon(&text)));
+            label.set_text(&text);
+        },
+    );
 
     let view = gtk::ListView::new(
         Some(gtk::SingleSelection::new(Some(model.clone()))),

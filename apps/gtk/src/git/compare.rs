@@ -25,11 +25,10 @@ impl Panel {
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
-                gio::spawn_blocking(move || what.read(&vault)).await
+                crate::work::off_thread("git", move || what.read(&vault)).await
             };
-            match read {
-                Ok(read) => panel.show(what, read),
-                Err(_) => tracing::warn!("the git worker panicked"),
+            if let Some(read) = read {
+                panel.show(what, read);
             }
         });
     }
@@ -164,14 +163,12 @@ impl Panel {
         glib::spawn_future_local(async move {
             let reads = {
                 let whats: Vec<What> = watches.iter().map(|w| w.what.clone()).collect();
-                gio::spawn_blocking(move || {
+                crate::work::off_thread("git", move || {
                     whats.iter().map(|w| w.read(&vault)).collect::<Vec<_>>()
                 })
                 .await
             };
-            let Ok(reads) = reads else {
-                return tracing::warn!("the git worker panicked");
-            };
+            let Some(reads) = reads else { return };
             for (watch, (left, right)) in watches.into_iter().zip(reads) {
                 let (Blob::Text(left), Blob::Text(right)) = (left, right) else {
                     continue;

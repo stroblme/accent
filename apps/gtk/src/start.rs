@@ -608,7 +608,7 @@ impl Probe {
         // The connection and the listing both happen off the main loop, so the entry stays
         // typeable throughout. Weak, because the dialog may be gone by the time the host answers.
         glib::spawn_future_local(async move {
-            let answer = gio::spawn_blocking({
+            let answer = crate::work::off_thread("ssh completion", {
                 let (url, dir) = (url.clone(), dir.clone());
                 move || ask(&url, &dir)
             })
@@ -617,7 +617,7 @@ impl Probe {
                 return;
             };
             match answer {
-                Ok(Some((home, folders))) => {
+                Some(Some((home, folders))) => {
                     *probe.home.borrow_mut() = Some(home);
                     probe.dirs.borrow_mut().insert(dir, Some(folders));
                 }

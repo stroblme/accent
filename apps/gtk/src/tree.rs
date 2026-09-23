@@ -157,7 +157,7 @@ fn fill(
     );
     let dir = prefix.to_string();
     glib::spawn_future_local(async move {
-        let listed = gio::spawn_blocking({
+        let listed = crate::work::off_thread("tree", {
             let dir = dir.clone();
             move || vault.list_dir(&dir)
         })
@@ -167,7 +167,7 @@ fn fill(
             return;
         }
         match listed {
-            Ok(Ok(rows)) => {
+            Some(Ok(rows)) => {
                 splice(&store, rows, show_hidden.get());
                 if let Some(landed) = landed {
                     landed();
@@ -175,8 +175,8 @@ fn fill(
             }
             // Leaving the rows alone beats blanking a directory the index simply could not answer
             // for — or, on a remote vault, one the connection could not reach.
-            Ok(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
-            Err(_) => tracing::warn!("the tree worker panicked"),
+            Some(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
+            None => {}
         }
     });
 }
@@ -417,14 +417,14 @@ impl Tree {
             );
             let dir = dir.clone();
             glib::spawn_future_local(async move {
-                let there = gio::spawn_blocking({
+                let there = crate::work::off_thread("tree", {
                     let (vault, dir) = (vault.clone(), dir.clone());
                     move || vault.stat(&dir)
                 })
                 .await;
                 match there {
-                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
-                    Ok(Ok(None)) => {
+                    Some(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
+                    Some(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                         watches.borrow_mut().remove(&dir);
                     }
@@ -432,8 +432,8 @@ impl Tree {
                     // while the link is still being made, and taking that as gone left each
                     // expanded folder showing a model nothing refilled any more: the files made
                     // in it afterwards never appeared until it was collapsed.
-                    Ok(Err(e)) => tracing::warn!("asking after {dir} failed: {e}"),
-                    Err(_) => tracing::warn!("the tree worker panicked"),
+                    Some(Err(e)) => tracing::warn!("asking after {dir} failed: {e}"),
+                    None => {}
                 }
             });
         }
@@ -857,7 +857,7 @@ fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
 const SPRING_OPEN: Duration = Duration::from_millis(800);
 
 /// A timer waiting to open the folder a drag is resting on.
-type Spring = Rc<RefCell<Option<glib::SourceId>>>;
+type Spring = Rc<crate::widgets::Debounce>;
 
 /// Open the shut folder a drag has come to rest on, so a file can be dropped into something that
 /// was not on screen when the drag began. `row` is the row under the pointer, `None` when the drag
@@ -867,18 +867,11 @@ type Spring = Rc<RefCell<Option<glib::SourceId>>>;
 /// one at a time. Nothing closes the folder again — a drag that opened one and went elsewhere
 /// leaves the tree as the reader would have left it by clicking the chevron.
 fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
-    if let Some(id) = timer.borrow_mut().take() {
-        id.remove();
-    }
+    timer.cancel();
     let Some(row) = row.filter(|row| row.is_expandable() && !row.is_expanded()) else {
         return;
     };
-    let disarm = timer.clone();
-    let id = glib::timeout_add_local_once(SPRING_OPEN, move || {
-        disarm.borrow_mut().take();
-        row.set_expanded(true);
-    });
-    *timer.borrow_mut() = Some(id);
+    timer.call(move || row.set_expanded(true));
 }
 
 /// The `GtkTreeListRow` a drop target on a row expander is over, and `None` for a target that is
@@ -920,7 +913,7 @@ fn move_target(
         }
     };
     let planned = Rc::new(planned);
-    let spring = Spring::default();
+    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
     // Both, because `enter` is what decides whether the row highlights at all and `motion` is
     // what corrects it once the preloaded value has arrived.
     let answer = {
@@ -987,7 +980,7 @@ fn import_target(
         gdk::DragAction::COPY | gdk::DragAction::MOVE,
     );
     let dir = Rc::new(dir);
-    let spring = Spring::default();
+    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
     let answer = {
         let (dir, spring) = (dir.clone(), spring.clone());
         move |target: &gtk::DropTarget, x, y| match dir(target, x, y) {
@@ -1146,147 +1139,144 @@ pub fn build(
     let vault_row = root_row(&root_label);
     vault_row.add_controller(move_target(&moves, |_, _, _| Some(String::new())));
     vault_row.add_controller(import_target(&imports, |_, _, _| Some(String::new())));
-    let factory = gtk::SignalListItemFactory::new();
     let bind_ignored = ignored.clone();
     let bind_cut = cut.clone();
     let bind_marked = marked.clone();
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
     let row_imports = imports.clone();
-    factory.connect_setup(move |_, item| {
-        let icon = gtk::Image::new();
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-            .build();
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.append(&icon);
-        row.append(&label);
-        let expander = gtk::TreeExpander::new();
-        expander.set_child(Some(&row));
-        // The name is ellipsized in the middle inside a 200 px sidebar, so the only way to read
-        // where a row really lives is to hover it. Answered on hover rather than written on bind:
-        // `set_tooltip_text` triggers a tooltip query on the whole window, and paying that per
-        // bound row tripled the cost of expanding a 2 400-child directory (12 ms to 40 ms).
-        expander.set_has_tooltip(true);
-        let root_label = root_label.clone();
-        expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
-            let row = expander.list_row().and_then(|row| row.item());
-            let Some(row) = row.as_ref().and_then(decode) else {
-                return false;
+    let factory = crate::widgets::factory(
+        move |_| {
+            let icon = gtk::Image::new();
+            let label = gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(gtk::pango::EllipsizeMode::Middle)
+                .build();
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.append(&icon);
+            row.append(&label);
+            let expander = gtk::TreeExpander::new();
+            expander.set_child(Some(&row));
+            // The name is ellipsized in the middle inside a 200 px sidebar, so the only way to read
+            // where a row really lives is to hover it. Answered on hover rather than written on bind:
+            // `set_tooltip_text` triggers a tooltip query on the whole window, and paying that per
+            // bound row tripled the cost of expanding a 2 400-child directory (12 ms to 40 ms).
+            expander.set_has_tooltip(true);
+            let root_label = root_label.clone();
+            expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
+                let row = expander.list_row().and_then(|row| row.item());
+                let Some(row) = row.as_ref().and_then(decode) else {
+                    return false;
+                };
+                tooltip.set_text(Some(&format!("{root_label}/{}", row.rel)));
+                true
+            });
+            // A row can be dragged into a pane, which opens the note there, onto a pane's edge, which
+            // splits it, or back into the tree, which moves the file. The two travel as two content
+            // types (see `move_content`) and the payload is the path either way, which is what every
+            // drop handler wants and what survives the row being recycled under the drag.
+            //
+            // `MOVE` beside `COPY` so the pointer says which of the two is about to happen. The panes
+            // ask for both and GTK's drop target settles a tie on `COPY`, so what they do is unchanged.
+            let source = gtk::DragSource::builder()
+                .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
+                .build();
+            let marked = drag_marked.clone();
+            source.connect_prepare(move |source, _, _| {
+                let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
+                let row = expander.list_row()?.item().as_ref().and_then(decode)?;
+                // Nothing is dragged out of somebody else's dependency tree: it is opened to look
+                // at, never edited from here.
+                if row.dependency {
+                    return None;
+                }
+                // A marked row carries the whole set, unless the set is that row alone.
+                let marks = marked.borrow();
+                if is_marked(&marks, &row.rel)
+                    && !(marks.len() == 1 && marks.contains_key(&row.rel))
+                {
+                    let set: Vec<&str> = marks.keys().map(String::as_str).collect();
+                    let set = gtk::StringList::new(&set);
+                    return Some(gdk::ContentProvider::for_value(&set.to_value()));
+                }
+                let moving = move_content(&row.rel);
+                // A directory offers the move type alone: it has no single note to open, so a pane
+                // must never be able to take it.
+                Some(match row.is_dir() {
+                    true => moving,
+                    false => gdk::ContentProvider::new_union(&[
+                        moving,
+                        gdk::ContentProvider::for_value(&row.rel.to_value()),
+                    ]),
+                })
+            });
+            let begin = dragging.clone();
+            source.connect_drag_begin(move |_, _| begin(true));
+            let end = dragging.clone();
+            source.connect_drag_end(move |_, _, _| end(false));
+            expander.add_controller(source);
+            // Dropped on a row: into the folder, or into the folder holding the file, which is where
+            // that row's New File would have put one too.
+            let row_dir = |target: &gtk::DropTarget, _: f64, _: f64| {
+                let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
+                let row = expander.list_row()?.item().as_ref().and_then(decode)?;
+                // And nothing is dropped into one either, for the same reason. The row simply never
+                // lights up.
+                (!row.dependency)
+                    .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
             };
-            tooltip.set_text(Some(&format!("{root_label}/{}", row.rel)));
-            true
-        });
-        // A row can be dragged into a pane, which opens the note there, onto a pane's edge, which
-        // splits it, or back into the tree, which moves the file. The two travel as two content
-        // types (see `move_content`) and the payload is the path either way, which is what every
-        // drop handler wants and what survives the row being recycled under the drag.
-        //
-        // `MOVE` beside `COPY` so the pointer says which of the two is about to happen. The panes
-        // ask for both and GTK's drop target settles a tie on `COPY`, so what they do is unchanged.
-        let source = gtk::DragSource::builder()
-            .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
-            .build();
-        let marked = drag_marked.clone();
-        source.connect_prepare(move |source, _, _| {
-            let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
-            let row = expander.list_row()?.item().as_ref().and_then(decode)?;
-            // Nothing is dragged out of somebody else's dependency tree: it is opened to look
-            // at, never edited from here.
-            if row.dependency {
-                return None;
+            expander.add_controller(move_target(&row_moves, row_dir));
+            // The same row takes files from another application, into the same folder.
+            expander.add_controller(import_target(&row_imports, row_dir));
+            expander
+        },
+        // Widget lookups and two setters only: no database access on the bind path.
+        move |expander: &gtk::TreeExpander, item| {
+            let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
+                return;
+            };
+            let Some(item) = row.item().as_ref().and_then(decode) else {
+                return;
+            };
+            expander.set_list_row(Some(&row));
+            let hbox = expander
+                .child()
+                .and_downcast::<gtk::Box>()
+                .expect("row box");
+            let icon = hbox
+                .first_child()
+                .and_downcast::<gtk::Image>()
+                .expect("icon");
+            icon.set_icon_name(Some(match item.is_dir() {
+                true => FOLDER_ICON,
+                false => icon_for(&item.rel),
+            }));
+            let label = icon
+                .next_sibling()
+                .and_downcast::<gtk::Label>()
+                .expect("label");
+            label.set_text(basename(&item.rel));
+            // Both branches, always: row widgets are recycled, so a row that stops being ignored has
+            // to have the class taken off it again. A row the index does not hold is dimmed by the
+            // same rule and for the same reason the ignored ones are: search does not reach it. A
+            // dot-named row is dimmed so that it still reads as hidden while it is shown, and a cut
+            // one so that it reads as already on its way out.
+            let dim = !item.indexed
+                || dot_named(&item.rel)
+                || bind_ignored.borrow().has(&item.rel)
+                || bind_cut.borrow().contains(&item.rel);
+            for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
+                set_class(widget, "dim-label", dim);
             }
-            // A marked row carries the whole set, unless the set is that row alone.
-            let marks = marked.borrow();
-            if is_marked(&marks, &row.rel) && !(marks.len() == 1 && marks.contains_key(&row.rel)) {
-                let set: Vec<&str> = marks.keys().map(String::as_str).collect();
-                let set = gtk::StringList::new(&set);
-                return Some(gdk::ContentProvider::for_value(&set.to_value()));
-            }
-            let moving = move_content(&row.rel);
-            // A directory offers the move type alone: it has no single note to open, so a pane
-            // must never be able to take it.
-            Some(match row.is_dir() {
-                true => moving,
-                false => gdk::ContentProvider::new_union(&[
-                    moving,
-                    gdk::ContentProvider::for_value(&row.rel.to_value()),
-                ]),
-            })
-        });
-        let begin = dragging.clone();
-        source.connect_drag_begin(move |_, _| begin(true));
-        let end = dragging.clone();
-        source.connect_drag_end(move |_, _, _| end(false));
-        expander.add_controller(source);
-        // Dropped on a row: into the folder, or into the folder holding the file, which is where
-        // that row's New File would have put one too.
-        let row_dir = |target: &gtk::DropTarget, _: f64, _: f64| {
-            let expander = target.widget()?.downcast::<gtk::TreeExpander>().ok()?;
-            let row = expander.list_row()?.item().as_ref().and_then(decode)?;
-            // And nothing is dropped into one either, for the same reason. The row simply never
-            // lights up.
-            (!row.dependency)
-                .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
-        };
-        expander.add_controller(move_target(&row_moves, row_dir));
-        // The same row takes files from another application, into the same folder.
-        expander.add_controller(import_target(&row_imports, row_dir));
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&expander));
-    });
-    // Widget lookups and two setters only: no database access on the bind path.
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        let Some(expander) = item.child().and_downcast::<gtk::TreeExpander>() else {
-            return;
-        };
-        let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
-            return;
-        };
-        let Some(item) = row.item().as_ref().and_then(decode) else {
-            return;
-        };
-        expander.set_list_row(Some(&row));
-        let hbox = expander
-            .child()
-            .and_downcast::<gtk::Box>()
-            .expect("row box");
-        let icon = hbox
-            .first_child()
-            .and_downcast::<gtk::Image>()
-            .expect("icon");
-        icon.set_icon_name(Some(match item.is_dir() {
-            true => FOLDER_ICON,
-            false => icon_for(&item.rel),
-        }));
-        let label = icon
-            .next_sibling()
-            .and_downcast::<gtk::Label>()
-            .expect("label");
-        label.set_text(basename(&item.rel));
-        // Both branches, always: row widgets are recycled, so a row that stops being ignored has
-        // to have the class taken off it again. A row the index does not hold is dimmed by the
-        // same rule and for the same reason the ignored ones are: search does not reach it. A
-        // dot-named row is dimmed so that it still reads as hidden while it is shown, and a cut
-        // one so that it reads as already on its way out.
-        let dim = !item.indexed
-            || dot_named(&item.rel)
-            || bind_ignored.borrow().has(&item.rel)
-            || bind_cut.borrow().contains(&item.rel);
-        for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
-            set_class(widget, "dim-label", dim);
-        }
-        // On the expander rather than on the label: a mark is about the row, not about its name,
-        // and the expander is the one widget here that spans the whole of it.
-        set_class(
-            &expander,
-            MARKED,
-            is_marked(&bind_marked.borrow(), &item.rel),
-        );
-    });
+            // On the expander rather than on the label: a mark is about the row, not about its name,
+            // and the expander is the one widget here that spans the whole of it.
+            set_class(
+                expander,
+                MARKED,
+                is_marked(&bind_marked.borrow(), &item.rel),
+            );
+        },
+    );
 
     let selection = gtk::SingleSelection::new(Some(model.clone()));
     selection.set_autoselect(false);

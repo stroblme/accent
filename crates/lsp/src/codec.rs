@@ -11,8 +11,10 @@ use std::io;
 /// either lost framing or is not a language server, and either way the allocation is the damage:
 /// the length is read from the wire before a byte of the body is.
 ///
-/// Four times [`accent_core::fs::MAX_TEXT`], which is the largest document accent will open at
-/// all, so a `didChange` carrying one whole and JSON-escaped still fits.
+/// Four times `accent-core`'s `fs::MAX_TEXT` (16 MiB), the largest document accent will open at
+/// all, so a `didChange` carrying one whole and JSON-escaped still fits. Spelled out rather than
+/// linked: this crate does not depend on that one, and an intra-doc link to it resolves to
+/// nothing.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt};

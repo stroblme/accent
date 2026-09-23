@@ -24,7 +24,7 @@ use self::paths::{
     already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
 };
 use crate::dialogs::{
-    CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
+    CONFIRM, alert, choose, confirm, focus_entry, form, labelled, name_dialog, name_entry,
 };
 use crate::pathfield::{completions, look_again, path_field};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
@@ -188,7 +188,7 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
         // The folders and then the file, on a worker: each is a round trip on a remote vault.
         let vault = ops.vault.clone();
         glib::spawn_future_local(async move {
-            let made = gio::spawn_blocking({
+            let made = crate::work::off_thread("create", {
                 let name = name.clone();
                 move || {
                     make_parents(&vault, &rel)?;
@@ -201,7 +201,7 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
                 }
             })
             .await
-            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            .unwrap_or_else(|| Err(format!("Cannot create {name}")));
             match made {
                 Ok((created, stops)) => {
                     (ops.open)(&created, &stops);
@@ -246,7 +246,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
         // Both questions on a worker, each being a round trip on a remote vault.
         let vault = ops.vault.clone();
         glib::spawn_future_local(async move {
-            let made = gio::spawn_blocking({
+            let made = crate::work::off_thread("create", {
                 let (rel, name) = (rel.clone(), name.clone());
                 move || {
                     // `create_dir_all` is happy to find the directory already there, so the
@@ -263,7 +263,7 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
                 }
             })
             .await
-            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            .unwrap_or_else(|| Err(format!("Cannot create {name}")));
             match made {
                 Ok(()) if hidden_now(&ops, &rel) => {
                     (ops.toast)(&format!("Created {name}; {HIDDEN}"))
@@ -322,7 +322,7 @@ pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
         // behind the process-wide lock, which a render thread may be holding.
         let vault = ops.vault.clone();
         glib::spawn_future_local(async move {
-            let made = gio::spawn_blocking({
+            let made = crate::work::off_thread("create", {
                 let (rel, name) = (rel.clone(), name.clone());
                 move || {
                     if vault.exists(&rel) {
@@ -338,7 +338,7 @@ pub fn new_drawing(ops: &Rc<Ops>, dir: &str) {
                 }
             })
             .await
-            .unwrap_or_else(|_| Err(format!("Cannot create {name}")));
+            .unwrap_or_else(|| Err(format!("Cannot create {name}")));
             match made {
                 // The tab with the pen down is the report, unless the tree will not list the file.
                 Ok(()) => {
@@ -429,15 +429,15 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
         };
         let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
         glib::spawn_future_local(async move {
-            let made = gio::spawn_blocking(move || vault.note_from_template(&template)).await;
+            let made = crate::work::attempt(&format!("create a note from {name}"), move || {
+                vault.note_from_template(&template).map_err(|e| why(&e))
+            })
+            .await;
             match made {
-                Ok(Ok(Some((rel, stops)))) => (ops.open)(&rel, &stops),
+                Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
                 // The file changed under the dialog; nothing was created, so nothing to undo.
-                Ok(Ok(None)) => (ops.toast)(&format!("{name} no longer says where its notes go")),
-                Ok(Err(e)) => {
-                    (ops.toast)(&format!("Cannot create a note from {name}: {}", why(&e)))
-                }
-                Err(_) => (ops.toast)(&format!("Cannot create a note from {name}")),
+                Ok(None) => (ops.toast)(&format!("{name} no longer says where its notes go")),
+                Err(why) => (ops.toast)(&why),
             }
         });
     });
@@ -467,12 +467,12 @@ fn with_templates(
 ) {
     let (vault, ops) = (ops.vault.clone(), ops.clone());
     glib::spawn_future_local(async move {
-        let listed = gio::spawn_blocking(move || match targets_only {
+        let listed = crate::work::off_thread("template list", move || match targets_only {
             true => vault.template_targets(),
             false => vault.templates(),
         })
         .await;
-        then(&ops, listed.ok().and_then(Result::ok).unwrap_or_default());
+        then(&ops, listed.and_then(Result::ok).unwrap_or_default());
     });
 }
 
@@ -498,12 +498,15 @@ fn insert_template_with(ops: &Rc<Ops>, title: &str, insert: Insert, templates: V
         };
         let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
         glib::spawn_future_local(async move {
-            let rendered =
-                gio::spawn_blocking(move || vault.render_template(&template, &title)).await;
+            let rendered = crate::work::attempt(&format!("insert {name}"), move || {
+                vault
+                    .render_template(&template, &title)
+                    .map_err(|e| why(&e))
+            })
+            .await;
             match rendered {
-                Ok(Ok((text, stops))) => insert(&text, &stops),
-                Ok(Err(e)) => (ops.toast)(&format!("Cannot insert {name}: {}", why(&e))),
-                Err(_) => (ops.toast)(&format!("Cannot insert {name}")),
+                Ok((text, stops)) => insert(&text, &stops),
+                Err(why) => (ops.toast)(&why),
             }
         });
     });
@@ -576,31 +579,28 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
 /// the note by its stem still find it, so there is nothing to rewrite and the rename would
 /// otherwise go through in silence.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
-    let dialog = alert(
-        "No Longer a Note?",
-        &format!(
-            "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
-            basename(to)
-        ),
-        &[
-            ("cancel", "Cancel", adw::ResponseAppearance::Default),
-            ("rename", "Rename", adw::ResponseAppearance::Default),
-        ],
-        "cancel",
+    let body = format!(
+        "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
+        basename(to)
     );
-
     let (ops, from, to, window) = (
         ops.clone(),
         from.to_string(),
         to.to_string(),
         ops.window.clone(),
     );
-    choose(&dialog, Some(&window), move |response| {
-        if response == "rename" {
+    // Not destructive: nothing is lost, the note simply stops being read as one.
+    confirm(
+        &window,
+        "No Longer a Note?",
+        &body,
+        "Rename",
+        false,
+        move || {
             let verb = verb(&from, &to);
             plan(&ops, vec![(from.clone(), to.clone())], verb);
-        }
-    });
+        },
+    );
 }
 
 /// Move notes and folders into another directory of the same vault, keeping their names: a row
@@ -620,7 +620,7 @@ pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
         // the plan is, being a `stat` each and a round trip each on a remote vault. Two files of
         // one name from two folders would take the same place, so the batch asks for it too.
         let dests: Vec<String> = moves.iter().map(|(_, to)| to.clone()).collect();
-        let taken = gio::spawn_blocking(move || {
+        let taken = crate::work::off_thread("move", move || {
             let mut seen = std::collections::HashSet::new();
             dests
                 .into_iter()
@@ -628,12 +628,12 @@ pub fn move_all(ops: &Rc<Ops>, moves: Vec<(String, String)>) {
         })
         .await;
         match taken {
-            Ok(None) => plan(&ops, moves, "Moved"),
-            Ok(Some(to)) => (ops.toast)(&format!(
+            Some(None) => plan(&ops, moves, "Moved"),
+            Some(Some(to)) => (ops.toast)(&format!(
                 "Cannot move {}: it is already there",
                 basename(&to)
             )),
-            Err(_) => (ops.toast)(&format!("Cannot move {}", several(&sources(&moves)))),
+            None => (ops.toast)(&format!("Cannot move {}", several(&sources(&moves)))),
         }
     });
 }
@@ -657,12 +657,14 @@ fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
     (ops.flush)(&[String::new()]);
     let (vault, ops, name) = (ops.vault.clone(), ops.clone(), several(&sources(&moves)));
     glib::spawn_future_local(async move {
-        let planned = gio::spawn_blocking(move || vault.plan_moves(&moves)).await;
+        let planned = crate::work::attempt(&format!("rename {name}"), move || {
+            vault.plan_moves(&moves).map_err(|e| why(&e))
+        })
+        .await;
         match planned {
-            Ok(Ok(plan)) if asks_nothing(&plan) => apply(&ops, plan, false, verb),
-            Ok(Ok(plan)) => confirm_update(&ops, plan, verb),
-            Ok(Err(e)) => (ops.toast)(&format!("Cannot rename {name}: {}", why(&e))),
-            Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
+            Ok(plan) if asks_nothing(&plan) => apply(&ops, plan, false, verb),
+            Ok(plan) => confirm_update(&ops, plan, verb),
+            Err(why) => (ops.toast)(&why),
         }
     });
 }
@@ -780,7 +782,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
     };
     let first = plan.moves[0].1.clone();
     glib::spawn_future_local(async move {
-        let done = gio::spawn_blocking({
+        let done = crate::work::off_thread("rename", {
             let name = name.clone();
             move || {
                 // Rename is the keyboard's move and a typed path may name folders that are not
@@ -797,7 +799,7 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
         })
         .await;
         match done {
-            Ok(Ok(report)) => {
+            Some(Ok(report)) => {
                 // Tabs follow first: a rewritten note is named by where it is now.
                 for (from, to) in &report.moved {
                     (ops.moved)(from, to);
@@ -818,8 +820,8 @@ fn apply(ops: &Rc<Ops>, plan: RenamePlan, update: bool, verb: &'static str) {
                 }
                 (ops.toast)(&message);
             }
-            Ok(Err(why)) => (ops.toast)(&why),
-            Err(_) => (ops.toast)(&format!("Cannot rename {name}")),
+            Some(Err(why)) => (ops.toast)(&why),
+            None => (ops.toast)(&format!("Cannot rename {name}")),
         }
     });
 }
@@ -923,60 +925,56 @@ pub fn trashed_with(trashed: &str, key: &str) -> bool {
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
 fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
-    let dialog = alert(
-        "Delete Permanently?",
-        &format!(
-            "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
-            several(&rels),
-            match ops.vault.is_remote() {
-                true => " on the remote",
-                false => " on this system",
-            },
-            match rels.len() {
-                1 => "it",
-                _ => "them",
-            }
-        ),
-        &[
-            ("cancel", "Cancel", adw::ResponseAppearance::Default),
-            ("delete", "Delete", adw::ResponseAppearance::Destructive),
-        ],
-        "cancel",
+    let body = format!(
+        "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
+        several(&rels),
+        match ops.vault.is_remote() {
+            true => " on the remote",
+            false => " on this system",
+        },
+        match rels.len() {
+            1 => "it",
+            _ => "them",
+        }
     );
 
     let (ops, window) = (ops.clone(), ops.window.clone());
-    choose(&dialog, Some(&window), move |response| {
-        if response != "delete" {
-            return;
-        }
-        // A round trip per path on a remote vault, so on a worker; each tab closes once its file
-        // is gone.
-        let vault = ops.vault.clone();
-        glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || {
-                rels.into_iter()
-                    .map(|rel| (vault.delete(&rel), rel))
-                    .collect::<Vec<_>>()
-            })
-            .await;
-            let Ok(done) = done else {
-                return (ops.toast)("Cannot delete");
-            };
-            let mut deleted = Vec::new();
-            for (answer, rel) in done {
-                match answer {
-                    Ok(()) => {
-                        (ops.close)(&rel);
-                        deleted.push(rel);
+    confirm(
+        &window,
+        "Delete Permanently?",
+        &body,
+        "Delete",
+        true,
+        move || {
+            // A round trip per path on a remote vault, so on a worker; each tab closes once its file
+            // is gone.
+            let vault = ops.vault.clone();
+            glib::spawn_future_local(async move {
+                let done = crate::work::off_thread("delete", move || {
+                    rels.into_iter()
+                        .map(|rel| (vault.delete(&rel), rel))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                let Some(done) = done else {
+                    return (ops.toast)("Cannot delete");
+                };
+                let mut deleted = Vec::new();
+                for (answer, rel) in done {
+                    match answer {
+                        Ok(()) => {
+                            (ops.close)(&rel);
+                            deleted.push(rel);
+                        }
+                        Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
                     }
-                    Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
                 }
-            }
-            if !deleted.is_empty() {
-                (ops.toast)(&format!("Deleted {}", several(&deleted)));
-            }
-        });
-    });
+                if !deleted.is_empty() {
+                    (ops.toast)(&format!("Deleted {}", several(&deleted)));
+                }
+            });
+        },
+    );
 }
 
 // ------------------------------------------------------------- clipboard and the file manager
@@ -1146,13 +1144,13 @@ fn vault_path_field(entry: &gtk::Entry, vault: &Arc<Vault>, base: &str) -> gtk::
             folders.borrow_mut().insert(dir.clone(), None);
             let (vault, folders, asked) = (vault.clone(), folders.clone(), asked.clone());
             glib::spawn_future_local(async move {
-                let listed = gio::spawn_blocking({
+                let listed = crate::work::off_thread("path completion", {
                     let (vault, dir) = (vault.clone(), dir.clone());
                     move || vault.list_dir(&dir)
                 })
                 .await;
                 let names = match listed {
-                    Ok(Ok(rows)) => folder_names(rows),
+                    Some(Ok(rows)) => folder_names(rows),
                     // Offering nothing beats offering a wrong list, which is what the tree says
                     // about a directory the index could not answer for either.
                     answer => {

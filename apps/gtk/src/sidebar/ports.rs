@@ -4,7 +4,6 @@
 use crate::widgets::{scroller, status_page};
 use accent_api::ssh::{Direction, Forward};
 use adw::prelude::*;
-use gtk::gio;
 use gtk::glib;
 use gtk::pango;
 use std::cell::{Cell, RefCell};
@@ -105,7 +104,7 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
                     // The row goes whatever ssh answers: a forward it would not cancel is one
                     // nothing here could cancel either, and a master that died took its forwards
                     // with it.
-                    let _ = gio::spawn_blocking(move || remove(f)).await;
+                    crate::work::off_thread("ssh", move || remove(f)).await;
                     forwards.borrow_mut().retain(|kept| *kept != f);
                     list.remove(&row);
                     switch_body();
@@ -166,17 +165,17 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
                 let (switch_body, drop_forward) = (switch_body.clone(), drop_forward.clone());
                 let add = data.add_forward.clone();
                 glib::spawn_future_local(async move {
-                    let answered = gio::spawn_blocking(move || add(f)).await;
+                    let answered = crate::work::off_thread("ssh", move || add(f)).await;
                     match answered {
                         // ssh answers a forward it already has with OK and adds nothing, so a
                         // second row would be stale the moment either was stopped. Asked when the
                         // answer lands, which also catches an Add pressed twice before the first
                         // came back.
-                        Ok(Ok(())) if forwards.borrow().contains(&f) => {
+                        Some(Ok(())) if forwards.borrow().contains(&f) => {
                             banner.set_title(&format!("{} is already forwarded", row_label(f)));
                             banner.set_revealed(true);
                         }
-                        Ok(Ok(())) => {
+                        Some(Ok(())) => {
                             banner.set_revealed(false);
                             forwards.borrow_mut().push(f);
                             list.append(&forward_row(f, drop_forward));
@@ -184,11 +183,11 @@ pub(super) fn pane(data: &Rc<Data>) -> gtk::Widget {
                             remote.set_text("");
                             switch_body();
                         }
-                        Ok(Err(message)) => {
+                        Some(Err(message)) => {
                             banner.set_title(&message);
                             banner.set_revealed(true);
                         }
-                        Err(_) => {
+                        None => {
                             banner.set_title("Cannot forward this port");
                             banner.set_revealed(true);
                         }

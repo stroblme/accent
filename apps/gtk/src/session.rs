@@ -11,7 +11,7 @@ const RECENT_NOTES: usize = 50;
 const RECENT_COMMANDS: usize = 20;
 
 /// Session state is cheap to lose and noisy to write, so it follows a change by a second.
-const SESSION: Duration = Duration::from_secs(1);
+pub(crate) const SESSION: Duration = Duration::from_secs(1);
 
 /// What the palette lists, kept warm so the dialog never waits on the vault.
 #[derive(Default)]
@@ -46,7 +46,7 @@ impl App {
             .collect();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let loaded = gio::spawn_blocking(move || {
+            let loaded = crate::work::off_thread("corpus", move || {
                 // Never widened: Go to File has no All toggle, and the tree is where an ignored
                 // file is reached, dimmed but listed.
                 let mut files = vault.file_paths(false).unwrap_or_default();
@@ -79,7 +79,7 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Ok(((files, real, gone, aliases), tags, recent))) =
+            if let (Some(app), Some(((files, real, gone, aliases), tags, recent))) =
                 (weak.upgrade(), loaded)
             {
                 app.recent_notes
@@ -219,21 +219,11 @@ impl App {
     }
 
     pub fn save_session_soon(self: &Rc<Self>) {
-        if self.session.borrow().is_some() {
-            return;
-        }
-        let id = glib::timeout_add_local_once(
-            SESSION,
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move || {
-                    *app.session.borrow_mut() = None;
-                    app.save_session();
-                }
-            ),
-        );
-        *self.session.borrow_mut() = Some(id);
+        self.session.call_once(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move || app.save_session()
+        ));
     }
 
     pub fn save_session(&self) {

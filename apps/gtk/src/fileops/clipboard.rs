@@ -273,7 +273,7 @@ fn copy_here(ops: &Rc<Ops>, rel: &str, dir: &str, is_dir: bool) {
     let (rel, dir) = (rel.to_string(), dir.to_string());
     let name = basename(&rel).to_string();
     glib::spawn_future_local(async move {
-        let done = gio::spawn_blocking({
+        let done = crate::work::attempt(&format!("copy {name}"), {
             let name = name.clone();
             move || {
                 // Naming and copying on the same worker: each candidate name costs a `stat`,
@@ -286,9 +286,8 @@ fn copy_here(ops: &Rc<Ops>, rel: &str, dir: &str, is_dir: bool) {
         // Neither the tree nor the index is poked: the watcher reports what landed, wherever the
         // files are, the same way it reports a new note.
         (ops.toast)(&match done {
-            Ok(Ok(to)) => format!("Copied {name} to {to}"),
-            Ok(Err(e)) => format!("Cannot copy {name}: {e}"),
-            Err(_) => format!("Cannot copy {name}"),
+            Ok(to) => format!("Copied {name} to {to}"),
+            Err(why) => why,
         });
     });
 }

@@ -288,11 +288,6 @@ pub fn probe_path(url: &Url) -> PathBuf {
         .join(format!("{}-probe", id(url)))
 }
 
-/// Ask whether the master is alive. Exits non-zero when it is not.
-pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
-    control(url, ctl, "check")
-}
-
 /// Tell the master to shut down, as the Open Remote dialog does with its probe's when it closes.
 /// A vault's own master is not told: it lingers its ControlPersist minute for a quick reopen.
 pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
@@ -750,18 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn check_and_exit_address_the_running_master() {
-        assert_eq!(
-            check(&plain(), ctl()),
-            words(&[
-                "ssh",
-                "-o",
-                "ControlPath=/run/user/1000/accent/0123456789abcdef",
-                "-O",
-                "check",
-                "box",
-            ])
-        );
+    fn exit_addresses_the_running_master() {
         assert_eq!(
             exit(&ported(), ctl()),
             words(&[

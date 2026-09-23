@@ -685,10 +685,10 @@ fn serve(resolve: &Arc<Resolve>, request: &webkit6::URISchemeRequest) {
     };
     let (resolve, request) = (resolve.clone(), request.clone());
     glib::spawn_future_local(async move {
-        match gio::spawn_blocking(move || resolve_asset(&*resolve, &rel)).await {
-            Ok(Some(path)) => send(&request, &path),
-            Ok(None) => deny(&request, "outside the vault"),
-            Err(_) => deny(&request, "the asset worker panicked"),
+        match crate::work::off_thread("asset", move || resolve_asset(&*resolve, &rel)).await {
+            Some(Some(path)) => send(&request, &path),
+            Some(None) => deny(&request, "outside the vault"),
+            None => deny(&request, "the asset worker stopped"),
         }
     });
 }
@@ -775,9 +775,9 @@ fn css_rgba(c: gdk::RGBA) -> String {
     )
 }
 
-/// The foreground at `alpha`, matching `highlight.rs::with_alpha`.
+/// The foreground at `alpha`, as CSS: the same colour the editor dims with.
 fn dim(c: gdk::RGBA, alpha: f32) -> String {
-    css_rgba(gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha))
+    css_rgba(crate::theme::at(c, alpha))
 }
 
 /// The whole preview look, derived from three values plus the document font. The alphas are the

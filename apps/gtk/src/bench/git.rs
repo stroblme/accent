@@ -149,7 +149,9 @@ fn bench_git_stage(app: &Rc<App>) {
         }
         println!("bench git_step folder Discard");
         click("src", "Discard");
-        for answer in ["discard", "delete"] {
+        // Discard, and the Delete Permanently the untracked half may raise behind it: both are
+        // `dialogs::confirm` questions, so both answer to the one id.
+        for _ in 0..2 {
             glib::timeout_future(Duration::from_millis(500)).await;
             let Some(dialog) = app
                 .window
@@ -160,7 +162,7 @@ fn bench_git_stage(app: &Rc<App>) {
             };
             let (heading, body) = (dialog.heading().unwrap_or_default(), dialog.body());
             println!("bench git_dialog {heading:?} {body:?}");
-            dialog.emit_by_name::<()>("response", &[&answer]);
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
             dialog.close();
             settle().await;
         }

@@ -541,7 +541,7 @@ mod imp {
             let carets = self.carets.borrow();
             if !carets.is_empty() {
                 let alpha = obj.blink_phase().map_or(1.0, |(e, p)| blink_alpha(e, p));
-                let tint = crate::highlight::with_alpha(colour, colour.alpha() * alpha);
+                let tint = crate::theme::at(colour, colour.alpha() * alpha);
                 let insert = buffer.get_insert();
                 for mark in carets.iter().map(|c| &c.mark).chain([&insert]) {
                     let at = obj.iter_location(&buffer.iter_at_mark(mark));
@@ -557,7 +557,7 @@ mod imp {
             if let Some(text) = self.ghost.borrow().as_deref() {
                 let caret = caret(&buffer);
                 let at = obj.iter_location(&caret);
-                let dim = crate::highlight::with_alpha(colour, colour.alpha() * GHOST_ALPHA);
+                let dim = crate::theme::at(colour, colour.alpha() * GHOST_ALPHA);
                 let layout = obj.create_pango_layout(Some(text));
                 // The layout carries the view's font and nothing the tags at the caret say, so
                 // inside a heading the suggestion was drawn at body size next to text at 1.6.

@@ -53,7 +53,7 @@ impl App {
         let (key, path) = (key.to_string(), path.to_path_buf());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let parsed = gio::spawn_blocking({
+            let parsed = crate::work::off_thread("diagram reader", {
                 let (key, path) = (key.clone(), path.clone());
                 move || {
                     parse(match vault {
@@ -67,9 +67,8 @@ impl App {
             if app.doc_for(&key).is_some() {
                 return;
             }
-            match parsed {
-                Ok(parsed) => app.adopt_diagram(&key, &path, parsed, how),
-                Err(_) => tracing::warn!("the diagram reader panicked on {key}"),
+            if let Some(parsed) = parsed {
+                app.adopt_diagram(&key, &path, parsed, how);
             }
         });
     }
@@ -86,8 +85,8 @@ impl App {
         let path = self.root().join(&key);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let parsed = gio::spawn_blocking(move || parse_text(text)).await;
-            if let (Some(app), Ok(parsed)) = (weak.upgrade(), parsed) {
+            let parsed = crate::work::off_thread("diagram reader", move || parse_text(text)).await;
+            if let (Some(app), Some(parsed)) = (weak.upgrade(), parsed) {
                 app.adopt_diagram(&key, &path, parsed, how);
             }
         });
@@ -359,7 +358,7 @@ impl App {
         let (key, path) = (tab.key(), tab.path());
         let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let parsed = gio::spawn_blocking(move || {
+            let parsed = crate::work::off_thread("diagram reader", move || {
                 parse(match vault {
                     Some(vault) => vault.read_text(&key),
                     None => accent_core::fs::read_text(&path),
@@ -370,13 +369,13 @@ impl App {
                 return;
             };
             match parsed {
-                Ok(Parsed::Diagram(file, etag)) => {
+                Some(Parsed::Diagram(file, etag)) => {
                     tab.reload(file, etag);
                     app.sync_status();
                 }
-                Ok(Parsed::Refused(_, why)) => app.cannot("reload", why),
-                Ok(Parsed::Failed(e)) => app.cannot("reload", e),
-                Err(_) => tracing::warn!("the diagram reader panicked"),
+                Some(Parsed::Refused(_, why)) => app.cannot("reload", why),
+                Some(Parsed::Failed(e)) => app.cannot("reload", e),
+                None => {}
             }
         });
     }
@@ -454,7 +453,7 @@ impl App {
     fn embed_image(self: &Rc<Self>, tab: &Rc<DiagramTab>, path: PathBuf) {
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking(move || {
+            let read = crate::work::attempt("read the picture", move || {
                 let bytes = std::fs::read(&path)?;
                 let mime = gio::content_type_guess(Some(&path), &bytes[..])
                     .0
@@ -467,9 +466,8 @@ impl App {
                 return;
             };
             let (mime, bytes) = match read {
-                Ok(Ok(read)) => read,
-                Ok(Err(e)) => return app.cannot("read the picture", e),
-                Err(_) => return,
+                Ok(read) => read,
+                Err(why) => return app.toast(&why),
             };
             if bytes.len() > MAX_IMAGE {
                 return app.toast("Pictures over 2 MiB are not embedded");
