@@ -608,12 +608,17 @@ impl Vault {
     /// not walked, a `node_modules` it never enters — is still there to open, so the file New
     /// File would write for the link ([`linked_path`]) is looked for on disk before it is offered:
     /// one `stat`, and only for a link the index could not place.
+    ///
+    /// That `stat` is asked through [`stat`](Self::stat) rather than [`exists`](Self::exists),
+    /// which cannot say why it answered `false`: on a remote vault that is not answering, a link
+    /// to a note that is really there read as one to write, and Go to Definition offered New
+    /// File over it. Same reasoning as [`repos`](Self::repos) below.
     pub fn follow(&self, target: &str) -> Result<Option<String>> {
         if let Some(rel) = self.resolve_link(target)? {
             return Ok(Some(rel));
         }
         let rel = linked_path(target);
-        Ok(self.exists(&rel).then_some(rel))
+        Ok(self.stat(&rel)?.map(|_| rel))
     }
 
     /// The repositories the vault touches. A failure is the caller's to see: offline used to read

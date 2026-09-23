@@ -399,9 +399,12 @@ impl Local {
     ) -> Result<ReplaceReport> {
         let deadline = std::time::Instant::now() + budget;
         let mut report = ReplaceReport::default();
-        // Collected before the first write: the guard must not still be held while files are
-        // rewritten, and the worker reindexes them as they land.
-        for rel in self.searcher().grep_paths(re, include_ignored)? {
+        // Bound to a name before the loop, not iterated straight out of the call: the guard
+        // `searcher()` returns is a temporary of the `for` *statement*, so writing it that way
+        // held the search connection for the whole rewrite — a query that reached the vault
+        // meanwhile waited out every file. The worker reindexes them as they land.
+        let paths = self.searcher().grep_paths(re, include_ignored)?;
+        for rel in paths {
             if std::time::Instant::now() >= deadline {
                 report
                     .failed

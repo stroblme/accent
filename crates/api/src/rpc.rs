@@ -347,6 +347,10 @@ impl Client {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 locked(&self.pending).remove(&id);
+                // Nobody is left to read this one, and the server is still working on it: the
+                // same notification a dropped `Task` sends, said here because a caller that gives
+                // up on a timeout has no `Asked` of its own to cancel through.
+                self.cancel(id);
                 Err(RpcError::failed(format!("{method} timed out")))
             }
         }
@@ -1012,19 +1016,22 @@ mod tests {
     }
 
     /// A call waits as long as its caller gave it: a method the host may take longer over is
-    /// answered, where the same call given less gives up at its own deadline.
+    /// answered, where the same call given less gives up at its own deadline — and the one that
+    /// gave up tells the host so, or the host works on for an answer nobody will read.
     #[test]
     fn a_call_waits_for_as_long_as_it_was_given() {
         let (server_in, client_out) = std::io::pipe().unwrap();
         let (client_in, mut server_out) = std::io::pipe().unwrap();
+        let cancelled: Arc<Mutex<Vec<Value>>> = Arc::default();
         // A host that takes 300 ms over every answer, and ignores the pings.
+        let heard = cancelled.clone();
         let server = std::thread::spawn(move || {
             for line in BufReader::new(server_in).lines().map_while(Result::ok) {
-                let Some(id) = serde_json::from_str::<Value>(&line)
-                    .unwrap()
-                    .get("id")
-                    .cloned()
-                else {
+                let message = serde_json::from_str::<Value>(&line).unwrap();
+                let Some(id) = message.get("id").cloned() else {
+                    if message.get("method") == Some(&json!("cancel")) {
+                        locked(&heard).push(message["params"][0].clone());
+                    }
                     continue;
                 };
                 std::thread::sleep(Duration::from_millis(300));
@@ -1046,7 +1053,13 @@ mod tests {
 
         let e = ask(Duration::from_millis(100)).unwrap_err();
         assert_eq!(e.message, "slow timed out");
+        // The next answer proves the host has read past the cancel the timeout sent.
         assert_eq!(ask(Duration::from_secs(2)).unwrap(), "done");
+        assert_eq!(
+            *locked(&cancelled),
+            vec![json!(1)],
+            "the request given up on"
+        );
         client.shutdown();
         server.join().unwrap();
     }
