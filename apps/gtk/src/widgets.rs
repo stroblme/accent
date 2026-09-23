@@ -3,7 +3,7 @@
 //! keystroke debounce — that every searching pane needs a copy of.
 
 use adw::prelude::*;
-use gtk::{glib, pango};
+use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
@@ -79,6 +79,33 @@ pub(crate) fn row_text(item: &gtk::ListItem) -> Option<String> {
     item.item()
         .and_downcast::<gtk::StringObject>()
         .map(|s| s.string().to_string())
+}
+
+/// Hang a menu off `host`, pointed at `anchor` in `host`'s coordinates, and show it.
+///
+/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
+/// long as its menu is up (`tree::Tree::pin`).
+///
+/// A popover parented by hand stays parented until it is unparented by hand — but not while it is
+/// closing. `closed` is emitted from inside the item's own `clicked`, and an unparented widget
+/// has no path to the action group on the host, so unparenting there drops whatever the click
+/// just asked for: it is what made the status bar's Fit Height do nothing. The idle runs once the
+/// click is over.
+pub(crate) fn popup_menu(
+    host: &impl IsA<gtk::Widget>,
+    menu: &gio::Menu,
+    anchor: Option<gdk::Rectangle>,
+) -> gtk::PopoverMenu {
+    let popover = gtk::PopoverMenu::from_model(Some(menu));
+    popover.set_parent(host);
+    popover.set_has_arrow(false);
+    popover.set_pointing_to(anchor.as_ref());
+    popover.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    popover.popup();
+    popover
 }
 
 /// Add or take away a style class. Row widgets are recycled, so the branch that takes it off

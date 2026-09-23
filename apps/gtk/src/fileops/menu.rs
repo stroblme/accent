@@ -43,7 +43,7 @@ pub fn context_menu(
 
     if !marked.is_empty() {
         let menu = marked_menu(marked, row_dir(row), can_paste(ops));
-        return popup(host, &menu, anchor, None);
+        return crate::widgets::popup_menu(host, &menu, Some(anchor));
     }
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
@@ -73,7 +73,7 @@ pub fn context_menu(
         // Nothing else names a path, but Paste names the folder it puts things in, and here that
         // is the vault root — the same target New File has just been given.
         menu.append_section(None, &clip_section(ops, None, dir));
-        return popup(host, &menu, anchor, None);
+        return crate::widgets::popup_menu(host, &menu, Some(anchor));
     };
     // Rename is the move as well as the name: a path typed into it carries the file, which is
     // what replaced Move to… when the tree learned to take a drop. A folder's is an action of its
@@ -107,7 +107,7 @@ pub fn context_menu(
     let danger = gio::Menu::new();
     danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
-    popup(host, &menu, anchor, None)
+    crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
 /// The menu a right-click on a marked row offers: what can act on several paths at once, and
@@ -167,38 +167,6 @@ pub fn row_dir(row: Option<(&str, bool)>) -> &str {
         Some((rel, false)) => parent_dir(rel),
         None => "",
     }
-}
-
-/// Hang the menu off `host` and show it. `class` is a style class for the popover, for a host
-/// that gives it no background of its own.
-///
-/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
-/// long as its menu is up (`tree::Tree::pin`).
-pub fn popup(
-    host: &gtk::Widget,
-    menu: &gio::Menu,
-    anchor: gdk::Rectangle,
-    class: Option<&str>,
-) -> gtk::PopoverMenu {
-    let popover = gtk::PopoverMenu::from_model(Some(menu));
-    if let Some(class) = class {
-        popover.add_css_class(class);
-    }
-    popover.set_parent(host);
-    popover.set_has_arrow(false);
-    popover.set_pointing_to(Some(&anchor));
-    // A popover parented by hand stays parented until it is unparented by hand — but not while it
-    // is closing. `closed` is emitted from inside the item's own `clicked`, and an unparented
-    // widget has no path to the action group on the host, so unparenting there dropped whatever
-    // the click had just asked for — every item in this menu, not only the ones that open a
-    // dialog, exactly as it dropped the status bar's Fit Height. The idle runs once the click is
-    // over.
-    popover.connect_closed(|p| {
-        let p = p.clone();
-        glib::idle_add_local_once(move || p.unparent());
-    });
-    popover.popup();
-    popover
 }
 
 /// The type a marked set travels as: the paths and, for each, whether it is a directory, which is

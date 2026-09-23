@@ -386,20 +386,7 @@ pub fn wire_window(app: &Rc<App>) {
             for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
                 menu.append(Some(label_of(action)), Some(action));
             }
-            let popover = gtk::PopoverMenu::from_model(Some(&menu));
-            popover.set_parent(app.statusbar.zoom());
-            popover.set_has_arrow(false);
-            // A popover parented by hand stays parented until it is unparented by hand — but not
-            // while it is closing. `closed` is emitted from inside the item's own `clicked`, and
-            // an unparented widget has no path to the window's action muxer, so unparenting there
-            // dropped the action the click had just asked for: the menu appeared, Fit Height did
-            // nothing, and the page stayed fitted to the width. The idle runs once the click is
-            // over.
-            popover.connect_closed(|p| {
-                let p = p.clone();
-                glib::idle_add_local_once(move || p.unparent());
-            });
-            popover.popup();
+            crate::widgets::popup_menu(app.statusbar.zoom(), &menu, None);
         }
     ));
     app.statusbar.zoom().add_controller(fit);

@@ -1103,30 +1103,13 @@ impl PdfTab {
             file.append(Some(crate::actions::label_of(action)), Some(action));
         }
         menu.append_section(None, &file);
-        let popover = gtk::PopoverMenu::from_model(Some(&menu));
         // Parented to the box rather than to the view, and pointed at the box's own coordinates:
         // a popover hung off a widget with a `size_allocate` of its own never re-presents and
         // freezes at its first-frame size (DESIGN.md, States).
         let at = gtk::graphene::Point::new(x as f32, y as f32);
         let at = self.view.compute_point(&self.host, &at).unwrap_or(at);
-        popover.set_parent(&self.host);
-        popover.set_has_arrow(false);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            at.x() as i32,
-            at.y() as i32,
-            1,
-            1,
-        )));
-        // A popover parented by hand stays parented until it is unparented by hand — but not
-        // while it is closing. `closed` is emitted from inside the item's own `clicked`, and an
-        // unparented widget has no path to the action group on the host, so unparenting there
-        // would drop the Copy the click had just asked for, exactly as it dropped the status
-        // bar's Fit Height. The idle runs once the click is over.
-        popover.connect_closed(|p| {
-            let p = p.clone();
-            glib::idle_add_local_once(move || p.unparent());
-        });
-        popover.popup();
+        let anchor = gtk::gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+        crate::widgets::popup_menu(&self.host, &menu, Some(anchor));
     }
 
     /// The keys a reader uses. Page Up, Page Down, Home and End are `GtkScrolledWindow`'s own;
