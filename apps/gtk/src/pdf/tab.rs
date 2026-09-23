@@ -626,23 +626,19 @@ impl PdfTab {
             return;
         }
         let name = crate::doc::file_name(&self.key()).to_string();
-        let dialog = crate::dialogs::alert(
+        let tab = Rc::downgrade(self);
+        crate::dialogs::confirm(
+            &self.view,
             &format!("Delete Page {}?", page + 1),
             &format!("The page is removed from {name}. This cannot be undone."),
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("delete", "Delete", adw::ResponseAppearance::Destructive),
-            ],
-            "cancel",
+            "Delete",
+            true,
+            move || {
+                if let Some(tab) = tab.upgrade() {
+                    tab.edit_pages(pdf::PageEdit::Delete(page));
+                }
+            },
         );
-        let tab = Rc::downgrade(self);
-        crate::dialogs::choose(&dialog, Some(&self.view), move |response| {
-            if let Some(tab) = tab.upgrade()
-                && response == "delete"
-            {
-                tab.edit_pages(pdf::PageEdit::Delete(page));
-            }
-        });
     }
 
     /// The same, but wait for it — the window is closing and the process is about to end, so a

@@ -24,7 +24,7 @@ use self::paths::{
     already_exists, is_markdown, levels, renamed_part, renamed_path, split_typed, typed_path, verb,
 };
 use crate::dialogs::{
-    CONFIRM, alert, choose, focus_entry, form, labelled, name_dialog, name_entry,
+    CONFIRM, alert, choose, confirm, focus_entry, form, labelled, name_dialog, name_entry,
 };
 use crate::pathfield::{completions, look_again, path_field};
 use accent_api::{FileKind, FileRow, RenamePlan, Vault};
@@ -576,31 +576,28 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
 /// the note by its stem still find it, so there is nothing to rewrite and the rename would
 /// otherwise go through in silence.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
-    let dialog = alert(
-        "No Longer a Note?",
-        &format!(
-            "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
-            basename(to)
-        ),
-        &[
-            ("cancel", "Cancel", adw::ResponseAppearance::Default),
-            ("rename", "Rename", adw::ResponseAppearance::Default),
-        ],
-        "cancel",
+    let body = format!(
+        "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
+        basename(to)
     );
-
     let (ops, from, to, window) = (
         ops.clone(),
         from.to_string(),
         to.to_string(),
         ops.window.clone(),
     );
-    choose(&dialog, Some(&window), move |response| {
-        if response == "rename" {
+    // Not destructive: nothing is lost, the note simply stops being read as one.
+    confirm(
+        &window,
+        "No Longer a Note?",
+        &body,
+        "Rename",
+        false,
+        move || {
             let verb = verb(&from, &to);
             plan(&ops, vec![(from.clone(), to.clone())], verb);
-        }
-    });
+        },
+    );
 }
 
 /// Move notes and folders into another directory of the same vault, keeping their names: a row
@@ -923,60 +920,56 @@ pub fn trashed_with(trashed: &str, key: &str) -> bool {
 /// There is no Undo: `gio` has no untrash, so the toast never offers a button that cannot work
 /// (NOTEPAD.md records it). Deleting for good is therefore asked about, every time.
 fn confirm_delete(ops: &Rc<Ops>, rels: Vec<String>) {
-    let dialog = alert(
-        "Delete Permanently?",
-        &format!(
-            "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
-            several(&rels),
-            match ops.vault.is_remote() {
-                true => " on the remote",
-                false => " on this system",
-            },
-            match rels.len() {
-                1 => "it",
-                _ => "them",
-            }
-        ),
-        &[
-            ("cancel", "Cancel", adw::ResponseAppearance::Default),
-            ("delete", "Delete", adw::ResponseAppearance::Destructive),
-        ],
-        "cancel",
+    let body = format!(
+        "{} cannot be moved to the trash{}. Deleting {} cannot be undone.",
+        several(&rels),
+        match ops.vault.is_remote() {
+            true => " on the remote",
+            false => " on this system",
+        },
+        match rels.len() {
+            1 => "it",
+            _ => "them",
+        }
     );
 
     let (ops, window) = (ops.clone(), ops.window.clone());
-    choose(&dialog, Some(&window), move |response| {
-        if response != "delete" {
-            return;
-        }
-        // A round trip per path on a remote vault, so on a worker; each tab closes once its file
-        // is gone.
-        let vault = ops.vault.clone();
-        glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || {
-                rels.into_iter()
-                    .map(|rel| (vault.delete(&rel), rel))
-                    .collect::<Vec<_>>()
-            })
-            .await;
-            let Ok(done) = done else {
-                return (ops.toast)("Cannot delete");
-            };
-            let mut deleted = Vec::new();
-            for (answer, rel) in done {
-                match answer {
-                    Ok(()) => {
-                        (ops.close)(&rel);
-                        deleted.push(rel);
+    confirm(
+        &window,
+        "Delete Permanently?",
+        &body,
+        "Delete",
+        true,
+        move || {
+            // A round trip per path on a remote vault, so on a worker; each tab closes once its file
+            // is gone.
+            let vault = ops.vault.clone();
+            glib::spawn_future_local(async move {
+                let done = gio::spawn_blocking(move || {
+                    rels.into_iter()
+                        .map(|rel| (vault.delete(&rel), rel))
+                        .collect::<Vec<_>>()
+                })
+                .await;
+                let Ok(done) = done else {
+                    return (ops.toast)("Cannot delete");
+                };
+                let mut deleted = Vec::new();
+                for (answer, rel) in done {
+                    match answer {
+                        Ok(()) => {
+                            (ops.close)(&rel);
+                            deleted.push(rel);
+                        }
+                        Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
                     }
-                    Err(e) => (ops.toast)(&format!("Cannot delete {}: {e}", basename(&rel))),
                 }
-            }
-            if !deleted.is_empty() {
-                (ops.toast)(&format!("Deleted {}", several(&deleted)));
-            }
-        });
-    });
+                if !deleted.is_empty() {
+                    (ops.toast)(&format!("Deleted {}", several(&deleted)));
+                }
+            });
+        },
+    );
 }
 
 // ------------------------------------------------------------- clipboard and the file manager

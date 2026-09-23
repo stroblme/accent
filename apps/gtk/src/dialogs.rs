@@ -74,6 +74,40 @@ pub(crate) fn alert(
     dialog
 }
 
+/// The question every "are you sure" takes: Cancel, one verb, Return and Escape on Cancel.
+/// `then` runs on the verb and on nothing else.
+///
+/// `destructive` paints the verb in the destructive colour, which is what marks the answers that
+/// lose something (DESIGN.md, States). A question with a third answer, or one whose verb is the
+/// safe one, builds its own with [`alert`] and [`choose`].
+pub(crate) fn confirm(
+    parent: &impl IsA<gtk::Widget>,
+    heading: &str,
+    body: &str,
+    verb: &str,
+    destructive: bool,
+    then: impl FnOnce() + 'static,
+) {
+    let appearance = match destructive {
+        true => adw::ResponseAppearance::Destructive,
+        false => adw::ResponseAppearance::Default,
+    };
+    let dialog = alert(
+        heading,
+        body,
+        &[
+            ("cancel", "Cancel", adw::ResponseAppearance::Default),
+            (CONFIRM, verb, appearance),
+        ],
+        "cancel",
+    );
+    choose(&dialog, Some(parent), move |response| {
+        if response == CONFIRM {
+            then();
+        }
+    });
+}
+
 /// The shared shape of the name dialogs: Cancel, one verb, and `form` as the extra child. Also
 /// what the Git pane's Create Branch uses.
 pub(crate) fn name_dialog(title: &str, verb: &str, form: &gtk::Box) -> adw::AlertDialog {

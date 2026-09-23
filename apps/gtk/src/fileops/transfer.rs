@@ -4,7 +4,7 @@
 
 use super::Ops;
 use super::paths::{child_path, free_path};
-use crate::dialogs::{alert, choose};
+use crate::dialogs::confirm;
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -111,25 +111,19 @@ fn local_name(path: &Path) -> Option<String> {
 /// (DESIGN.md, States). Once for the batch rather than once per file: a chooser can return a
 /// dozen paths, and a dozen dialogs is an obstacle rather than a question.
 fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: &[String]) {
-    let dialog = alert(
-        match existing.len() {
-            1 => "Replace File?",
-            _ => "Replace Files?",
-        },
-        &replace_body(existing),
-        &[
-            ("cancel", "Cancel", adw::ResponseAppearance::Default),
-            ("replace", "Replace", adw::ResponseAppearance::Destructive),
-        ],
-        "cancel",
-    );
-
+    let heading = match existing.len() {
+        1 => "Replace File?",
+        _ => "Replace Files?",
+    };
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
-    choose(&dialog, Some(&window), move |response| {
-        if response == "replace" {
-            send(&ops, &dir, chosen);
-        }
-    });
+    confirm(
+        &window,
+        heading,
+        &replace_body(existing),
+        "Replace",
+        true,
+        move || send(&ops, &dir, chosen),
+    );
 }
 
 /// Body of the "Replace Files?" dialog: what is already there, named, and that it cannot be got

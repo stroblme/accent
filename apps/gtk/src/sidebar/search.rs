@@ -7,7 +7,7 @@
 //! and an answer arriving under a newer number is dropped rather than painted.
 
 use super::{OnOpen, Target};
-use crate::dialogs::{alert, choose};
+use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Match, SearchHit};
@@ -426,25 +426,15 @@ impl Search {
         }
         let total = self.total.get();
         if total > CONFIRM_ABOVE {
-            let dialog = alert(
+            let search = self.clone();
+            return confirm(
+                &self.apply,
                 &format!("Replace {total} Matches?"),
                 "Every match is rewritten in the file it is in. This cannot be undone.",
-                &[
-                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                    (
-                        "replace",
-                        "Replace All",
-                        adw::ResponseAppearance::Destructive,
-                    ),
-                ],
-                "cancel",
+                "Replace All",
+                true,
+                move || search.run_replace_all(),
             );
-            let search = self.clone();
-            return choose(&dialog, Some(&self.apply), move |response| {
-                if response == "replace" {
-                    search.run_replace_all();
-                }
-            });
         }
         self.run_replace_all();
     }

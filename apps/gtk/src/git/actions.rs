@@ -340,21 +340,15 @@ impl Panel {
 
     /// The one delete that loses commits, so it asks first (DESIGN.md, States).
     fn confirm_delete(self: &Rc<Self>, name: String) {
-        let dialog = dialogs::alert(
+        let panel = self.clone();
+        dialogs::confirm(
+            &self.hooks.window,
             &format!("Delete {name}?"),
             "Its commits are not merged into any other branch and will be lost.",
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("delete", "Delete", adw::ResponseAppearance::Destructive),
-            ],
-            "cancel",
+            "Delete",
+            true,
+            move || panel.delete_branch(name, true),
         );
-        let panel = self.clone();
-        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response == "delete" {
-                panel.delete_branch(name, true);
-            }
-        });
     }
 
     /// Pick one of the selected repository's other local branches and delete it: the palette's
@@ -474,32 +468,27 @@ impl Panel {
         if !self.merging() {
             return (self.hooks.toast)("No merge in progress");
         }
-        let dialog = dialogs::alert(
+        let panel = self.clone();
+        dialogs::confirm(
+            &self.hooks.window,
             "Abort Merge?",
             "The files go back to how they were before the merge, and the conflicts resolved so \
              far are lost.",
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("abort", "Abort", adw::ResponseAppearance::Destructive),
-            ],
-            "cancel",
+            "Abort",
+            true,
+            move || {
+                panel.command(
+                    "abort the merge".to_string(),
+                    false,
+                    Fail::Say,
+                    |vault, repo| {
+                        vault
+                            .git_merge_abort(repo)
+                            .map(|()| "Merge aborted".to_string())
+                    },
+                );
+            },
         );
-        let panel = self.clone();
-        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response != "abort" {
-                return;
-            }
-            panel.command(
-                "abort the merge".to_string(),
-                false,
-                Fail::Say,
-                |vault, repo| {
-                    vault
-                        .git_merge_abort(repo)
-                        .map(|()| "Merge aborted".to_string())
-                },
-            );
-        });
     }
 
     /// Carry on with the rebase under way, each commit keeping its own message. One that stops on
@@ -527,32 +516,27 @@ impl Panel {
 
     /// Give up the rebase under way, which asks first for the reason [`Panel::abort_merge`] does.
     pub(super) fn abort_rebase(self: &Rc<Self>) {
-        let dialog = dialogs::alert(
+        let panel = self.clone();
+        dialogs::confirm(
+            &self.hooks.window,
             "Abort Rebase?",
             "The branch goes back to where it was before the rebase, and the conflicts resolved \
              so far are lost.",
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("abort", "Abort", adw::ResponseAppearance::Destructive),
-            ],
-            "cancel",
+            "Abort",
+            true,
+            move || {
+                panel.command(
+                    "abort the rebase".to_string(),
+                    false,
+                    Fail::Say,
+                    |vault, repo| {
+                        vault
+                            .git_rebase_abort(repo)
+                            .map(|()| "Rebase aborted".to_string())
+                    },
+                );
+            },
         );
-        let panel = self.clone();
-        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response != "abort" {
-                return;
-            }
-            panel.command(
-                "abort the rebase".to_string(),
-                false,
-                Fail::Say,
-                |vault, repo| {
-                    vault
-                        .git_rebase_abort(repo)
-                        .map(|()| "Rebase aborted".to_string())
-                },
-            );
-        });
     }
 
     /// Put HEAD on one commit, detached, so the repository can be read at that point.
@@ -674,16 +658,6 @@ impl Panel {
             (None, None) => return,
         };
         let body = discard_body(&what, folder.is_some(), tracked.len(), untracked.len());
-        let dialog = dialogs::alert(
-            "Discard Changes?",
-            &body,
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("discard", "Discard", adw::ResponseAppearance::Destructive),
-            ],
-            "cancel",
-        );
-
         let root = self.hooks.vault.root();
         let keys: Vec<String> = untracked
             .iter()
@@ -695,18 +669,22 @@ impl Panel {
             None => format!("Discarded {what}"),
         };
         let panel = self.clone();
-        dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response != "discard" {
-                return;
-            }
-            if !keys.is_empty() {
-                (panel.hooks.trash)(&keys);
-                panel.schedule_refresh(Depth::Status);
-            }
-            panel.write("discard", paths, move |vault, repo, paths| {
-                vault.git_discard(repo, paths).map(|()| done)
-            });
-        });
+        dialogs::confirm(
+            &self.hooks.window,
+            "Discard Changes?",
+            &body,
+            "Discard",
+            true,
+            move || {
+                if !keys.is_empty() {
+                    (panel.hooks.trash)(&keys);
+                    panel.schedule_refresh(Depth::Status);
+                }
+                panel.write("discard", paths, move |vault, repo, paths| {
+                    vault.git_discard(repo, paths).map(|()| done)
+                });
+            },
+        );
     }
 }
 
