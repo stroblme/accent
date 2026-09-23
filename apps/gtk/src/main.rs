@@ -209,8 +209,8 @@ struct App {
     /// What the window was opened on, and is remembered by. A cell, so a window that changes what
     /// it is remembered by has one assignment to make.
     key: RefCell<shell::WindowKey>,
-    /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
-    /// no index, no watcher, no session, and every tab keyed by an absolute path.
+    /// The vault this window is on, or `None` for a window opened on a file or on shells instead
+    /// of a folder: no index, no watcher, and every tab keyed by an absolute path.
     ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
     vault: Option<Arc<Vault>>,
@@ -876,6 +876,16 @@ impl App {
         }
     }
 
+    /// What a launch names after the window's key: a note in a vault's window, and in a terminal
+    /// session's the directory to open another shell at.
+    fn open_named(self: &Rc<Self>, named: &str) {
+        let session = matches!(*self.key.borrow(), shell::WindowKey::Terminal(_));
+        match session {
+            true => self.open_terminal_at(Some(PathBuf::from(named))),
+            false => self.open_path(named),
+        }
+    }
+
     /// A shell in a new tab of the active pane, at the vault root — the directory everything else
     /// in the window is measured from. A window with no vault opens one at home.
     fn open_terminal(self: &Rc<Self>) {
@@ -927,6 +937,7 @@ impl App {
     /// The one door into a shell tab, new or restored. A restored one lands in the pane the
     /// session put it in, behind whatever that pane shows, and does not take the keyboard.
     fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
+        use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
         if matches!(shell, terminal::Shell::Local(_))
             && terminal::cli().is_none()
@@ -935,6 +946,10 @@ impl App {
             self.toast("accent-cli is not installed; shells will not persist");
         }
         let term = terminal::open(&self.tabs_for(&key), &shell, key);
+        // A new shell is part of the session, as a new tab is; a restored one is in it already.
+        if how != Opened::Restored {
+            self.save_session_soon();
+        }
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -976,7 +991,6 @@ impl App {
         );
         // A `cd` is where the session will put the shell back, so it is written down like a move
         // of the caret would be.
-        use vte4::TerminalExt as _;
         term.view
             .connect_current_directory_uri_changed(glib::clone!(
                 #[weak(rename_to = app)]

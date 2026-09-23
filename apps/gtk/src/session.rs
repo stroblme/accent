@@ -112,6 +112,7 @@ impl App {
         let vaults = start::recent_vaults(&self.config);
         let used = self.recent_commands.borrow();
         let config = self.config.borrow();
+        let key = self.key.borrow();
         let sources = palette::Sources {
             recent,
             mru,
@@ -132,7 +133,7 @@ impl App {
             // Filtered here rather than in the dialog: the window is the only thing that knows
             // which vault it is already on, and a row that raises the window it was picked from
             // would be the one row in the list that does nothing.
-            vaults: start::other_vaults(&vaults, self.vault().map(|v| v.key())),
+            vaults: start::other_vaults(&vaults, self.vault().map(|v| v.key()).or(key.saved_as())),
             // The tab bar's own chords: no command runs them, so they are not rows, but a
             // rebind that took one would be shadowed by a controller the dialog cannot see.
             taken: panes::widget_chords()
@@ -158,6 +159,7 @@ impl App {
                 }
             }),
         };
+        drop(key);
         drop(config);
         drop(used);
         palette::present(
@@ -281,10 +283,70 @@ impl App {
         self.write_session(&session);
     }
 
-    /// Whether this window writes a session down and puts it back: a vault's does. A window
-    /// opened on a file or a shell has nothing to key one on, and is opened the same way again.
+    /// Whether this window writes a session down and puts it back: a vault's does, and a named
+    /// terminal session's. A window opened on a file, or an unnamed one of shells, has nothing to
+    /// key one on, and is opened the same way again.
     fn keeps_session(&self) -> bool {
         self.key.borrow().saved_as().is_some()
+    }
+
+    /// Save Session…: give this terminal window's shells a name to come back to. From then on the
+    /// window writes its session the way a vault's does; asked again, it saves under another name.
+    pub(crate) fn save_session_dialog(self: &Rc<Self>) {
+        let named = match &*self.key.borrow() {
+            shell::WindowKey::Terminal(key) => terminal::session_name(key).map(str::to_string),
+            key if key.is_terminal() => None,
+            _ => return self.toast("A vault window's session is saved with the vault"),
+        };
+        let entry = dialogs::name_entry("Session name", &named.unwrap_or_default());
+        let form = dialogs::form();
+        form.append(&entry);
+        let dialog = dialogs::name_dialog("Save Session", "Save", &form);
+        let typed = entry.clone();
+        dialogs::choose(
+            &dialog,
+            Some(&self.window),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |response| {
+                    if response == dialogs::CONFIRM {
+                        app.save_session_as(typed.text().trim());
+                    }
+                }
+            ),
+        );
+        dialogs::focus_entry(&entry, |entry| entry.select_region(0, -1));
+    }
+
+    /// Key this window by the session `name` and write it: into the recent list, and into the
+    /// state file every later change goes to.
+    fn save_session_as(self: &Rc<Self>, name: &str) {
+        let key = terminal::session_key(name);
+        if terminal::session_name(&key).is_none() {
+            return self.toast("A session name cannot be empty or hold a /");
+        }
+        let taken = self.shell.upgrade().and_then(|shell| shell.app_for(&key));
+        if taken.is_some_and(|app| !Rc::ptr_eq(&app, self)) {
+            return self.toast(&format!("{name} is open in another window"));
+        }
+        if self.key.borrow().saved_as() != Some(key.as_path()) {
+            // A session of that name written before is replaced, so the shells it held and this
+            // window does not have would be held with nothing left to open them again.
+            let mine: HashSet<String> = self.terminals().iter().map(|t| t.key()).collect();
+            for (id, place) in Session::load(&key).terminals {
+                if !mine.contains(&id) {
+                    terminal::end(&id, &place.at);
+                }
+            }
+            *self.key.borrow_mut() = shell::WindowKey::Terminal(key.clone());
+            self.config.borrow_mut().touch_recent(&key);
+            settings::save(&self.config.borrow());
+            self.title.set_title(name);
+            self.window.set_title(Some(name));
+        }
+        self.save_session();
+        self.toast(&format!("Saved the session as {name}"));
     }
 
     /// Let go of this window's shells as it closes. A window that keeps a session only detaches
@@ -399,6 +461,16 @@ impl App {
         if self.restored.replace(true) || !self.keeps_session() {
             return;
         }
+        // A terminal session named a moment ago has no file yet, and the defaults it would read
+        // instead are a vault window's: a sidebar, for one.
+        let file = self
+            .key
+            .borrow()
+            .saved_as()
+            .map(accent_core::config::state_path);
+        if self.vault().is_none() && !file.is_some_and(|file| file.is_file()) {
+            return;
+        }
         self.sync_placeholder();
         let session = self.stored_session();
         // Before the tabs, so each one is built at the right size instead of being restyled
@@ -446,6 +518,11 @@ impl App {
             false => 0,
         };
         let (icon, title, body) = match waiting {
+            0 if self.key.borrow().is_terminal() => (
+                "utilities-terminal-symbolic",
+                "No Shell Open".to_string(),
+                "Press Ctrl+J to open one.".to_string(),
+            ),
             0 => (
                 "text-x-generic-symbolic",
                 "No Note Open".to_string(),

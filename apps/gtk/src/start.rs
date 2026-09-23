@@ -288,10 +288,8 @@ fn recent_row(
         // Directory names are plain text, not Pango markup: an "R&D" vault must not warn.
         .use_markup(false)
         .build();
-    // Only a remote is marked: most rows are folders on this machine, and an icon on every one of
-    // them would say nothing. `network-server-symbolic` is in Adwaita 50 under `symbolic/places/`.
-    if ssh::is_remote_path(&path) {
-        row.add_prefix(&gtk::Image::from_icon_name("network-server-symbolic"));
+    if let Some(icon) = row_icon(&path) {
+        row.add_prefix(&gtk::Image::from_icon_name(icon));
     }
     row.connect_activated({
         let (path, on_open) = (path.clone(), on_open.clone());
@@ -348,6 +346,9 @@ pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
 /// `me@box:2222:/srv/vault` reads worse than it informs; add it if two vaults on one host ever
 /// differ by port alone.
 pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
+    if let Some(name) = crate::terminal::session_name(path) {
+        return (name.to_string(), "Terminal session".to_string());
+    }
     if ssh::is_remote_path(path) {
         return match ssh::parse(&path.to_string_lossy()) {
             Ok(url) => (
@@ -362,6 +363,16 @@ pub(crate) fn labels(path: &Path, home: Option<&Path>) -> (String, String) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string());
     (name, abbreviate(path, home))
+}
+
+/// The icon a recent row carries, if any. Only what is not a folder here is marked: most rows are
+/// folders on this machine, and an icon on every one of them would say nothing. Both names are in
+/// Adwaita 50.
+pub(crate) fn row_icon(path: &Path) -> Option<&'static str> {
+    if crate::terminal::session_name(path).is_some() {
+        return Some("utilities-terminal-symbolic");
+    }
+    ssh::is_remote_path(path).then_some("network-server-symbolic")
 }
 
 /// The folder a remote vault is, for the row's title. A path with no last component — the whole
@@ -395,7 +406,7 @@ pub(crate) fn recent_vaults(config: &Rc<RefCell<Config>>) -> Vec<PathBuf> {
 }
 
 /// Drop the local vaults whose folder has gone — deleted, or on a drive nobody has mounted — and
-/// say whether any went. The list is not capped, so this is what keeps it to vaults that can
+/// the terminal sessions that were never written, and say whether any went. The list is not capped, so this is what keeps it to vaults that can
 /// still open, rather than a row that can only fail.
 ///
 /// A remote stays whatever state it is in, until it is removed by hand: the only way to find out
@@ -403,8 +414,17 @@ pub(crate) fn recent_vaults(config: &Rc<RefCell<Config>>) -> Vec<PathBuf> {
 /// not answer.
 fn prune(recent: &mut Vec<PathBuf>) -> bool {
     let before = recent.len();
-    recent.retain(|p| ssh::is_remote_path(p) || p.is_dir());
+    recent.retain(|p| openable(p));
     recent.len() < before
+}
+
+/// Whether a recent entry can still open: a remote, which cannot be asked without dialling out; a
+/// folder that is still there; or a terminal session that has been written down.
+pub(crate) fn openable(path: &Path) -> bool {
+    ssh::is_remote_path(path)
+        || path.is_dir()
+        || (crate::terminal::session_name(path).is_some()
+            && accent_core::config::state_path(path).is_file())
 }
 
 /// The recent vaults a window can switch to: all of them but the one it is already on. Keys, not
@@ -866,8 +886,11 @@ mod tests {
         std::fs::write(&file, "x").unwrap();
         let remote = PathBuf::from("ssh://box/srv/vault");
 
+        // A terminal session that was never written down has nothing to open.
+        let session = PathBuf::from(format!("terminal://accent-test-{}", std::process::id()));
+
         // Recency order kept, a folder that went and a file dropped, the remote kept unchecked.
-        let mut recent = vec![remote.clone(), dir.join("gone"), dir.clone(), file];
+        let mut recent = vec![remote.clone(), dir.join("gone"), dir.clone(), file, session];
         assert!(prune(&mut recent));
         assert_eq!(recent, [remote, dir.clone()]);
         // Nothing left to take, so nothing to write.
@@ -929,6 +952,11 @@ mod tests {
         assert_eq!(
             labels(Path::new("/home/me/Notes"), Some(Path::new("/home/me"))),
             ("Notes".to_string(), "~/Notes".to_string())
+        );
+        // A terminal session is its name, and says what it is.
+        assert_eq!(
+            labels(Path::new("terminal://dev"), None),
+            ("dev".to_string(), "Terminal session".to_string())
         );
     }
 

@@ -599,6 +599,23 @@ pub fn is_key(key: &str) -> bool {
         .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// What a saved terminal session's key starts with: `terminal://<name>`, the way a remote vault's
+/// is `ssh://…`, so the recent list, the state file and the command line all take it as they are.
+pub const SESSION: &str = "terminal://";
+
+/// The key the terminal session `name` is remembered by.
+pub fn session_key(name: &str) -> PathBuf {
+    PathBuf::from(format!("{SESSION}{name}"))
+}
+
+/// The name in a terminal session's key: `None` for any other key, and for a name that is empty
+/// or holds a `/`.
+pub fn session_name(key: &Path) -> Option<&str> {
+    key.to_str()?
+        .strip_prefix(SESSION)
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+}
+
 /// The name the holder knows the shell by: its key without the prefix.
 fn id(key: &str) -> &str {
     key.strip_prefix(KEY).unwrap_or(key)
@@ -669,6 +686,18 @@ mod tests {
         assert!(!crate::doc::is_loose_key(&key));
         // A note that merely starts the same way is still a note.
         assert!(!is_key("terminal:notes.md"));
+    }
+
+    #[test]
+    fn a_session_key_reads_back_as_its_name() {
+        assert_eq!(session_key("dev"), PathBuf::from("terminal://dev"));
+        assert_eq!(session_name(&session_key("dev")), Some("dev"));
+        assert_eq!(session_name(&session_key("my work")), Some("my work"));
+        // No name, a name that would be a path, and every other kind of key.
+        assert_eq!(session_name(Path::new("terminal://")), None);
+        assert_eq!(session_name(Path::new("terminal://a/b")), None);
+        assert_eq!(session_name(Path::new("ssh://box/srv/vault")), None);
+        assert_eq!(session_name(Path::new("/home/me/Notes")), None);
     }
 
     /// OSC 7 names the host it was sent from, and a directory on another machine is no place to

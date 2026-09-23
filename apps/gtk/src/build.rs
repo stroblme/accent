@@ -16,10 +16,10 @@ pub fn build_window(
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
 
-    // No root is a window opened on a file: no index to build, no watcher to run, and nothing
-    // to add to the recent-vaults list. A root that is an `ssh://` address is a vault on another
-    // machine — it opens the same way and returns just as fast, because the connection is made on
-    // a thread and reports itself through the events like the indexing does.
+    // No root is a window opened on a file or on shells: no index to build and no watcher to run.
+    // A root that is an `ssh://` address is a vault on another machine — it opens the same way and
+    // returns just as fast, because the connection is made on a thread and reports itself through
+    // the events like the indexing does.
     let (vault, events) = match &root {
         Some(root) => {
             let vault_config = shell.config.borrow().vault(root);
@@ -48,12 +48,14 @@ pub fn build_window(
     }
 
     // A window with no vault is named for what it holds rather than for a folder it has not got:
-    // the shells' window says so, the documents window carries the application's name.
+    // a terminal session by its name, the shells' window says so, the documents window carries
+    // the application's name.
     let vault_name = match key {
         WindowKey::Vault(root) => root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string()),
+        WindowKey::Terminal(key) => terminal::session_name(key).unwrap_or_default().to_string(),
         WindowKey::Loose(Loose::Terminal) => "Terminal".to_string(),
         WindowKey::Loose(Loose::Documents) => "Accent".to_string(),
     };
@@ -368,7 +370,7 @@ pub fn build_window(
             // Before the save below, which is what rewrites the keys it reads out of the file.
             retired_daily_keys(&app);
             // The recent list, written once the window the user asked for is on screen.
-            if app.vault().is_some()
+            if app.key.borrow().saved_as().is_some()
                 && let Err(e) = app.config.borrow().save()
             {
                 tracing::warn!("saving config: {e:#}");
@@ -379,8 +381,13 @@ pub fn build_window(
             if !app.offline() {
                 app.restore_session();
             }
-            if let Some(rel) = note {
-                app.open_path(&rel);
+            let session = matches!(*app.key.borrow(), WindowKey::Terminal(_));
+            match note {
+                Some(named) => app.open_named(&named),
+                // A terminal session is its shells, so one that came back with none — a new
+                // name, or every shell closed — starts with one at home.
+                None if session && app.terminals().is_empty() => app.open_terminal(),
+                None => {}
             }
         }
     ));
