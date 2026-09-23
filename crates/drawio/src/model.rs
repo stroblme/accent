@@ -216,10 +216,18 @@ impl Page {
     pub fn origin_of(&self, id: &str) -> Point {
         let mut at = Point::default();
         let mut cell = self.cell(id);
+        // A chain longer than the page has cells has walked a `parent` loop — which a hand-edited
+        // file can hold, draw.io writing none — and a cell in one is measured from the page, as a
+        // cell under a layer is. Counted rather than remembered: this runs per vertex per scene.
+        let mut left = self.cells.len();
         while let Some(parent) = cell
             .and_then(|c| c.parent.as_deref())
             .and_then(|p| self.cell(p))
         {
+            match left.checked_sub(1) {
+                Some(rest) => left = rest,
+                None => return Point::default(),
+            }
             if parent.vertex
                 && let Some(g) = &parent.geometry
                 && !g.relative
@@ -490,5 +498,25 @@ mod tests {
         assert_eq!(c.label(), "%AUTHOR%");
         c.set_label("x");
         assert_eq!(c.label(), "x");
+    }
+
+    /// A cell that is its own parent: draw.io writes none, a hand-edited file can hold one, and
+    /// the walk up the parents is reached from opening the file.
+    #[test]
+    fn a_cell_parented_to_itself_does_not_hang() {
+        let mut p = Page::blank("P", "p");
+        p.cells.push(Cell::new_vertex(
+            "A",
+            "A",
+            Rect::new(10.0, 20.0, 30.0, 40.0),
+            "",
+            "",
+        ));
+        // Measured from the page: a cell in a parent loop has no origin to be offset from.
+        assert_eq!(p.origin_of("A"), Point::default());
+        assert_eq!(
+            p.absolute_rect("A"),
+            Some(Rect::new(10.0, 20.0, 30.0, 40.0))
+        );
     }
 }
