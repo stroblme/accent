@@ -176,7 +176,7 @@ pub struct Panel {
     has_more: Cell<bool>,
     state: RefCell<State>,
     /// The debounce timer, replaced rather than stacked.
-    pending: RefCell<Option<glib::SourceId>>,
+    pending: crate::widgets::Debounce,
     busy: Cell<bool>,
     /// Something asked for a refresh while one was in flight; run once more when it lands, for
     /// the deepest of whatever asked.
@@ -353,7 +353,7 @@ impl Panel {
             log_view: log_view.clone(),
             has_more: Cell::new(false),
             state: RefCell::new(State::default()),
-            pending: RefCell::new(None),
+            pending: crate::widgets::Debounce::new(DEBOUNCE),
             busy: Cell::new(false),
             again: Cell::new(None),
             pending_depth: Cell::new(None),
@@ -438,16 +438,11 @@ impl Panel {
     pub fn schedule_refresh(self: &Rc<Self>, depth: Depth) {
         self.pending_depth
             .set(self.pending_depth.get().max(Some(depth)));
-        if let Some(id) = self.pending.borrow_mut().take() {
-            id.remove();
-        }
         let panel = self.clone();
-        let id = glib::timeout_add_local_once(DEBOUNCE, move || {
-            panel.pending.replace(None);
+        self.pending.call(move || {
             let depth = panel.pending_depth.take().unwrap_or(Depth::Status);
             panel.refresh(depth);
         });
-        self.pending.replace(Some(id));
     }
 
     /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,

@@ -857,7 +857,7 @@ fn moves_into(paths: &[String], dir: &str) -> Vec<(String, String)> {
 const SPRING_OPEN: Duration = Duration::from_millis(800);
 
 /// A timer waiting to open the folder a drag is resting on.
-type Spring = Rc<RefCell<Option<glib::SourceId>>>;
+type Spring = Rc<crate::widgets::Debounce>;
 
 /// Open the shut folder a drag has come to rest on, so a file can be dropped into something that
 /// was not on screen when the drag began. `row` is the row under the pointer, `None` when the drag
@@ -867,18 +867,11 @@ type Spring = Rc<RefCell<Option<glib::SourceId>>>;
 /// one at a time. Nothing closes the folder again — a drag that opened one and went elsewhere
 /// leaves the tree as the reader would have left it by clicking the chevron.
 fn spring_open(timer: &Spring, row: Option<gtk::TreeListRow>) {
-    if let Some(id) = timer.borrow_mut().take() {
-        id.remove();
-    }
+    timer.cancel();
     let Some(row) = row.filter(|row| row.is_expandable() && !row.is_expanded()) else {
         return;
     };
-    let disarm = timer.clone();
-    let id = glib::timeout_add_local_once(SPRING_OPEN, move || {
-        disarm.borrow_mut().take();
-        row.set_expanded(true);
-    });
-    *timer.borrow_mut() = Some(id);
+    timer.call(move || row.set_expanded(true));
 }
 
 /// The `GtkTreeListRow` a drop target on a row expander is over, and `None` for a target that is
@@ -920,7 +913,7 @@ fn move_target(
         }
     };
     let planned = Rc::new(planned);
-    let spring = Spring::default();
+    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
     // Both, because `enter` is what decides whether the row highlights at all and `motion` is
     // what corrects it once the preloaded value has arrived.
     let answer = {
@@ -987,7 +980,7 @@ fn import_target(
         gdk::DragAction::COPY | gdk::DragAction::MOVE,
     );
     let dir = Rc::new(dir);
-    let spring = Spring::default();
+    let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
     let answer = {
         let (dir, spring) = (dir.clone(), spring.clone());
         move |target: &gtk::DropTarget, x, y| match dir(target, x, y) {

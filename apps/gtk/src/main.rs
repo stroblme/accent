@@ -102,6 +102,10 @@ const SEARCH_LIMIT: usize = 100;
 /// DESIGN.md, Motion: the preview re-renders 300 ms after the last edit, and the status bar's
 /// word count is read again on the same beat.
 const RENDER: Duration = Duration::from_millis(300);
+
+/// How long after a note changed every open PDF re-queries the links into it: long enough that a
+/// burst of watcher events is one query per PDF rather than one per event.
+const PDF_LINKS: Duration = Duration::from_millis(300);
 /// How often the tree may be re-read while the first index is still running, in microseconds:
 /// often enough that a cold start fills in as it goes, rarely enough to stay off the main loop.
 const TREE_REPAINT: i64 = 250_000;
@@ -317,10 +321,12 @@ struct App {
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
     /// The pending post-edit refresh: the preview's re-render and the status bar's word count.
-    refresh: RefCell<Option<glib::SourceId>>,
+    refresh: widgets::Debounce,
     /// The pending re-query of the note links every open PDF highlights.
-    pdf_links: RefCell<Option<glib::SourceId>>,
-    session: RefCell<Option<glib::SourceId>>,
+    pdf_links: widgets::Debounce,
+    /// The pending session write. First-wins ([`widgets::Debounce::call_once`]): a steady stream
+    /// of edits must not push the write off indefinitely.
+    session: widgets::Debounce,
     /// Notes this window showed and commands it ran, most recent first. The palette leads with
     /// them, so opening a note is remembered as well as editing it; the index only knows mtime.
     recent_notes: RefCell<Vec<String>>,

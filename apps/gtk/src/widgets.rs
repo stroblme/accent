@@ -218,6 +218,18 @@ impl Debounce {
         *self.pending.borrow_mut() = Some(id);
     }
 
+    /// Run `f` once the delay has passed, unless a call is already waiting: the first one wins.
+    ///
+    /// The other half of [`call`](Self::call). A restart is right where the latest input is the
+    /// one to answer (a query, a render); first-wins is right where the work reads the current
+    /// state whenever it runs, and a burst must not push it off indefinitely — writing the
+    /// session, for one, which a steady stream of edits would otherwise never get to.
+    pub(crate) fn call_once(&self, f: impl FnOnce() + 'static) {
+        if self.pending.borrow().is_none() {
+            self.call(f);
+        }
+    }
+
     /// Drop whatever is pending, for the keystroke that is answered on the spot instead.
     pub(crate) fn cancel(&self) {
         if let Some(id) = self.pending.borrow_mut().take() {
