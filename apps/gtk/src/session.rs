@@ -227,12 +227,16 @@ impl App {
     }
 
     pub fn save_session(&self) {
+        if !self.keeps_session() {
+            return;
+        }
+        let stored = self.stored_session();
         let session = Session {
             open: self
                 .docs
                 .borrow()
                 .iter()
-                .filter(|d| !d.is_transient())
+                .filter(|d| d.persists())
                 .map(|d| d.key())
                 .collect(),
             active: self.restorable_active(),
@@ -250,50 +254,70 @@ impl App {
             // Merged rather than replaced: a PDF closed earlier in this session keeps the place
             // it was left at, which is the whole point of remembering it.
             pdf: {
-                let mut places = self.vault().map(|v| v.session().pdf).unwrap_or_default();
+                let mut places = stored.pdf.clone();
                 for pdf in self.pdfs() {
                     places.insert(pdf.key(), pdf.place());
                 }
                 places
             },
             diagram: {
-                let mut places = self
-                    .vault()
-                    .map(|v| v.session().diagram)
-                    .unwrap_or_default();
+                let mut places = stored.diagram.clone();
                 for d in self.diagrams() {
                     places.insert(d.key(), d.place());
                 }
                 places
             },
-            // Shells are not written yet.
-            terminals: Default::default(),
-        };
-        let Some(vault) = self.vault() else {
-            // Nothing to key a session file on, and nothing worth restoring: a window opened on
-            // one file is opened again the same way.
-            return;
+            // Only the open ones: a shell that was closed has ended, and has nowhere to go back to.
+            terminals: self
+                .terminals()
+                .iter()
+                .filter_map(|t| Some((t.key(), ShellPlace { at: t.at()? })))
+                .collect(),
         };
         let session = match self.restored.get() {
             true => session,
-            false => unrestored(vault.session(), session),
+            false => unrestored(stored, session),
         };
-        if let Err(e) = vault.save_session(&session) {
+        self.write_session(&session);
+    }
+
+    /// Whether this window writes a session down and puts it back: a vault's does. A window
+    /// opened on a file or a shell has nothing to key one on, and is opened the same way again.
+    fn keeps_session(&self) -> bool {
+        self.key.borrow().saved_as().is_some()
+    }
+
+    /// The session as this window last wrote it, or the defaults.
+    fn stored_session(&self) -> Session {
+        match (self.vault(), self.key.borrow().saved_as()) {
+            (Some(vault), _) => vault.session(),
+            (None, Some(key)) => Session::load(key),
+            (None, None) => Session::default(),
+        }
+    }
+
+    fn write_session(&self, session: &Session) {
+        let written = match (self.vault(), self.key.borrow().saved_as()) {
+            (Some(vault), _) => vault.save_session(session),
+            (None, Some(key)) => session.save(key),
+            (None, None) => Ok(()),
+        };
+        if let Err(e) = written {
             tracing::warn!("saving the session: {e:#}");
         }
     }
 
-    /// The tab a restore comes back on. The one in front, unless that is a shell or a comparison:
-    /// neither is a file, so neither is restored, and a pane naming none would leave the restore
-    /// making whichever pane landed last the active one. The pane the reader was in names its
-    /// most recently used tab that *is* restored instead, so the window comes back in that pane.
+    /// The tab a restore comes back on. The one in front, unless that is a comparison: it is not
+    /// restored, and a pane naming none would leave the restore making whichever pane landed last
+    /// the active one. The pane the reader was in names its most recently used tab that *is*
+    /// restored instead, so the window comes back in that pane.
     pub(crate) fn restorable_active(&self) -> Option<String> {
-        if let Some(doc) = self.active_doc().filter(|d| !d.is_transient()) {
+        if let Some(doc) = self.active_doc().filter(|d| d.persists()) {
             return Some(doc.key());
         }
         self.pane().recent().iter().find_map(|page| {
             self.doc_for_page(page)
-                .filter(|doc| !doc.is_transient())
+                .filter(|doc| doc.persists())
                 .map(|doc| doc.key())
         })
     }
@@ -311,12 +335,12 @@ impl App {
             None => self.layout_of(&root),
             Some(_) => Err(Unsized),
         }
-        .unwrap_or_else(|Unsized| self.vault().and_then(|v| v.session().layout))
+        .unwrap_or_else(|Unsized| self.stored_session().layout)
     }
 
     /// The layout under `widget`: a pane's column, or a `GtkPaned` between two such trees. A pane
-    /// with nothing to put back — shells and comparisons are not files — is left out, and the
-    /// other side of its split takes the split's place.
+    /// with nothing to put back — comparisons are not — is left out, and the other side of its
+    /// split takes the split's place.
     fn layout_of(&self, widget: &gtk::Widget) -> Result<Option<Layout>, Unsized> {
         if let Some(paned) = widget.downcast_ref::<gtk::Paned>() {
             let (Some(start), Some(end)) = (paned.start_child(), paned.end_child()) else {
@@ -350,7 +374,7 @@ impl App {
         };
         let key = |page: &adw::TabPage| {
             self.doc_for_page(page)
-                .filter(|d| !d.is_transient())
+                .filter(|d| d.persists())
                 .map(|d| d.key())
         };
         let tabs: Vec<String> = pane.pages().iter().filter_map(key).collect();
@@ -360,20 +384,17 @@ impl App {
 
     /// Restored after the window is on screen, so nothing here is on the path to the first frame.
     pub fn restore_session(self: &Rc<Self>) {
-        let Some(vault) = self.vault() else {
-            return;
-        };
         // Once per window, whether it was restored on opening or on the connection arriving.
-        if self.restored.replace(true) {
+        if self.restored.replace(true) || !self.keeps_session() {
             return;
         }
         self.sync_placeholder();
-        let session = vault.session();
+        let session = self.stored_session();
         // Before the tabs, so each one is built at the right size instead of being restyled
         // afterwards. A state file written before zoom existed defaults to 1.0.
         self.set_zoom(session.zoom);
         if let Some(layout) = session.panes() {
-            self.restore_panes(layout, session.active.clone());
+            self.restore_panes(layout, &session);
         }
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
@@ -440,7 +461,8 @@ impl App {
     /// The splits come first and stand empty until their tabs land: a text tab only exists once
     /// the worker's read is back, so each open looks its pane up in `placing` (see
     /// [`App::tabs_for`]) instead of being moved there afterwards.
-    fn restore_panes(self: &Rc<Self>, layout: Layout, active: Option<String>) {
+    fn restore_panes(self: &Rc<Self>, layout: Layout, session: &Session) {
+        let active = session.active.clone();
         let (mut placed, mut splits) = (Vec::new(), Vec::new());
         self.arrange(&self.pane(), layout, &mut placed, &mut splits);
         // Each split made the pane it added the active one. Until the active tab lands, a note
@@ -465,6 +487,11 @@ impl App {
         for key in restore.placed.iter().flat_map(|p| &p.tabs) {
             // Opened while a remote vault was still connecting, and left where it is.
             if self.doc_for(key).is_some() {
+                continue;
+            }
+            // A shell is no read: it is back in its pane at once.
+            if terminal::is_key(key) {
+                self.restore_shell(key, session.terminals.get(key));
                 continue;
             }
             let asked = Asked {
@@ -763,6 +790,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     }
     stored.pdf.extend(now.pdf);
     stored.diagram.extend(now.diagram);
+    stored.terminals.extend(now.terminals);
     stored
 }
 
@@ -790,6 +818,7 @@ mod tests {
             }),
             zoom: 1.5,
             recent_commands: vec!["win.find".into()],
+            terminals: [("terminal:1".into(), place("/srv"))].into(),
             ..Session::default()
         };
         let merged = unrestored(stored.clone(), Session::default());
@@ -799,11 +828,14 @@ mod tests {
         assert_eq!(merged.layout, stored.layout);
         assert_eq!(merged.zoom, 1.5);
         assert_eq!(merged.recent_commands, stored.recent_commands);
+        // Where a stored shell was is kept for the restore that has not happened yet.
+        assert_eq!(merged.terminals, stored.terminals);
 
         let now = Session {
             open: vec!["b.md".into(), "c.md".into()],
             active: Some("c.md".into()),
             recent_commands: vec!["win.palette".into()],
+            terminals: [("terminal:2".into(), place("/tmp"))].into(),
             ..Session::default()
         };
         let merged = unrestored(stored.clone(), now);
@@ -811,5 +843,13 @@ mod tests {
         assert_eq!(merged.active.as_deref(), Some("b.md"));
         assert_eq!(merged.layout, stored.layout);
         assert_eq!(merged.recent_commands, ["win.palette", "win.find"]);
+        assert_eq!(
+            merged.terminals.keys().collect::<Vec<_>>(),
+            ["terminal:1", "terminal:2"]
+        );
+    }
+
+    fn place(at: &str) -> ShellPlace {
+        ShellPlace { at: at.into() }
     }
 }

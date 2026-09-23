@@ -24,6 +24,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use accent_api::ssh;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use vte4::TerminalExt;
@@ -70,8 +71,28 @@ impl Term {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| match &self.shell {
                 Shell::Local(cwd) => cwd.display().to_string(),
-                Shell::Remote { host, .. } => host.clone(),
+                Shell::Remote { at, .. } => at.host.clone(),
             })
+    }
+
+    /// Where the shell is, as the session writes it down: the directory it last reported through
+    /// OSC 7 on this machine, or the one it was started in until it has reported one. OSC 7 does
+    /// not arrive over ssh, so a remote shell is where it was opened. `None` for a directory whose
+    /// name is not UTF-8, which a session file cannot hold.
+    pub fn at(&self) -> Option<String> {
+        match &self.shell {
+            Shell::Local(start) => {
+                let told = self
+                    .view
+                    .current_directory_uri()
+                    .and_then(|uri| dir_of(&uri, &glib::host_name()));
+                told.as_deref()
+                    .unwrap_or(start)
+                    .to_str()
+                    .map(str::to_string)
+            }
+            Shell::Remote { at, .. } => Some(at.to_string()),
+        }
     }
 
     /// Start the shell a dropped link ended again, in the same tab: what was on screen stays above
@@ -146,7 +167,17 @@ pub enum Shell {
     Local(PathBuf),
     /// An interactive login on the host, landing in the vault root. Built by
     /// `accent_api::ssh::shell`, which is also what carries the ControlPath.
-    Remote { argv: Vec<String>, host: String },
+    Remote {
+        argv: Vec<String>,
+        /// Where it was opened: the host, and the directory on it.
+        at: ssh::Url,
+        /// The address whose ssh connection it rides: the vault's.
+        #[expect(
+            dead_code,
+            reason = "read once a lost link is prepared again from the tab"
+        )]
+        link: ssh::Url,
+    },
 }
 
 pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
@@ -176,7 +207,7 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     page.set_title(
         match shell {
             Shell::Local(_) => "Terminal".to_string(),
-            Shell::Remote { host, .. } => host.clone(),
+            Shell::Remote { at, .. } => at.host.clone(),
         }
         .as_str(),
     );
@@ -260,10 +291,11 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
             return;
         };
         match &term.shell {
-            Shell::Remote { host, .. } if link_lost(status) => {
+            Shell::Remote { at, .. } if link_lost(status) => {
                 term.lost.set(true);
                 let line = format!(
-                    "\r\n[The connection to {host} went. The shell reopens when it is back.]\r\n"
+                    "\r\n[The connection to {} went. The shell reopens when it is back.]\r\n",
+                    at.host
                 );
                 view.feed(line.as_bytes());
             }
@@ -496,10 +528,31 @@ fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
-/// A terminal's key. Not a path, so nothing that walks the open documents by path can collide with
-/// one, and the number only has to be unique within a window.
-pub fn key(n: usize) -> String {
-    format!("terminal:{n}")
+/// What a terminal's key starts with. Not a path, so nothing that walks the open documents by path
+/// can collide with one.
+const KEY: &str = "terminal:";
+
+/// A key for a new shell: sixteen random hex digits, which is also the name the shell is held
+/// under, so it has to be unique across windows, session files and machines, not only within a
+/// window.
+pub fn new_key() -> String {
+    format!("{KEY}{:08x}{:08x}", glib::random_int(), glib::random_int())
+}
+
+/// Whether a session's key names a shell rather than a file.
+pub fn is_key(key: &str) -> bool {
+    key.strip_prefix(KEY)
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The directory an OSC 7 `file://host/path` URI names, if `host` is this machine. A shell that
+/// has ssh'd somewhere reports the other machine's directory, which is no place to start one here.
+fn dir_of(uri: &str, host: &str) -> Option<PathBuf> {
+    let (dir, from) = glib::filename_from_uri(uri).ok()?;
+    match from.as_deref() {
+        None | Some("" | "localhost") => Some(dir),
+        Some(from) => (from == host).then_some(dir),
+    }
 }
 
 #[cfg(test)]
@@ -508,9 +561,36 @@ mod tests {
 
     #[test]
     fn a_terminal_key_is_never_a_path() {
-        assert_eq!(key(3), "terminal:3");
+        let key = new_key();
+        assert!(is_key(&key), "{key}");
+        // Sixteen hex digits after the prefix, and a fresh one each time.
+        assert_eq!(key.len(), "terminal:".len() + 16);
+        assert_ne!(key, new_key());
         // Not loose, which is what would send it through the file machinery.
-        assert!(!crate::doc::is_loose_key(&key(1)));
+        assert!(!crate::doc::is_loose_key(&key));
+        // A note that merely starts the same way is still a note.
+        assert!(!is_key("terminal:notes.md"));
+    }
+
+    /// OSC 7 names the host it was sent from, and a directory on another machine is no place to
+    /// start a shell here.
+    #[test]
+    fn osc7_names_a_directory_only_on_this_machine() {
+        assert_eq!(
+            dir_of("file://box/home/me/src", "box"),
+            Some(PathBuf::from("/home/me/src"))
+        );
+        // No host, or `localhost`, is this one; the path is decoded.
+        assert_eq!(
+            dir_of("file:///tmp/a%20b", "box"),
+            Some(PathBuf::from("/tmp/a b"))
+        );
+        assert_eq!(
+            dir_of("file://localhost/tmp", "box"),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(dir_of("file://elsewhere/home/me", "box"), None);
+        assert_eq!(dir_of("https://box/home/me", "box"), None);
     }
 
     /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.

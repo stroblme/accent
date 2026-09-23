@@ -61,7 +61,7 @@ mod work;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
-use accent_core::config::{FocusMode, Layout, PdfZoom};
+use accent_core::config::{FocusMode, Layout, PdfZoom, ShellPlace};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
@@ -266,8 +266,6 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
-    /// Numbers the shells this window has opened, so each tab has a key of its own.
-    terminals: Cell<usize>,
     /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
     /// background rather than asked for when the dialog opens: on a remote vault that question
     /// costs a round trip, and the palette is a thing that has to appear instantly.
@@ -886,21 +884,46 @@ impl App {
     /// one that has one, so `win.terminal` keeps going through `open_terminal` and the action,
     /// the menu and the palette entry are all untouched.
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
-        let n = self.terminals.get() + 1;
-        self.terminals.set(n);
         // A remote vault's shell opens on the remote, unless the caller named a directory here:
         // `accent --terminal <dir>` means this machine whatever window it lands in.
         let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
             (None, Some(remote)) => terminal::Shell::Remote {
                 argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
-                host: remote.url().host.clone(),
+                at: remote.url().clone(),
+                link: remote.url().clone(),
             },
             _ => terminal::Shell::Local(cwd.unwrap_or_else(|| match self.vault() {
                 Some(vault) => vault.root(),
                 None => glib::home_dir(),
             })),
         };
-        let term = terminal::open(&self.tabs(), &shell, terminal::key(n));
+        self.open_shell(terminal::new_key(), shell, Opened::Kept);
+    }
+
+    /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
+    /// or home when that has gone since.
+    ///
+    /// ponytail: a shell on another machine is dropped rather than put back, which is what every
+    /// shell was before sessions held them.
+    fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
+        let at = place.map_or("", |p| p.at.as_str());
+        if ssh::is_remote(at) {
+            return;
+        }
+        let dir = Some(PathBuf::from(at))
+            .filter(|dir| dir.is_dir())
+            .unwrap_or_else(glib::home_dir);
+        self.open_shell(
+            key.to_string(),
+            terminal::Shell::Local(dir),
+            Opened::Restored,
+        );
+    }
+
+    /// The one door into a shell tab, new or restored. A restored one lands in the pane the
+    /// session put it in, behind whatever that pane shows, and does not take the keyboard.
+    fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
+        let term = terminal::open(&self.tabs_for(&key), &shell, key);
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -940,10 +963,22 @@ impl App {
                 move |term| app.close_page(&term.page)
             ),
         );
+        // A `cd` is where the session will put the shell back, so it is written down like a move
+        // of the caret would be.
+        use vte4::TerminalExt as _;
+        term.view
+            .connect_current_directory_uri_changed(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |_| app.save_session_soon()
+            ));
         let page = term.page.clone();
         let view = term.view.clone();
         self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.select_new_page(&page, Opened::Kept);
+        self.select_new_page(&page, how);
+        if how == Opened::Restored {
+            return;
+        }
         // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
         // unable to hear a keystroke, which is a terminal you have to click before you can type
         // in. From an idle, because the page has only just been selected and the widget it holds
