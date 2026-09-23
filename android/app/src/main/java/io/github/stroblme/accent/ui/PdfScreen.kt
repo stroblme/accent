@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -53,6 +54,7 @@ import io.github.stroblme.accent.ffi.Theme
 import java.io.File
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * What the pen is doing. A finger never draws: it moves the page.
@@ -88,7 +90,11 @@ fun LoosePdfScreen(uri: Uri) {
     var failed by remember(uri) { mutableStateOf<String?>(null) }
     LaunchedEffect(uri) {
         runCatching {
-            val bytes = context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            // Off the main thread: the whole file is read, and it is somebody else's document,
+            // which may be on a network provider.
+            val bytes = withContext(Dispatchers.IO) {
+                context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            }
             PdfModel.of(bytes)
         }.onSuccess { doc = it }
             .onFailure { failed = it.message ?: "This file could not be opened." }
@@ -102,7 +108,9 @@ fun LoosePdfScreen(uri: Uri) {
             // No path on this side: the bytes go back through whatever handed them over.
             val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
             runCatching {
-                context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
+                }
             }
         }
     }
