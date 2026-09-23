@@ -380,6 +380,8 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 ///
 /// `;` rather than `&&`: a root that is not there — a typo in the address — prints `cd`'s error
 /// and still gives a shell, at the login's home, which is where such a window is steered from.
+///
+/// The GTK remote arm still uses it until the remote shells go through [`attach`].
 pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-t".to_string());
@@ -387,6 +389,23 @@ pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
     argv.push(format!(
         "cd {}; exec \"$SHELL\"",
         quote(&url.path.to_string_lossy())
+    ));
+    argv
+}
+
+/// A terminal tab's end of the shell `id` held on the host, started in `url`'s path if the host
+/// does not hold it yet. `server` is a path expression from [`server_path`].
+///
+/// `-t` for the same reason as [`shell`]: `attach` relays a pty, and without one the host's end
+/// has no terminal to put in raw mode or to take a size from.
+pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
+    let mut argv = base(url, ctl);
+    argv.push("-t".to_string());
+    argv.push(url.destination());
+    argv.push(format!(
+        "{server} attach --cwd {} {}",
+        quote(&url.path.to_string_lossy()),
+        quote(id)
     ));
     argv
 }
@@ -458,6 +477,12 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
 /// [`server_path`]; the root is a literal, so it is quoted.
 pub fn serve_cmd(server: &str, root: &Path) -> String {
     format!("{server} serve --vault {}", quote(&root.to_string_lossy()))
+}
+
+/// The command that ends the shell `id` held on the host, for [`run`]: a Close Tab, which must
+/// not wait on a prompt.
+pub fn kill_cmd(server: &str, id: &str) -> String {
+    format!("{server} kill {}", quote(id))
 }
 
 // --------------------------------------------------------------------- cache
@@ -923,6 +948,42 @@ mod tests {
                 "box",
                 "cd '/srv/my vault'; exec \"$SHELL\"",
             ])
+        );
+    }
+
+    #[test]
+    fn a_held_shell_is_attached_over_the_master_in_a_pty_of_its_own() {
+        let server = server_path("0123456789abcdef");
+        let id = "89abcdef01234567";
+        assert_eq!(
+            attach(&plain(), ctl(), &server, id),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-t",
+                "box",
+                &format!("{server} attach --cwd '/srv/vault' '{id}'"),
+            ])
+        );
+        let spaced = parse("ssh://me@box:2222/srv/my vault").expect("a spaced path parses");
+        assert_eq!(
+            attach(&spaced, ctl(), &server, id),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-p",
+                "2222",
+                "-t",
+                "me@box",
+                &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
+            ])
+        );
+        // Ending it is a one-shot command over the same master, which never prompts.
+        assert_eq!(
+            run(&spaced, ctl(), &kill_cmd(&server, id)).last(),
+            Some(&format!("{server} kill '{id}'"))
         );
     }
 
