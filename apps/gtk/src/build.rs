@@ -16,10 +16,10 @@ pub fn build_window(
     install_chrome_css();
     theme::apply(shell.config.borrow().theme);
 
-    // No root is a window opened on a file: no index to build, no watcher to run, and nothing
-    // to add to the recent-vaults list. A root that is an `ssh://` address is a vault on another
-    // machine — it opens the same way and returns just as fast, because the connection is made on
-    // a thread and reports itself through the events like the indexing does.
+    // No root is a window opened on a file or on shells: no index to build and no watcher to run.
+    // A root that is an `ssh://` address is a vault on another machine — it opens the same way and
+    // returns just as fast, because the connection is made on a thread and reports itself through
+    // the events like the indexing does.
     let (vault, events) = match &root {
         Some(root) => {
             let vault_config = shell.config.borrow().vault(root);
@@ -43,17 +43,19 @@ pub fn build_window(
     // Touched now, so the window title and any picker opened in this window read the list the
     // way it will be written; the write itself waits for the post-present idle below, an fsync
     // being no part of building a widget tree.
-    if let Some(root) = &root {
-        shell.config.borrow_mut().touch_recent(root);
+    if let Some(saved) = key.saved_as() {
+        shell.config.borrow_mut().touch_recent(saved);
     }
 
     // A window with no vault is named for what it holds rather than for a folder it has not got:
-    // the shells' window says so, the documents window carries the application's name.
+    // a terminal session by its name, the shells' window says so, the documents window carries
+    // the application's name.
     let vault_name = match key {
         WindowKey::Vault(root) => root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string()),
+        WindowKey::Terminal(key) => terminal::session_name(key).unwrap_or_default().to_string(),
         WindowKey::Loose(Loose::Terminal) => "Terminal".to_string(),
         WindowKey::Loose(Loose::Documents) => "Accent".to_string(),
     };
@@ -184,7 +186,7 @@ pub fn build_window(
         history("edit-undo-symbolic", "win.pdf-undo"),
         history("edit-redo-symbolic", "win.pdf-redo"),
     );
-    let menu = menu_button();
+    let menu = menu_button(key);
     header.pack_end(&menu);
     header.pack_end(&drawing);
     header.pack_end(&redo);
@@ -259,6 +261,7 @@ pub fn build_window(
         .build();
 
     let app = Rc::new(App {
+        key: RefCell::new(key.clone()),
         vault: vault.clone(),
         // (`vault` is an `Option` here: `None` is a window opened on a file, with no folder.)
         shell: Rc::downgrade(shell),
@@ -285,7 +288,7 @@ pub fn build_window(
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
-        terminals: Cell::new(0),
+        told_unheld: Cell::new(false),
         split,
         sidebar_column,
         sidebar_header,
@@ -367,7 +370,7 @@ pub fn build_window(
             // Before the save below, which is what rewrites the keys it reads out of the file.
             retired_daily_keys(&app);
             // The recent list, written once the window the user asked for is on screen.
-            if app.vault().is_some()
+            if app.key.borrow().saved_as().is_some()
                 && let Err(e) = app.config.borrow().save()
             {
                 tracing::warn!("saving config: {e:#}");
@@ -378,8 +381,13 @@ pub fn build_window(
             if !app.offline() {
                 app.restore_session();
             }
-            if let Some(rel) = note {
-                app.open_path(&rel);
+            let session = matches!(*app.key.borrow(), WindowKey::Terminal(_));
+            match note {
+                Some(named) => app.open_named(&named),
+                // A terminal session is its shells, so one that came back with none — a new
+                // name, or every shell closed — starts with one at home.
+                None if session && app.terminals().is_empty() => app.open_terminal(),
+                None => {}
             }
         }
     ));

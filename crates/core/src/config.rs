@@ -272,6 +272,14 @@ pub struct DiagramPlace {
     pub y: f64,
 }
 
+/// Where a shell was, so it can be started there again when nothing kept it running.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ShellPlace {
+    /// An absolute directory on this machine, or `ssh://[user@]host[:port]/path` on another.
+    pub at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
@@ -300,6 +308,8 @@ pub struct Session {
     pub pdf: BTreeMap<String, PdfPlace>,
     /// Where each diagram was left, the same way (and with the same ceiling) as `pdf`.
     pub diagram: BTreeMap<String, DiagramPlace>,
+    /// Where each open shell was, keyed by its tab key (`terminal:<id>`).
+    pub terminals: BTreeMap<String, ShellPlace>,
 }
 
 impl Default for Session {
@@ -316,6 +326,7 @@ impl Default for Session {
             recent_commands: Vec::new(),
             pdf: BTreeMap::new(),
             diagram: BTreeMap::new(),
+            terminals: BTreeMap::new(),
         }
     }
 }
@@ -1176,6 +1187,12 @@ daily_dir = "Daily"
                     y: 20.0,
                 },
             )]),
+            terminals: BTreeMap::from([(
+                "terminal:0123456789abcdef".to_string(),
+                ShellPlace {
+                    at: "/home/me/src".to_string(),
+                },
+            )]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1196,6 +1213,16 @@ daily_dir = "Daily"
             assert_eq!(back.zoom, 1.2);
             assert_eq!(back.recent_notes, s.recent_notes);
             assert_eq!(back.recent_commands, s.recent_commands);
+            assert_eq!(back.terminals, s.terminals);
+
+            // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
+            let named = Path::new("terminal://dev");
+            s.save(named).unwrap();
+            assert_eq!(
+                state_path(named).file_stem().unwrap(),
+                vault_hash(named).as_str()
+            );
+            assert_eq!(Session::load(named).terminals, s.terminals);
         });
     }
 

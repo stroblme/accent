@@ -19,11 +19,18 @@
 //! reference count alone — there is no `destroy` to break one from outside — and a `VteTerminal`
 //! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
 //! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
+//!
+//! A shell is held by `accent-cli` now, and what runs in the tab's pty is `accent-cli attach`: a
+//! hangup detaches it and leaves the shell running for the next window to take up, and Close Tab
+//! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use accent_api::ssh;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use vte4::TerminalExt;
@@ -53,6 +60,8 @@ pub struct Term {
     shell: Shell,
     /// Whether a dropped link ended the shell and the tab is waiting for [`reopen`](Self::reopen).
     lost: Cell<bool>,
+    /// Whether the shell has ended, so there is nothing left for [`kill`](Self::kill) to end.
+    ended: Cell<bool>,
 }
 
 impl Term {
@@ -70,15 +79,50 @@ impl Term {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| match &self.shell {
                 Shell::Local(cwd) => cwd.display().to_string(),
-                Shell::Remote { host, .. } => host.clone(),
+                Shell::Remote { at, .. } => at.host.clone(),
             })
     }
 
-    /// Start the shell a dropped link ended again, in the same tab: what was on screen stays above
-    /// it, and the new one lands at the vault root. Nothing to do for a shell that is still running.
-    pub fn reopen(&self) {
+    /// Where the shell is, as the session writes it down: the directory it last reported through
+    /// OSC 7 on this machine, or the one it was started in until it has reported one. OSC 7 does
+    /// not arrive over ssh, so a remote shell is where it was opened. `None` for a directory whose
+    /// name is not UTF-8, which a session file cannot hold.
+    pub fn at(&self) -> Option<String> {
+        match &self.shell {
+            Shell::Local(start) => {
+                let told = self
+                    .view
+                    .current_directory_uri()
+                    .and_then(|uri| dir_of(&uri, &glib::host_name()));
+                told.as_deref()
+                    .unwrap_or(start)
+                    .to_str()
+                    .map(str::to_string)
+            }
+            Shell::Remote { at, .. } => Some(at.to_string()),
+        }
+    }
+
+    /// Attach again to the shell a dropped link cut this tab off from. The host still holds it and
+    /// replays its screen, history and all, so the old one is cleared first rather than shown
+    /// twice. Nothing to do for a shell that is still attached.
+    pub fn reopen(self: &Rc<Self>) {
         if self.lost.replace(false) {
-            spawn(&self.view, &self.shell);
+            self.view.reset(true, true);
+            start(self);
+        }
+    }
+
+    /// End the shell for good, which is what Close Tab means: closing a window only lets go of
+    /// its shells, and they are still there when it opens again. Nothing to do for one that has
+    /// ended already.
+    pub fn kill(&self) {
+        if self.ended.get() {
+            return;
+        }
+        match &self.shell {
+            Shell::Local(_) => end(&self.key, &self.at().unwrap_or_default()),
+            Shell::Remote { kill, .. } => run_kill(kill.clone()),
         }
     }
 
@@ -133,7 +177,6 @@ pub fn has_focus(gtk_app: &gtk::Application) -> bool {
         .is_some_and(|widget| widget.is::<vte4::Terminal>())
 }
 
-/// Open a shell in `cwd` as a tab of `tabs`.
 /// What a shell tab runs.
 ///
 /// A remote vault's shell belongs on the remote: the files are there, the repository is there,
@@ -144,11 +187,36 @@ pub fn has_focus(gtk_app: &gtk::Application) -> bool {
 pub enum Shell {
     /// The user's own shell, in a directory on this machine.
     Local(PathBuf),
-    /// An interactive login on the host, landing in the vault root. Built by
-    /// `accent_api::ssh::shell`, which is also what carries the ControlPath.
-    Remote { argv: Vec<String>, host: String },
+    /// A shell held on a host by the server this build uploads there, attached over `ssh -t`:
+    /// see [`Shell::remote`].
+    Remote {
+        argv: Vec<String>,
+        /// What ends it for good, run on this machine.
+        kill: Vec<String>,
+        /// Where it was opened: the host, and the directory on it.
+        at: ssh::Url,
+        /// The address whose ssh master it rides, which [`start`] makes ready before attaching: a
+        /// remote vault's own, or the host's.
+        link: ssh::Url,
+    },
 }
 
+impl Shell {
+    /// The shell `key` names, held on the host `at` names and started in its path, riding the
+    /// master of `link`.
+    pub fn remote(at: ssh::Url, link: ssh::Url, key: &str) -> Result<Self, String> {
+        let server = ssh::server_path(&accent_api::link::server()?.hash);
+        let ctl = ssh::control_path(&link);
+        Ok(Self::Remote {
+            argv: ssh::attach(&at, &ctl, &server, id(key)),
+            kill: ssh::run(&at, &ctl, &ssh::kill_cmd(&server, id(key))),
+            at,
+            link,
+        })
+    }
+}
+
+/// Open a shell as a tab of `tabs`, and start it.
 pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     let view = vte4::Terminal::new();
     view.set_scrollback_lines(SCROLLBACK);
@@ -176,7 +244,7 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     page.set_title(
         match shell {
             Shell::Local(_) => "Terminal".to_string(),
-            Shell::Remote { host, .. } => host.clone(),
+            Shell::Remote { at, .. } => at.host.clone(),
         }
         .as_str(),
     );
@@ -197,26 +265,123 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         }
     ));
 
-    spawn(&view, shell);
     install_keys(&view, tabs);
     install_links(&view);
 
-    Rc::new(Term {
+    let term = Rc::new(Term {
         key,
         page,
         view,
         shell: shell.clone(),
         lost: Cell::new(false),
-    })
+        ended: Cell::new(false),
+    });
+    reattach_on_key(&term);
+    start(&term);
+    term
+}
+
+/// Run the shell once there is somewhere to run it: on this machine at once, and on a host once
+/// [`accent_api::link::prepare`] has a master up and the server installed there. A window of
+/// shells has no connect bar, so the tab's own screen says how far that has got, on one line
+/// written over in place.
+fn start(term: &Rc<Term>) {
+    let Shell::Remote { link, .. } = &term.shell else {
+        return spawn(&term.view, &term.shell, id(&term.key));
+    };
+    term.view
+        .feed(format!("Connecting to {}…", link.host).as_bytes());
+    let (link, weak) = (link.clone(), Rc::downgrade(term));
+    let view = glib::SendWeakRef::from(term.view.downgrade());
+    // Set once there is an outcome. A line the worker said just before it returned can reach the
+    // main loop after that, and would be drawn over the shell's first prompt.
+    let over = Arc::new(AtomicBool::new(false));
+    glib::spawn_future_local(async move {
+        let what = format!("connect to {}", link.host);
+        let listening = over.clone();
+        let ready = crate::work::attempt(&what, move || {
+            let say = |line: &str, _: Option<f64>| progress(&view, &listening, line);
+            accent_api::link::prepare(&link, &ssh::control_path(&link), false, &say)
+        })
+        .await;
+        over.store(true, Ordering::Relaxed);
+        let Some(term) = weak.upgrade() else {
+            return;
+        };
+        term.view.feed(CLEAR_LINE);
+        match ready {
+            Ok(()) => spawn(&term.view, &term.shell, id(&term.key)),
+            Err(why) => {
+                term.lost.set(true);
+                let line = format!("[{why}. Press a key to try again.]");
+                term.view.feed(line.replace('\n', "\r\n").as_bytes());
+            }
+        }
+    });
+}
+
+/// Back to the start of the line, and the line cleared.
+const CLEAR_LINE: &[u8] = b"\r\x1b[2K";
+
+/// Draw one of [`start`]'s progress lines over the last, from the worker making the host ready:
+/// through the main loop, as `pdf::render` hands a page back, and not once `over` is set.
+fn progress(view: &glib::SendWeakRef<vte4::Terminal>, over: &Arc<AtomicBool>, line: &str) {
+    let (view, over, line) = (view.clone(), over.clone(), format!("{line}…"));
+    glib::idle_add_once(move || {
+        if let Some(view) = view.upgrade().filter(|_| !over.load(Ordering::Relaxed)) {
+            view.feed(CLEAR_LINE);
+            view.feed(line.as_bytes());
+        }
+    });
+}
+
+/// Bring a lost shell back on a key press: a window of shells has no banner to press Reconnect
+/// on, and the tab is where the reader is looking. Not on a modifier alone, so the Ctrl of a
+/// Ctrl+W that gives up on the tab does not dial out first — which may raise a passphrase dialog.
+/// Capture phase, so the key that asks is not also typed into the shell it brings back.
+fn reattach_on_key(term: &Rc<Term>) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    // Weak: the view owns this controller, and the term owns the view.
+    let weak = Rc::downgrade(term);
+    keys.connect_key_pressed(move |keys, _, _, _| {
+        let modifier = keys
+            .current_event()
+            .and_then(|event| event.downcast::<gdk::KeyEvent>().ok())
+            .is_some_and(|key| key.is_modifier());
+        match weak.upgrade().filter(|term| term.lost.get() && !modifier) {
+            Some(term) => {
+                term.reopen();
+                glib::Propagation::Stop
+            }
+            None => glib::Propagation::Proceed,
+        }
+    });
+    term.view.add_controller(keys);
 }
 
 /// Run `shell` in `view`, which may have run one before: VTE takes a new child once the last has
 /// exited.
-fn spawn(view: &vte4::Terminal, shell: &Shell) {
-    let (cwd, argv) = match shell {
-        Shell::Local(cwd) => (Some(cwd.clone()), vec![user_shell()]),
+///
+/// A local one is `accent-cli attach`, which starts the shell `id` names in the holder, or finds
+/// it there still running, and relays it into this pty: so the shell outlives the tab's pty and a
+/// closed window, and comes back when its tab does. Without `accent-cli` it is the shell itself,
+/// ending with its tab, as it always used to.
+fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
+    let (cwd, argv) = match (shell, cli()) {
+        (Shell::Local(cwd), Some(cli)) => (
+            None,
+            vec![
+                cli.to_string_lossy().into_owned(),
+                "attach".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string_lossy().into_owned(),
+                id.to_string(),
+            ],
+        ),
+        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()]),
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
-        Shell::Remote { argv, .. } => (None, argv.clone()),
+        (Shell::Remote { argv, .. }, _) => (None, argv.clone()),
     };
     let named = argv.join(" ");
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -237,11 +402,6 @@ fn spawn(view: &vte4::Terminal, shell: &Shell) {
     );
 }
 
-/// The shell exited: hand the terminal back so the caller can close its tab.
-///
-/// Except a remote shell whose link went. Its tab stays, saying so, and [`Term::reopen`] starts
-/// the shell again when the vault is back; closing the tab meanwhile is what gives up on it. A
-/// local command's 255 is an ordinary exit.
 /// Run `changed` whenever VTE reports a title of its own: once a moment after the shell has
 /// started, and again on every `cd`. Weak, for the reason [`on_exit`] is.
 pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
@@ -253,6 +413,13 @@ pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
     });
 }
 
+/// The shell exited: hand the terminal back so the caller can close its tab.
+///
+/// Except a remote shell whose link went, which the host still holds. Its tab stays, saying so,
+/// and [`Term::reopen`] attaches again on a key press, or when a remote vault's window is back;
+/// closing the tab meanwhile is what ends it. A local command's 255 is an ordinary exit. And
+/// except an `accent-cli attach` that could not do its job, whose tab stays so the line it printed
+/// can be read; `Ctrl+W` closes it.
 pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
     term.view.connect_child_exited(move |view, status| {
@@ -260,27 +427,43 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
             return;
         };
         match &term.shell {
-            Shell::Remote { host, .. } if link_lost(status) => {
+            Shell::Remote { at, .. } if link_lost(status) => {
                 term.lost.set(true);
                 let line = format!(
-                    "\r\n[The connection to {host} went. The shell reopens when it is back.]\r\n"
+                    "\r\n[Lost the connection to {}. Press a key to reconnect.]\r\n",
+                    at.host
                 );
                 view.feed(line.as_bytes());
             }
-            _ => done(&term),
+            _ => {
+                term.ended.set(true);
+                if !exited_with(status, ATTACH_FAILED) {
+                    done(&term);
+                }
+            }
         }
     });
 }
 
-/// Whether ssh ended itself rather than the shell it carried: it exits 255 on its own errors, a
-/// dropped link among them, and with the remote command's status otherwise. `status` is the wait
-/// status VTE passes on, as `waitpid` gave it: an exit is a zero signal byte, and its code is the
-/// byte above.
+/// What `accent-cli attach` exits with when it could not reach the holder or start the shell,
+/// rather than with the status of a shell it carried.
 ///
-/// ponytail: a remote `exit 255` reads as a lost link too, and keeps its tab until the next
-/// reconnect or a close.
+/// ponytail: a shell's own `exit 254` keeps its tab the same way, until `Ctrl+W`.
+const ATTACH_FAILED: i32 = 254;
+
+/// Whether ssh ended itself rather than the shell it carried: it exits 255 on its own errors, a
+/// dropped link among them, and with the remote command's status otherwise.
+///
+/// ponytail: a remote `exit 255` reads as a lost link too, and keeps its tab until a key press
+/// attaches to a shell the host no longer holds — which starts a new one — or a close.
 fn link_lost(status: i32) -> bool {
-    status & 0x7f == 0 && (status >> 8) & 0xff == 255
+    exited_with(status, 255)
+}
+
+/// Whether a child exited with `code`. `status` is the wait status VTE passes on, as `waitpid`
+/// gave it: an exit is a zero signal byte, and its code is the byte above.
+fn exited_with(status: i32, code: i32) -> bool {
+    status & 0x7f == 0 && (status >> 8) & 0xff == code
 }
 
 /// What the terminal answers itself: moving between tabs, which `AdwTabView` binds at the window
@@ -496,10 +679,99 @@ fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
 
-/// A terminal's key. Not a path, so nothing that walks the open documents by path can collide with
-/// one, and the number only has to be unique within a window.
-pub fn key(n: usize) -> String {
-    format!("terminal:{n}")
+/// What a terminal's key starts with. Not a path, so nothing that walks the open documents by path
+/// can collide with one.
+const KEY: &str = "terminal:";
+
+/// A key for a new shell: sixteen random hex digits, which is also the name the shell is held
+/// under, so it has to be unique across windows, session files and machines, not only within a
+/// window.
+pub fn new_key() -> String {
+    format!("{KEY}{:08x}{:08x}", glib::random_int(), glib::random_int())
+}
+
+/// Whether a session's key names a shell rather than a file.
+pub fn is_key(key: &str) -> bool {
+    key.strip_prefix(KEY)
+        .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// What a saved terminal session's key starts with: `terminal://<name>`, the way a remote vault's
+/// is `ssh://…`, so the recent list, the state file and the command line all take it as they are.
+pub const SESSION: &str = "terminal://";
+
+/// The key the terminal session `name` is remembered by.
+pub fn session_key(name: &str) -> PathBuf {
+    PathBuf::from(format!("{SESSION}{name}"))
+}
+
+/// The name in a terminal session's key: `None` for any other key, and for a name that is empty
+/// or holds a `/`.
+pub fn session_name(key: &Path) -> Option<&str> {
+    key.to_str()?
+        .strip_prefix(SESSION)
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+}
+
+/// The name the holder knows the shell by: its key without the prefix.
+fn id(key: &str) -> &str {
+    key.strip_prefix(KEY).unwrap_or(key)
+}
+
+/// The `accent-cli` beside this binary, which is what holds the shells: `target/<profile>/` in a
+/// build, `bin/` in an install. Not `ssh::server_binary`, which finds the static build uploaded
+/// to a host.
+pub fn cli() -> Option<PathBuf> {
+    let cli = std::env::current_exe().ok()?.with_file_name("accent-cli");
+    cli.is_file().then_some(cli)
+}
+
+/// End the shell `key` names, held where `at` says: Close Tab on this machine, and a saved
+/// session's shell that a session written over it leaves out. Without `accent-cli` nothing holds
+/// a shell here, and it ended with its tab.
+///
+/// On a host, over that host's own master, which is the one a window of shells rides there.
+pub fn end(key: &str, at: &str) {
+    if ssh::is_remote(at) {
+        let url = ssh::parse(at);
+        match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
+            Ok(Shell::Remote { kill, .. }) => run_kill(kill),
+            Ok(Shell::Local(_)) => {}
+            Err(e) => tracing::warn!("cannot end the shell at {at}: {e}"),
+        }
+        return;
+    }
+    if let Some(cli) = cli() {
+        let cli = cli.to_string_lossy().into_owned();
+        run_kill(vec![cli, "kill".to_string(), id(key).to_string()]);
+    }
+}
+
+/// Run a kill's argument vector and wait for it on a thread of its own, so Close Tab never waits
+/// on the holder or on a host. An empty one is a shell nothing holds.
+fn run_kill(argv: Vec<String>) {
+    let Some((program, args)) = argv.split_first() else {
+        return;
+    };
+    let mut command = std::process::Command::new(program);
+    command.args(args).stdin(std::process::Stdio::null());
+    let _ = std::thread::Builder::new()
+        .name("accent-kill".to_string())
+        .spawn(move || {
+            if let Err(e) = command.status() {
+                tracing::warn!("cannot end the shell: {e}");
+            }
+        });
+}
+
+/// The directory an OSC 7 `file://host/path` URI names, if `host` is this machine. A shell that
+/// has ssh'd somewhere reports the other machine's directory, which is no place to start one here.
+fn dir_of(uri: &str, host: &str) -> Option<PathBuf> {
+    let (dir, from) = glib::filename_from_uri(uri).ok()?;
+    match from.as_deref() {
+        None | Some("" | "localhost") => Some(dir),
+        Some(from) => (from == host).then_some(dir),
+    }
 }
 
 #[cfg(test)]
@@ -508,9 +780,48 @@ mod tests {
 
     #[test]
     fn a_terminal_key_is_never_a_path() {
-        assert_eq!(key(3), "terminal:3");
+        let key = new_key();
+        assert!(is_key(&key), "{key}");
+        // Sixteen hex digits after the prefix, and a fresh one each time.
+        assert_eq!(key.len(), "terminal:".len() + 16);
+        assert_ne!(key, new_key());
         // Not loose, which is what would send it through the file machinery.
-        assert!(!crate::doc::is_loose_key(&key(1)));
+        assert!(!crate::doc::is_loose_key(&key));
+        // A note that merely starts the same way is still a note.
+        assert!(!is_key("terminal:notes.md"));
+    }
+
+    #[test]
+    fn a_session_key_reads_back_as_its_name() {
+        assert_eq!(session_key("dev"), PathBuf::from("terminal://dev"));
+        assert_eq!(session_name(&session_key("dev")), Some("dev"));
+        assert_eq!(session_name(&session_key("my work")), Some("my work"));
+        // No name, a name that would be a path, and every other kind of key.
+        assert_eq!(session_name(Path::new("terminal://")), None);
+        assert_eq!(session_name(Path::new("terminal://a/b")), None);
+        assert_eq!(session_name(Path::new("ssh://box/srv/vault")), None);
+        assert_eq!(session_name(Path::new("/home/me/Notes")), None);
+    }
+
+    /// OSC 7 names the host it was sent from, and a directory on another machine is no place to
+    /// start a shell here.
+    #[test]
+    fn osc7_names_a_directory_only_on_this_machine() {
+        assert_eq!(
+            dir_of("file://box/home/me/src", "box"),
+            Some(PathBuf::from("/home/me/src"))
+        );
+        // No host, or `localhost`, is this one; the path is decoded.
+        assert_eq!(
+            dir_of("file:///tmp/a%20b", "box"),
+            Some(PathBuf::from("/tmp/a b"))
+        );
+        assert_eq!(
+            dir_of("file://localhost/tmp", "box"),
+            Some(PathBuf::from("/tmp"))
+        );
+        assert_eq!(dir_of("file://elsewhere/home/me", "box"), None);
+        assert_eq!(dir_of("https://box/home/me", "box"), None);
     }
 
     /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.

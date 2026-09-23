@@ -19,6 +19,7 @@ pub mod ffi;
 #[cfg(feature = "android")]
 uniffi::setup_scaffolding!();
 pub mod language;
+pub mod link;
 mod local;
 mod paths;
 pub mod remote;

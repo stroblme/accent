@@ -38,7 +38,7 @@ use git::{
     bench_git_sync_over_fetch,
 };
 use image::bench_image;
-use keys::{bench_keys, bench_list, bench_shell_keys, bench_term};
+use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
@@ -105,6 +105,9 @@ use tags::bench_tags;
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
+/// `ACCENT_BENCH_HOLD=open` then `=back`, on one scratch state, is a shell outliving its window:
+/// `open` leaves a marker in it and quits, `back` prints what the restore brought back and whether
+/// Close Tab ended it in the holder (see `keys::bench_hold`).
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
@@ -207,8 +210,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
 /// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
-/// `a`'s pane and puts a terminal in front of it first, a shell being no file and so not
-/// restored, which leaves that pane naming none. Every printout says
+/// `a`'s pane and puts a terminal in front of it first, which the session writes into that pane
+/// and as the active tab like any other. Every printout says
 /// which tab is in front of the active pane, which tab the session would write as the active one,
 /// and how many places each pane's Back and Forward hold. `=1` prints the tree a restore built
 /// once its tabs have landed, and quits without writing one. `=pick:<rel>` does the same, having
@@ -230,6 +233,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let panes = std::env::var("ACCENT_BENCH_PANES").ok();
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
+    let hold = std::env::var("ACCENT_BENCH_HOLD").ok();
     let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
@@ -284,6 +288,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !paths
         && !shell_keys
         && !term
+        && hold.is_none()
         && picture.is_none()
         && !close
         && !hidden
@@ -392,6 +397,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if term {
             return bench_term(&app);
+        }
+        if let Some(step) = hold {
+            return bench_hold(&app, &step);
         }
         if let Some(arg) = picture {
             return bench_image(&app, &arg);

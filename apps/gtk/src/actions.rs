@@ -10,6 +10,7 @@ use super::*;
 /// libadwaita has no notion of that order.
 pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
+    ("win.save-session", "Save Session…", &[]),
     ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-file", "New File", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
@@ -26,6 +27,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &["<Control><Shift>Tab", "<Control><Shift>ISO_Left_Tab"],
     ),
     ("win.terminal", "New Terminal", &["<Control>j"]),
+    ("win.terminal-remote", "New Remote Terminal…", &[]),
+    // A shell here from a remote vault's window, where New Terminal opens one on the host.
+    ("win.terminal-local", "New Local Terminal", &[]),
     // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
     // can be named by the terminal's own context menu. Both spellings carry Control and Shift, so
     // `forwarded` hands them back from a focused shell without being told to.
@@ -243,6 +247,7 @@ impl App {
         }
         match name {
             "save" => self.save_active(),
+            "save-session" => self.save_session_dialog(),
             "open-file" => self.open_file_dialog(),
             "new-file" => {
                 let Some(vault) = self.vault() else {
@@ -281,6 +286,8 @@ impl App {
                 }
             }
             "terminal" => self.open_terminal(),
+            "terminal-remote" => self.choose_remote_terminal(),
+            "terminal-local" => self.open_terminal_at(Some(glib::home_dir())),
             // Nothing to do over any other tab: the editor and the PDF have their own copy.
             "terminal-copy" => {
                 if let Some(Doc::Terminal(term)) = self.active_doc() {
@@ -811,27 +818,47 @@ pub fn label_of(action: &str) -> &str {
         .map_or(action, |(_, label, _)| *label)
 }
 
-pub fn menu_button() -> gtk::MenuButton {
+/// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
+/// files in this window, which vault it is on, what it shows, and the application. What needs a
+/// vault — making a file or a folder in it, closing it — is left off a window without one rather
+/// than offered and refused, and a window of shells offers to save them as a session. A shell on
+/// this machine is its own item only where New Terminal opens one on a host.
+fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
+    let vault = key.vault().is_some();
+    let mut shows = vec![
+        "win.find",
+        "win.view-mode",
+        "win.terminal",
+        "win.terminal-remote",
+    ];
+    if key.vault().is_some_and(ssh::is_remote_path) {
+        shows.push("win.terminal-local");
+    }
+    shows.push("win.present");
+    let mut files = match vault {
+        true => vec!["win.new-file", "win.new-folder"],
+        false => Vec::new(),
+    };
+    files.extend(["win.open-file", "win.save"]);
+    if key.is_terminal() {
+        files.push("win.save-session");
+    }
+    // What changes which vault this window is on: the three ways in, then the way out.
+    let mut vaults = vec!["app.open-vault", "app.open-remote", "win.open-recent"];
+    if vault {
+        vaults.push("app.close-vault");
+    }
+    [
+        files,
+        vaults,
+        shows,
+        vec!["win.preferences", "win.about", "app.quit"],
+    ]
+}
+
+pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
     let menu = gio::Menu::new();
-    for group in [
-        [
-            "win.new-file",
-            "win.new-folder",
-            "win.open-file",
-            "win.save",
-        ]
-        .as_slice(),
-        // What changes which vault this window is on: the three ways in, then the way out.
-        [
-            "app.open-vault",
-            "app.open-remote",
-            "win.open-recent",
-            "app.close-vault",
-        ]
-        .as_slice(),
-        ["win.find", "win.view-mode", "win.terminal", "win.present"].as_slice(),
-        ["win.preferences", "win.about", "app.quit"].as_slice(),
-    ] {
+    for group in primary_actions(key) {
         let section = gio::Menu::new();
         for action in group {
             section.append(Some(label_of(action)), Some(action));
@@ -1013,6 +1040,86 @@ mod tests {
                 "{action} is on the tab menu but not in ACTIONS"
             );
         }
+    }
+
+    #[test]
+    fn the_primary_menu_offers_only_what_the_window_can_do() {
+        use crate::shell::{Loose, WindowKey};
+        let vault = primary_actions(&WindowKey::Vault("/home/me/Notes".into()));
+        assert_eq!(
+            vault[0],
+            [
+                "win.new-file",
+                "win.new-folder",
+                "win.open-file",
+                "win.save"
+            ]
+        );
+        assert_eq!(
+            vault[1],
+            [
+                "app.open-vault",
+                "app.open-remote",
+                "win.open-recent",
+                "app.close-vault"
+            ]
+        );
+        // Without a vault there is nothing to make a file in and nothing to close; a window of
+        // shells can be saved as a session instead.
+        let shells = [
+            WindowKey::Terminal("terminal://dev".into()),
+            WindowKey::Loose(Loose::Terminal),
+        ];
+        for key in &shells {
+            let menu = primary_actions(key);
+            assert_eq!(menu[0], ["win.open-file", "win.save", "win.save-session"]);
+            assert_eq!(
+                menu[1],
+                ["app.open-vault", "app.open-remote", "win.open-recent"]
+            );
+            assert_eq!(menu[2..], vault[2..]);
+        }
+        let documents = primary_actions(&WindowKey::Loose(Loose::Documents));
+        assert_eq!(documents[0], ["win.open-file", "win.save"]);
+        assert_eq!(documents[1], primary_actions(&shells[0])[1]);
+        // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
+        // this machine is an item of its own.
+        let remote = primary_actions(&WindowKey::Vault("ssh://box/srv/vault".into()));
+        assert_eq!(
+            vault[2],
+            [
+                "win.find",
+                "win.view-mode",
+                "win.terminal",
+                "win.terminal-remote",
+                "win.present"
+            ]
+        );
+        assert_eq!(
+            remote[2],
+            [
+                "win.find",
+                "win.view-mode",
+                "win.terminal",
+                "win.terminal-remote",
+                "win.terminal-local",
+                "win.present"
+            ]
+        );
+        // Every item is a command the window has, which is where its label comes from.
+        for menu in [vault, documents, remote] {
+            for action in menu.iter().flatten() {
+                assert!(
+                    ACTIONS.iter().any(|(name, _, _)| name == action),
+                    "{action}"
+                );
+            }
+        }
+        assert!(
+            ACTIONS
+                .iter()
+                .any(|(name, _, _)| *name == "win.save-session")
+        );
     }
 
     /// The two items a shell or a comparison must not be offered, and that a pane built before

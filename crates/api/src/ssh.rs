@@ -294,6 +294,12 @@ pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "exit")
 }
 
+/// Ask whether a master is up behind `ctl`. It only talks to the socket, so it answers at once
+/// and never dials out: the question to settle before paying for a handshake.
+pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
+    control(url, ctl, "check")
+}
+
 /// Which machine listens for a forward's connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -367,20 +373,23 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
     argv
 }
 
-/// An interactive login shell in the vault root, for a terminal tab.
+/// A terminal tab's end of the shell `id` held on the host, started in `url`'s path if the host
+/// does not hold it yet. `server` is a path expression from [`server_path`].
 ///
-/// `-t` forces a pty, which a remote command does not get by default and without which the shell
-/// runs non-interactive. No `BatchMode` here: a prompt is exactly what the tab is for.
+/// `-t` forces a pty, which a remote command does not get by default: `attach` relays one, and
+/// without it the host's end has no terminal to put in raw mode or to take a size from. No
+/// `BatchMode`: should the master be gone, a prompt in the tab is one the reader can answer.
 ///
-/// `;` rather than `&&`: a root that is not there — a typo in the address — prints `cd`'s error
-/// and still gives a shell, at the login's home, which is where such a window is steered from.
-pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
+/// A path that is not there — a typo in the address — starts the shell at the login's home, which
+/// is the holder's own fallback, so a window opened at a mistyped path still gets one.
+pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-t".to_string());
     argv.push(url.destination());
     argv.push(format!(
-        "cd {}; exec \"$SHELL\"",
-        quote(&url.path.to_string_lossy())
+        "{server} attach --cwd {} {}",
+        quote(&url.path.to_string_lossy()),
+        quote(id)
     ));
     argv
 }
@@ -452,6 +461,12 @@ pub fn install_server_cmd(hash: &str, size: usize) -> String {
 /// [`server_path`]; the root is a literal, so it is quoted.
 pub fn serve_cmd(server: &str, root: &Path) -> String {
     format!("{server} serve --vault {}", quote(&root.to_string_lossy()))
+}
+
+/// The command that ends the shell `id` held on the host, for [`run`]: a Close Tab, which must
+/// not wait on a prompt.
+pub fn kill_cmd(server: &str, id: &str) -> String {
+    format!("{server} kill {}", quote(id))
 }
 
 // --------------------------------------------------------------------- cache
@@ -759,6 +774,19 @@ mod tests {
                 "me@box",
             ])
         );
+        assert_eq!(
+            check(&ported(), ctl()),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-p",
+                "2222",
+                "-O",
+                "check",
+                "me@box",
+            ])
+        );
     }
 
     #[test]
@@ -879,21 +907,23 @@ mod tests {
     }
 
     #[test]
-    fn an_interactive_shell_starts_in_the_vault_root_or_else_at_home() {
+    fn a_held_shell_is_attached_over_the_master_in_a_pty_of_its_own() {
+        let server = server_path("0123456789abcdef");
+        let id = "89abcdef01234567";
         assert_eq!(
-            shell(&plain(), ctl()),
+            attach(&plain(), ctl(), &server, id),
             words(&[
                 "ssh",
                 "-o",
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-t",
                 "box",
-                "cd '/srv/vault'; exec \"$SHELL\"",
+                &format!("{server} attach --cwd '/srv/vault' '{id}'"),
             ])
         );
-        let spaced = parse("ssh://box:2222/srv/my vault").expect("a spaced path parses");
+        let spaced = parse("ssh://me@box:2222/srv/my vault").expect("a spaced path parses");
         assert_eq!(
-            shell(&spaced, ctl()),
+            attach(&spaced, ctl(), &server, id),
             words(&[
                 "ssh",
                 "-o",
@@ -901,9 +931,14 @@ mod tests {
                 "-p",
                 "2222",
                 "-t",
-                "box",
-                "cd '/srv/my vault'; exec \"$SHELL\"",
+                "me@box",
+                &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])
+        );
+        // Ending it is a one-shot command over the same master, which never prompts.
+        assert_eq!(
+            run(&spaced, ctl(), &kill_cmd(&server, id)).last(),
+            Some(&format!("{server} kill '{id}'"))
         );
     }
 

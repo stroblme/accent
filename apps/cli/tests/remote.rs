@@ -15,6 +15,7 @@
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
 use accent_api::{Event, Vault, VaultConfig, git, rpc};
 
@@ -363,6 +364,26 @@ fn a_remote_vault_connects_indexes_and_answers() {
         )
     );
     drop(vault);
+
+    // The host made ready on its own, as a terminal window's is: a master of the host's rather
+    // than a vault's, quietly, so nothing on the way may prompt. The first pass makes the master,
+    // the second finds it up and skips the handshake.
+    let host = link::host(&url);
+    let ctl = ssh::control_path(&host);
+    let exit = || {
+        let argv = ssh::exit(&host, &ctl);
+        let _ = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output();
+    };
+    exit();
+    for pass in ["cold", "warm"] {
+        let t = Instant::now();
+        link::prepare(&host, &ctl, true, &|what, _| eprintln!("  {what}"))
+            .unwrap_or_else(|why| panic!("preparing {}: {why}", host.host));
+        eprintln!("host prepared, {pass}, in {:?}", t.elapsed());
+    }
+    exit();
 }
 
 /// Run `script` on the host over a connection of its own, and answer with what it printed.

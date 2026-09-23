@@ -1,6 +1,8 @@
-//! Drills over the keyboard: the editor's key semantics and a shell's accelerators.
+//! Drills over the keyboard: the editor's key semantics, and a shell's accelerators, title and
+//! life beyond its window.
 
 use super::*;
+use vte4::TerminalExt as _;
 
 /// Drive the key semantics [`multicaret::View`] corrects — the wordwise deletes, logical-line
 /// Up/Down, and the same chords at a column of carets — through the very signals the key bindings
@@ -775,4 +777,72 @@ pub(super) fn bench_term(app: &Rc<App>) {
         bench_quit(&app);
         glib::ControlFlow::Break
     });
+}
+
+/// `ACCENT_BENCH_HOLD=open|back`: a shell outliving its window. Run twice on one scratch state,
+/// `open` first. `open` sends a `cd` and a marker into the window's shell and quits the way
+/// Ctrl+Q does, which writes the session and leaves the shell held; `back` prints what the
+/// restore brought back — the key, where the shell is, and whether the marker came back on its
+/// screen — then closes the tab and prints how many shells the holder still has. Expected: the
+/// same key twice, `at=/tmp`, `replayed=true`, `held=0`. Under `SHELL=/bin/bash`, whose `vte.sh`
+/// reports the directory.
+pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
+    if app.terminals().is_empty() {
+        app.open_terminal();
+    }
+    let Some(term) = app.terminals().first().cloned() else {
+        return bench_quit(app);
+    };
+    let (app, open) = (app.clone(), step == "open");
+    // Typed once the shell is up rather than into the pty ahead of it: switching the tty to raw
+    // mode may flush what is waiting there.
+    glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+        if open {
+            term.view.feed_child(b"cd /tmp && echo held-marker\n");
+        }
+        glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+            bench_hold_step(&app, &term, open)
+        });
+    });
+}
+
+/// The half of [`bench_hold`] once its shell has had time to answer.
+fn bench_hold_step(app: &Rc<App>, term: &Rc<crate::terminal::Term>, open: bool) {
+    let (key, at) = (term.key(), term.at().unwrap_or_default());
+    // A window without a vault toasts nothing else, so this is 0, or 1 when no `accent-cli` is
+    // there to hold its shells: that is said once, however many it opens.
+    let toasts = app.toasted.get();
+    if open {
+        println!("bench hold open key={key} at={at} toasts={toasts}");
+        if let Some(gtk_app) = app.window.application() {
+            gtk_app.activate_action("quit", None);
+        }
+        return;
+    }
+    let replayed = term
+        .view
+        .text_format(vte4::Format::Text)
+        .is_some_and(|text| text.contains("held-marker"));
+    println!("bench hold back key={key} at={at} replayed={replayed} toasts={toasts}");
+    let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(500), move || {
+        println!("bench hold held={}", bench_held());
+        bench_quit(&app);
+    });
+}
+
+/// How many shells `accent-cli held` lists, or why it could not say.
+fn bench_held() -> String {
+    let Some(cli) = crate::terminal::cli() else {
+        return "no-accent-cli".to_string();
+    };
+    match std::process::Command::new(cli).arg("held").output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .count()
+            .to_string(),
+        Ok(out) => format!("failed:{}", out.status),
+        Err(e) => format!("failed:{e}"),
+    }
 }

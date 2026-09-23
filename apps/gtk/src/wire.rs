@@ -530,6 +530,7 @@ pub fn wire_window(app: &Rc<App>) {
                 git.stop();
             }
             app.save_session();
+            app.release_shells();
             glib::Propagation::Proceed
         }
     ));
