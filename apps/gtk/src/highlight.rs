@@ -1,5 +1,6 @@
 //! Editor styling: core `Span`s and CSV `Cell`s (byte ranges) -> `gtk::TextTag`s on the buffer.
 
+use crate::theme;
 use crate::typing;
 use accent_core::csv;
 use accent_core::markdown::{self, Span, Style};
@@ -201,12 +202,6 @@ fn monospace_family() -> String {
         .unwrap_or_else(|| "monospace".to_string())
 }
 
-/// The colour at `alpha`, which is how everything in the editor dims: composited over the
-/// view's background, a foreground at an alpha is the grey the eye reads as "quieter".
-pub fn with_alpha(c: gdk::RGBA, alpha: f32) -> gdk::RGBA {
-    gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha)
-}
-
 /// The lowest contrast a dim colour may read at against the page under it.
 ///
 /// The alphas below say what a marker is worth where the page has contrast to spare, and on
@@ -250,19 +245,19 @@ pub fn reads_at(colour: gdk::RGBA, page: gdk::RGBA) -> f32 {
 /// Contrast against the page only grows as the ink does, so the smallest alpha that clears the
 /// floor is a bisection away; a page with no room left hands back the ink itself.
 pub fn dim(ink: gdk::RGBA, page: gdk::RGBA, alpha: f32) -> gdk::RGBA {
-    if reads_at(with_alpha(ink, alpha), page) >= DIM_FLOOR {
-        return with_alpha(ink, alpha);
+    if reads_at(theme::at(ink, alpha), page) >= DIM_FLOOR {
+        return theme::at(ink, alpha);
     }
     let (mut lo, mut hi) = (alpha, 1.0);
     // Twenty halvings land within 1e-6 of the boundary, far finer than the 1/255 it is painted at.
     for _ in 0..20 {
         let mid = 0.5 * (lo + hi);
-        match reads_at(with_alpha(ink, mid), page) >= DIM_FLOOR {
+        match reads_at(theme::at(ink, mid), page) >= DIM_FLOOR {
             true => hi = mid,
             false => lo = mid,
         }
     }
-    with_alpha(ink, hi)
+    theme::at(ink, hi)
 }
 
 /// The page a note is written on. `theme::view_bg` is the one place that literal is written down,
@@ -300,9 +295,7 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     // A wash behind a run of code rather than ink on the page: it is meant to be barely there, so
     // the floor — which is about a mark being findable — would turn it into a slab.
     for name in ["code", "codeblock"] {
-        set(name, &|t| {
-            t.set_background_rgba(Some(&with_alpha(fg, 0.07)))
-        });
+        set(name, &|t| t.set_background_rgba(Some(&theme::at(fg, 0.07))));
     }
 }
 
@@ -563,7 +556,7 @@ mod tests {
         // Solarized light: base00 on base3, 4.1:1 to start with, so 40 % of it is 1.6:1.
         let ink = gdk::RGBA::parse("#657b83").unwrap();
         let page = gdk::RGBA::parse("#fdf6e3").unwrap();
-        assert!(reads_at(with_alpha(ink, 0.4), page) < DIM_FLOOR);
+        assert!(reads_at(theme::at(ink, 0.4), page) < DIM_FLOOR);
         let lifted = dim(ink, page, 0.4);
         assert!(lifted.alpha() > 0.4, "alpha {}", lifted.alpha());
         assert!((reads_at(lifted, page) - DIM_FLOOR).abs() < 0.01);

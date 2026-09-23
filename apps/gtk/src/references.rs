@@ -52,11 +52,11 @@ impl App {
             let backlinks = found.is_empty() && !note;
             if backlinks {
                 let asked = key.clone();
-                found = gio::spawn_blocking(move || vault.backlink_locations(&asked))
-                    .await
-                    .ok()
-                    .and_then(Result::ok)
-                    .unwrap_or_default();
+                found =
+                    crate::work::off_thread("backlinks", move || vault.backlink_locations(&asked))
+                        .await
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
             }
             let Some(app) = weak.upgrade() else { return };
             // The user may have moved on while we were asking; a stale answer must not replace

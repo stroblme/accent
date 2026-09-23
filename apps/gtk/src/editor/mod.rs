@@ -323,9 +323,13 @@ pub struct Tab {
     snippet: RefCell<Option<sourceview5::Snippet>>,
     /// The paste that makes a URL over a selection a link, which `Ctrl+Shift+V` holds back.
     paste_link: glib::SignalHandlerId,
-    debounce: RefCell<Option<glib::SourceId>>,
-    autosave: RefCell<Option<glib::SourceId>>,
-    cursor: RefCell<Option<glib::SourceId>>,
+    /// The post-edit pass: the change bars, and the styling a note too long to restyle inside a
+    /// frame owes the rest of its text.
+    debounce: crate::widgets::Debounce,
+    autosave: crate::widgets::Debounce,
+    /// First-wins ([`crate::widgets::Debounce::call_once`]): a caret held on an arrow key must
+    /// still tell the outline where it is, rather than be pushed off for as long as it moves.
+    cursor: crate::widgets::Debounce,
     on_autosave: Hook,
     on_edited: Hook,
     on_banner: Hook,
@@ -624,9 +628,9 @@ pub fn open(
         loading: Cell::new(false),
         snippet: RefCell::new(None),
         paste_link,
-        debounce: RefCell::new(None),
-        autosave: RefCell::new(None),
-        cursor: RefCell::new(None),
+        debounce: crate::widgets::Debounce::new(DEBOUNCE),
+        autosave: crate::widgets::Debounce::new(AUTOSAVE),
+        cursor: crate::widgets::Debounce::new(CURSOR),
         on_autosave: RefCell::new(None),
         on_edited: RefCell::new(None),
         on_banner: RefCell::new(None),
@@ -989,17 +993,17 @@ impl Tab {
         let (rel, path) = (self.rel(), self.path());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking(move || match vault {
+            let read = crate::work::off_thread("reader", move || match vault {
                 Some(vault) => vault.read_text(&rel),
                 None => fs::read_text(&path),
             })
             .await;
             let Some(tab) = weak.upgrade() else { return };
             let text = match read {
-                Ok(Ok(fs::Read::Text(text))) => text,
+                Some(Ok(fs::Read::Text(text))) => text,
                 // It stopped being text while we had it open. The buffer keeps the last readable
                 // version rather than showing the user a screen of replacement characters.
-                Ok(Ok(_)) => {
+                Some(Ok(_)) => {
                     return done(
                         &tab,
                         Err(std::io::Error::new(
@@ -1008,8 +1012,8 @@ impl Tab {
                         )),
                     );
                 }
-                Ok(Err(e)) => return done(&tab, Err(e)),
-                Err(_) => return done(&tab, Err(std::io::Error::other("the reader panicked"))),
+                Some(Err(e)) => return done(&tab, Err(e)),
+                None => return done(&tab, Err(std::io::Error::other("the reader stopped"))),
             };
             tab.adopt_reload(text, anchor);
             done(&tab, Ok(()));
@@ -1412,9 +1416,6 @@ impl Tab {
         if !self.save.modified.replace(true) {
             self.page.set_title(&self.tab_title());
         }
-        if let Some(id) = self.debounce.borrow_mut().take() {
-            id.remove();
-        }
         let instant = self.buffer.char_count() <= INSTANT;
         if instant {
             self.reanalyse();
@@ -1427,21 +1428,16 @@ impl Tab {
         // The change bars are a second whole-buffer copy and a line diff against the committed
         // text, which is too much to spend on a keystroke however short the note is, and nothing
         // a typist watches: they follow the debounce at either size.
-        let id = glib::timeout_add_local_once(
-            DEBOUNCE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    *tab.debounce.borrow_mut() = None;
-                    tab.update_marks();
-                    if !instant {
-                        tab.reanalyse();
-                    }
+        self.debounce.call(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || {
+                tab.update_marks();
+                if !instant {
+                    tab.reanalyse();
                 }
-            ),
-        );
-        *self.debounce.borrow_mut() = Some(id);
+            }
+        ));
         self.schedule_autosave();
     }
 
@@ -1502,24 +1498,15 @@ impl Tab {
     }
 
     fn schedule_autosave(self: &Rc<Self>) {
-        if let Some(id) = self.autosave.borrow_mut().take() {
-            id.remove();
-        }
+        self.autosave.cancel();
         if self.save.disk_changed.get() {
             return;
         }
-        let id = glib::timeout_add_local_once(
-            AUTOSAVE,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    *tab.autosave.borrow_mut() = None;
-                    tab.autosave_now();
-                }
-            ),
-        );
-        *self.autosave.borrow_mut() = Some(id);
+        self.autosave.call(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.autosave_now()
+        ));
     }
 
     /// Save now, unless the file changed underneath us: the user is looking at a banner asking
@@ -1531,9 +1518,7 @@ impl Tab {
     /// either: a second copy nothing in the app ever reads back is a second source of truth, and
     /// the buffer is not going anywhere while the window is open.
     fn autosave_now(self: &Rc<Self>) {
-        if let Some(id) = self.autosave.borrow_mut().take() {
-            id.remove();
-        }
+        self.autosave.cancel();
         let modified = self.save.modified.get();
         if modified && may_save(modified, self.save.disk_changed.get()) {
             self.emit(&self.on_autosave);
@@ -1541,21 +1526,11 @@ impl Tab {
     }
 
     fn on_cursor_moved(self: &Rc<Self>) {
-        if self.cursor.borrow().is_some() {
-            return;
-        }
-        let id = glib::timeout_add_local_once(
-            CURSOR,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || {
-                    *tab.cursor.borrow_mut() = None;
-                    tab.emit(&tab.on_cursor);
-                }
-            ),
-        );
-        *self.cursor.borrow_mut() = Some(id);
+        self.cursor.call_once(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.emit(&tab.on_cursor)
+        ));
     }
 }
 
@@ -1578,15 +1553,10 @@ impl Saves for Tab {
 }
 
 impl Drop for Tab {
-    /// A closed tab takes its pending timeouts, its font provider and its document on the
-    /// language layer with it.
+    /// A closed tab takes its font provider and its document on the language layer with it; the
+    /// three `Debounce`s cancel whatever they are holding as they drop.
     fn drop(&mut self) {
         lang::detach(self);
-        for pending in [&self.debounce, &self.autosave, &self.cursor] {
-            if let Some(id) = pending.borrow_mut().take() {
-                id.remove();
-            }
-        }
         if let (Some(display), Some(provider)) =
             (gdk::Display::default(), self.font.borrow_mut().take())
         {

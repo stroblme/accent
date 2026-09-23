@@ -3,7 +3,7 @@
 //! keystroke debounce — that every searching pane needs a copy of.
 
 use adw::prelude::*;
-use gtk::{glib, pango};
+use gtk::{gdk, gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
@@ -35,29 +35,43 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// A factory whose row is one label. `bind` is handed that label and the item being bound, so a
-/// caller that wants more than the text — an indent per outline level — still has it.
+/// A factory whose row `setup` builds and `bind` fills, each handed the row as its own type.
+///
+/// The two downcasts every list factory was writing out: `GtkSignalListItemFactory` hands its
+/// closures a `GObject`, and the child comes back as a `GtkWidget`. `setup` is given the item as
+/// well, for a row whose drawing reads the object bound to it.
+pub(crate) fn factory<W: IsA<gtk::Widget>>(
+    setup: impl Fn(&gtk::ListItem) -> W + 'static,
+    bind: impl Fn(&W, &gtk::ListItem) + 'static,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        item.set_child(Some(&setup(item)));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        if let Some(row) = item.child().and_downcast::<W>() {
+            bind(&row, item);
+        }
+    });
+    factory
+}
+
+/// [`factory`] for the commonest row of all: one ellipsized label.
 pub(crate) fn label_factory(
     ellipsize: pango::EllipsizeMode,
     bind: impl Fn(&gtk::Label, &gtk::ListItem) + 'static,
 ) -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(move |_, item| {
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(ellipsize)
-            .build();
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        if let Some(label) = item.child().and_downcast::<gtk::Label>() {
-            bind(&label, item);
-        }
-    });
-    factory
+    factory(
+        move |_| {
+            gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(ellipsize)
+                .build()
+        },
+        bind,
+    )
 }
 
 /// The text a `GtkStringList` row carries, which is what every plain-label list is a list of.
@@ -65,6 +79,33 @@ pub(crate) fn row_text(item: &gtk::ListItem) -> Option<String> {
     item.item()
         .and_downcast::<gtk::StringObject>()
         .map(|s| s.string().to_string())
+}
+
+/// Hang a menu off `host`, pointed at `anchor` in `host`'s coordinates, and show it.
+///
+/// The popover comes back so a caller can hear it close: the tree holds its row highlight for as
+/// long as its menu is up (`tree::Tree::pin`).
+///
+/// A popover parented by hand stays parented until it is unparented by hand — but not while it is
+/// closing. `closed` is emitted from inside the item's own `clicked`, and an unparented widget
+/// has no path to the action group on the host, so unparenting there drops whatever the click
+/// just asked for: it is what made the status bar's Fit Height do nothing. The idle runs once the
+/// click is over.
+pub(crate) fn popup_menu(
+    host: &impl IsA<gtk::Widget>,
+    menu: &gio::Menu,
+    anchor: Option<gdk::Rectangle>,
+) -> gtk::PopoverMenu {
+    let popover = gtk::PopoverMenu::from_model(Some(menu));
+    popover.set_parent(host);
+    popover.set_has_arrow(false);
+    popover.set_pointing_to(anchor.as_ref());
+    popover.connect_closed(|p| {
+        let p = p.clone();
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    popover.popup();
+    popover
 }
 
 /// Add or take away a style class. Row widgets are recycled, so the branch that takes it off
@@ -175,6 +216,18 @@ impl Debounce {
             f();
         });
         *self.pending.borrow_mut() = Some(id);
+    }
+
+    /// Run `f` once the delay has passed, unless a call is already waiting: the first one wins.
+    ///
+    /// The other half of [`call`](Self::call). A restart is right where the latest input is the
+    /// one to answer (a query, a render); first-wins is right where the work reads the current
+    /// state whenever it runs, and a burst must not push it off indefinitely — writing the
+    /// session, for one, which a steady stream of edits would otherwise never get to.
+    pub(crate) fn call_once(&self, f: impl FnOnce() + 'static) {
+        if self.pending.borrow().is_none() {
+            self.call(f);
+        }
     }
 
     /// Drop whatever is pending, for the keystroke that is answered on the spot instead.

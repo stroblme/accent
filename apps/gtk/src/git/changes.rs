@@ -60,20 +60,13 @@ enum Row {
 
 impl Panel {
     pub(super) fn wire_changes(self: &Rc<Self>, view: &gtk::ListView) {
-        let factory = gtk::SignalListItemFactory::new();
-        let weak = Rc::downgrade(self);
-        factory.connect_setup(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                item.set_child(Some(&change_row(item, &weak)));
-            }
-        });
-        let weak = Rc::downgrade(self);
-        factory.connect_bind(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                bind_change(item, &weak);
-            }
-        });
-        view.set_factory(Some(&factory));
+        let (setup, bound) = (Rc::downgrade(self), Rc::downgrade(self));
+        view.set_factory(Some(&crate::widgets::factory(
+            move |item| change_row(item, &setup),
+            // The row is rebuilt from the item rather than from the stack handed over: a
+            // recycled row draws what it is bound to, not what it held.
+            move |_: &gtk::Stack, item| bind_change(item, &bound),
+        )));
 
         // A press over the list holds its rows still until the release, which is then answered
         // with the redraw that was held off. Comparing first keeps the rows a refresh does not

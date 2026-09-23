@@ -40,20 +40,13 @@ enum LogItem {
 
 impl Panel {
     pub(super) fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
-        let factory = gtk::SignalListItemFactory::new();
-        let weak = Rc::downgrade(self);
-        factory.connect_setup(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                item.set_child(Some(&log_row(item, &weak)));
-            }
-        });
-        let weak = Rc::downgrade(self);
-        factory.connect_bind(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                bind_log(item, &weak);
-            }
-        });
-        view.set_factory(Some(&factory));
+        let (setup, bound) = (Rc::downgrade(self), Rc::downgrade(self));
+        view.set_factory(Some(&crate::widgets::factory(
+            move |item| log_row(item, &setup),
+            // The row is rebuilt from the item rather than from the stack handed over: a
+            // recycled row draws what it is bound to, not what it held.
+            move |_: &gtk::Stack, item| bind_log(item, &bound),
+        )));
 
         // The same one-click rule as the changes list and the tree: a commit opens its file list,
         // a file in it opens its diff.
@@ -138,11 +131,13 @@ impl Panel {
         glib::spawn_future_local(async move {
             let query = oid.clone();
             let vault = panel.hooks.vault.clone();
-            let files = gio::spawn_blocking(move || vault.git_changed_files(&repo, &query)).await;
+            let files = crate::work::attempt("list the commit's files", move || {
+                vault.git_changed_files(&repo, &query)
+            })
+            .await;
             let files = match files {
-                Ok(Ok(files)) => files,
-                Ok(Err(e)) => return tracing::debug!("git show --name-status: {e}"),
-                Err(_) => return tracing::warn!("the git worker panicked"),
+                Ok(files) => files,
+                Err(why) => return (panel.hooks.toast)(&why),
             };
             // A refresh, or another commit, may have landed while git was answering.
             if panel.expanded.borrow().as_deref() != Some(oid.as_str()) {
@@ -193,16 +188,16 @@ impl Panel {
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let vault = panel.hooks.vault.clone();
-            let page = gio::spawn_blocking(move || vault.git_log(&repo, skip, PAGE)).await;
+            let page = crate::work::attempt("load more history", move || {
+                vault.git_log(&repo, skip, PAGE)
+            })
+            .await;
             let page = match page {
-                Ok(Ok(page)) => page,
-                // Whatever went wrong, the history behind the row is still there, so it stays.
-                Ok(Err(e)) => {
-                    tracing::debug!("git log: {e}");
-                    return panel.has_more.set(true);
-                }
-                Err(_) => {
-                    tracing::warn!("the git worker panicked");
+                Ok(page) => page,
+                // Whatever went wrong, the history behind the row is still there, so the Load
+                // More row comes back rather than the list ending on a failure nobody saw.
+                Err(why) => {
+                    (panel.hooks.toast)(&why);
                     return panel.has_more.set(true);
                 }
             };

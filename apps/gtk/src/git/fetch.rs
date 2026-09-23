@@ -37,7 +37,7 @@ impl Panel {
         // As a command does: the process outlives the window until the fetch is stopped.
         let hold = self.hooks.window.application().map(|app| app.hold());
         glib::spawn_future_local(async move {
-            let fetched = gio::spawn_blocking(move || {
+            let fetched = crate::work::off_thread("git fetch", move || {
                 let _held = lock.lock();
                 vault.git_fetch(&repo)
             })
@@ -47,19 +47,21 @@ impl Panel {
             if panel.gone.get() {
                 return;
             }
-            let failed = !matches!(fetched, Ok(Ok(_)));
+            let failed = !matches!(fetched, Some(Ok(_)));
             if panel.fetch_failed.replace(failed) != failed {
                 panel.sync_state();
             }
             match fetched {
                 // A fetch that brought nothing prints nothing, so this is quiet in the common case.
-                Ok(Ok(transcript)) => {
+                Some(Ok(transcript)) => {
                     if !transcript.is_empty() {
                         tracing::debug!("git fetch: {transcript}");
                     }
                 }
-                Ok(Err(e)) => return tracing::debug!("git fetch: {e:#}"),
-                Err(_) => return tracing::warn!("the git worker panicked"),
+                // The autofetch is the one command nobody asked for, so it stays in the log
+                // whatever happens: a toast here would interrupt someone who is writing.
+                Some(Err(e)) => return tracing::debug!("git fetch: {e:#}"),
+                None => return,
             }
             // `.git/refs/remotes` is not among the paths the vault watches, so what a fetch moved
             // is only seen because we ask.

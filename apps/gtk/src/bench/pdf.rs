@@ -90,7 +90,9 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             dialog.heading(),
             dialog.body()
         );
-        dialog.emit_by_name::<()>("response", &[&"delete"]);
+        // The id every `dialogs::confirm` question answers with, named rather than spelled: a
+        // drill that guesses it reports the dialog and then silently answers nothing.
+        dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
         written(&app).await;
         println!("bench pages deleted {}", pages_read(&pdf));
         bench_quit(&app);

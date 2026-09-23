@@ -301,24 +301,16 @@ impl App {
         if !self.is_active(tab) {
             return;
         }
-        if let Some(id) = self.refresh.borrow_mut().take() {
-            id.remove();
-        }
-        let id = glib::timeout_add_local_once(
-            RENDER,
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move || {
-                    *app.refresh.borrow_mut() = None;
-                    app.sync_status();
-                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
-                        app.render(&tab);
-                    }
+        self.refresh.call(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move || {
+                app.sync_status();
+                if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
+                    app.render(&tab);
                 }
-            ),
-        );
-        *self.refresh.borrow_mut() = Some(id);
+            }
+        ));
     }
 
     /// A pane's find bar addressing the rendered preview, which is what it does while presenting.
