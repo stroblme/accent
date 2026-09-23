@@ -95,11 +95,6 @@ impl std::fmt::Display for RpcError {
 impl std::error::Error for RpcError {}
 
 impl RpcError {
-    /// Whether the far end was merely not there yet, which is a wait rather than a failure.
-    pub fn is_connecting(&self) -> bool {
-        self.code == CONNECTING
-    }
-
     pub(crate) fn failed(message: impl std::fmt::Display) -> RpcError {
         RpcError {
             code: FAILED,

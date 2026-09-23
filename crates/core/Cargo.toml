@@ -21,23 +21,24 @@ nucleo-matcher = "0.3"
 ignore = "0.4"
 notify = "8"
 notify-debouncer-full = "0.6"
-tempfile = "3"
-pulldown-cmark = { version = "0.13", default-features = false, features = ["simd", "html"] }
+tempfile.workspace = true
+# `simd` for the scanner and `html` for the preview, on top of the workspace's plain parser.
+pulldown-cmark = { workspace = true, features = ["simd", "html"] }
 pulldown-latex = "0.8"
 # regex-automata and regex-syntax are already compiled in for `ignore`/`globset`, so the front end
 # is the only new code this pulls: it is what gives search its Regular Expression mode.
 regex = "1"
-blake3 = "1"
+blake3.workspace = true
 toml = "1"
 similar = { version = "3", default-features = false, features = ["text", "inline"] }
-chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono.workspace = true
 # `setsid` and `kill` for git's process group: a git stopped part way takes its hooks and its ssh
 # with it (`git::bounded`).
 libc = "0.2"
 pdfium-render = { version = "0.9", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
 
 # `cargo test` builds examples too, so this one must not be built without its feature.
 [[example]]

@@ -400,10 +400,6 @@ impl PdfView {
         self.queue_draw();
     }
 
-    pub fn drawing_config(&self) -> accent_core::config::DrawingConfig {
-        self.imp().style.borrow().clone()
-    }
-
     /// How a tool's stroke is drawn, from the preferences: the highlighter in its own width and
     /// colour, wide and translucent; everything else — the pen and the shapes — in the pen's.
     /// One width per stroke: a stylus reports pressure and this ignores it.
