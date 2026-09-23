@@ -294,6 +294,12 @@ pub fn exit(url: &Url, ctl: &Path) -> Vec<String> {
     control(url, ctl, "exit")
 }
 
+/// Ask whether a master is up behind `ctl`. It only talks to the socket, so it answers at once
+/// and never dials out: the question to settle before paying for a handshake.
+pub fn check(url: &Url, ctl: &Path) -> Vec<String> {
+    control(url, ctl, "check")
+}
+
 /// Which machine listens for a forward's connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -756,6 +762,19 @@ mod tests {
                 "2222",
                 "-O",
                 "exit",
+                "me@box",
+            ])
+        );
+        assert_eq!(
+            check(&ported(), ctl()),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-p",
+                "2222",
+                "-O",
+                "check",
                 "me@box",
             ])
         );
