@@ -96,8 +96,8 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
         return;
     }
     let mut rels: Vec<String> = arg.split(',').map(str::to_string).collect();
-    // A shell in front of the pane the reader was in at the close: not a file, so nothing of it
-    // is restored, which is what makes "what is saved as active" a question.
+    // A shell in front of the pane the reader was in at the close: the session writes it like a
+    // file, into that pane and as the active tab, and the restore starts it there again.
     let shell = rels.last().is_some_and(|last| last == "shell");
     if shell {
         rels.pop();
@@ -142,9 +142,9 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
             outer.set_position(outer.width() * 3 / 10);
             inner.set_position(inner.height() * 6 / 10);
             if shell {
-                // In the left pane, which is not the one whose first tab lands last: a pane with
-                // a shell in front names no file, so what the session writes as the active tab is
-                // the whole of what brings the restore back to the pane the reader was in.
+                // In the left pane, which is not the one whose first tab lands last: what the
+                // session writes as the active tab, here the shell, is the whole of what brings
+                // the restore back to the pane the reader was in.
                 app.reveal_page(&a);
                 app.open_terminal();
             }

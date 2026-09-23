@@ -522,6 +522,12 @@ impl App {
                 tracing::debug!("a closing diagram was not written: {e}");
             }
         }
+        // Closing a shell's tab is ending it; closing its window only lets go of it, and a window
+        // being destroyed closes no page through here. A shell is refused a move to another
+        // window before it would reach here too.
+        if let Some(Doc::Terminal(term)) = self.doc_for_page(page) {
+            term.kill();
+        }
         if let Some((pane, doc)) = self.pane_of(page).zip(self.doc_for_page(page)) {
             pane.nav.borrow_mut().forget(&doc.key());
         }

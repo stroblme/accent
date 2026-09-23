@@ -17,10 +17,11 @@ pub struct Shell {
     /// Whether the file has been found not to parse and that has been said, so it is said once
     /// until the file parses again.
     pub config_broken: Cell<bool>,
-    /// The open vaults, and the only strong reference to each window's state: an entry is dropped
+    /// The open windows, and the only strong reference to each one's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
-    /// Keyed by what each window was opened on, so a vault-less one is found again by its kind.
-    pub windows: RefCell<Vec<(WindowKey, Rc<App>)>>,
+    /// Each carries what it was opened on (`App::key`), so a vault-less one is found again by its
+    /// kind.
+    pub windows: RefCell<Vec<Rc<App>>>,
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     pub start: glib::WeakRef<adw::ApplicationWindow>,
@@ -33,11 +34,14 @@ pub struct Shell {
     pub shell_keys: Cell<bool>,
 }
 
-/// What a window in [`Shell::windows`] was opened on: a vault, by its `Vault::key`, or no vault at
-/// all, as one of the [`Loose`] kinds.
-#[derive(PartialEq)]
+/// What a window in [`Shell::windows`] was opened on: a vault, by its `Vault::key`, a terminal
+/// session by its `terminal://<name>` key, or no vault at all, as one of the [`Loose`] kinds.
+#[derive(Clone, PartialEq)]
 pub enum WindowKey {
     Vault(PathBuf),
+    /// Shells saved under a name (Save Session…): no vault, but a session and a place in the
+    /// recent list like one.
+    Terminal(PathBuf),
     Loose(Loose),
 }
 
@@ -46,8 +50,25 @@ impl WindowKey {
     pub fn vault(&self) -> Option<&Path> {
         match self {
             WindowKey::Vault(root) => Some(root),
+            WindowKey::Terminal(_) | WindowKey::Loose(_) => None,
+        }
+    }
+
+    /// The key the window is remembered by, in the recent list and in its state file. `None` for
+    /// a window that is opened the same way again rather than restored.
+    pub fn saved_as(&self) -> Option<&Path> {
+        match self {
+            WindowKey::Vault(key) | WindowKey::Terminal(key) => Some(key),
             WindowKey::Loose(_) => None,
         }
+    }
+
+    /// Whether the window is one for shells: a terminal session, or the one `--terminal` opens.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WindowKey::Terminal(_) | WindowKey::Loose(Loose::Terminal)
+        )
     }
 }
 
@@ -159,8 +180,8 @@ impl Shell {
         self.windows
             .borrow()
             .iter()
-            .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
-            .map(|(_, app)| app.clone())
+            .find(|app| app.window.upcast_ref::<gtk::Window>() == window)
+            .cloned()
     }
 
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
@@ -182,12 +203,7 @@ impl Shell {
             theme::apply(config.theme);
         }
         // Cloned out of the borrow: applying a config reaches a long way into each window.
-        let apps: Vec<Rc<App>> = self
-            .windows
-            .borrow()
-            .iter()
-            .map(|(_, app)| app.clone())
-            .collect();
+        let apps: Vec<Rc<App>> = self.windows.borrow().clone();
         for app in apps {
             app.apply_config(config, &changed);
         }
@@ -298,7 +314,7 @@ impl Shell {
             .windows
             .borrow()
             .iter()
-            .any(|(_, app)| app.window.upcast_ref::<gtk::Window>() == &window);
+            .any(|app| app.window.upcast_ref::<gtk::Window>() == &window);
         if !opened {
             return;
         }
@@ -321,7 +337,7 @@ impl Shell {
     /// one stalled close is cheaper than the flag.
     fn forget(&self, window: &adw::ApplicationWindow) {
         let mut windows = self.windows.borrow_mut();
-        let Some(i) = windows.iter().position(|(_, app)| &app.window == window) else {
+        let Some(i) = windows.iter().position(|app| &app.window == window) else {
             return;
         };
         let app = windows.remove(i);
@@ -336,30 +352,17 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
-        // `accent --terminal [dir]` is accent as a terminal: a window with no vault holding one
+        // `accent --terminal [PATH]` is accent as a terminal: a window with no vault holding one
         // shell. A second one joins that window as another tab, and a loose file opened meanwhile
         // goes to a window of its own rather than in among the shells.
         if args.iter().any(|a| a == "--terminal" || a == "-t") {
-            let cwd = terminal_cwd(&args).and_then(|arg| {
-                // Resolved against the invoking process's directory, as a vault path is.
-                let path = command_line.create_file_for_arg(arg).path()?;
-                match path.canonicalize() {
-                    Ok(dir) if dir.is_dir() => Some(dir),
-                    // A file is not taken as its parent: which directory was meant is a guess,
-                    // and a shell in the wrong one is worse than a shell at home that says so.
-                    Ok(other) => {
-                        eprintln!("not a folder, opening at home: {}", other.display());
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("cannot open {}: {e}", path.display());
-                        None
-                    }
-                }
-            });
+            let at = terminal_cwd(&args).and_then(|arg| shell_at(command_line, arg));
             if let Some(app) = self.loose_window(gtk_app, Loose::Terminal) {
                 app.window.present();
-                app.open_terminal_at(cwd);
+                match at {
+                    Some(at) => app.open_terminal_named(&at),
+                    None => app.open_terminal_at(None),
+                }
             }
             return glib::ExitCode::SUCCESS;
         }
@@ -374,12 +377,24 @@ impl Shell {
             // Launched with no folder: pick up the vault this window was last opened on, and only
             // fall back to the start screen when there is none or it has gone away.
             let last = self.config.borrow().recent_vaults.first().cloned();
-            match last.filter(|path| path.is_dir() || ssh::is_remote_path(path)) {
+            match last.filter(|path| start::openable(path)) {
                 Some(root) => self.open_vault(gtk_app, root, None),
                 None => self.start_screen(gtk_app),
             }
             return glib::ExitCode::SUCCESS;
         };
+        // `accent terminal://<name> [PATH]`: the session of that name, made if it is new, with a
+        // shell at PATH added to it.
+        if let Some(address) = arg.to_str().filter(|a| a.starts_with(terminal::SESSION)) {
+            let key = PathBuf::from(address);
+            if terminal::session_name(&key).is_none() {
+                eprintln!("not a session name, which needs one and no '/': {address}");
+                return glib::ExitCode::FAILURE;
+            }
+            let at = args.get(2).and_then(|arg| shell_at(command_line, arg));
+            self.open_vault(gtk_app, key, at);
+            return glib::ExitCode::SUCCESS;
+        }
         // An address rather than a path, and `create_file_for_arg` would answer a URI whose
         // `path()` is `None` — "cannot resolve" for something perfectly openable.
         if let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) {
@@ -444,15 +459,21 @@ impl Shell {
         {
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
             let (from, here) = (app.window.downgrade(), vault.key().to_owned());
-            start::connect_dialog(&app.window, Some(remote.url()), move |address| {
-                let root = PathBuf::from(address);
-                let replace = root != here;
-                shell.open_from_start(&gtk_app, root);
-                // Once the new one is up, so the application never stands at zero windows.
-                if let Some(window) = from.upgrade().filter(|_| replace) {
-                    window.close();
-                }
-            });
+            start::connect_dialog(
+                &app.window,
+                Some(remote.url()),
+                "Open Remote Vault",
+                "Connect",
+                move |address| {
+                    let root = PathBuf::from(address);
+                    let replace = root != here;
+                    shell.open_from_start(&gtk_app, root);
+                    // Once the new one is up, so the application never stands at zero windows.
+                    if let Some(window) = from.upgrade().filter(|_| replace) {
+                        window.close();
+                    }
+                },
+            );
             return;
         }
         let dialog = gtk::FileDialog::builder().title("Open Vault").build();
@@ -473,9 +494,15 @@ impl Shell {
             return;
         };
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-        start::connect_dialog(&window, None, move |address| {
-            shell.open_from_start(&gtk_app, PathBuf::from(address));
-        });
+        start::connect_dialog(
+            &window,
+            None,
+            "Open Remote Vault",
+            "Connect",
+            move |address| {
+                shell.open_from_start(&gtk_app, PathBuf::from(address));
+            },
+        );
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
@@ -506,7 +533,9 @@ impl Shell {
     /// start screen instead, where a vault without a window yet is picked.
     ///
     /// `root` is what the vault is keyed by: a directory, or an `ssh://` address for one on
-    /// another machine. The two are one list, one rule and one window each.
+    /// another machine. The two are one list, one rule and one window each — and a terminal
+    /// session's `terminal://<name>` is a third kind of key in the same list, whose `note` is a
+    /// directory to add a shell at.
     pub fn open_vault(
         self: &Rc<Self>,
         gtk_app: &adw::Application,
@@ -516,11 +545,15 @@ impl Shell {
         if let Some(app) = self.app_for(&root) {
             app.window.present();
             if let Some(note) = note {
-                app.open_path(&note);
+                app.open_named(&note);
             }
             return;
         }
-        self.add_window(gtk_app, WindowKey::Vault(root), note);
+        let key = match terminal::session_name(&root) {
+            Some(_) => WindowKey::Terminal(root),
+            None => WindowKey::Vault(root),
+        };
+        self.add_window(gtk_app, key, note);
     }
 
     /// Build a window on `key` — a vault, or one of the windows with no vault — and take charge
@@ -545,7 +578,7 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((key, app.clone()));
+        self.windows.borrow_mut().push(app.clone());
         Some(app)
     }
 
@@ -555,7 +588,7 @@ impl Shell {
         self.windows
             .borrow()
             .iter()
-            .find_map(|(_, app)| Some((app.clone(), app.doc_for_page(page)?)))
+            .find_map(|app| Some((app.clone(), app.doc_for_page(page)?)))
     }
 
     /// A page has landed in `into`'s tab view that `into` knows nothing about: either a tab
@@ -670,17 +703,20 @@ impl Shell {
         into.close_page(page);
     }
 
-    fn app_for(&self, root: &Path) -> Option<Rc<App>> {
-        let windows = self.windows.borrow();
-        let (_, app) = windows.iter().find(|(key, _)| key.vault() == Some(root))?;
-        Some(app.clone())
+    /// The open window remembered by `key`, a vault's key.
+    pub(crate) fn app_for(&self, key: &Path) -> Option<Rc<App>> {
+        self.windows
+            .borrow()
+            .iter()
+            .find(|app| app.key.borrow().saved_as() == Some(key))
+            .cloned()
     }
 
     /// Open `path` wherever it belongs: in the window whose vault contains it, or in the window
     /// kept for documents that are in no vault — never the one `accent --terminal` opened.
     fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) {
-        let inside = self.windows.borrow().iter().find_map(|(key, app)| {
-            let rel = path.strip_prefix(key.vault()?).ok()?;
+        let inside = self.windows.borrow().iter().find_map(|app| {
+            let rel = path.strip_prefix(app.key.borrow().vault()?).ok()?;
             Some((app.clone(), rel.to_string_lossy().into_owned()))
         });
         if let Some((app, rel)) = inside {
@@ -707,8 +743,8 @@ impl Shell {
             .windows
             .borrow()
             .iter()
-            .find(|(key, _)| *key == WindowKey::Loose(kind))
-            .map(|(_, app)| app.clone());
+            .find(|app| *app.key.borrow() == WindowKey::Loose(kind))
+            .cloned();
         if let Some(app) = loose {
             return Some(app);
         }
@@ -724,6 +760,41 @@ fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
         .skip(1)
         .map(|arg| arg.as_os_str())
         .find(|arg| !matches!(arg.to_str(), Some("--terminal" | "-t" | "--new-window")))
+}
+
+/// Where a shell was asked for on the command line: on a host, as an `ssh://` address read back
+/// the way `ssh::Url` spells it, or in a directory here (see [`shell_dir`]). `None`, said on
+/// stderr, for an address that does not parse.
+fn shell_at(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<String> {
+    let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) else {
+        return shell_dir(command_line, arg).map(|dir| dir.to_string_lossy().into_owned());
+    };
+    match ssh::parse(address) {
+        Ok(url) => Some(url.to_string()),
+        Err(e) => {
+            eprintln!("cannot open {address}, opening at home: {e}");
+            None
+        }
+    }
+}
+
+/// The directory a shell was asked for on the command line, resolved against the invoking
+/// process's directory as a vault path is, or `None` — said on stderr — when it is not one.
+fn shell_dir(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<PathBuf> {
+    let path = command_line.create_file_for_arg(arg).path()?;
+    match path.canonicalize() {
+        Ok(dir) if dir.is_dir() => Some(dir),
+        // A file is not taken as its parent: which directory was meant is a guess, and a shell
+        // in the wrong one is worse than a shell at home that says so.
+        Ok(other) => {
+            eprintln!("not a folder, opening at home: {}", other.display());
+            None
+        }
+        Err(e) => {
+            eprintln!("cannot open {}: {e}", path.display());
+            None
+        }
+    }
 }
 
 /// Hand a page back to the window it was dragged out of, and say there why.
@@ -756,6 +827,11 @@ mod tests {
         );
         // Order does not matter, and the short spelling is the same flag.
         assert_eq!(cwd(&["accent", "/tmp", "-t"]).as_deref(), Some("/tmp"));
+        // A place on a host is taken the same way.
+        assert_eq!(
+            cwd(&["accent", "-t", "ssh://box/srv/x"]).as_deref(),
+            Some("ssh://box/srv/x")
+        );
         // The bare form has no directory to offer, so the window decides.
         assert_eq!(cwd(&["accent", "--terminal"]), None);
         // argv[0] is the program, never the path.

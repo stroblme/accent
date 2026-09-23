@@ -1,5 +1,9 @@
 //! accent-cli: index | scan | search | backlinks | tags | stats. Works without the GUI.
 //! Read-only with respect to the vault — the only thing it writes is the cache db.
+//! Also what runs behind the window: `serve` on a remote host, and `hold`, `attach`, `kill`,
+//! `held`, which keep the terminal tabs' shells alive between windows.
+
+mod hold;
 
 use accent_core::index::{Index, Phase, Progress, default_db_path};
 use accent_core::walk::{self, ScanOptions};
@@ -12,7 +16,7 @@ use std::time::Instant;
 #[command(
     name = "accent-cli",
     version,
-    about = "accent vault index and query CLI"
+    about = "accent vault index and query CLI, and the holder of its terminals' shells"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -117,6 +121,27 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Hold the terminals' shells: the daemon `attach` starts when none is running.
+    ///
+    /// One per user and machine. It leaves on its own when its last shell has ended, and returns
+    /// at once when another holder is already up.
+    Hold,
+    /// Attach this terminal to held shell ID, starting the holder and the shell if need be.
+    ///
+    /// What a terminal tab runs, locally or over `ssh -t`. Closing the terminal only detaches:
+    /// the shell stays with the holder until it exits or is killed. Exits with the shell's status
+    /// when it ends, 0 when detached or taken over by another terminal, and 254 when it could not
+    /// attach at all (never 255, which is ssh's own).
+    Attach {
+        /// Where a new shell starts. Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        id: String,
+    },
+    /// End a held shell and everything running in it. Nothing to do if no shell has this id.
+    Kill { id: String },
+    /// List the held shells, one JSON object per line.
+    Held,
 }
 
 fn main() -> Result<()> {
@@ -242,6 +267,10 @@ fn main() -> Result<()> {
             // because the server reads it on a thread of its own.
             accent_api::rpc::serve(&vault, db.as_deref(), std::io::stdin(), std::io::stdout())?;
         }
+        Cmd::Hold => hold::daemon::run()?,
+        Cmd::Attach { cwd, id } => std::process::exit(hold::client::attach(&id, cwd)),
+        Cmd::Kill { id } => hold::client::kill(&id)?,
+        Cmd::Held => hold::client::held()?,
     }
     Ok(())
 }

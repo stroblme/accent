@@ -61,7 +61,7 @@ mod work;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
-use accent_core::config::{FocusMode, Layout, PdfZoom};
+use accent_core::config::{FocusMode, Layout, PdfZoom, ShellPlace};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
@@ -206,8 +206,11 @@ struct Waiting {
 }
 
 struct App {
-    /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
-    /// no index, no watcher, no session, and every tab keyed by an absolute path.
+    /// What the window was opened on, and is remembered by. A cell, so a window that changes what
+    /// it is remembered by has one assignment to make.
+    key: RefCell<shell::WindowKey>,
+    /// The vault this window is on, or `None` for a window opened on a file or on shells instead
+    /// of a folder: no index, no watcher, and every tab keyed by an absolute path.
     ///
     /// `Arc`, not `Rc`: the sidebar's search runs its queries on a worker thread.
     vault: Option<Arc<Vault>>,
@@ -263,8 +266,8 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
-    /// Numbers the shells this window has opened, so each tab has a key of its own.
-    terminals: Cell<usize>,
+    /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
+    told_unheld: Cell<bool>,
     /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
     /// background rather than asked for when the dialog opens: on a remote vault that question
     /// costs a round trip, and the palette is a thing that has to appear instantly.
@@ -873,6 +876,25 @@ impl App {
         }
     }
 
+    /// What a launch names after the window's key: a note in a vault's window, and in a terminal
+    /// session's where to open another shell.
+    fn open_named(self: &Rc<Self>, named: &str) {
+        let session = matches!(*self.key.borrow(), shell::WindowKey::Terminal(_));
+        match session {
+            true => self.open_terminal_named(named),
+            false => self.open_path(named),
+        }
+    }
+
+    /// A shell where a launch said: on a host for an `ssh://` address, and otherwise in the
+    /// directory here that `at` names.
+    fn open_terminal_named(self: &Rc<Self>, at: &str) {
+        match ssh::parse(at) {
+            Ok(url) => self.open_remote_terminal(url),
+            Err(_) => self.open_terminal_at(Some(PathBuf::from(at))),
+        }
+    }
+
     /// A shell in a new tab of the active pane, at the vault root — the directory everything else
     /// in the window is measured from. A window with no vault opens one at home.
     fn open_terminal(self: &Rc<Self>) {
@@ -883,21 +905,108 @@ impl App {
     /// one that has one, so `win.terminal` keeps going through `open_terminal` and the action,
     /// the menu and the palette entry are all untouched.
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
-        let n = self.terminals.get() + 1;
-        self.terminals.set(n);
         // A remote vault's shell opens on the remote, unless the caller named a directory here:
         // `accent --terminal <dir>` means this machine whatever window it lands in.
-        let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
-            (None, Some(remote)) => terminal::Shell::Remote {
-                argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
-                host: remote.url().host.clone(),
-            },
-            _ => terminal::Shell::Local(cwd.unwrap_or_else(|| match self.vault() {
-                Some(vault) => vault.root(),
-                None => glib::home_dir(),
-            })),
+        if cwd.is_none()
+            && let Some(remote) = self.vault().and_then(|v| v.remote())
+        {
+            return self.open_remote_terminal(remote.url().clone());
+        }
+        let cwd = cwd.unwrap_or_else(|| match self.vault() {
+            Some(vault) => vault.root(),
+            None => glib::home_dir(),
+        });
+        self.open_shell(
+            terminal::new_key(),
+            terminal::Shell::Local(cwd),
+            Opened::Kept,
+        );
+    }
+
+    /// A shell on the host `at` names, in its path.
+    fn open_remote_terminal(self: &Rc<Self>, at: ssh::Url) {
+        let key = terminal::new_key();
+        match self.remote_shell(at, &key) {
+            Ok(shell) => self.open_shell(key, shell, Opened::Kept),
+            Err(why) => self.cannot("open a terminal on the host", why),
+        }
+    }
+
+    /// New Remote Terminal…: the Open Remote form, asking which host and where on it. Filled in
+    /// with the shell in front when that one is on a host, else with this window's own address,
+    /// so another shell beside the first is a keypress away.
+    fn choose_remote_terminal(self: &Rc<Self>) {
+        let at = match self.active_doc() {
+            Some(Doc::Terminal(term)) => term.at().and_then(|at| ssh::parse(&at).ok()),
+            _ => None,
+        }
+        .or_else(|| {
+            let remote = self.vault().and_then(|v| v.remote());
+            remote.map(|r| r.url().clone())
+        });
+        start::connect_dialog(
+            &self.window,
+            at.as_ref(),
+            "New Remote Terminal",
+            "Open",
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |address| {
+                    // The form only hands over an address that parses.
+                    if let Ok(at) = ssh::parse(&address) {
+                        app.open_remote_terminal(at);
+                    }
+                }
+            ),
+        );
+    }
+
+    /// The shell `key` names, held on the host `at` names. It rides this window's vault's master
+    /// when the vault is on that host, so a remote vault's shells cost no connection of their
+    /// own, and the host's own master otherwise.
+    fn remote_shell(&self, at: ssh::Url, key: &str) -> Result<terminal::Shell, String> {
+        let link = match self.vault().and_then(|v| v.remote()) {
+            Some(remote) if remote.url().authority() == at.authority() => remote.url().clone(),
+            _ => accent_api::link::host(&at),
         };
-        let term = terminal::open(&self.tabs(), &shell, terminal::key(n));
+        terminal::Shell::remote(at, link, key)
+    }
+
+    /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
+    /// or home when that has gone since, and on a host the path it was opened at.
+    fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
+        let at = place.map_or("", |p| p.at.as_str());
+        let shell = match ssh::is_remote(at) {
+            true => match ssh::parse(at).and_then(|url| self.remote_shell(url, key)) {
+                Ok(shell) => shell,
+                Err(why) => return self.cannot("put back a shell on the host", why),
+            },
+            false => terminal::Shell::Local(
+                Some(PathBuf::from(at))
+                    .filter(|dir| dir.is_dir())
+                    .unwrap_or_else(glib::home_dir),
+            ),
+        };
+        self.open_shell(key.to_string(), shell, Opened::Restored);
+    }
+
+    /// The one door into a shell tab, new or restored. A restored one lands in the pane the
+    /// session put it in, behind whatever that pane shows, and does not take the keyboard.
+    fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
+        use vte4::TerminalExt as _;
+        // Said once per window, the first time a shell here could have been held and was not.
+        if matches!(shell, terminal::Shell::Local(_))
+            && terminal::cli().is_none()
+            && !self.told_unheld.replace(true)
+        {
+            self.toast("accent-cli is not installed; shells will not persist");
+        }
+        let term = terminal::open(&self.tabs_for(&key), &shell, key);
+        // A new shell is part of the session, as a new tab is; a restored one is in it already.
+        if how != Opened::Restored {
+            self.save_session_soon();
+        }
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.
         zoom_on_wheel(
@@ -937,10 +1046,21 @@ impl App {
                 move |term| app.close_page(&term.page)
             ),
         );
+        // A `cd` is where the session will put the shell back, so it is written down like a move
+        // of the caret would be.
+        term.view
+            .connect_current_directory_uri_changed(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |_| app.save_session_soon()
+            ));
         let page = term.page.clone();
         let view = term.view.clone();
         self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.select_new_page(&page, Opened::Kept);
+        self.select_new_page(&page, how);
+        if how == Opened::Restored {
+            return;
+        }
         // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
         // unable to hear a keystroke, which is a terminal you have to click before you can type
         // in. From an idle, because the page has only just been selected and the widget it holds

@@ -23,13 +23,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
+use crate::link;
 use crate::rpc::{Client, Hello, RpcError};
 use crate::ssh::{self, Forward, Url};
 use crate::{Event, VaultConfig};
-
-/// How much of the server binary goes out per write, and therefore how often the progress bar
-/// moves while it is uploading.
-const CHUNK: usize = 256 * 1024;
 
 /// A call on the main thread that takes longer than this has cost the windows a frame.
 const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
@@ -516,22 +513,9 @@ impl Remote {
 
     // ---------------------------------------------------------------- ssh
 
-    /// One ssh invocation, with the environment that makes a prompt reach a dialog instead of a
-    /// terminal nobody is looking at.
-    ///
-    /// `SSH_ASKPASS` points at accent itself: the app re-runs as its own askpass helper when it
-    /// sees `ACCENT_ASKPASS`, so there is one binary to install and the dialog looks like the
-    /// rest of the window. `REQUIRE=force` is what makes ssh use it even when it can see a
-    /// terminal, which it can — the app was very likely started from one.
+    /// One ssh invocation that may prompt through a dialog: see [`link::command`].
     fn ssh(&self, argv: &[String]) -> Command {
-        let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        if let Ok(exe) = std::env::current_exe() {
-            cmd.env("SSH_ASKPASS", exe)
-                .env("SSH_ASKPASS_REQUIRE", "force")
-                .env("ACCENT_ASKPASS", "1");
-        }
-        cmd
+        link::command(argv)
     }
 
     /// Ask ssh to start forwarding a port, either way, over the master that is already open.
@@ -702,84 +686,12 @@ impl Remote {
         // Whatever the last attempt left running goes first: `spawn_server` overwrites both slots,
         // so without this a retry would leak an ssh child and a reader thread every time.
         self.teardown();
-        self.say(&format!("Connecting to {}", self.url.host));
-        if let Some(dir) = self.ctl.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
-        let out = self
-            .ssh(&ssh::master(&self.url, &self.ctl, quiet))
-            // The master must not read our stdin, and its own prompts go through SSH_ASKPASS.
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run ssh: {e}"))?;
-        if !out.status.success() {
-            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(Failure::Link(match why.is_empty() {
-                true => format!("cannot connect to {}", self.url.host),
-                false => why,
-            }));
-        }
-
-        let hash = self.provision()?;
-        self.spawn_server(&hash)?;
+        link::prepare(&self.url, &self.ctl, quiet, &|what, fraction| {
+            self.step(what, fraction)
+        })?;
+        self.spawn_server(&link::server()?.hash)?;
         self.restore_forwards();
         Ok(())
-    }
-
-    /// Put the right server binary on the host, if it is not already there, and answer with what
-    /// it is named by: the hash the caller would otherwise read the 6.4 MB binary again to get.
-    fn provision(&self) -> Result<String, String> {
-        self.say("Checking the remote server");
-        let local = ssh::server_binary().map_err(|e| e.to_string())?;
-        let bytes = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
-        let hash = ssh::hash_of(&bytes);
-
-        let total = bytes.len();
-        if self.ssh_output(&ssh::have_server_cmd(&hash, total)).is_ok() {
-            return Ok(hash);
-        }
-
-        self.step(
-            &format!("Uploading the server (0 / {} MB)", mb(total)),
-            Some(0.0),
-        );
-        let mut child = self
-            .ssh(&ssh::run(
-                &self.url,
-                &self.ctl,
-                &ssh::install_server_cmd(&hash, total),
-            ))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("cannot run ssh: {e}"))?;
-        {
-            let mut stdin = child.stdin.take().ok_or("ssh has no stdin")?;
-            for (n, chunk) in bytes.chunks(CHUNK).enumerate() {
-                stdin
-                    .write_all(chunk)
-                    .map_err(|e| format!("uploading the server: {e}"))?;
-                let done = ((n + 1) * CHUNK).min(total);
-                self.step(
-                    &format!("Uploading the server ({} / {} MB)", mb(done), mb(total)),
-                    Some(done as f64 / total as f64),
-                );
-            }
-        }
-        // The bytes are all written, and the host is still unpacking them: without this the bar
-        // would sit full for seconds under a message saying the upload had finished.
-        self.say("Installing the server");
-        let out = child
-            .wait_with_output()
-            .map_err(|e| format!("uploading the server: {e}"))?;
-        match out.status.success() {
-            true => Ok(hash),
-            false => Err(format!(
-                "cannot install the server: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            )),
-        }
     }
 
     fn spawn_server(&self, hash: &str) -> Result<(), Failure> {
@@ -894,10 +806,6 @@ fn drain(stream: impl Read + Send + 'static) {
                 tracing::debug!(target: "accent_api::remote", "ssh: {line}");
             }
         });
-}
-
-fn mb(bytes: usize) -> String {
-    format!("{:.1}", bytes as f64 / (1024.0 * 1024.0))
 }
 
 #[cfg(test)]

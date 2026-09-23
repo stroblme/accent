@@ -72,10 +72,16 @@ impl Doc {
         }
     }
 
-    /// Not a file. A diff is a view of two texts and a terminal is a running shell; neither is
-    /// written to the session, is a recent note, or has anywhere to be pointed by a rename.
+    /// Not a file. A diff is a view of two texts and a terminal is a running shell; neither is a
+    /// recent note or has anywhere to be pointed by a rename. See [`Doc::persists`] for the session.
     pub fn is_transient(&self) -> bool {
         matches!(self, Doc::Diff(_) | Doc::Terminal(_))
+    }
+
+    /// Whether the session writes this tab down and puts it back. A file, and a shell, which is
+    /// started again where it was; not a diff, which is a view of two texts nobody can reopen.
+    pub fn persists(&self) -> bool {
+        !matches!(self, Doc::Diff(_))
     }
 
     pub fn page(&self) -> &adw::TabPage {

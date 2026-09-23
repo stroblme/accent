@@ -369,7 +369,8 @@ fn row_factory(
                 slot.remove(&child);
             }
             let entry: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
-            // Only a file has an icon: the Files tree's, so a row reads the same in both places.
+            // A file has the Files tree's icon, so a row reads the same in both places; a recent
+            // vault has the start screen's, where it has one.
             icon.set_visible(matches!(
                 &*entry,
                 Item::File(_) | Item::Missing(_) | Item::Alias { .. }
@@ -419,6 +420,10 @@ fn row_factory(
                 // folder and placed by its path, a remote one by its host and the path on that host.
                 Item::Vault(key) => {
                     let (title, subtitle) = start::labels(Path::new(key), Some(home.as_path()));
+                    if let Some(name) = start::row_icon(Path::new(key)) {
+                        icon.set_icon_name(Some(name));
+                        icon.set_visible(true);
+                    }
                     name.set_text(&title);
                     dir.set_text(&subtitle);
                     slot.append(&forget_button(key, &forget));
