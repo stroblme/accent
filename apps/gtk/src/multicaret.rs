@@ -824,15 +824,16 @@ impl View {
     }
 
     pub fn clear_carets(&self) {
+        // Taken out of the cell before any of them is deleted: `delete_mark` emits
+        // `mark-deleted`, and a handler of it that asks whether a column is up ([`has_carets`])
+        // would borrow the list this used to still be holding mutably.
+        let carets: Vec<_> = self.imp().carets.borrow_mut().drain(..).collect();
+        if carets.is_empty() {
+            return;
+        }
         let buffer = self.buffer();
-        {
-            let mut carets = self.imp().carets.borrow_mut();
-            if carets.is_empty() {
-                return;
-            }
-            for caret in carets.drain(..) {
-                caret.delete(&buffer);
-            }
+        for caret in carets {
+            caret.delete(&buffer);
         }
         self.blink_off();
         self.queue_draw();

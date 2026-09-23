@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.em
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.stroblme.accent.Open
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.Span
 import io.github.stroblme.accent.ffi.Style
 import io.github.stroblme.accent.ffi.analyzeUtf16
 import io.github.stroblme.accent.ffi.toHtml
@@ -397,15 +398,27 @@ private fun Editor(model: VaultModel) {
     )
 }
 
-/** Applies the core's spans to the field's output; nothing it does reaches the saved text. */
+/**
+ * Applies the core's spans to the field's output; nothing it does reaches the saved text.
+ *
+ * The parse is kept against the text it was of, because this runs on every output pass — a
+ * recomposition for any reason at all, not only a keystroke — and parsing a note of any size that
+ * often is the composition thread's whole frame. One parse per text, as the desktop does behind
+ * its render debounce.
+ */
 private class Styling(
     private val fg: Color,
     private val accent: Color,
     private val muted: Color,
 ) : OutputTransformation {
+    private var last: Pair<String, List<Span>>? = null
+
     override fun TextFieldBuffer.transformOutput() {
-        val analysis = runCatching { analyzeUtf16(asCharSequence().toString()) }.getOrNull() ?: return
-        for (span in analysis.spans) {
+        val text = asCharSequence().toString()
+        val spans = last?.takeIf { it.first == text }?.second
+            ?: runCatching { analyzeUtf16(text).spans }.getOrNull()?.also { last = text to it }
+            ?: return
+        for (span in spans) {
             val style = styleOf(span.style) ?: continue
             val start = span.range.start.toInt().coerceIn(0, length)
             val end = span.range.end.toInt().coerceIn(start, length)

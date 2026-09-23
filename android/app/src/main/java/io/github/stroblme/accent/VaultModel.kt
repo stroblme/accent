@@ -187,7 +187,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val opened = withContext(Dispatchers.IO) { runCatching { Vault.open(root) } }
             opened
                 .onSuccess { v ->
-                    vault?.close()
+                    release(vault)
                     vault = v
                     recents.touch(Recents.Kind.Vaults, root)
                     _state.update { VaultState(root = v.root(), indexing = true) }
@@ -364,7 +364,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun closeVault() = leave {
         // After the buffer is written rather than before, because the write goes through the
         // handle: the buffer is the only copy of whatever was typed in the last second.
-        vault?.close()
+        release(vault)
         vault = null
         corpus = null
         _state.value = VaultState()
@@ -592,13 +592,25 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Put a vault handle down without holding the frame.
+     *
+     * The last call to go frees the object, and the core's `Drop` shuts the language sessions
+     * down and joins the index worker — seconds, on a vault being reconciled for the first time.
+     * On a thread of its own, so the screen that asked is not the thread that waits.
+     */
+    private fun release(handle: Vault?) {
+        val going = handle ?: return
+        Thread({ going.close() }, "vault-close").start()
+    }
+
     private fun fail(what: String, e: Throwable) {
         val why = (e as? AccentException.Failed)?.reason ?: e.message
         _state.update { it.copy(message = if (why.isNullOrBlank()) what else "$what: $why") }
     }
 
     override fun onCleared() {
-        vault?.close()
+        release(vault)
         vault = null
     }
 
