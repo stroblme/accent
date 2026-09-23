@@ -324,12 +324,23 @@ fn upsert(
     //
     // The hash is of the normalised text, never of the raw file. Safe, because a hash is only
     // ever compared against an earlier hash of the same file taken the same way.
+    //
+    // A file that cannot be read keeps its stat row and loses its body, which is a note that is
+    // in the tree and in no search. Said at `debug!`, the level the walk says its own skips at,
+    // because it is the only trace such a note leaves.
+    let body = || match crate::fs::read_text(&f.canonical) {
+        Ok(read) => Some(read),
+        Err(e) => {
+            tracing::debug!("{}: no body indexed: {e}", f.canonical.display());
+            None
+        }
+    };
     let read = match f.kind {
-        FileKind::Markdown => crate::fs::read_text(&f.canonical).ok(),
+        FileKind::Markdown => body(),
         // A diagram's body is XML whose every style key would come back as a search hit, so it
         // keeps a stat row only; searching its labels is a job for the diagram crate.
         FileKind::Other if f.size <= MAX_INDEXED_BODY && !crate::path::is_diagram(&f.rel_path) => {
-            crate::fs::read_text(&f.canonical).ok()
+            body()
         }
         _ => None,
     };
