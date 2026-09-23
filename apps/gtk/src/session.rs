@@ -287,6 +287,17 @@ impl App {
         self.key.borrow().saved_as().is_some()
     }
 
+    /// Let go of this window's shells as it closes. A window that keeps a session only detaches
+    /// them, and its next opening takes them up again; one that does not has nothing to take them
+    /// up again, so they end with it.
+    pub(crate) fn release_shells(&self) {
+        if !self.keeps_session() {
+            for term in self.terminals() {
+                term.kill();
+            }
+        }
+    }
+
     /// The session as this window last wrote it, or the defaults.
     fn stored_session(&self) -> Session {
         match (self.vault(), self.key.borrow().saved_as()) {

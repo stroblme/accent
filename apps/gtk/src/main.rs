@@ -266,6 +266,8 @@ struct App {
     /// Built on the first Split or Preview: a WebKit process per window is not worth paying for
     /// at startup by someone who only ever writes.
     preview: RefCell<Option<preview::Preview>>,
+    /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
+    told_unheld: Cell<bool>,
     /// Every file and every tag in the vault, as the palette lists them. Kept warm in the
     /// background rather than asked for when the dialog opens: on a remote vault that question
     /// costs a round trip, and the palette is a thing that has to appear instantly.
@@ -889,6 +891,8 @@ impl App {
         let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
             (None, Some(remote)) => terminal::Shell::Remote {
                 argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
+                // Nothing holds it: it ends with its tab, or with the link.
+                kill: Vec::new(),
                 at: remote.url().clone(),
                 link: remote.url().clone(),
             },
@@ -923,6 +927,13 @@ impl App {
     /// The one door into a shell tab, new or restored. A restored one lands in the pane the
     /// session put it in, behind whatever that pane shows, and does not take the keyboard.
     fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
+        // Said once per window, the first time a shell here could have been held and was not.
+        if matches!(shell, terminal::Shell::Local(_))
+            && terminal::cli().is_none()
+            && !self.told_unheld.replace(true)
+        {
+            self.toast("accent-cli is not installed; shells will not persist");
+        }
         let term = terminal::open(&self.tabs_for(&key), &shell, key);
         // The shell's own zoom, not the document's. Capture phase: VTE binds Ctrl+scroll to a font
         // scale of its own, which would move the terminal without the readout ever hearing of it.

@@ -19,6 +19,10 @@
 //! reference count alone — there is no `destroy` to break one from outside — and a `VteTerminal`
 //! that is never finalised never drops its `VtePty`, so the pty master stays open and the shell
 //! never gets its hangup. That is how every closed terminal tab used to leak a live shell.
+//!
+//! A shell is held by `accent-cli` now, and what runs in the tab's pty is `accent-cli attach`: a
+//! hangup detaches it and leaves the shell running for the next window to take up, and Close Tab
+//! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
@@ -54,6 +58,8 @@ pub struct Term {
     shell: Shell,
     /// Whether a dropped link ended the shell and the tab is waiting for [`reopen`](Self::reopen).
     lost: Cell<bool>,
+    /// Whether the shell has ended, so there is nothing left for [`kill`](Self::kill) to end.
+    ended: Cell<bool>,
 }
 
 impl Term {
@@ -99,7 +105,20 @@ impl Term {
     /// it, and the new one lands at the vault root. Nothing to do for a shell that is still running.
     pub fn reopen(&self) {
         if self.lost.replace(false) {
-            spawn(&self.view, &self.shell);
+            spawn(&self.view, &self.shell, id(&self.key));
+        }
+    }
+
+    /// End the shell for good, which is what Close Tab means: closing a window only lets go of
+    /// its shells, and they are still there when it opens again. Nothing to do for one that has
+    /// ended already.
+    pub fn kill(&self) {
+        if self.ended.get() {
+            return;
+        }
+        match &self.shell {
+            Shell::Local(_) => end(&self.key, &self.at().unwrap_or_default()),
+            Shell::Remote { kill, .. } => run_kill(kill.clone()),
         }
     }
 
@@ -169,6 +188,9 @@ pub enum Shell {
     /// `accent_api::ssh::shell`, which is also what carries the ControlPath.
     Remote {
         argv: Vec<String>,
+        /// What ends it for good, run on this machine; empty for a shell nothing holds, which
+        /// ends with its tab.
+        kill: Vec<String>,
         /// Where it was opened: the host, and the directory on it.
         at: ssh::Url,
         /// The address whose ssh connection it rides: the vault's.
@@ -228,7 +250,7 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         }
     ));
 
-    spawn(&view, shell);
+    spawn(&view, shell, id(&key));
     install_keys(&view, tabs);
     install_links(&view);
 
@@ -238,16 +260,32 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
         view,
         shell: shell.clone(),
         lost: Cell::new(false),
+        ended: Cell::new(false),
     })
 }
 
 /// Run `shell` in `view`, which may have run one before: VTE takes a new child once the last has
 /// exited.
-fn spawn(view: &vte4::Terminal, shell: &Shell) {
-    let (cwd, argv) = match shell {
-        Shell::Local(cwd) => (Some(cwd.clone()), vec![user_shell()]),
+///
+/// A local one is `accent-cli attach`, which starts the shell `id` names in the holder, or finds
+/// it there still running, and relays it into this pty: so the shell outlives the tab's pty and a
+/// closed window, and comes back when its tab does. Without `accent-cli` it is the shell itself,
+/// ending with its tab, as it always used to.
+fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
+    let (cwd, argv) = match (shell, cli()) {
+        (Shell::Local(cwd), Some(cli)) => (
+            None,
+            vec![
+                cli.to_string_lossy().into_owned(),
+                "attach".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string_lossy().into_owned(),
+                id.to_string(),
+            ],
+        ),
+        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()]),
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
-        Shell::Remote { argv, .. } => (None, argv.clone()),
+        (Shell::Remote { argv, .. }, _) => (None, argv.clone()),
     };
     let named = argv.join(" ");
     let args: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -268,11 +306,6 @@ fn spawn(view: &vte4::Terminal, shell: &Shell) {
     );
 }
 
-/// The shell exited: hand the terminal back so the caller can close its tab.
-///
-/// Except a remote shell whose link went. Its tab stays, saying so, and [`Term::reopen`] starts
-/// the shell again when the vault is back; closing the tab meanwhile is what gives up on it. A
-/// local command's 255 is an ordinary exit.
 /// Run `changed` whenever VTE reports a title of its own: once a moment after the shell has
 /// started, and again on every `cd`. Weak, for the reason [`on_exit`] is.
 pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
@@ -284,6 +317,12 @@ pub fn on_title(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
     });
 }
 
+/// The shell exited: hand the terminal back so the caller can close its tab.
+///
+/// Except a remote shell whose link went. Its tab stays, saying so, and [`Term::reopen`] starts
+/// the shell again when the vault is back; closing the tab meanwhile is what gives up on it. A
+/// local command's 255 is an ordinary exit. And except an `accent-cli attach` that could not do
+/// its job, whose tab stays so the line it printed can be read; `Ctrl+W` closes it.
 pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
     let weak = Rc::downgrade(term);
     term.view.connect_child_exited(move |view, status| {
@@ -299,20 +338,35 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
                 );
                 view.feed(line.as_bytes());
             }
-            _ => done(&term),
+            _ => {
+                term.ended.set(true);
+                if !exited_with(status, ATTACH_FAILED) {
+                    done(&term);
+                }
+            }
         }
     });
 }
 
+/// What `accent-cli attach` exits with when it could not reach the holder or start the shell,
+/// rather than with the status of a shell it carried.
+///
+/// ponytail: a shell's own `exit 254` keeps its tab the same way, until `Ctrl+W`.
+const ATTACH_FAILED: i32 = 254;
+
 /// Whether ssh ended itself rather than the shell it carried: it exits 255 on its own errors, a
-/// dropped link among them, and with the remote command's status otherwise. `status` is the wait
-/// status VTE passes on, as `waitpid` gave it: an exit is a zero signal byte, and its code is the
-/// byte above.
+/// dropped link among them, and with the remote command's status otherwise.
 ///
 /// ponytail: a remote `exit 255` reads as a lost link too, and keeps its tab until the next
 /// reconnect or a close.
 fn link_lost(status: i32) -> bool {
-    status & 0x7f == 0 && (status >> 8) & 0xff == 255
+    exited_with(status, 255)
+}
+
+/// Whether a child exited with `code`. `status` is the wait status VTE passes on, as `waitpid`
+/// gave it: an exit is a zero signal byte, and its code is the byte above.
+fn exited_with(status: i32, code: i32) -> bool {
+    status & 0x7f == 0 && (status >> 8) & 0xff == code
 }
 
 /// What the terminal answers itself: moving between tabs, which `AdwTabView` binds at the window
@@ -543,6 +597,51 @@ pub fn new_key() -> String {
 pub fn is_key(key: &str) -> bool {
     key.strip_prefix(KEY)
         .is_some_and(|id| id.len() == 16 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The name the holder knows the shell by: its key without the prefix.
+fn id(key: &str) -> &str {
+    key.strip_prefix(KEY).unwrap_or(key)
+}
+
+/// The `accent-cli` beside this binary, which is what holds the shells: `target/<profile>/` in a
+/// build, `bin/` in an install. Not `ssh::server_binary`, which finds the static build uploaded
+/// to a host.
+pub fn cli() -> Option<PathBuf> {
+    let cli = std::env::current_exe().ok()?.with_file_name("accent-cli");
+    cli.is_file().then_some(cli)
+}
+
+/// End the shell `key` names, held on this machine: what Close Tab does. Without `accent-cli`
+/// nothing holds it, and it ended with its tab.
+///
+/// ponytail: `at` on another machine is left alone here; a remote tab ends its shell through its
+/// own [`Shell::Remote`] `kill`.
+pub fn end(key: &str, at: &str) {
+    if ssh::is_remote(at) {
+        return;
+    }
+    if let Some(cli) = cli() {
+        let cli = cli.to_string_lossy().into_owned();
+        run_kill(vec![cli, "kill".to_string(), id(key).to_string()]);
+    }
+}
+
+/// Run a kill's argument vector and wait for it on a thread of its own, so Close Tab never waits
+/// on the holder or on a host. An empty one is a shell nothing holds.
+fn run_kill(argv: Vec<String>) {
+    let Some((program, args)) = argv.split_first() else {
+        return;
+    };
+    let mut command = std::process::Command::new(program);
+    command.args(args).stdin(std::process::Stdio::null());
+    let _ = std::thread::Builder::new()
+        .name("accent-kill".to_string())
+        .spawn(move || {
+            if let Err(e) = command.status() {
+                tracing::warn!("cannot end the shell: {e}");
+            }
+        });
 }
 
 /// The directory an OSC 7 `file://host/path` URI names, if `host` is this machine. A shell that

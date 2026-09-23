@@ -286,6 +286,7 @@ pub fn build_window(
         references: RefCell::new(None),
         ops: OnceCell::new(),
         preview: RefCell::new(None),
+        told_unheld: Cell::new(false),
         split,
         sidebar_column,
         sidebar_header,
