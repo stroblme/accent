@@ -186,7 +186,7 @@ pub fn build_window(
         history("edit-undo-symbolic", "win.pdf-undo"),
         history("edit-redo-symbolic", "win.pdf-redo"),
     );
-    let menu = menu_button();
+    let menu = menu_button(key);
     header.pack_end(&menu);
     header.pack_end(&drawing);
     header.pack_end(&redo);
