@@ -44,6 +44,11 @@ pub fn parse(bytes: &[u8]) -> Result<File, Error> {
     Ok(File { attrs, pages })
 }
 
+/// How deep the elements of a diagram may nest. draw.io writes six levels
+/// (`mxfile > diagram > mxGraphModel > root > mxCell > mxGeometry`, plus `mxPoint`s under that);
+/// the cap is there for what a file may claim, not for what one holds.
+const MAX_DEPTH: usize = 64;
+
 /// The document element as a tree, attribute values and text unescaped. Text beside child
 /// elements is trimmed, which drops the indentation between them.
 fn tree(xml: &str) -> Result<Element, Error> {
@@ -56,7 +61,17 @@ fn tree(xml: &str) -> Result<Element, Error> {
             .read_event()
             .map_err(|e| Error::Xml(format!("{e} (at byte {})", reader.error_position())))?;
         match event {
-            Event::Start(start) => open.push(element(&start)?),
+            Event::Start(start) => {
+                // The parse is a loop and the write ([`write_element`]) is a recursion, as is the
+                // tree's own drop glue, so a file nested deeper than the stack takes parses here
+                // and aborts the process on the way out. A diagram is six levels deep.
+                if open.len() >= MAX_DEPTH {
+                    return Err(Error::Xml(format!(
+                        "elements nested more than {MAX_DEPTH} deep"
+                    )));
+                }
+                open.push(element(&start)?);
+            }
             Event::Empty(start) => close(element(&start)?, &mut open, &mut root),
             Event::End(_) => {
                 if let Some(done) = open.pop() {
@@ -209,12 +224,23 @@ fn zap_gremlins(s: &str) -> String {
 
 /// A page from its `<diagram>` attributes and its `<mxGraphModel>`.
 fn model_page(attrs: Vec<(String, String)>, model: Element) -> Page {
+    // A second cell carrying an id already taken is given a fresh one, as draw.io does when a
+    // cell is added under an id the model holds (`mxGraphModel.cellAdded`). The tree is walked by
+    // id, so a duplicate is a cell that is its own ancestor — a recursion the walk never leaves.
+    let mut seen = std::collections::HashSet::new();
     let cells = model
         .children
         .into_iter()
         .filter(|c| c.name == "root")
         .flat_map(|root| root.children)
         .map(cell)
+        .map(|mut c| {
+            if !seen.insert(c.id.clone()) {
+                c.id = guid();
+                seen.insert(c.id.clone());
+            }
+            c
+        })
         .collect();
     Page {
         attrs,
@@ -733,5 +759,49 @@ mod tests {
         assert_eq!(a, ("image/png".to_string(), b"foo".to_vec()));
         assert_eq!(a, b);
         assert!(super::decode_data_uri("https://example.org/a.png").is_none());
+    }
+
+    /// A hand-edited file may hold two cells under one id; draw.io's own model never does. The
+    /// tree is walked by id, so the second one has to become a cell of its own on the way in.
+    #[test]
+    fn a_duplicate_id_is_given_a_fresh_one() {
+        let xml = br#"<mxGraphModel><root>
+            <mxCell id="0" /><mxCell id="1" parent="0" />
+            <mxCell id="X" parent="1" vertex="1"><mxGeometry x="0" y="0" width="10" height="10" as="geometry" /></mxCell>
+            <mxCell id="X" parent="X" vertex="1"><mxGeometry x="5" y="5" width="10" height="10" as="geometry" /></mxCell>
+        </root></mxGraphModel>"#;
+        let file = parse(xml).unwrap();
+        let ids: Vec<&str> = file.pages[0].cells.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), 4, "every cell is kept");
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "under ids of their own: {ids:?}");
+        // And the scene the reader sees is built rather than recursed into: the second cell is
+        // parented to the first, which is no longer itself.
+        assert!(!write(&file).is_empty());
+    }
+
+    /// The parse is a loop, the write is a recursion: a file may claim more nesting than the
+    /// stack has, and the refusal has to come before the tree is built.
+    #[test]
+    fn nesting_past_the_cap_is_refused() {
+        let deep = format!(
+            "<mxGraphModel>{}{}</mxGraphModel>",
+            "<a>".repeat(MAX_DEPTH + 10),
+            "</a>".repeat(MAX_DEPTH + 10)
+        );
+        let e = parse(deep.as_bytes()).unwrap_err();
+        assert!(
+            matches!(&e, Error::Xml(why) if why.contains("nested")),
+            "{e}"
+        );
+        // One level under the cap still reads, the cap counting the elements open at once.
+        let fine = format!(
+            "<mxGraphModel><root><mxCell id=\"0\" />{}{}</root></mxGraphModel>",
+            "<a>".repeat(MAX_DEPTH - 4),
+            "</a>".repeat(MAX_DEPTH - 4)
+        );
+        assert!(parse(fine.as_bytes()).is_ok());
     }
 }
