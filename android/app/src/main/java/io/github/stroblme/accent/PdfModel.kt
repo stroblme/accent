@@ -19,6 +19,8 @@ import io.github.stroblme.accent.ffi.Tile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
@@ -168,11 +170,23 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
 
     companion object {
         suspend fun open(path: String): PdfModel = withContext(Dispatchers.IO) {
-            PdfModel(PdfSession.open(path)).also { it.load() }
+            PdfModel(PdfSession.open(path)).also { it.orClose() }
         }
 
         suspend fun of(bytes: ByteArray): PdfModel = withContext(Dispatchers.IO) {
-            PdfModel(PdfSession.openBytes(bytes)).also { it.load() }
+            PdfModel(PdfSession.openBytes(bytes)).also { it.orClose() }
+        }
+
+        /**
+         * Load, and put the document down again if nobody is waiting for it any more.
+         *
+         * A reader who leaves one PDF for another cancels this coroutine, and a cancelled
+         * `withContext` throws its result away — which for a document is a session and a render
+         * thread the caller never sees and so can never close.
+         */
+        private suspend fun PdfModel.orClose() {
+            load()
+            if (!currentCoroutineContext().isActive) close()
         }
     }
 }
