@@ -17,10 +17,11 @@ pub struct Shell {
     /// Whether the file has been found not to parse and that has been said, so it is said once
     /// until the file parses again.
     pub config_broken: Cell<bool>,
-    /// The open vaults, and the only strong reference to each window's state: an entry is dropped
+    /// The open windows, and the only strong reference to each one's state: an entry is dropped
     /// in `forget` when the window closes, which is what releases the vault and its worker thread.
-    /// Keyed by what each window was opened on, so a vault-less one is found again by its kind.
-    pub windows: RefCell<Vec<(WindowKey, Rc<App>)>>,
+    /// Each carries what it was opened on (`App::key`), so a vault-less one is found again by its
+    /// kind.
+    pub windows: RefCell<Vec<Rc<App>>>,
     /// The start screen while one is up, so Open Folder… presents it again instead of stacking a
     /// second copy. Weak: the window belongs to GTK, and closing it is how it goes away.
     pub start: glib::WeakRef<adw::ApplicationWindow>,
@@ -35,7 +36,7 @@ pub struct Shell {
 
 /// What a window in [`Shell::windows`] was opened on: a vault, by its `Vault::key`, or no vault at
 /// all, as one of the [`Loose`] kinds.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum WindowKey {
     Vault(PathBuf),
     Loose(Loose),
@@ -48,6 +49,12 @@ impl WindowKey {
             WindowKey::Vault(root) => Some(root),
             WindowKey::Loose(_) => None,
         }
+    }
+
+    /// The key the window is remembered by, in the recent list and in its state file. `None` for
+    /// a window that is opened the same way again rather than restored.
+    pub fn saved_as(&self) -> Option<&Path> {
+        self.vault()
     }
 }
 
@@ -159,8 +166,8 @@ impl Shell {
         self.windows
             .borrow()
             .iter()
-            .find(|(_, app)| app.window.upcast_ref::<gtk::Window>() == window)
-            .map(|(_, app)| app.clone())
+            .find(|app| app.window.upcast_ref::<gtk::Window>() == window)
+            .cloned()
     }
 
     /// Record an `app.` action in the active window's recently-run commands. Nothing happens from
@@ -182,12 +189,7 @@ impl Shell {
             theme::apply(config.theme);
         }
         // Cloned out of the borrow: applying a config reaches a long way into each window.
-        let apps: Vec<Rc<App>> = self
-            .windows
-            .borrow()
-            .iter()
-            .map(|(_, app)| app.clone())
-            .collect();
+        let apps: Vec<Rc<App>> = self.windows.borrow().clone();
         for app in apps {
             app.apply_config(config, &changed);
         }
@@ -298,7 +300,7 @@ impl Shell {
             .windows
             .borrow()
             .iter()
-            .any(|(_, app)| app.window.upcast_ref::<gtk::Window>() == &window);
+            .any(|app| app.window.upcast_ref::<gtk::Window>() == &window);
         if !opened {
             return;
         }
@@ -321,7 +323,7 @@ impl Shell {
     /// one stalled close is cheaper than the flag.
     fn forget(&self, window: &adw::ApplicationWindow) {
         let mut windows = self.windows.borrow_mut();
-        let Some(i) = windows.iter().position(|(_, app)| &app.window == window) else {
+        let Some(i) = windows.iter().position(|app| &app.window == window) else {
             return;
         };
         let app = windows.remove(i);
@@ -545,7 +547,7 @@ impl Shell {
                 glib::Propagation::Proceed
             }
         });
-        self.windows.borrow_mut().push((key, app.clone()));
+        self.windows.borrow_mut().push(app.clone());
         Some(app)
     }
 
@@ -555,7 +557,7 @@ impl Shell {
         self.windows
             .borrow()
             .iter()
-            .find_map(|(_, app)| Some((app.clone(), app.doc_for_page(page)?)))
+            .find_map(|app| Some((app.clone(), app.doc_for_page(page)?)))
     }
 
     /// A page has landed in `into`'s tab view that `into` knows nothing about: either a tab
@@ -670,17 +672,20 @@ impl Shell {
         into.close_page(page);
     }
 
-    fn app_for(&self, root: &Path) -> Option<Rc<App>> {
-        let windows = self.windows.borrow();
-        let (_, app) = windows.iter().find(|(key, _)| key.vault() == Some(root))?;
-        Some(app.clone())
+    /// The open window remembered by `key`, a vault's key.
+    pub(crate) fn app_for(&self, key: &Path) -> Option<Rc<App>> {
+        self.windows
+            .borrow()
+            .iter()
+            .find(|app| app.key.borrow().saved_as() == Some(key))
+            .cloned()
     }
 
     /// Open `path` wherever it belongs: in the window whose vault contains it, or in the window
     /// kept for documents that are in no vault — never the one `accent --terminal` opened.
     fn open_file(self: &Rc<Self>, gtk_app: &adw::Application, path: PathBuf) {
-        let inside = self.windows.borrow().iter().find_map(|(key, app)| {
-            let rel = path.strip_prefix(key.vault()?).ok()?;
+        let inside = self.windows.borrow().iter().find_map(|app| {
+            let rel = path.strip_prefix(app.key.borrow().vault()?).ok()?;
             Some((app.clone(), rel.to_string_lossy().into_owned()))
         });
         if let Some((app, rel)) = inside {
@@ -707,8 +712,8 @@ impl Shell {
             .windows
             .borrow()
             .iter()
-            .find(|(key, _)| *key == WindowKey::Loose(kind))
-            .map(|(_, app)| app.clone());
+            .find(|app| *app.key.borrow() == WindowKey::Loose(kind))
+            .cloned();
         if let Some(app) = loose {
             return Some(app);
         }

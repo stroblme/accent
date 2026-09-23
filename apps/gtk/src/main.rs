@@ -206,6 +206,9 @@ struct Waiting {
 }
 
 struct App {
+    /// What the window was opened on, and is remembered by. A cell, so a window that changes what
+    /// it is remembered by has one assignment to make.
+    key: RefCell<shell::WindowKey>,
     /// The vault this window is on, or `None` for a window opened on a file instead of a folder:
     /// no index, no watcher, no session, and every tab keyed by an absolute path.
     ///

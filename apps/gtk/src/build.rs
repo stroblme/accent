@@ -43,8 +43,8 @@ pub fn build_window(
     // Touched now, so the window title and any picker opened in this window read the list the
     // way it will be written; the write itself waits for the post-present idle below, an fsync
     // being no part of building a widget tree.
-    if let Some(root) = &root {
-        shell.config.borrow_mut().touch_recent(root);
+    if let Some(saved) = key.saved_as() {
+        shell.config.borrow_mut().touch_recent(saved);
     }
 
     // A window with no vault is named for what it holds rather than for a folder it has not got:
@@ -259,6 +259,7 @@ pub fn build_window(
         .build();
 
     let app = Rc::new(App {
+        key: RefCell::new(key.clone()),
         vault: vault.clone(),
         // (`vault` is an `Option` here: `None` is a window opened on a file, with no folder.)
         shell: Rc::downgrade(shell),
