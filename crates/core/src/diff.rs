@@ -14,6 +14,16 @@ pub enum Op {
     Insert,
 }
 
+impl From<ChangeTag> for Op {
+    fn from(tag: ChangeTag) -> Op {
+        match tag {
+            ChangeTag::Equal => Op::Equal,
+            ChangeTag::Delete => Op::Delete,
+            ChangeTag::Insert => Op::Insert,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DiffLine {
     pub op: Op,
@@ -52,11 +62,7 @@ pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
             // cut a range short.
             text.truncate(text.trim_end_matches(['\r', '\n']).len());
             DiffLine {
-                op: match c.tag() {
-                    ChangeTag::Equal => Op::Equal,
-                    ChangeTag::Delete => Op::Delete,
-                    ChangeTag::Insert => Op::Insert,
-                },
+                op: c.tag().into(),
                 old_line: c.old_index().map(|i| i + 1),
                 new_line: c.new_index().map(|i| i + 1),
                 text,
@@ -87,11 +93,7 @@ fn changes(old: &str, new: &str) -> Vec<DiffLine> {
     TextDiff::from_lines(old, new)
         .iter_all_changes()
         .map(|c| DiffLine {
-            op: match c.tag() {
-                ChangeTag::Equal => Op::Equal,
-                ChangeTag::Delete => Op::Delete,
-                ChangeTag::Insert => Op::Insert,
-            },
+            op: c.tag().into(),
             old_line: c.old_index().map(|i| i + 1),
             new_line: c.new_index().map(|i| i + 1),
             text: c.value().to_string(),

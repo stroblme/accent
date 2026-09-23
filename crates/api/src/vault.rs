@@ -18,9 +18,9 @@ use accent_core::search;
 
 use crate::local::Local;
 use crate::{
-    Backlink, Commit, DiffLine, Etag, Event, FileRow, Location, Match, Options, PdfLink,
-    RenamePlan, RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status,
-    Submodule, VaultConfig, fs, git, remote, rpc, ssh,
+    Backlink, Commit, Etag, Event, FileRow, Location, Match, Options, PdfLink, RenamePlan,
+    RenameReport, ReplaceReport, Repo, SaveError, SearchHit, Session, Status, Submodule,
+    VaultConfig, fs, git, remote, rpc, ssh,
 };
 
 /// One open vault, wherever it lives.
@@ -375,7 +375,6 @@ methods! {
     any plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     any rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     any adopt_conflict(original: ref str, conflict: ref str) -> Etag;
-    any conflict_diff(original: ref str, conflict: ref str) -> Vec<DiffLine>;
     any template_target(template: ref str) -> Option<String>;
     any note_from_template(template: ref str) -> Option<(String, Vec<usize>)>;
     any render_template(template: ref str, title: ref str) -> (String, Vec<usize>);

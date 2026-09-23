@@ -270,14 +270,9 @@ impl Index {
     /// subtree has to go with it. Returns how many rows went.
     ///
     /// The links that pointed into the subtree are re-resolved as each row goes
-    /// ([`delete_file_rows`]), so there is nothing left for a batch caller to defer:
-    /// [`remove_file_batched`](Self::remove_file_batched) is the same call, kept for symmetry
-    /// with [`update_file_batched`](Self::update_file_batched).
-    pub fn remove_file(&mut self, rel: &str) -> Result<usize> {
-        self.remove_file_batched(rel)
-    }
-
-    /// See [`remove_file`](Self::remove_file).
+    /// ([`delete_file_rows`]), so there is nothing for a batch caller to defer — the name keeps
+    /// the `_batched` suffix of [`update_file_batched`](Self::update_file_batched), which has to
+    /// have one.
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
         let (lo, hi) = path::subtree_range(rel);
         let ids: Vec<i64> = {
@@ -936,7 +931,7 @@ mod tests {
         assert_eq!(ix.backlinks("sub/Beta.md").unwrap().len(), 1);
 
         // One event for the directory has to take the note under it with it.
-        assert_eq!(ix.remove_file("sub").unwrap(), 2);
+        assert_eq!(ix.remove_file_batched("sub").unwrap(), 2);
         assert!(ix.get_file("sub").unwrap().is_none());
         assert!(ix.get_file("sub/Beta.md").unwrap().is_none());
         assert!(ix.search("ferris", 10, false).unwrap().is_empty());
@@ -945,7 +940,7 @@ mod tests {
             vec![("a.md".to_string(), "Beta".to_string())]
         );
         assert_eq!(
-            ix.remove_file("sub").unwrap(),
+            ix.remove_file_batched("sub").unwrap(),
             0,
             "removing twice is a no-op"
         );
