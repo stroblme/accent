@@ -475,7 +475,10 @@ impl Config {
     /// what keeps a hand edit — or a file that no longer parses — from being written over.
     pub fn save(&self) -> Result<bool> {
         let path = config_path();
-        let on_disk = std::fs::read_to_string(&path).ok();
+        // An error rather than `None`: a file that cannot be read is not a file that is not
+        // there, and reading the second out of the first wrote the defaults over a config whose
+        // bytes nobody had seen.
+        let on_disk = on_disk(&path)?;
         if on_disk.is_some() && on_disk != known() {
             return Ok(false);
         }
@@ -496,7 +499,7 @@ impl Config {
     /// nothing is taken in and [`save`](Self::save) keeps refusing until it does.
     pub fn reread(&self) -> Result<Option<Reread>> {
         let path = config_path();
-        let text = std::fs::read_to_string(&path).ok();
+        let text = on_disk(&path)?;
         let known = known();
         let Some(file) = theirs(text.as_deref(), known.as_deref(), &path)? else {
             return Ok(None);
@@ -651,6 +654,20 @@ fn set_known(text: Option<String>) {
 
 /// The config in `text`, where that is a change of someone else's: `None` for no file, or for the
 /// text accent itself last read or wrote; an error for a change that does not parse.
+/// The file's text, or `None` where there is no file.
+///
+/// An error is a file that is there and could not be read — no permission, an I/O failure, bytes
+/// that are not UTF-8. Told apart from "there is no file" because the two mean opposite things to
+/// a writer: nothing on disk is free to write, and a file that cannot be read is the one thing
+/// that must not be written over, its contents being unknown rather than absent.
+fn on_disk(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+    }
+}
+
 fn theirs(text: Option<&str>, known: Option<&str>, path: &Path) -> Result<Option<Config>> {
     match text {
         Some(text) if Some(text) != known => Config::parse(text, path).map(Some),
@@ -1024,6 +1041,33 @@ daily_template = "DailyNote.md"
             );
             assert!(Config::read(&p).unwrap().line_numbers);
             assert!(taken.config.reread().unwrap().is_none(), "its own write");
+        });
+    }
+
+    /// A config that cannot be read is not a config that is not there: reading the second out of
+    /// the first let the guard above pass and wrote the defaults over a file whose bytes nobody
+    /// had seen.
+    #[test]
+    fn a_config_that_cannot_be_read_is_not_written_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        with_xdg(tmp.path(), || {
+            let p = config_path();
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "minimap = false\n").unwrap();
+            let mut c = Config::load();
+            c.line_numbers = true;
+
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Root reads it anyway, and then there is nothing to test.
+            if std::fs::read_to_string(&p).is_ok() {
+                return;
+            }
+            assert!(c.save().is_err(), "an unreadable config is not written");
+            assert!(c.reread().is_err(), "nor read as holding nothing new");
+
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "minimap = false\n");
         });
     }
 
