@@ -35,29 +35,43 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// A factory whose row is one label. `bind` is handed that label and the item being bound, so a
-/// caller that wants more than the text — an indent per outline level — still has it.
+/// A factory whose row `setup` builds and `bind` fills, each handed the row as its own type.
+///
+/// The two downcasts every list factory was writing out: `GtkSignalListItemFactory` hands its
+/// closures a `GObject`, and the child comes back as a `GtkWidget`. `setup` is given the item as
+/// well, for a row whose drawing reads the object bound to it.
+pub(crate) fn factory<W: IsA<gtk::Widget>>(
+    setup: impl Fn(&gtk::ListItem) -> W + 'static,
+    bind: impl Fn(&W, &gtk::ListItem) + 'static,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        item.set_child(Some(&setup(item)));
+    });
+    factory.connect_bind(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
+        if let Some(row) = item.child().and_downcast::<W>() {
+            bind(&row, item);
+        }
+    });
+    factory
+}
+
+/// [`factory`] for the commonest row of all: one ellipsized label.
 pub(crate) fn label_factory(
     ellipsize: pango::EllipsizeMode,
     bind: impl Fn(&gtk::Label, &gtk::ListItem) + 'static,
 ) -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(move |_, item| {
-        let label = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(ellipsize)
-            .build();
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        if let Some(label) = item.child().and_downcast::<gtk::Label>() {
-            bind(&label, item);
-        }
-    });
-    factory
+    factory(
+        move |_| {
+            gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(ellipsize)
+                .build()
+        },
+        bind,
+    )
 }
 
 /// The text a `GtkStringList` row carries, which is what every plain-label list is a list of.

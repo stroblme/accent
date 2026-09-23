@@ -1244,28 +1244,15 @@ fn build_message_box() -> MessageBox {
 /// A row of the repository chooser: one label, ellipsized where it has to fit the sidebar's width
 /// and whole where it does not.
 fn name_factory(ellipsize: bool) -> gtk::SignalListItemFactory {
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(move |_, item| {
-        let label = gtk::Label::builder().xalign(0.0).build();
-        if ellipsize {
-            label.set_ellipsize(pango::EllipsizeMode::End);
-        }
-        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-            item.set_child(Some(&label));
-        }
-    });
-    factory.connect_bind(|_, item| {
-        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        if let (Some(label), Some(name)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::StringObject>(),
-        ) {
+    let ellipsize = match ellipsize {
+        true => pango::EllipsizeMode::End,
+        false => pango::EllipsizeMode::None,
+    };
+    crate::widgets::label_factory(ellipsize, |label, item| {
+        if let Some(name) = item.item().and_downcast::<gtk::StringObject>() {
             label.set_text(&name.string());
         }
-    });
-    factory
+    })
 }
 
 /// The heading over the branch popover's remote rows. A row that is not a branch, so nothing

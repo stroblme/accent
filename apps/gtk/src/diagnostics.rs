@@ -78,8 +78,8 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         WARNING,
         crate::diff::tint(crate::diff::WARNING_HUE, fg, 1.0),
     );
-    set(INFO, crate::highlight::with_alpha(fg, INFO_ALPHA));
-    set(HINT, crate::highlight::with_alpha(fg, HINT_ALPHA));
+    set(INFO, crate::theme::at(fg, INFO_ALPHA));
+    set(HINT, crate::theme::at(fg, HINT_ALPHA));
 }
 
 /// Paint `items` over the buffer, replacing whatever was there, and say how many end-of-line

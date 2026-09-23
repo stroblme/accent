@@ -40,20 +40,13 @@ enum LogItem {
 
 impl Panel {
     pub(super) fn wire_log(self: &Rc<Self>, view: &gtk::ListView) {
-        let factory = gtk::SignalListItemFactory::new();
-        let weak = Rc::downgrade(self);
-        factory.connect_setup(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                item.set_child(Some(&log_row(item, &weak)));
-            }
-        });
-        let weak = Rc::downgrade(self);
-        factory.connect_bind(move |_, item| {
-            if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
-                bind_log(item, &weak);
-            }
-        });
-        view.set_factory(Some(&factory));
+        let (setup, bound) = (Rc::downgrade(self), Rc::downgrade(self));
+        view.set_factory(Some(&crate::widgets::factory(
+            move |item| log_row(item, &setup),
+            // The row is rebuilt from the item rather than from the stack handed over: a
+            // recycled row draws what it is bound to, not what it held.
+            move |_: &gtk::Stack, item| bind_log(item, &bound),
+        )));
 
         // The same one-click rule as the changes list and the tree: a commit opens its file list,
         // a file in it opens its diff.

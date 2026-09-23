@@ -775,9 +775,9 @@ fn css_rgba(c: gdk::RGBA) -> String {
     )
 }
 
-/// The foreground at `alpha`, matching `highlight.rs::with_alpha`.
+/// The foreground at `alpha`, as CSS: the same colour the editor dims with.
 fn dim(c: gdk::RGBA, alpha: f32) -> String {
-    css_rgba(gdk::RGBA::new(c.red(), c.green(), c.blue(), alpha))
+    css_rgba(crate::theme::at(c, alpha))
 }
 
 /// The whole preview look, derived from three values plus the document font. The alphas are the

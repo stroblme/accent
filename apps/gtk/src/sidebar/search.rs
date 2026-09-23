@@ -600,80 +600,75 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // needs bindable state.
     let results = gio::ListStore::new::<glib::BoxedAnyObject>();
 
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let name = gtk::Label::builder()
-            .xalign(0.0)
-            .ellipsize(pango::EllipsizeMode::Middle)
-            .build();
-        name.add_css_class("heading");
-        // The folder shares the name's line and gives way first, cut at its front: the last
-        // folders are what tell two `design.md`s apart, and a grep row's line number sits here
-        // too, so both survive the cut.
-        let dir = gtk::Label::builder()
-            .xalign(0.0)
-            .hexpand(true)
-            .ellipsize(pango::EllipsizeMode::Start)
-            .build();
-        dir.add_css_class("dim-label");
-        let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        head.append(&gtk::Image::new());
-        head.append(&name);
-        head.append(&dir);
-        let snippet = gtk::Label::builder()
-            .xalign(0.0)
-            .wrap(true)
-            .wrap_mode(pango::WrapMode::WordChar)
-            .lines(2)
-            .ellipsize(pango::EllipsizeMode::End)
-            .build();
-        snippet.add_css_class("dim-label");
-        // `.navigation-sidebar` gives its rows horizontal padding only, so a two-line row sits on
-        // the top and bottom edges of its own selection pill. 6 is the scale's inside-a-group step
-        // (DESIGN.md, Spacing).
-        let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        row.set_margin_top(6);
-        row.set_margin_bottom(6);
-        row.append(&head);
-        row.append(&snippet);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&row));
-    });
-    factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-        let (Some(head), Some(snippet)) = (
-            row.first_child().and_downcast::<gtk::Box>(),
-            row.last_child().and_downcast::<gtk::Label>(),
-        ) else {
-            return;
-        };
-        let Some(icon) = head.first_child().and_downcast::<gtk::Image>() else {
-            return;
-        };
-        let (Some(name), Some(dir)) = (
-            icon.next_sibling().and_downcast::<gtk::Label>(),
-            head.last_child().and_downcast::<gtk::Label>(),
-        ) else {
-            return;
-        };
-        let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
-            return;
-        };
-        let hit: Ref<Row> = boxed.borrow();
-        // A tail row has no name, and no icon either: it continues the file above it.
-        icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
-        icon.set_visible(!hit.name.is_empty());
-        name.set_text(&hit.name);
-        dir.set_text(&hit.dir);
-        // A tail row is the dim line alone, so the empty second line is taken away rather than
-        // left as a gap under it.
-        snippet.set_markup(&hit.snippet);
-        snippet.set_visible(!hit.snippet.is_empty());
-    });
+    let factory = crate::widgets::factory(
+        |_| {
+            let name = gtk::Label::builder()
+                .xalign(0.0)
+                .ellipsize(pango::EllipsizeMode::Middle)
+                .build();
+            name.add_css_class("heading");
+            // The folder shares the name's line and gives way first, cut at its front: the last
+            // folders are what tell two `design.md`s apart, and a grep row's line number sits here
+            // too, so both survive the cut.
+            let dir = gtk::Label::builder()
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(pango::EllipsizeMode::Start)
+                .build();
+            dir.add_css_class("dim-label");
+            let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            head.append(&gtk::Image::new());
+            head.append(&name);
+            head.append(&dir);
+            let snippet = gtk::Label::builder()
+                .xalign(0.0)
+                .wrap(true)
+                .wrap_mode(pango::WrapMode::WordChar)
+                .lines(2)
+                .ellipsize(pango::EllipsizeMode::End)
+                .build();
+            snippet.add_css_class("dim-label");
+            // `.navigation-sidebar` gives its rows horizontal padding only, so a two-line row sits on
+            // the top and bottom edges of its own selection pill. 6 is the scale's inside-a-group step
+            // (DESIGN.md, Spacing).
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            row.set_margin_top(6);
+            row.set_margin_bottom(6);
+            row.append(&head);
+            row.append(&snippet);
+            row
+        },
+        |row: &gtk::Box, item| {
+            let (Some(head), Some(snippet)) = (
+                row.first_child().and_downcast::<gtk::Box>(),
+                row.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            let Some(icon) = head.first_child().and_downcast::<gtk::Image>() else {
+                return;
+            };
+            let (Some(name), Some(dir)) = (
+                icon.next_sibling().and_downcast::<gtk::Label>(),
+                head.last_child().and_downcast::<gtk::Label>(),
+            ) else {
+                return;
+            };
+            let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+            let hit: Ref<Row> = boxed.borrow();
+            // A tail row has no name, and no icon either: it continues the file above it.
+            icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
+            icon.set_visible(!hit.name.is_empty());
+            name.set_text(&hit.name);
+            dir.set_text(&hit.dir);
+            // A tail row is the dim line alone, so the empty second line is taken away rather than
+            // left as a gap under it.
+            snippet.set_markup(&hit.snippet);
+            snippet.set_visible(!hit.snippet.is_empty());
+        },
+    );
 
     let view = gtk::ListView::new(
         Some(gtk::SingleSelection::new(Some(results.clone()))),

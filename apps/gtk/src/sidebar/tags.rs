@@ -69,37 +69,30 @@ fn selected_name(selection: &gtk::SingleSelection) -> Option<String> {
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     let tags = gio::ListStore::new::<glib::BoxedAnyObject>();
 
-    let factory = gtk::SignalListItemFactory::new();
-    factory.connect_setup(|_, item| {
-        let name = gtk::Label::builder().xalign(0.0).hexpand(true).build();
-        name.set_ellipsize(pango::EllipsizeMode::End);
-        let count = gtk::Label::builder().xalign(1.0).build();
-        count.add_css_class("dim-label");
-        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        row.append(&name);
-        row.append(&count);
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("list item")
-            .set_child(Some(&row));
-    });
-    factory.connect_bind(|_, item| {
-        let item = item.downcast_ref::<gtk::ListItem>().expect("list item");
-        let Some(row) = item.child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-        let (Some(name), Some(count)) = (
-            row.first_child().and_downcast::<gtk::Label>(),
-            row.last_child().and_downcast::<gtk::Label>(),
-        ) else {
-            return;
-        };
-        let Some(boxed) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
-            return;
-        };
-        let tag: Ref<(String, i64)> = boxed.borrow();
-        name.set_text(&tag.0);
-        count.set_text(&tag.1.to_string());
-    });
+    let factory = crate::widgets::factory(
+        |_| {
+            let name = gtk::Label::builder().xalign(0.0).hexpand(true).build();
+            name.set_ellipsize(pango::EllipsizeMode::End);
+            let count = gtk::Label::builder().xalign(1.0).build();
+            count.add_css_class("dim-label");
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            row.append(&name);
+            row.append(&count);
+            row
+        },
+        |row: &gtk::Box, item| {
+            let (Some(name), Some(count), Some(boxed)) = (
+                row.first_child().and_downcast::<gtk::Label>(),
+                row.last_child().and_downcast::<gtk::Label>(),
+                item.item().and_downcast::<glib::BoxedAnyObject>(),
+            ) else {
+                return;
+            };
+            let tag: Ref<(String, i64)> = boxed.borrow();
+            name.set_text(&tag.0);
+            count.set_text(&tag.1.to_string());
+        },
+    );
 
     // No autoselect: the file list stays hidden until the user actually picks a tag.
     let selection = gtk::SingleSelection::new(Some(tags.clone()));
