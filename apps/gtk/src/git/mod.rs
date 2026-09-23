@@ -560,12 +560,13 @@ impl Panel {
         };
         let panel = self.clone();
         glib::spawn_future_local(async move {
-            let fetched =
-                gio::spawn_blocking(move || fetch::fetch(&vault, selected, depth, known)).await;
+            let fetched = crate::work::off_thread("git", move || {
+                fetch::fetch(&vault, selected, depth, known)
+            })
+            .await;
             panel.busy.set(false);
-            match fetched {
-                Ok(fetched) => panel.apply(fetched),
-                Err(_) => tracing::warn!("the git worker panicked"),
+            if let Some(fetched) = fetched {
+                panel.apply(fetched);
             }
             if let Some(depth) = panel.again.take() {
                 panel.refresh(depth);
@@ -973,9 +974,10 @@ impl Panel {
         };
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let blob = gio::spawn_blocking(move || vault.git_show(&repo, "HEAD", &rel)).await;
+            let blob =
+                crate::work::off_thread("git", move || vault.git_show(&repo, "HEAD", &rel)).await;
             done(match blob {
-                Ok(Ok(Some(Blob::Text(text)))) => Some(text),
+                Some(Ok(Some(Blob::Text(text)))) => Some(text),
                 _ => None,
             });
         });

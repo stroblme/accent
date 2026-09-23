@@ -46,7 +46,7 @@ impl App {
             .collect();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let loaded = gio::spawn_blocking(move || {
+            let loaded = crate::work::off_thread("corpus", move || {
                 // Never widened: Go to File has no All toggle, and the tree is where an ignored
                 // file is reached, dimmed but listed.
                 let mut files = vault.file_paths(false).unwrap_or_default();
@@ -79,7 +79,7 @@ impl App {
                 )
             })
             .await;
-            if let (Some(app), Ok(((files, real, gone, aliases), tags, recent))) =
+            if let (Some(app), Some(((files, real, gone, aliases), tags, recent))) =
                 (weak.upgrade(), loaded)
             {
                 app.recent_notes

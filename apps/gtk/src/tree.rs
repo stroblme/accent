@@ -157,7 +157,7 @@ fn fill(
     );
     let dir = prefix.to_string();
     glib::spawn_future_local(async move {
-        let listed = gio::spawn_blocking({
+        let listed = crate::work::off_thread("tree", {
             let dir = dir.clone();
             move || vault.list_dir(&dir)
         })
@@ -167,7 +167,7 @@ fn fill(
             return;
         }
         match listed {
-            Ok(Ok(rows)) => {
+            Some(Ok(rows)) => {
                 splice(&store, rows, show_hidden.get());
                 if let Some(landed) = landed {
                     landed();
@@ -175,8 +175,8 @@ fn fill(
             }
             // Leaving the rows alone beats blanking a directory the index simply could not answer
             // for — or, on a remote vault, one the connection could not reach.
-            Ok(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
-            Err(_) => tracing::warn!("the tree worker panicked"),
+            Some(Err(e)) => tracing::warn!("listing a directory failed: {e:#}"),
+            None => {}
         }
     });
 }
@@ -417,14 +417,14 @@ impl Tree {
             );
             let dir = dir.clone();
             glib::spawn_future_local(async move {
-                let there = gio::spawn_blocking({
+                let there = crate::work::off_thread("tree", {
                     let (vault, dir) = (vault.clone(), dir.clone());
                     move || vault.stat(&dir)
                 })
                 .await;
                 match there {
-                    Ok(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
-                    Ok(Ok(None)) => {
+                    Some(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
+                    Some(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                         watches.borrow_mut().remove(&dir);
                     }
@@ -432,8 +432,8 @@ impl Tree {
                     // while the link is still being made, and taking that as gone left each
                     // expanded folder showing a model nothing refilled any more: the files made
                     // in it afterwards never appeared until it was collapsed.
-                    Ok(Err(e)) => tracing::warn!("asking after {dir} failed: {e}"),
-                    Err(_) => tracing::warn!("the tree worker panicked"),
+                    Some(Err(e)) => tracing::warn!("asking after {dir} failed: {e}"),
+                    None => {}
                 }
             });
         }

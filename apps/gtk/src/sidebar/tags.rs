@@ -186,10 +186,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             let look_up = data.files_with_tag.clone();
             glib::spawn_future_local(async move {
                 let wanted = name.clone();
-                let listed = gio::spawn_blocking(move || look_up(&wanted)).await;
-                let Ok(rows) = listed else {
-                    return tracing::warn!("the tag worker panicked");
-                };
+                let listed = crate::work::off_thread("tag", move || look_up(&wanted)).await;
+                let Some(rows) = listed else { return };
                 if *showing.borrow() != name {
                     return;
                 }
@@ -244,8 +242,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         move || {
             let (all, apply, tags) = (all.clone(), apply.clone(), data.tags.clone());
             glib::spawn_future_local(async move {
-                let Ok(rows) = gio::spawn_blocking(move || tags()).await else {
-                    return tracing::warn!("the tag worker panicked");
+                let Some(rows) = crate::work::off_thread("tag", move || tags()).await else {
+                    return;
                 };
                 *all.borrow_mut() = rows;
                 apply();

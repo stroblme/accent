@@ -298,7 +298,7 @@ impl App {
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let looked = gio::spawn_blocking(move || match vault {
+            let looked = crate::work::off_thread("stat", move || match vault {
                 Some(vault) => vault.stat(&rel),
                 None => match Etag::of(&path) {
                     Ok(etag) => Ok(Some(etag)),
@@ -307,7 +307,7 @@ impl App {
                 },
             })
             .await
-            .unwrap_or_else(|_| Err(std::io::Error::other("the stat worker panicked")));
+            .unwrap_or_else(|| Err(std::io::Error::other("the stat worker stopped")));
             if let (Some(app), Some(tab)) = (app.upgrade(), watched.upgrade()) {
                 app.compare_disk(&tab, looked, moved);
             }
@@ -553,7 +553,7 @@ impl App {
                 let rel = tab.rel();
                 let (app, asked) = (Rc::downgrade(self), Rc::downgrade(tab));
                 glib::spawn_future_local(async move {
-                    let copies = gio::spawn_blocking({
+                    let copies = crate::work::off_thread("conflict list", {
                         let rel = rel.clone();
                         move || vault.conflicts_of(&rel)
                     })
@@ -561,7 +561,7 @@ impl App {
                     let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) else {
                         return;
                     };
-                    match copies.ok().and_then(Result::ok).unwrap_or_default().first() {
+                    match copies.and_then(Result::ok).unwrap_or_default().first() {
                         Some(conflict) => app.resolve_conflict(&rel, conflict),
                         None => {
                             tab.clear_alert(Alert::Conflict);
@@ -586,13 +586,13 @@ impl App {
         let (rel, path) = (tab.rel(), tab.path());
         let (app, asked) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking(move || match vault {
+            let read = crate::work::off_thread("reader", move || match vault {
                 Some(vault) => vault.read(&rel),
                 None => accent_core::fs::read_note(&path),
             })
             .await;
             if let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) {
-                app.compare_with(&tab, read.ok().and_then(Result::ok));
+                app.compare_with(&tab, read.and_then(Result::ok));
             }
         });
     }
@@ -674,8 +674,9 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let asked = rel.clone();
-            let copies = gio::spawn_blocking(move || vault.conflicts_of(&asked)).await;
-            let (Some(app), Ok(Ok(copies))) = (weak.upgrade(), copies) else {
+            let copies =
+                crate::work::off_thread("conflict list", move || vault.conflicts_of(&asked)).await;
+            let (Some(app), Some(Ok(copies))) = (weak.upgrade(), copies) else {
                 return;
             };
             // The tab may have closed while the index was asked.
@@ -701,13 +702,14 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let asked = conflict.clone();
-            let read = gio::spawn_blocking(move || vault.read(&asked)).await;
+            let read =
+                crate::work::attempt("read the conflict copy", move || vault.read(&asked)).await;
             let Some(app) = weak.upgrade() else {
                 return;
             };
             match read {
-                Ok(Ok((theirs, etag))) => app.compare_conflict(original, conflict, theirs, etag),
-                _ => app.toast("Cannot read the conflict copy"),
+                Ok((theirs, etag)) => app.compare_conflict(original, conflict, theirs, etag),
+                Err(why) => app.toast(&why),
             }
         });
     }
@@ -786,7 +788,7 @@ impl App {
         let (original, conflict) = (original.to_string(), conflict.to_string());
         let (app, kept) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
-            let adopted = gio::spawn_blocking({
+            let adopted = crate::work::attempt("resolve", {
                 let (original, conflict) = (original.clone(), conflict.clone());
                 move || vault.adopt_conflict(&original, &conflict)
             })
@@ -794,10 +796,8 @@ impl App {
             let (Some(app), Some(tab)) = (app.upgrade(), kept.upgrade()) else {
                 return;
             };
-            match adopted {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return app.cannot("resolve", e),
-                Err(_) => return app.cannot("resolve", "the worker panicked"),
+            if let Err(why) = adopted {
+                return app.toast(&why);
             }
             tab.discard();
             app.refresh_tab(&tab);

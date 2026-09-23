@@ -64,7 +64,7 @@ impl Panel {
         let panel = self.clone();
         let vault = self.hooks.vault.clone();
         glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || job(&vault, &repo)).await;
+            let done = crate::work::off_thread("git", move || job(&vault, &repo)).await;
             panel.jobs.set(panel.jobs.get() - 1);
             drop(hold);
             if panel.gone.get() {
@@ -79,7 +79,7 @@ impl Panel {
             }
             // A close waiting for git: the last command to go through closes the window, and one
             // that fails keeps it open under the failure said below.
-            let ok = matches!(done, Ok(Ok(_)));
+            let ok = matches!(done, Some(Ok(_)));
             if (!ok || panel.jobs.get() == 0)
                 && let Some(leave) = panel.leaving.take()
             {
@@ -89,11 +89,11 @@ impl Panel {
                 }
             }
             match done {
-                Ok(Ok(message)) => {
+                Some(Ok(message)) => {
                     then(&panel);
                     (panel.hooks.toast)(&message);
                 }
-                Ok(Err(e)) => {
+                Some(Err(e)) => {
                     let message = format!("{e:#}");
                     match on_err {
                         Fail::AskToForce(name) if git::unmerged(&message) => {
@@ -102,7 +102,10 @@ impl Panel {
                         _ => panel.failed(&what, &message),
                     }
                 }
-                Err(_) => tracing::warn!("the git worker panicked"),
+                // A command the user pressed a button for: a worker that stopped is reported the
+                // way any other failure of it is, rather than leaving the spinner's reset as the
+                // only sign anything happened.
+                None => panel.failed(&what, "the worker stopped"),
             }
             // Straight away, not through the debounce: the user asked for this and is watching
             // the row it moves. The debounce is there to fold a burst of watcher events into one

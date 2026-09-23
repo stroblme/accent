@@ -347,11 +347,10 @@ impl Search {
         glib::spawn_future_local(async move {
             let run = search.data.search.clone();
             let t0 = Instant::now();
-            let answer = gio::spawn_blocking(move || run(query)).await;
+            let answer = crate::work::off_thread("search", move || run(query)).await;
             search.running.set(search.running.get() - 1);
-            let Ok(answer) = answer else {
-                search.set_busy(search.busy());
-                return tracing::warn!("the search worker panicked");
+            let Some(answer) = answer else {
+                return search.set_busy(search.busy());
             };
             tracing::debug!(
                 query = key.text,

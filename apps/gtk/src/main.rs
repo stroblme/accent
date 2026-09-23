@@ -57,6 +57,7 @@ mod tree;
 mod typing;
 mod widgets;
 mod wire;
+mod work;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
@@ -1004,11 +1005,13 @@ impl App {
         let ignored: Vec<String> = excluded.iter().cloned().collect();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let written = gio::spawn_blocking(move || vault.set_excluded(&ignored)).await;
+            let written =
+                crate::work::off_thread("exclusion-set", move || vault.set_excluded(&ignored))
+                    .await;
             match written {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return tracing::warn!("recording the exclusion set: {e}"),
-                Err(_) => return tracing::warn!("the exclusion-set writer panicked"),
+                Some(Ok(())) => {}
+                Some(Err(e)) => return tracing::warn!("recording the exclusion set: {e}"),
+                None => return,
             }
             if let Some(app) = weak.upgrade() {
                 // Recorded only now: a write that failed — a remote one that outlasted the RPC

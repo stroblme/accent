@@ -993,17 +993,17 @@ impl Tab {
         let (rel, path) = (self.rel(), self.path());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking(move || match vault {
+            let read = crate::work::off_thread("reader", move || match vault {
                 Some(vault) => vault.read_text(&rel),
                 None => fs::read_text(&path),
             })
             .await;
             let Some(tab) = weak.upgrade() else { return };
             let text = match read {
-                Ok(Ok(fs::Read::Text(text))) => text,
+                Some(Ok(fs::Read::Text(text))) => text,
                 // It stopped being text while we had it open. The buffer keeps the last readable
                 // version rather than showing the user a screen of replacement characters.
-                Ok(Ok(_)) => {
+                Some(Ok(_)) => {
                     return done(
                         &tab,
                         Err(std::io::Error::new(
@@ -1012,8 +1012,8 @@ impl Tab {
                         )),
                     );
                 }
-                Ok(Err(e)) => return done(&tab, Err(e)),
-                Err(_) => return done(&tab, Err(std::io::Error::other("the reader panicked"))),
+                Some(Err(e)) => return done(&tab, Err(e)),
+                None => return done(&tab, Err(std::io::Error::other("the reader stopped"))),
             };
             tab.adopt_reload(text, anchor);
             done(&tab, Ok(()));

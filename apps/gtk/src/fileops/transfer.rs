@@ -40,12 +40,14 @@ pub fn download(ops: &Rc<Ops>, rel: &str) {
         // Bytes over ssh, so off the main thread: a large PDF would otherwise freeze the window
         // for as long as the copy takes.
         glib::spawn_future_local(async move {
-            let done = gio::spawn_blocking(move || vault.download(&rel, &dest)).await;
+            let done = crate::work::attempt(&format!("download {name}"), move || {
+                vault.download(&rel, &dest)
+            })
+            .await;
             (ops.transferring)(&busy, false);
             (ops.toast)(&match done {
-                Ok(Ok(())) => format!("Downloaded {name}"),
-                Ok(Err(e)) => format!("Cannot download {name}: {e}"),
-                Err(_) => format!("Cannot download {name}"),
+                Ok(()) => format!("Downloaded {name}"),
+                Err(why) => why,
             });
         });
     });
@@ -75,12 +77,12 @@ pub fn upload(ops: &Rc<Ops>, dir: &str) {
             // The chooser could only ask about this machine's files, so what is already on the
             // host has to be asked about here — once, before anything is sent. Each answer is a
             // `stat` over ssh, so the asking happens on the worker with the copies.
-            let checked = gio::spawn_blocking(move || {
+            let checked = crate::work::off_thread("upload", move || {
                 let existing = clashes(&dir, &chosen, |rel| vault.exists(rel));
                 (dir, chosen, existing)
             })
             .await;
-            let Ok((dir, chosen, existing)) = checked else {
+            let Some((dir, chosen, existing)) = checked else {
                 return (ops.toast)("Cannot upload");
             };
             match existing.is_empty() {
@@ -145,7 +147,7 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
     let busy = busy_line("Uploading", &chosen);
     (ops.transferring)(&busy, true);
     glib::spawn_future_local(async move {
-        let done = gio::spawn_blocking(move || {
+        let done = crate::work::off_thread("upload", move || {
             let (mut uploaded, mut failed) = (0, Vec::new());
             for file in &chosen {
                 let Some(name) = local_name(file) else {
@@ -163,8 +165,8 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>) {
         // Neither the tree nor the index is poked here: the watcher on the host reports what
         // landed, the same way it reports anything else written there.
         (ops.toast)(&match done {
-            Ok((uploaded, failed)) => upload_message(uploaded, &failed),
-            Err(_) => "Cannot upload".to_string(),
+            Some((uploaded, failed)) => upload_message(uploaded, &failed),
+            None => "Cannot upload".to_string(),
         });
     });
 }
@@ -182,7 +184,7 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let busy = busy_line("Copying", &files);
     (ops.transferring)(&busy, true);
     glib::spawn_future_local(async move {
-        let done = gio::spawn_blocking(move || {
+        let done = crate::work::off_thread("copy", move || {
             let (mut copied, mut refused) = (0, Vec::new());
             for file in &files {
                 let Some(name) = local_name(file) else {
@@ -213,8 +215,8 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
         .await;
         (ops.transferring)(&busy, false);
         (ops.toast)(&match done {
-            Ok((copied, refused)) => import_message(copied, &refused),
-            Err(_) => "Cannot paste".to_string(),
+            Some((copied, refused)) => import_message(copied, &refused),
+            None => "Cannot paste".to_string(),
         });
     });
 }

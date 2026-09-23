@@ -137,11 +137,13 @@ impl App {
                     return self.toast(&message);
                 };
                 glib::spawn_future_local(async move {
-                    let counted =
-                        gio::spawn_blocking(move || vault.conflicts().map(|c| c.len())).await;
+                    let counted = crate::work::off_thread("conflict count", move || {
+                        vault.conflicts().map(|c| c.len())
+                    })
+                    .await;
                     let Some(app) = weak.upgrade() else { return };
                     match counted {
-                        Ok(Ok(n)) if n > 0 => {
+                        Some(Ok(n)) if n > 0 => {
                             app.toast(&format!("{message}, {n} with sync conflicts"));
                         }
                         _ => app.toast(&message),

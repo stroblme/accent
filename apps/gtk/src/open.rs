@@ -108,7 +108,7 @@ impl App {
         let (key, path) = (key.to_string(), path.to_path_buf());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let read = gio::spawn_blocking({
+            let read = crate::work::off_thread("reader", {
                 let key = key.clone();
                 move || match vault {
                     Some(vault) => vault.read_text(&key),
@@ -122,10 +122,10 @@ impl App {
                 return;
             }
             match read {
-                Ok(read) => app.adopt_text(&key, read, flavour, how),
-                Err(_) => {
+                Some(read) => app.adopt_text(&key, read, flavour, how),
+                // The tab is never going to arrive, so whatever was waiting for it is let go.
+                None => {
                     app.awaiting.borrow_mut().remove(&key);
-                    tracing::warn!("the reader panicked on {key}");
                 }
             }
         });
@@ -364,17 +364,19 @@ impl App {
         let edited = pdf.conflict_copy();
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let sent = gio::spawn_blocking(move || remote.push(&asked, edited.as_deref())).await;
+            let sent =
+                crate::work::off_thread("upload", move || remote.push(&asked, edited.as_deref()))
+                    .await;
             let (Some(app), Some(pdf)) = (weak_app.upgrade(), weak_pdf.upgrade()) else {
                 return;
             };
             let what = format!("save {}", doc::file_name(&key));
             match sent {
-                Ok(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
+                Some(Ok(accent_api::remote::Pushed::Sent)) => pdf.clear_conflict(),
                 // The host's copy moved while this one was being changed. Overwriting it would
                 // lose whatever moved it, so the changes went beside it in the vault instead and
                 // the reader is told what it is called — once, however long they keep drawing.
-                Ok(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
+                Some(Ok(accent_api::remote::Pushed::Conflict(copy))) => {
                     if pdf.told_conflict(Some(copy.clone())) {
                         app.cannot(
                             &what,
@@ -388,7 +390,7 @@ impl App {
                 }
                 // Not even the copy would go up. The changes are on this machine only, so say
                 // where before anything else writes over it.
-                Ok(Ok(accent_api::remote::Pushed::Kept(at, why))) => {
+                Some(Ok(accent_api::remote::Pushed::Kept(at, why))) => {
                     if pdf.told_conflict(None) {
                         app.cannot(
                             &what,
@@ -401,8 +403,8 @@ impl App {
                         );
                     }
                 }
-                Ok(Err(e)) => app.cannot(&what, e),
-                Err(_) => app.cannot(&what, "the upload panicked"),
+                Some(Err(e)) => app.cannot(&what, e),
+                None => app.cannot(&what, "the upload stopped"),
             }
             // Drawn on while it was out, and still the same file: once more, however many saves
             // landed meanwhile.
@@ -691,7 +693,7 @@ impl App {
         let (app, reader) = (Rc::downgrade(self), Rc::downgrade(pdf));
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let links = gio::spawn_blocking(move || vault.pdf_links(&asked)).await;
+            let links = crate::work::off_thread("pdf links", move || vault.pdf_links(&asked)).await;
             let (Some(app), Some(pdf)) = (app.upgrade(), reader.upgrade()) else {
                 return;
             };
@@ -700,9 +702,9 @@ impl App {
                 return;
             }
             match links {
-                Ok(Ok(links)) => pdf.set_note_links(links),
-                Ok(Err(e)) => tracing::warn!("pdf links for {key}: {e:#}"),
-                Err(_) => tracing::warn!("the pdf links worker panicked on {key}"),
+                Some(Ok(links)) => pdf.set_note_links(links),
+                Some(Err(e)) => tracing::warn!("pdf links for {key}: {e:#}"),
+                None => {}
             }
             app.sync_export();
         });
@@ -805,12 +807,12 @@ impl App {
         let (key, path) = (key.to_string(), path.to_path_buf());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let copy = gio::spawn_blocking(move || match vault {
+            let copy = crate::work::off_thread("fetch", move || match vault {
                 Some(vault) => vault.fetch(&key),
                 None => Ok(path),
             })
             .await
-            .unwrap_or_else(|_| Err(std::io::Error::other("the fetch panicked")));
+            .unwrap_or_else(|| Err(std::io::Error::other("the fetch stopped")));
             if let Some(app) = weak.upgrade() {
                 landed(&app, copy);
             }
@@ -984,13 +986,13 @@ impl App {
         (ops.flush)(&open);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let outcome = gio::spawn_blocking(move || {
+            let outcome = crate::work::attempt("replace", move || {
                 vault.replace_all(&query, options, &replacement, literal, include_ignored)
             })
             .await;
             if let Some(app) = weak.upgrade() {
                 match outcome {
-                    Ok(Ok(report)) => {
+                    Ok(report) => {
                         let unsaved = (ops.reload)(&report.rewritten);
                         app.toast(&replace_message(
                             report.matches,
@@ -999,8 +1001,9 @@ impl App {
                             unsaved,
                         ));
                     }
-                    Ok(Err(e)) => app.cannot("replace", e),
-                    Err(_) => tracing::warn!("the replace worker panicked"),
+                    // Including a worker that stopped: a Replace the user asked for and watched a
+                    // progress state run through must never end in silence.
+                    Err(why) => app.toast(&why),
                 }
             }
             done();
@@ -1033,20 +1036,21 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let asked = target.clone();
-            let resolved = gio::spawn_blocking(move || vault.follow(&asked)).await;
+            let resolved =
+                crate::work::attempt(&format!("resolve {asked}"), move || vault.follow(&asked))
+                    .await;
             let Some(app) = weak.upgrade() else { return };
             match resolved {
-                Ok(Ok(Some(rel))) => app.land_on(&rel, &anchor),
+                Ok(Some(rel)) => app.land_on(&rel, &anchor),
                 // Nothing answers to the name: offer to write it, prefilled with what the link
                 // says. Cancelling says nothing — the reader followed a link and changed
                 // their mind about creating the note behind it.
-                Ok(Ok(None)) => {
+                Ok(None) => {
                     if let Some(ops) = app.ops() {
                         fileops::new_linked_note(ops, &target);
                     }
                 }
-                Ok(Err(e)) => app.cannot(&format!("resolve {target}"), e),
-                Err(_) => tracing::warn!("the link worker panicked on {target}"),
+                Err(why) => app.toast(&why),
             }
         });
     }

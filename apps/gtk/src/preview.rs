@@ -685,10 +685,10 @@ fn serve(resolve: &Arc<Resolve>, request: &webkit6::URISchemeRequest) {
     };
     let (resolve, request) = (resolve.clone(), request.clone());
     glib::spawn_future_local(async move {
-        match gio::spawn_blocking(move || resolve_asset(&*resolve, &rel)).await {
-            Ok(Some(path)) => send(&request, &path),
-            Ok(None) => deny(&request, "outside the vault"),
-            Err(_) => deny(&request, "the asset worker panicked"),
+        match crate::work::off_thread("asset", move || resolve_asset(&*resolve, &rel)).await {
+            Some(Some(path)) => send(&request, &path),
+            Some(None) => deny(&request, "outside the vault"),
+            None => deny(&request, "the asset worker stopped"),
         }
     });
 }

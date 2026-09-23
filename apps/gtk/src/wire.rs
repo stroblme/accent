@@ -336,13 +336,13 @@ pub fn wire_window(app: &Rc<App>) {
                 app.statusbar.set_indexing(statusbar::Indexing::Running);
             }
             glib::spawn_future_local(async move {
-                let asked = gio::spawn_blocking(move || match resume {
+                let asked = crate::work::attempt("reach the vault", move || match resume {
                     true => vault.resume_indexing(),
                     false => vault.stop_indexing(),
                 })
                 .await;
-                if let (Ok(Err(e)), Some(app)) = (asked, weak.upgrade()) {
-                    app.toast(&format!("Cannot reach the vault: {e}"));
+                if let (Err(why), Some(app)) = (asked, weak.upgrade()) {
+                    app.toast(&why);
                 }
             });
         }
