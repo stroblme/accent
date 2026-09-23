@@ -61,7 +61,6 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Option<(u8, Vec<u8>)>> {
 }
 
 /// A terminal size as `rows u16 | cols u16`, big-endian.
-#[allow(dead_code)] // attach, next commit
 pub fn size(rows: u16, cols: u16) -> [u8; 4] {
     let ([r0, r1], [c0, c1]) = (rows.to_be_bytes(), cols.to_be_bytes());
     [r0, r1, c0, c1]
@@ -87,7 +86,6 @@ pub struct Hello {
 }
 
 impl Hello {
-    #[allow(dead_code)] // attach, next commit
     pub fn encode(&self) -> Vec<u8> {
         let mut out = size(self.rows, self.cols).to_vec();
         for part in [self.id.as_bytes(), self.cwd.as_os_str().as_bytes()] {

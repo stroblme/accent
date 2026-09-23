@@ -121,6 +121,8 @@ impl Daemon {
                 );
                 let _ = protocol::write_frame(&mut conn, OUTPUT, why.as_bytes());
                 let _ = protocol::write_frame(&mut conn, EXIT, &FAILED.to_be_bytes());
+                // A holder started for this shell alone has nothing left to hold.
+                self.leave_if_idle();
                 return;
             }
         };
@@ -198,12 +200,16 @@ impl Daemon {
         self.gone(id, shell, code);
     }
 
-    /// A shell ended: forget it, tell its terminal, and leave with the socket if it was the last.
-    /// The emptiness check and the exit happen under the lock `open` takes, so no shell can be
-    /// started in between.
+    /// A shell ended: forget it, tell its terminal, and leave if it was the last.
     fn gone(&self, id: &str, shell: &Shell, code: i32) {
         lock(&self.shells).remove(id);
         shell.ended(code);
+        self.leave_if_idle();
+    }
+
+    /// Exit, taking the socket along, when no shell is held. The check and the exit happen under
+    /// the lock `open` takes, so no shell can be started in between.
+    fn leave_if_idle(&self) {
         let shells = lock(&self.shells);
         if shells.is_empty() {
             let _ = std::fs::remove_file(&self.socket);

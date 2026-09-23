@@ -64,17 +64,13 @@ impl Holder {
     }
 
     /// Attach to shell `id` the way `attach` does, with a small, known environment.
-    fn hello(&self, id: &str) -> UnixStream {
+    fn hello(&self, id: &str, shell: &str) -> UnixStream {
         let conn = UnixStream::connect(self.socket()).unwrap();
         conn.set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
         let mut hello = vec![0, 24, 0, 80];
-        for part in [
-            id,
-            self.tmp.to_str().unwrap(),
-            "SHELL=/bin/sh",
-            "PATH=/usr/bin:/bin",
-        ] {
+        let shell = format!("SHELL={shell}");
+        for part in [id, self.tmp.to_str().unwrap(), &shell, "PATH=/usr/bin:/bin"] {
             hello.extend(part.as_bytes());
             hello.push(0);
         }
@@ -145,7 +141,7 @@ fn a_held_shell_runs_and_says_how_it_ended() {
     let Some(mut holder) = Holder::start("ends") else {
         return;
     };
-    let conn = holder.hello("t1");
+    let conn = holder.hello("t1", "/bin/sh");
     // The echo of what was typed holds `40+2`, never `42`.
     send(&conn, INPUT, b"echo $((40+2)); exit 3\n");
     let (seen, code) = until(&conn, None);
@@ -159,13 +155,13 @@ fn a_detached_shell_is_redrawn_on_reattach_and_ends_on_kill() {
     let Some(mut holder) = Holder::start("back") else {
         return;
     };
-    let conn = holder.hello("t2");
+    let conn = holder.hello("t2", "/bin/sh");
     send(&conn, INPUT, b"echo $((40+2))\n");
     until(&conn, Some("42"));
     // The terminal went away; the shell did not.
     drop(conn);
 
-    let conn = holder.hello("t2");
+    let conn = holder.hello("t2", "/bin/sh");
     let (replay, code) = until(&conn, Some("42"));
     assert_eq!(code, None, "the shell ended on detach: {replay:?}");
 
@@ -186,5 +182,18 @@ fn a_detached_shell_is_redrawn_on_reattach_and_ends_on_kill() {
     );
     // SIGHUP: 128 + 1, as a shell reports a child that died of it.
     assert_eq!(until(&conn, None).1, Some(129));
+    holder.assert_gone();
+}
+
+#[test]
+fn a_shell_that_cannot_start_says_why_and_leaves_no_holder() {
+    let Some(mut holder) = Holder::start("fails") else {
+        return;
+    };
+    let conn = holder.hello("t3", "/nonexistent/sh");
+    let (said, code) = until(&conn, None);
+    assert!(said.contains("cannot start /nonexistent/sh"), "{said:?}");
+    // 254, never ssh's 255: the window keeps this tab to show the line above.
+    assert_eq!(code, Some(254));
     holder.assert_gone();
 }

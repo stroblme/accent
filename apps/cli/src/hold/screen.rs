@@ -34,6 +34,9 @@ pub fn parser(rows: u16, cols: u16) -> Parser {
 /// `rows` and `cols` must not be zero.
 pub fn resize(p: &mut Parser, rows: u16, cols: u16) {
     // `?47` switches grids without clearing either, which `?1049` would do.
+    // ponytail: here and in `replay`, sequences of ours go through the shell's own parser, so one
+    // the shell's output left half-written at that moment is garbled (rare: a read ending inside
+    // an escape). A fix needs vt100 to expose its grid switch or its parser state.
     let alt = p.screen().alternate_screen();
     if alt {
         p.process(b"\x1b[?47l");
