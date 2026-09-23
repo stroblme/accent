@@ -447,15 +447,18 @@ pub(crate) fn other_vaults(recent: &[PathBuf], current: Option<&Path>) -> Vec<St
 ///
 /// An `AdwAlertDialog` like the ones in `fileops`: Cancel, one verb, and the form as its extra
 /// child. Any response closes such a dialog, so an address that does not parse is refused by
-/// keeping Connect insensitive and saying why under the fields, rather than by closing on a
+/// keeping the verb insensitive and saying why under the fields, rather than by closing on a
 /// failure the user would then have to reopen the dialog to correct. The start screen has no
 /// toast overlay, so there is nowhere else for that sentence to go anyway.
 ///
 /// `at` fills the form in with a remote window's own address, for Open Folder… there: the host
 /// is the one the window is on, and the path is the one it was opened at, ready to be corrected.
+/// `title` and `verb` say what the address is for: a vault to open, or a shell to start there.
 pub(crate) fn connect_dialog(
     window: &impl IsA<gtk::Widget>,
     at: Option<&ssh::Url>,
+    title: &str,
+    verb: &str,
     on_open_remote: impl Fn(String) + 'static,
 ) {
     let host = gtk::Entry::builder()
@@ -511,7 +514,7 @@ pub(crate) fn connect_dialog(
     form.append(&path_row);
     form.append(&why);
 
-    let dialog = crate::dialogs::name_dialog_with("Open Remote Vault", CONNECT, "Connect", &form);
+    let dialog = crate::dialogs::name_dialog_with(title, CONNECT, verb, &form);
     // Enter in either field activates the default response, which is this one, so an empty form
     // has to leave it unusable rather than merely dim.
     dialog.set_response_enabled(CONNECT, false);

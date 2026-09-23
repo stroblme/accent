@@ -352,14 +352,17 @@ impl Shell {
         command_line: &gio::ApplicationCommandLine,
     ) -> glib::ExitCode {
         let args = command_line.arguments();
-        // `accent --terminal [dir]` is accent as a terminal: a window with no vault holding one
+        // `accent --terminal [PATH]` is accent as a terminal: a window with no vault holding one
         // shell. A second one joins that window as another tab, and a loose file opened meanwhile
         // goes to a window of its own rather than in among the shells.
         if args.iter().any(|a| a == "--terminal" || a == "-t") {
-            let cwd = terminal_cwd(&args).and_then(|arg| shell_dir(command_line, arg));
+            let at = terminal_cwd(&args).and_then(|arg| shell_at(command_line, arg));
             if let Some(app) = self.loose_window(gtk_app, Loose::Terminal) {
                 app.window.present();
-                app.open_terminal_at(cwd);
+                match at {
+                    Some(at) => app.open_terminal_named(&at),
+                    None => app.open_terminal_at(None),
+                }
             }
             return glib::ExitCode::SUCCESS;
         }
@@ -388,9 +391,8 @@ impl Shell {
                 eprintln!("not a session name, which needs one and no '/': {address}");
                 return glib::ExitCode::FAILURE;
             }
-            let dir = args.get(2).and_then(|arg| shell_dir(command_line, arg));
-            let dir = dir.map(|dir| dir.to_string_lossy().into_owned());
-            self.open_vault(gtk_app, key, dir);
+            let at = args.get(2).and_then(|arg| shell_at(command_line, arg));
+            self.open_vault(gtk_app, key, at);
             return glib::ExitCode::SUCCESS;
         }
         // An address rather than a path, and `create_file_for_arg` would answer a URI whose
@@ -457,15 +459,21 @@ impl Shell {
         {
             let (shell, gtk_app) = (self.clone(), gtk_app.clone());
             let (from, here) = (app.window.downgrade(), vault.key().to_owned());
-            start::connect_dialog(&app.window, Some(remote.url()), move |address| {
-                let root = PathBuf::from(address);
-                let replace = root != here;
-                shell.open_from_start(&gtk_app, root);
-                // Once the new one is up, so the application never stands at zero windows.
-                if let Some(window) = from.upgrade().filter(|_| replace) {
-                    window.close();
-                }
-            });
+            start::connect_dialog(
+                &app.window,
+                Some(remote.url()),
+                "Open Remote Vault",
+                "Connect",
+                move |address| {
+                    let root = PathBuf::from(address);
+                    let replace = root != here;
+                    shell.open_from_start(&gtk_app, root);
+                    // Once the new one is up, so the application never stands at zero windows.
+                    if let Some(window) = from.upgrade().filter(|_| replace) {
+                        window.close();
+                    }
+                },
+            );
             return;
         }
         let dialog = gtk::FileDialog::builder().title("Open Vault").build();
@@ -486,9 +494,15 @@ impl Shell {
             return;
         };
         let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-        start::connect_dialog(&window, None, move |address| {
-            shell.open_from_start(&gtk_app, PathBuf::from(address));
-        });
+        start::connect_dialog(
+            &window,
+            None,
+            "Open Remote Vault",
+            "Connect",
+            move |address| {
+                shell.open_from_start(&gtk_app, PathBuf::from(address));
+            },
+        );
     }
 
     fn start_screen(self: &Rc<Self>, gtk_app: &adw::Application) {
@@ -748,6 +762,22 @@ fn terminal_cwd(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr> {
         .find(|arg| !matches!(arg.to_str(), Some("--terminal" | "-t" | "--new-window")))
 }
 
+/// Where a shell was asked for on the command line: on a host, as an `ssh://` address read back
+/// the way `ssh::Url` spells it, or in a directory here (see [`shell_dir`]). `None`, said on
+/// stderr, for an address that does not parse.
+fn shell_at(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<String> {
+    let Some(address) = arg.to_str().filter(|a| ssh::is_remote(a)) else {
+        return shell_dir(command_line, arg).map(|dir| dir.to_string_lossy().into_owned());
+    };
+    match ssh::parse(address) {
+        Ok(url) => Some(url.to_string()),
+        Err(e) => {
+            eprintln!("cannot open {address}, opening at home: {e}");
+            None
+        }
+    }
+}
+
 /// The directory a shell was asked for on the command line, resolved against the invoking
 /// process's directory as a vault path is, or `None` — said on stderr — when it is not one.
 fn shell_dir(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) -> Option<PathBuf> {
@@ -797,6 +827,11 @@ mod tests {
         );
         // Order does not matter, and the short spelling is the same flag.
         assert_eq!(cwd(&["accent", "/tmp", "-t"]).as_deref(), Some("/tmp"));
+        // A place on a host is taken the same way.
+        assert_eq!(
+            cwd(&["accent", "-t", "ssh://box/srv/x"]).as_deref(),
+            Some("ssh://box/srv/x")
+        );
         // The bare form has no directory to offer, so the window decides.
         assert_eq!(cwd(&["accent", "--terminal"]), None);
         // argv[0] is the program, never the path.

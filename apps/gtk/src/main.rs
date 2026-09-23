@@ -877,12 +877,21 @@ impl App {
     }
 
     /// What a launch names after the window's key: a note in a vault's window, and in a terminal
-    /// session's the directory to open another shell at.
+    /// session's where to open another shell.
     fn open_named(self: &Rc<Self>, named: &str) {
         let session = matches!(*self.key.borrow(), shell::WindowKey::Terminal(_));
         match session {
-            true => self.open_terminal_at(Some(PathBuf::from(named))),
+            true => self.open_terminal_named(named),
             false => self.open_path(named),
+        }
+    }
+
+    /// A shell where a launch said: on a host for an `ssh://` address, and otherwise in the
+    /// directory here that `at` names.
+    fn open_terminal_named(self: &Rc<Self>, at: &str) {
+        match ssh::parse(at) {
+            Ok(url) => self.open_remote_terminal(url),
+            Err(_) => self.open_terminal_at(Some(PathBuf::from(at))),
         }
     }
 
@@ -898,40 +907,88 @@ impl App {
     fn open_terminal_at(self: &Rc<Self>, cwd: Option<PathBuf>) {
         // A remote vault's shell opens on the remote, unless the caller named a directory here:
         // `accent --terminal <dir>` means this machine whatever window it lands in.
-        let shell = match (&cwd, self.vault().and_then(|v| v.remote().cloned())) {
-            (None, Some(remote)) => terminal::Shell::Remote {
-                argv: accent_api::ssh::shell(remote.url(), remote.control_path()),
-                // Nothing holds it: it ends with its tab, or with the link.
-                kill: Vec::new(),
-                at: remote.url().clone(),
-                link: remote.url().clone(),
-            },
-            _ => terminal::Shell::Local(cwd.unwrap_or_else(|| match self.vault() {
-                Some(vault) => vault.root(),
-                None => glib::home_dir(),
-            })),
+        if cwd.is_none()
+            && let Some(remote) = self.vault().and_then(|v| v.remote())
+        {
+            return self.open_remote_terminal(remote.url().clone());
+        }
+        let cwd = cwd.unwrap_or_else(|| match self.vault() {
+            Some(vault) => vault.root(),
+            None => glib::home_dir(),
+        });
+        self.open_shell(
+            terminal::new_key(),
+            terminal::Shell::Local(cwd),
+            Opened::Kept,
+        );
+    }
+
+    /// A shell on the host `at` names, in its path.
+    fn open_remote_terminal(self: &Rc<Self>, at: ssh::Url) {
+        let key = terminal::new_key();
+        match self.remote_shell(at, &key) {
+            Ok(shell) => self.open_shell(key, shell, Opened::Kept),
+            Err(why) => self.cannot("open a terminal on the host", why),
+        }
+    }
+
+    /// New Remote Terminal…: the Open Remote form, asking which host and where on it. Filled in
+    /// with the shell in front when that one is on a host, else with this window's own address,
+    /// so another shell beside the first is a keypress away.
+    fn choose_remote_terminal(self: &Rc<Self>) {
+        let at = match self.active_doc() {
+            Some(Doc::Terminal(term)) => term.at().and_then(|at| ssh::parse(&at).ok()),
+            _ => None,
+        }
+        .or_else(|| {
+            let remote = self.vault().and_then(|v| v.remote());
+            remote.map(|r| r.url().clone())
+        });
+        start::connect_dialog(
+            &self.window,
+            at.as_ref(),
+            "New Remote Terminal",
+            "Open",
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |address| {
+                    // The form only hands over an address that parses.
+                    if let Ok(at) = ssh::parse(&address) {
+                        app.open_remote_terminal(at);
+                    }
+                }
+            ),
+        );
+    }
+
+    /// The shell `key` names, held on the host `at` names. It rides this window's vault's master
+    /// when the vault is on that host, so a remote vault's shells cost no connection of their
+    /// own, and the host's own master otherwise.
+    fn remote_shell(&self, at: ssh::Url, key: &str) -> Result<terminal::Shell, String> {
+        let link = match self.vault().and_then(|v| v.remote()) {
+            Some(remote) if remote.url().authority() == at.authority() => remote.url().clone(),
+            _ => accent_api::link::host(&at),
         };
-        self.open_shell(terminal::new_key(), shell, Opened::Kept);
+        terminal::Shell::remote(at, link, key)
     }
 
     /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
-    /// or home when that has gone since.
-    ///
-    /// ponytail: a shell on another machine is dropped rather than put back, which is what every
-    /// shell was before sessions held them.
+    /// or home when that has gone since, and on a host the path it was opened at.
     fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
         let at = place.map_or("", |p| p.at.as_str());
-        if ssh::is_remote(at) {
-            return;
-        }
-        let dir = Some(PathBuf::from(at))
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(glib::home_dir);
-        self.open_shell(
-            key.to_string(),
-            terminal::Shell::Local(dir),
-            Opened::Restored,
-        );
+        let shell = match ssh::is_remote(at) {
+            true => match ssh::parse(at).and_then(|url| self.remote_shell(url, key)) {
+                Ok(shell) => shell,
+                Err(why) => return self.cannot("put back a shell on the host", why),
+            },
+            false => terminal::Shell::Local(
+                Some(PathBuf::from(at))
+                    .filter(|dir| dir.is_dir())
+                    .unwrap_or_else(glib::home_dir),
+            ),
+        };
+        self.open_shell(key.to_string(), shell, Opened::Restored);
     }
 
     /// The one door into a shell tab, new or restored. A restored one lands in the pane the

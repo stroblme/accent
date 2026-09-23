@@ -373,31 +373,15 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
     argv
 }
 
-/// An interactive login shell in the vault root, for a terminal tab.
-///
-/// `-t` forces a pty, which a remote command does not get by default and without which the shell
-/// runs non-interactive. No `BatchMode` here: a prompt is exactly what the tab is for.
-///
-/// `;` rather than `&&`: a root that is not there — a typo in the address — prints `cd`'s error
-/// and still gives a shell, at the login's home, which is where such a window is steered from.
-///
-/// The GTK remote arm still uses it until the remote shells go through [`attach`].
-pub fn shell(url: &Url, ctl: &Path) -> Vec<String> {
-    let mut argv = base(url, ctl);
-    argv.push("-t".to_string());
-    argv.push(url.destination());
-    argv.push(format!(
-        "cd {}; exec \"$SHELL\"",
-        quote(&url.path.to_string_lossy())
-    ));
-    argv
-}
-
 /// A terminal tab's end of the shell `id` held on the host, started in `url`'s path if the host
 /// does not hold it yet. `server` is a path expression from [`server_path`].
 ///
-/// `-t` for the same reason as [`shell`]: `attach` relays a pty, and without one the host's end
-/// has no terminal to put in raw mode or to take a size from.
+/// `-t` forces a pty, which a remote command does not get by default: `attach` relays one, and
+/// without it the host's end has no terminal to put in raw mode or to take a size from. No
+/// `BatchMode`: should the master be gone, a prompt in the tab is one the reader can answer.
+///
+/// A path that is not there — a typo in the address — starts the shell at the login's home, which
+/// is the holder's own fallback, so a window opened at a mistyped path still gets one.
 pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.push("-t".to_string());
@@ -920,35 +904,6 @@ mod tests {
         );
         // Its own socket: an open vault on the same host must not be shut down with the dialog.
         assert_ne!(probe_path(&plain()), control_path(&plain()));
-    }
-
-    #[test]
-    fn an_interactive_shell_starts_in_the_vault_root_or_else_at_home() {
-        assert_eq!(
-            shell(&plain(), ctl()),
-            words(&[
-                "ssh",
-                "-o",
-                "ControlPath=/run/user/1000/accent/0123456789abcdef",
-                "-t",
-                "box",
-                "cd '/srv/vault'; exec \"$SHELL\"",
-            ])
-        );
-        let spaced = parse("ssh://box:2222/srv/my vault").expect("a spaced path parses");
-        assert_eq!(
-            shell(&spaced, ctl()),
-            words(&[
-                "ssh",
-                "-o",
-                "ControlPath=/run/user/1000/accent/0123456789abcdef",
-                "-p",
-                "2222",
-                "-t",
-                "box",
-                "cd '/srv/my vault'; exec \"$SHELL\"",
-            ])
-        );
     }
 
     #[test]

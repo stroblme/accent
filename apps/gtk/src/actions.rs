@@ -27,6 +27,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &["<Control><Shift>Tab", "<Control><Shift>ISO_Left_Tab"],
     ),
     ("win.terminal", "New Terminal", &["<Control>j"]),
+    ("win.terminal-remote", "New Remote Terminal…", &[]),
+    // A shell here from a remote vault's window, where New Terminal opens one on the host.
+    ("win.terminal-local", "New Local Terminal", &[]),
     // Actions rather than callbacks on the shell itself, so they rebind, list in the palette and
     // can be named by the terminal's own context menu. Both spellings carry Control and Shift, so
     // `forwarded` hands them back from a focused shell without being told to.
@@ -283,6 +286,8 @@ impl App {
                 }
             }
             "terminal" => self.open_terminal(),
+            "terminal-remote" => self.choose_remote_terminal(),
+            "terminal-local" => self.open_terminal_at(Some(glib::home_dir())),
             // Nothing to do over any other tab: the editor and the PDF have their own copy.
             "terminal-copy" => {
                 if let Some(Doc::Terminal(term)) = self.active_doc() {
@@ -816,9 +821,20 @@ pub fn label_of(action: &str) -> &str {
 /// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
 /// files in this window, which vault it is on, what it shows, and the application. What needs a
 /// vault — making a file or a folder in it, closing it — is left off a window without one rather
-/// than offered and refused, and a window of shells offers to save them as a session.
+/// than offered and refused, and a window of shells offers to save them as a session. A shell on
+/// this machine is its own item only where New Terminal opens one on a host.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
+    let mut shows = vec![
+        "win.find",
+        "win.view-mode",
+        "win.terminal",
+        "win.terminal-remote",
+    ];
+    if key.vault().is_some_and(ssh::is_remote_path) {
+        shows.push("win.terminal-local");
+    }
+    shows.push("win.present");
     let mut files = match vault {
         true => vec!["win.new-file", "win.new-folder"],
         false => Vec::new(),
@@ -835,7 +851,7 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     [
         files,
         vaults,
-        vec!["win.find", "win.view-mode", "win.terminal", "win.present"],
+        shows,
         vec!["win.preferences", "win.about", "app.quit"],
     ]
 }
@@ -1066,8 +1082,32 @@ mod tests {
         let documents = primary_actions(&WindowKey::Loose(Loose::Documents));
         assert_eq!(documents[0], ["win.open-file", "win.save"]);
         assert_eq!(documents[1], primary_actions(&shells[0])[1]);
+        // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
+        // this machine is an item of its own.
+        let remote = primary_actions(&WindowKey::Vault("ssh://box/srv/vault".into()));
+        assert_eq!(
+            vault[2],
+            [
+                "win.find",
+                "win.view-mode",
+                "win.terminal",
+                "win.terminal-remote",
+                "win.present"
+            ]
+        );
+        assert_eq!(
+            remote[2],
+            [
+                "win.find",
+                "win.view-mode",
+                "win.terminal",
+                "win.terminal-remote",
+                "win.terminal-local",
+                "win.present"
+            ]
+        );
         // Every item is a command the window has, which is where its label comes from.
-        for menu in [vault, documents] {
+        for menu in [vault, documents, remote] {
             for action in menu.iter().flatten() {
                 assert!(
                     ACTIONS.iter().any(|(name, _, _)| name == action),
