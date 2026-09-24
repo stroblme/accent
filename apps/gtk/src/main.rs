@@ -66,7 +66,7 @@ use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
     ACTIONS, accels_for, install_actions, label_of, menu_button, mode_switcher, nav_action,
-    pane_rect, tab_menu,
+    pane_rect, primary_menu, tab_menu,
 };
 use adw::prelude::*;
 use build::{build_window, install_document_font};

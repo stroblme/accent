@@ -774,8 +774,53 @@ pub(super) fn bench_term(app: &Rc<App>) {
         if left > 0 {
             return glib::ControlFlow::Continue;
         }
-        bench_quit(&app);
+        bench_term_save(&app);
         glib::ControlFlow::Break
+    });
+}
+
+/// Save Session answered with a name, and whether the primary menu offers Close Session either
+/// side of it: the menu used to be the one the window opened with, unnamed, until it was opened
+/// again. The shell is closed at the end, so the holder keeps nothing of the drill's. A vault
+/// window has no session of shells to save.
+fn bench_term_save(app: &Rc<App>) {
+    if !app.key.borrow().is_terminal() {
+        return bench_quit(app);
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let closes = || {
+            let labels = app.menu.menu_model().map(|m| crate::fileops::labels(&m));
+            labels.is_some_and(|l| l.iter().any(|l| l == "Close Session"))
+        };
+        println!("bench term_menu before close_session={}", closes());
+        let _ = WidgetExt::activate_action(&app.window, "win.save-session", None);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        if let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+        {
+            let entry = dialog
+                .extra_child()
+                .and_then(|form| find_widget(&form, &|w| w.is::<gtk::Entry>()))
+                .and_downcast::<gtk::Entry>();
+            if let Some(entry) = entry {
+                entry.set_text("bench");
+            }
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            dialog.close();
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench term_menu after close_session={} window={:?}",
+            closes(),
+            app.window.title().unwrap_or_default()
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!("bench term_menu held={}", bench_held());
+        bench_quit(&app);
     });
 }
 

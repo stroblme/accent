@@ -369,7 +369,7 @@ impl App {
                     terminal::end(&id, &place.at);
                 }
             }
-            *self.key.borrow_mut() = shell::WindowKey::Terminal(key.clone());
+            self.rekey(shell::WindowKey::Terminal(key.clone()));
             self.config.borrow_mut().touch_recent(&key);
             settings::save(&self.config.borrow());
             self.title.set_title(name);
@@ -377,6 +377,13 @@ impl App {
         }
         self.save_session();
         self.toast(&format!("Saved the session as {name}"));
+    }
+
+    /// Remember this window by `key` from now on, and offer in its menu what that key can do: the
+    /// menu is built for the key a window opens on, and Close Session is a named session's alone.
+    fn rekey(&self, key: shell::WindowKey) {
+        self.menu.set_menu_model(Some(&primary_menu(&key)));
+        *self.key.borrow_mut() = key;
     }
 
     /// Close Session: end the session for good — its shells, its state file and its row in the
@@ -414,7 +421,7 @@ impl App {
     /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
     /// session's file and its row go.
     fn end_session(self: &Rc<Self>, key: &std::path::Path) {
-        *self.key.borrow_mut() = shell::WindowKey::Loose(shell::Loose::Terminal);
+        self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
         let _ = std::fs::remove_file(accent_core::config::state_path(key));
         let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
