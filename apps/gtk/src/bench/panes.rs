@@ -588,6 +588,73 @@ pub(super) fn bench_pins_restored(app: &Rc<App>) {
     });
 }
 
+/// See `ACCENT_BENCH_TABS=pinwin:` above. A drop in another window ends with the page attached to
+/// one of that window's tab views, which `transfer_page` does here; what follows is the receiving
+/// window's own adoption (`Shell::landed`), which reopens the file there.
+pub(super) fn bench_pin_window(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    if rels.len() != 3 {
+        return bench_quit(app);
+    }
+    for rel in &rels {
+        app.open_path(rel);
+    }
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        let page = |rel: &str| app.doc_for(rel).map(|doc| doc.page().clone());
+        let (Some(a), Some(b)) = (page(&rels[0]), page(&rels[1])) else {
+            return bench_quit(&app);
+        };
+        app.set_pinned(&a, true);
+        let gtk_app = app.window.application().and_downcast::<adw::Application>();
+        let other = app
+            .shell
+            .upgrade()
+            .zip(gtk_app)
+            .and_then(|(shell, gtk_app)| {
+                shell.loose_window(&gtk_app, crate::shell::Loose::Documents)
+            });
+        let Some(other) = other else {
+            return bench_quit(&app);
+        };
+        bench_pin_windows("pinned", &app, &other);
+        // The plain one first, so the pinned one has a tab there to land in front of.
+        bench_hand_over(&app, &other, &b);
+        glib::timeout_add_local_once(Duration::from_millis(800), move || {
+            bench_pin_windows("moved_b", &app, &other);
+            bench_hand_over(&app, &other, &a);
+            glib::timeout_add_local_once(Duration::from_millis(800), move || {
+                bench_pin_windows("moved_a", &app, &other);
+                if let Some(page) = other.pinned.borrow().first() {
+                    println!("bench pinned_tab {}", bench_tab_line(page));
+                }
+                bench_quit(&app);
+            });
+        });
+    });
+}
+
+/// Both windows' tabs, pinned ones marked `^`.
+fn bench_pin_windows(what: &str, here: &Rc<App>, there: &Rc<App>) {
+    println!(
+        "bench pinwin {what} here {} there {}",
+        bench_pins_line(here),
+        bench_pins_line(there)
+    );
+}
+
+/// Attach `page` to the end of `to`'s active pane, as a tab let go on its bar is.
+fn bench_hand_over(from: &Rc<App>, to: &Rc<App>, page: &adw::TabPage) {
+    if let Some(pane) = from.pane_of(page) {
+        let tabs = to.tabs();
+        pane.tabs.transfer_page(page, &tabs, tabs.n_pages());
+    }
+}
+
 /// How many items a pane's tab menu holds once it has been told which page is about to show it.
 ///
 /// `setup-menu` is emitted by hand: there is no pointer headless, so this runs the handler

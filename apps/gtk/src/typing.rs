@@ -97,18 +97,33 @@ pub fn continuation(line: &str) -> Option<Continue> {
     None
 }
 
-/// The column a wrapped line lines up behind: the characters at the head of `line` that a reader
-/// takes for its gutter — the indent, and the list, task or quote marker that opens the line
-/// together with the space after it. 0 where the line opens neither, which is most prose.
+/// The column a wrapped row of `line` starts at. Where `markers` says the line is a note's and it
+/// opens with a list, task or quote marker, that is behind the marker and the space after it, so
+/// the wrap lines up under the item's text. Otherwise an indented line hangs one `level` deeper
+/// than its indent, VS Code's `wrappingIndent: "indent"`, so the wrap cannot pass for the next
+/// line; a line with no indent, which is most prose and every top-level line of code, is 0.
 ///
 /// The markers are [`continuation`]'s and are read the same way. What differs is that this
 /// measures the marker the line already carries rather than writing the next one, so `9)` is the
-/// three columns it takes and not the four `10)` would.
+/// three columns it takes and not the four `10)` would. A tab reaches the next multiple of
+/// `tab_width`, which is where the view draws what follows it.
 ///
 /// Indent, bullet, digits and `>` are all ASCII, so the byte count is the character count.
-pub fn wrap_column(line: &str) -> usize {
+pub fn wrap_column(line: &str, tab_width: usize, level: usize, markers: bool) -> usize {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    indent + marker_width(&line[indent..])
+    let columns = line[..indent].bytes().fold(0, |column, byte| match byte {
+        b'\t' => (column / tab_width + 1) * tab_width,
+        _ => column + 1,
+    });
+    let marker = match markers {
+        true => marker_width(&line[indent..]),
+        false => 0,
+    };
+    match (columns, marker) {
+        (0, 0) => 0,
+        (_, 0) => columns + level,
+        _ => columns + marker,
+    }
 }
 
 /// Whether `line` holds nothing but its indent and a list, task or quote marker: what Return on a
@@ -131,11 +146,11 @@ pub fn marker_only(line: &str) -> bool {
 /// marker to step past — prose, or a blank line — which leaves the key to the view.
 ///
 /// What is written after the marker makes no difference; Obsidian and VS Code both indent an item
-/// from anywhere on its line. The step is [`wrap_column`]'s width, so the nested item starts where
-/// its parent's text does and where `highlight::hang` already wraps to.
+/// from anywhere on its line. The step is the marker's width, so the nested item starts where its
+/// parent's text does and where a wrap of the parent already hangs ([`wrap_column`]).
 pub fn list_indent(line: &str) -> Option<String> {
     let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-    let width = wrap_column(line) - indent;
+    let width = marker_width(&line[indent..]);
     match (width > 0, line[..indent].contains('\t')) {
         (false, _) => None,
         (true, true) => Some("\t".to_string()),
@@ -270,7 +285,7 @@ pub fn on_key(
 
 /// Tab on a line that opens a list, a task, an enumeration or a quote indents that item by the
 /// width of its marker, so it starts where its parent's text does — the column [`continuation`]
-/// writes the marker at, and the one `highlight::hang` wraps to. Anywhere else the key is the
+/// writes the marker at, and the one a wrap of the parent hangs at. Anywhere else the key is the
 /// view's.
 ///
 /// The whole line is read, not the part in front of the caret: the item is indented from anywhere
@@ -469,28 +484,27 @@ mod tests {
         assert_eq!(inserts("  12. twelfth"), "  13. ");
     }
 
-    /// What a wrapped line hangs behind. The general rule and not a list-only one: an indented
-    /// continuation line has no marker and still wraps under its own indent.
+    /// What a wrapped line hangs behind: a note's list or quote marker, and otherwise one level
+    /// deeper than the line's own indent, in a note and in code alike.
     #[test]
     fn a_wrapped_line_hangs_behind_its_own_gutter() {
-        assert_eq!(wrap_column("- item"), 2);
-        assert_eq!(wrap_column("* item"), 2);
-        assert_eq!(wrap_column("1. first"), 3);
+        // A note's rule, markers on, here with 8-column tabs and levels.
+        let note = |line| wrap_column(line, 8, 8, true);
+        assert_eq!(note("- item"), 2);
+        assert_eq!(note("* item"), 2);
+        assert_eq!(note("1. first"), 3);
+        assert_eq!(note("9) ninth"), 3, "the marker it has, not the next one");
+        assert_eq!(note("12. twelfth"), 4);
+        assert_eq!(note("  - nested"), 4, "the indent counts");
+        assert_eq!(note("  - [ ] task"), 4, "the box is content, not marker");
+        assert_eq!(note("\t- tabbed"), 10, "a tab reaches the next tab stop");
+        assert_eq!(note("> quoted"), 2);
+        assert_eq!(note(">quoted"), 1, "a quote needs no space");
         assert_eq!(
-            wrap_column("9) ninth"),
-            3,
-            "the marker it has, not the next one"
+            note("    continued"),
+            12,
+            "a plain indent hangs a level deeper"
         );
-        assert_eq!(wrap_column("12. twelfth"), 4);
-        assert_eq!(wrap_column("  - nested"), 4, "the indent counts");
-        assert_eq!(
-            wrap_column("  - [ ] task"),
-            4,
-            "the box is content, not marker"
-        );
-        assert_eq!(wrap_column("> quoted"), 2);
-        assert_eq!(wrap_column(">quoted"), 1, "a quote needs no space");
-        assert_eq!(wrap_column("    continued"), 4, "a plain indent hangs too");
         for line in [
             "",
             "plain text",
@@ -499,8 +513,15 @@ mod tests {
             "*emphasis*",
             "1.no",
         ] {
-            assert_eq!(wrap_column(line), 0, "{line:?}");
+            assert_eq!(note(line), 0, "{line:?}");
         }
+        // Code: four-column tabs and levels, and no markers.
+        let code = |line| wrap_column(line, 4, 4, false);
+        assert_eq!(code("    body();"), 8);
+        assert_eq!(code("\t\tbody();"), 12);
+        assert_eq!(code("  \tbody();"), 8, "a tab after spaces stops at 4");
+        assert_eq!(code(" * a comment"), 5, "a star in code is not a bullet");
+        assert_eq!(code("fn main() {"), 0);
     }
 
     /// What Return on a list item leaves behind, and so the line ghost text stays off.

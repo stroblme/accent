@@ -267,7 +267,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // screen, and a language whose house style is three of them is not ours to rule out.
     let indent = adw::SpinRow::with_range(1.0, 16.0, 1.0);
     indent.set_title("Indent Width");
-    indent.set_subtitle("Columns one indent is worth in code");
+    indent.set_subtitle("Columns one indent is worth");
     indent.set_value(f64::from(config.borrow().indent_width));
     indent.connect_value_notify({
         let (config, save) = (config.clone(), save.clone());

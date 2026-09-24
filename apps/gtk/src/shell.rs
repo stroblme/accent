@@ -697,8 +697,13 @@ impl Shell {
             return return_page(into, &from, page, &format!("Save failed: {e}"));
         }
         // Opened before the old page goes, so a pane that the drop has just split off never
-        // stands empty and closes itself out from under the note arriving in it.
-        into.open_path(&into.key_for(&path));
+        // stands empty and closes itself out from under the note arriving in it. A pinned tab is
+        // pinned there too, as one moved into another pane is.
+        let how = match from.is_pinned(page) {
+            true => Opened::Pinned,
+            false => Opened::Kept,
+        };
+        into.open_as(&into.key_for(&path), how);
         from.forget_page(page);
         into.close_page(page);
     }

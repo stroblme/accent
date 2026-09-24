@@ -2,7 +2,7 @@
 //! other side of one is rendered in.
 
 use super::{Alert, Flavour, Tab, build, line_numbers, sync_scheme};
-use crate::{diff, highlight};
+use crate::{diff, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
 use sourceview5::prelude::*;
@@ -71,6 +71,7 @@ pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &
         Flavour::Csv => highlight::restyle_csv(buffer),
         Flavour::Code => {}
     }
+    wrap::measure(view);
 }
 
 impl Tab {
