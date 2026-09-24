@@ -89,9 +89,9 @@ fun HomeScreen(model: VaultModel) {
                 )
             }
             BrowseButton(
-                // Not while the note's own find is open: that bar has the foot of the screen, and
-                // a pill over it would offer the vault's search to a reader already searching the
-                // page in front.
+                // Not while the document's own find is open: that bar has the foot of the screen,
+                // and a pill over it would offer the vault's search to a reader already searching
+                // the page in front.
                 //
                 // And not until there is something to browse. A button that would open an empty
                 // tree, an empty switcher and a search with nothing to search is a control that
@@ -100,7 +100,7 @@ fun HomeScreen(model: VaultModel) {
                 // reads [VaultState.ready], which is the same state that line reads, so the two
                 // cannot disagree about whether the reader may start.
                 visible = screen == Screen.Home && chrome.shown && open?.finding != true &&
-                    state.ready,
+                    pdf?.finding != true && state.ready,
                 onBrowse = { screen = Screen.Browse },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )

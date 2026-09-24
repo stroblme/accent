@@ -97,6 +97,8 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         at = pdf.at,
         notes = notes,
         onNote = model::openFromPdf,
+        finding = pdf.finding,
+        onFinding = model::finding,
     ) { it.save() }
 }
 
@@ -123,10 +125,19 @@ fun LoosePdfScreen(uri: Uri) {
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
     val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".pdf").orEmpty()
+    // No palette out here, so the bar's Find is the only way in and the flag is this screen's own.
+    var finding by remember(uri) { mutableStateOf(false) }
     // Opened straight from another app, so there is no vault screen around this one to keep it
     // clear of the status bar and the gesture strip.
     Box(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
-        Reader(doc, failed, name, chrome) { model ->
+        Reader(
+            doc,
+            failed,
+            name,
+            chrome,
+            finding = finding,
+            onFinding = { finding = it },
+        ) { model ->
             // No path on this side: the bytes go back through whatever handed them over.
             val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
             runCatching {
@@ -149,6 +160,9 @@ private fun Reader(
     /** The note links into it, which paint as highlights; none for a document from outside. */
     notes: List<PdfLink> = emptyList(),
     onNote: (PdfLink, PdfPlace) -> Unit = { _, _ -> },
+    /** Whether its find bar is open. */
+    finding: Boolean,
+    onFinding: (Boolean) -> Unit,
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
@@ -200,19 +214,22 @@ private fun Reader(
             DocumentFrame(
                 barShown = chrome.shown,
                 bar = {
-                    // The bar has one action, and Contents is now what a PDF puts in it: it says
-                    // so even on a file carrying no outline, the way it used to say Edit. Where
-                    // the annotation tools go is still open ([ANNOTATIONS]) and is not this slot.
-                    DocumentBar(
-                        title = title,
-                        action = "Contents",
-                        enabled = marks.isNotEmpty(),
-                        onAction = { contents = true },
-                    )
+                    // Find, and the bookmarks. Contents says so even on a file carrying no
+                    // outline, the way it used to say Edit: a gap where a control belongs is worse
+                    // than one that says it has nothing to offer. Where the annotation tools go is
+                    // still open ([ANNOTATIONS]).
+                    DocumentBar(title) {
+                        TextButton(onClick = { onFinding(true) }) { Text("Find") }
+                        TextButton(onClick = { contents = true }, enabled = marks.isNotEmpty()) {
+                            Text("Contents")
+                        }
+                    }
                 },
             ) { bar ->
                 val clear = with(LocalDensity.current) { bar.toPx() }
-                Pages(doc, tool, chrome, wanted, at, notes, onNote, clear) { wanted = null }
+                Pages(doc, tool, chrome, wanted, at, notes, onNote, clear, finding, onFinding) {
+                    wanted = null
+                }
                 if (ANNOTATIONS) {
                     PdfToolbar(
                         tool = tool,
@@ -314,6 +331,8 @@ private fun Pages(
     onNote: (PdfLink, PdfPlace) -> Unit,
     /** How much of the top of the screen the document's bar covers, in pixels. */
     clear: Float,
+    finding: Boolean,
+    onFinding: (Boolean) -> Unit,
     onWent: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -403,11 +422,13 @@ private fun Pages(
 
     /**
      * Bring [rect], in points on page [index], into view below the bar if it is not: to the middle
-     * of what the bar leaves, so it arrives with room around it to be read in.
+     * of what the bar leaves, so it arrives with room around it to be read in. [jumped] puts where
+     * the reader was on the way Back, as a find's first match does and its steps do not.
      */
-    fun show(index: Int, rect: Rect) {
+    fun show(index: Int, rect: Rect, jumped: Boolean = false) {
         val above = pages.above(list, viewport.width, zoom)
         val to = pages.reveal(index, rect, above, panX, viewport, zoom, clear) ?: return
+        if (jumped) back += pages.place(above, viewport.width, zoom)
         panX = to.panX
         list.requestScrollToItem(to.row, to.into)
     }
@@ -513,7 +534,42 @@ private fun Pages(
         val (page, top) = back.removeAt(back.lastIndex)
         goTo(page, top)
     }
-    // After the jumps', so it is asked first: a selection is the nearest thing to put away.
+    // The find: the whole document a page at a time, from the page under the middle of the screen
+    // round to the one before it, so the match the reader lands on is found first — the first at or
+    // after that page, as a note's find lands on the first after where it is. Typing again starts
+    // over, and what was running stops between two pages: one page is the smallest unit pdfium
+    // searches, and tiles asked for meanwhile are drawn between them. Opening the bar starts empty.
+    var query by remember(doc, finding) { mutableStateOf("") }
+    var found by remember(doc) { mutableStateOf(Found()) }
+    var searched by remember(doc) { mutableStateOf(false) }
+    LaunchedEffect(query) {
+        found = Found()
+        searched = false
+        if (query.isBlank()) return@LaunchedEffect
+        delay(FIND_AFTER_MS)
+        val middle = pages.above(list, viewport.width, zoom) + viewport.height / 2f
+        val reading = pages.at(middle, viewport.width, zoom).first
+        for (page in (reading until doc.pageCount) + (0 until reading)) {
+            found = found.plus(page, doc.search(page, query))
+            if (found.at == null) found.from(reading)?.let { first ->
+                found = found.copy(at = first)
+                found.hits[first].let { show(it.page, it.box, jumped = true) }
+            }
+        }
+        searched = true
+        // Nothing at or after the page being read: the first there is, round the end.
+        if (found.at == null && found.hits.isNotEmpty()) {
+            found = found.copy(at = 0)
+            found.hits[0].let { show(it.page, it.box, jumped = true) }
+        }
+    }
+    fun step(forward: Boolean) {
+        found = found.step(forward)
+        found.at?.let { found.hits[it] }?.let { show(it.page, it.box) }
+    }
+
+    // After the jumps', so a find open and then a selection are put away first.
+    BackHandler(enabled = finding) { onFinding(false) }
     BackHandler(enabled = selection != null) { selection = null }
 
     /** Take what the fingers did to the layer and lay the column out that way. */
@@ -529,99 +585,119 @@ private fun Pages(
         shift = Offset.Zero
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .clipToBounds()
-            .onSizeChanged { viewport = it }
-            .onTap(chrome, claimed = ::claimed)
-            .pointerInput(doc, viewport) {
-                val decay = exponentialDecay<Float>()
-                panZoom(
-                    onGesture = { centroid, pan, step ->
-                        if (live == 1f && step == 1f) {
-                            // One finger: the column scrolls and the pages slide, both at once.
-                            list.dispatchRawDelta(-pan.y)
-                            panX = holdXAt(panX + pan.x, viewport.width, zoom)
-                            chrome.scrolled(-pan.y)
-                        } else {
-                            // Two: the layer below carries all of it until they are lifted.
-                            if (live == 1f) pivot = centroid
-                            live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
-                            shift += pan
-                        }
-                    },
-                    onEnd = { velocity ->
-                        if (live != 1f) {
-                            // The one place the column is laid out again, on a list that has not
-                            // moved since the pinch began: where the reader was, plus what the
-                            // fingers did to it, is where they have to be put back.
-                            commit()
-                            return@panZoom
-                        }
-                        scope.launch {
-                            var last = 0f
-                            AnimationState(0f, -velocity.y).animateDecay(decay) {
-                                list.dispatchRawDelta(value - last)
-                                last = value
+    Column(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { viewport = it }
+                .onTap(chrome, claimed = ::claimed)
+                .pointerInput(doc, viewport) {
+                    val decay = exponentialDecay<Float>()
+                    panZoom(
+                        onGesture = { centroid, pan, step ->
+                            if (live == 1f && step == 1f) {
+                                // One finger: the column scrolls and the pages slide, both at once.
+                                list.dispatchRawDelta(-pan.y)
+                                panX = holdXAt(panX + pan.x, viewport.width, zoom)
+                                chrome.scrolled(-pan.y)
+                            } else {
+                                // Two: the layer below carries all of it until they are lifted.
+                                if (live == 1f) pivot = centroid
+                                live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
+                                shift += pan
                             }
-                        }
-                        scope.launch {
-                            var last = 0f
-                            AnimationState(0f, velocity.x).animateDecay(decay) {
-                                panX = holdXAt(panX + (value - last), viewport.width, zoom)
-                                last = value
+                        },
+                        onEnd = { velocity ->
+                            if (live != 1f) {
+                                // The one place the column is laid out again, on a list that has
+                                // not moved since the pinch began: where the reader was, plus what
+                                // the fingers did to it, is where they have to be put back.
+                                commit()
+                                return@panZoom
                             }
-                        }
-                    },
-                )
-            },
-    ) {
-        LazyColumn(
-            state = list,
-            // Every drag goes through the gesture above, which is what lets one follow both axes.
-            userScrollEnabled = false,
-            modifier = Modifier
-                // As wide as the zoom makes it, and — while a pinch is shrinking the layer — tall
-                // enough that the rows to fill the screen are still composed.
-                .oversize(
-                    width = (viewport.width * zoom).toInt(),
-                    height = (viewport.height / live.coerceAtMost(1f)).toInt(),
-                )
-                .graphicsLayer {
-                    transformOrigin = TransformOrigin(0f, 0f)
-                    scaleX = live
-                    scaleY = live
-                    translationX = liveShift(pivot.x, live, panX, shift.x)
-                    translationY = liveShift(pivot.y, live, 0f, shift.y)
-                },
-            verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
-        ) {
-            items(doc.pageCount) { index ->
-                val size = doc.sizes.getOrNull(index)
-                if (size != null && viewport.width > 0) {
-                    Page(
-                        doc = doc,
-                        index = index,
-                        pageWidth = size.width,
-                        pageHeight = size.height,
-                        shownPx = (viewport.width * zoom).toInt(),
-                        renderPx = (viewport.width * settled.zoom).toInt(),
-                        // The settled screen in this page's own pixels: a page is exactly as wide
-                        // as the column, so the only difference is where the page starts down it.
-                        window = settled.window.translate(
-                            0,
-                            -pages.top(index, viewport.width, settled.zoom).roundToInt(),
-                        ),
-                        theme = theme,
-                        tool = tool,
-                        links = links,
-                        notes = notesOn[index].orEmpty(),
-                        marks = marks,
-                        chosen = chosen.firstOrNull { it.page == index }?.boxes.orEmpty(),
+                            scope.launch {
+                                var last = 0f
+                                AnimationState(0f, -velocity.y).animateDecay(decay) {
+                                    list.dispatchRawDelta(value - last)
+                                    last = value
+                                }
+                            }
+                            scope.launch {
+                                var last = 0f
+                                AnimationState(0f, velocity.x).animateDecay(decay) {
+                                    panX = holdXAt(panX + (value - last), viewport.width, zoom)
+                                    last = value
+                                }
+                            }
+                        },
                     )
+                },
+        ) {
+            LazyColumn(
+                state = list,
+                // Every drag goes through the gesture above, which is what lets one follow both
+                // axes.
+                userScrollEnabled = false,
+                modifier = Modifier
+                    // As wide as the zoom makes it, and — while a pinch is shrinking the layer —
+                    // tall enough that the rows to fill the screen are still composed.
+                    .oversize(
+                        width = (viewport.width * zoom).toInt(),
+                        height = (viewport.height / live.coerceAtMost(1f)).toInt(),
+                    )
+                    .graphicsLayer {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = live
+                        scaleY = live
+                        translationX = liveShift(pivot.x, live, panX, shift.x)
+                        translationY = liveShift(pivot.y, live, 0f, shift.y)
+                    },
+                verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+            ) {
+                items(doc.pageCount) { index ->
+                    val size = doc.sizes.getOrNull(index)
+                    if (size != null && viewport.width > 0) {
+                        Page(
+                            doc = doc,
+                            index = index,
+                            pageWidth = size.width,
+                            pageHeight = size.height,
+                            shownPx = (viewport.width * zoom).toInt(),
+                            renderPx = (viewport.width * settled.zoom).toInt(),
+                            // The settled screen in this page's own pixels: a page is exactly as
+                            // wide as the column, so the only difference is where the page starts
+                            // down it.
+                            window = settled.window.translate(
+                                0,
+                                -pages.top(index, viewport.width, settled.zoom).roundToInt(),
+                            ),
+                            theme = theme,
+                            tool = tool,
+                            links = links,
+                            notes = notesOn[index].orEmpty(),
+                            marks = marks,
+                            chosen = chosen.firstOrNull { it.page == index }?.boxes.orEmpty(),
+                            hits = found.hits.filter { it.page == index }.map { it.box },
+                            current = found.at?.let { found.hits[it] }
+                                ?.takeIf { it.page == index }?.box,
+                        )
+                    }
                 }
             }
+        }
+        // Below the pages rather than over them, as a note's is: a bar over the foot of the screen
+        // would cover the match it had just found.
+        if (finding) {
+            FindBar(
+                query = query,
+                onQuery = { query = it },
+                placeholder = "Find in this document",
+                count = found.count(searched),
+                canStep = found.hits.size > 1,
+                onStep = ::step,
+            )
         }
     }
 }
@@ -785,14 +861,6 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
 /** Where the column has to be for something to be in view: the row, the offset into it, the pan. */
 internal data class Reveal(val row: Int, val into: Int, val panX: Float)
 
-/** The smallest box holding both. */
-private fun Rect.union(other: Rect) = Rect(
-    minOf(left, other.left),
-    minOf(top, other.top),
-    maxOf(right, other.right),
-    maxOf(bottom, other.bottom),
-)
-
 /** Where a point on the pages fell: which page, where on it in points, and at what scale. */
 internal data class Landing(val page: Int, val point: Point, val scale: Float)
 
@@ -811,6 +879,9 @@ private const val MIN_ZOOM = 1f
  * not got, and a shallower range is easier to land a pinch with on the thing being looked at.
  */
 private const val MAX_ZOOM = 8f
+
+/** How long the typing rests before a find starts over. */
+private const val FIND_AFTER_MS = 150L
 
 /** How long the hands rest before the pages are drawn again at where they left them. */
 private const val RESHARPEN_MS = 180L
@@ -870,6 +941,9 @@ private fun Page(
     marks: MutableMap<Int, List<Mark>>,
     /** The boxes of the selected glyphs on this page. */
     chosen: List<Rect>,
+    /** The find's matches on this page, and the one stepped to if it is here. */
+    hits: List<Rect>,
+    current: Rect?,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -913,6 +987,8 @@ private fun Page(
     }
     val highlight = colors.primary.copy(alpha = HIGHLIGHT_ALPHA)
     val selected = colors.primary.copy(alpha = SELECTION_ALPHA)
+    val match = colors.primary.copy(alpha = MARK_ALPHA)
+    val stepped = colors.primary.copy(alpha = CURRENT_MARK_ALPHA)
 
     Box(
         Modifier
@@ -984,13 +1060,14 @@ private fun Page(
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
         // Over the page rather than in its pixels, so a highlight comes and goes without a render
         // and shows on a page still waiting for one; at the size the page is shown, so a pinch
-        // carries it along. The highlights under the selection, as on the desktop: they are what
-        // the page says, the selection what the reader is doing to it now.
+        // carries it along. The highlights under the selection and the find's matches, as on the
+        // desktop: they are what the page says, the other two what the reader is doing to it now.
         val painted = marks[index].orEmpty()
-        if (painted.isNotEmpty() || chosen.isNotEmpty()) {
+        if (painted.isNotEmpty() || chosen.isNotEmpty() || hits.isNotEmpty()) {
             Canvas(Modifier.fillMaxSize()) {
                 for (mark in painted) for (quad in mark.quads) box(quad, scale, highlight)
                 for (glyph in chosen) box(glyph, scale, selected)
+                for (hit in hits) box(hit, scale, if (hit == current) stepped else match)
             }
         }
     }

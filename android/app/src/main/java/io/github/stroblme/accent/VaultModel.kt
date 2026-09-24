@@ -90,8 +90,16 @@ data class Open(
     fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
 }
 
-/** The PDF in front of the reader: where it is in the vault, where on disk, and where it opens. */
-data class OpenPdf(val rel: String, val path: String, val at: PdfPlace? = null)
+/**
+ * The PDF in front of the reader: where it is in the vault, where on disk, and where it opens —
+ * and whether its find is open ([VaultModel.finding]), as a note's is ([Open.finding]).
+ */
+data class OpenPdf(
+    val rel: String,
+    val path: String,
+    val at: PdfPlace? = null,
+    val finding: Boolean = false,
+)
 
 /**
  * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
@@ -427,7 +435,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      *
      * [find] is the query rather than [SearchHit.at]: the hit's range is bytes into the markdown
      * source and the screen holds the page that source rendered to, so the only thing that
-     * survives the crossing is the words. A PDF drops it; there is no find in that reader yet.
+     * survives the crossing is the words. A PDF drops it.
      *
      * [at] is where a PDF opens, and [back] the PDF a note is opened from, for [close] to return
      * to; see [openFromPdf].
@@ -478,7 +486,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      */
     fun openFromPdf(link: PdfLink, place: PdfPlace) {
         val from = _state.value.pdf ?: return
-        openFile(link.srcRelPath, find = link.alias, back = from.copy(at = place))
+        openFile(link.srcRelPath, find = link.alias, back = from.copy(at = place, finding = false))
     }
 
     /** The note links into this PDF, which paint as its highlights. */
@@ -690,12 +698,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
 
     /**
-     * Open or put away the note's own find.
+     * Open or put away the find of whatever is in front, a note or a PDF.
      *
      * With nothing in front there is nothing to find in and this does nothing, which is what
      * [close] already does from the same palette.
      */
-    fun finding(on: Boolean) = _state.update { it.copy(open = it.open?.copy(finding = on)) }
+    fun finding(on: Boolean) = _state.update {
+        it.copy(open = it.open?.copy(finding = on), pdf = it.pdf?.copy(finding = on))
+    }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }
 

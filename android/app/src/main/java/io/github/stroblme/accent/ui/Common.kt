@@ -27,6 +27,8 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -207,14 +209,14 @@ fun Pill(label: String, onClick: () -> Unit) {
 }
 
 /**
- * The bar over a document: what it is called, and the one thing that can be done to it.
+ * The bar over a document: what it is called, and what can be done to it — text buttons, at its
+ * end.
  *
  * The same bar over a note and over a PDF, so that the viewport under it begins in the same place
- * in both. [enabled] is what a PDF has instead of a second bar of its own — the button is there,
- * and says so, until there is something for it to do.
+ * in both.
  */
 @Composable
-fun DocumentBar(title: String, action: String, enabled: Boolean = true, onAction: () -> Unit) {
+fun DocumentBar(title: String, actions: @Composable RowScope.() -> Unit) {
     Row(
         Modifier.fillMaxWidth().padding(start = Gutter, end = 4.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -226,7 +228,7 @@ fun DocumentBar(title: String, action: String, enabled: Boolean = true, onAction
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = onAction, enabled = enabled) { Text(action) }
+        actions()
     }
 }
 
@@ -437,6 +439,52 @@ fun Field(
         shape = MaterialTheme.shapes.large,
         modifier = modifier.fillMaxWidth().padding(Gutter),
     )
+}
+
+/**
+ * A document's own find: the page in front, where Browse's Search is every note in the vault. A
+ * note's and a PDF's alike.
+ *
+ * At the foot of the screen, which is where every query field in this app is and where the
+ * keyboard leaves the thumb. It is the one piece of chrome that does not go while the keyboard is
+ * up, because the keyboard is what it is for — the Browse pill goes instead, so the vault's search
+ * and the page's find are never on the screen together. It takes its space from the document
+ * rather than floating over it: a bar over the last lines would cover the match it had just found.
+ *
+ * Back is the way out, as it is out of the panel. The arrows are disabled rather than absent while
+ * there is nothing to step through, and [count] — "3/12", or "None" — is the only thing that says a
+ * word is not there at all: everything else about a find that matches nothing looks like a find
+ * that has not scrolled yet.
+ */
+@Composable
+fun FindBar(
+    query: String,
+    onQuery: (String) -> Unit,
+    placeholder: String,
+    count: String,
+    canStep: Boolean,
+    onStep: (forward: Boolean) -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
+    Row(
+        Modifier.fillMaxWidth().padding(end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Field(
+            value = query,
+            onValue = onQuery,
+            placeholder = placeholder,
+            modifier = Modifier.weight(1f).focusRequester(focus),
+        )
+        Text(
+            count,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        TextButton(onClick = { onStep(false) }, enabled = canStep) { Text("▴") }
+        TextButton(onClick = { onStep(true) }, enabled = canStep) { Text("▾") }
+    }
 }
 
 /**

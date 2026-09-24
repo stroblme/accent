@@ -18,8 +18,10 @@ import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.PdfSession
 import io.github.stroblme.accent.ffi.Point
+import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.Tile
+import io.github.stroblme.accent.ui.union
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -123,6 +125,15 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     /** The glyphs a link's four numbers cover on [index] today, or `null` if they fit no line. */
     suspend fun locate(index: Int, numbers: List<UInt>): Located? = on {
         runCatching { session.locate(index.toUInt(), numbers) }.getOrNull()
+    }
+
+    /**
+     * Every match of [text] on page [index], one box each over the lines it runs across — the
+     * desktop marks a match the same way. One page per call, so a find can stop between two.
+     */
+    suspend fun search(index: Int, text: String): List<Rect> = on {
+        runCatching { session.search(index.toUInt(), text) }.getOrDefault(emptyList())
+            .mapNotNull { hit -> hit.quads.reduceOrNull { a, b -> a.union(b) } }
     }
 
     /**
