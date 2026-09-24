@@ -54,6 +54,19 @@ impl Vault {
         Ok(self.inner.rescan()?)
     }
 
+    /// Stop the walk that is running, keeping every file it has already indexed.
+    ///
+    /// The [`Event::Reconciled`] that ends it says `stopped`, and the vault then ignores
+    /// [`Vault::rescan`] until [`Vault::resume_indexing`]. Opening it again resumes too.
+    pub fn stop_indexing(&self) -> Answer<()> {
+        Ok(self.inner.stop_indexing()?)
+    }
+
+    /// Walk again after [`Vault::stop_indexing`], indexing what the stopped walk had not reached.
+    pub fn resume_indexing(&self) -> Answer<()> {
+        Ok(self.inner.resume_indexing()?)
+    }
+
     /// Everything the vault has said since this was last asked, waiting up to `timeout_ms` for
     /// the first one.
     ///

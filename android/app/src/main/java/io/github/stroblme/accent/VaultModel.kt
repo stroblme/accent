@@ -90,6 +90,12 @@ data class Open(
 data class VaultState(
     val root: String? = null,
     val indexing: Boolean = false,
+    /**
+     * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
+     * and nothing but [VaultModel.resumeIndexing] walks again — not even the rescan every return
+     * to the app asks for. Opening the vault again is a resume too.
+     */
+    val paused: Boolean = false,
     /** Files the walk has been through so far, for as long as one is running. */
     val scanned: Long = 0,
     /**
@@ -105,7 +111,8 @@ data class VaultState(
      * A latch, because [indexing] is about work running and not about the index being empty. It
      * is false for exactly one stretch of a vault's life — its first walk, until the first batch
      * of files has been read — and a walk over an index that already has files (the rescan every
-     * resume starts) leaves it alone, those files still being there to browse.
+     * resume starts) leaves it alone, those files still being there to browse. A walk stopped
+     * before its first batch sets it only if an earlier walk left files in the index.
      */
     val ready: Boolean = false,
     /** The directories whose children have been listed, so the tree redraws in place. */
@@ -211,9 +218,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun apply(batch: List<Event>) {
         var reindexed = false
+        var stopped = false
         val touched = mutableSetOf<String>()
         for (event in batch) when (event) {
-            is Event.Reconciled -> reindexed = true
+            is Event.Reconciled -> {
+                reindexed = true
+                stopped = event.stopped
+            }
             is Event.DirsChanged -> touched += event.dirs
             is Event.FileChanged -> onChanged(event.rel)
             is Event.FileRemoved -> touched += parentOf(event.rel)
@@ -226,10 +237,24 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             is Event.Progress -> seen = event.progress
         }
         if (reindexed) {
-            // The walk is over, so whatever the vault holds is in the index.
-            _state.update { it.copy(indexing = false, scanned = 0, phase = null, ready = true) }
+            // The walk is over, so whatever the vault holds is in the index — unless it was
+            // stopped, and then the index holds what it had read by then.
+            _state.update {
+                it.copy(
+                    indexing = false,
+                    paused = stopped,
+                    scanned = 0,
+                    phase = null,
+                    ready = it.ready || !stopped,
+                )
+            }
             corpus = null
             relist(_state.value.expanded)
+            // Stopped while it was still finding the files, a walk writes nothing, so whether
+            // there is anything to browse is whatever an earlier walk left behind.
+            if (stopped) {
+                _state.update { it.copy(ready = it.ready || !it.children[""].isNullOrEmpty()) }
+            }
         } else if (touched.isNotEmpty()) {
             relist(touched.intersect(_state.value.children.keys))
         } else {
@@ -252,6 +277,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 indexing = true,
+                paused = false,
                 scanned = p.done.toLong(),
                 phase = p.phase,
                 ready = it.ready || read,
@@ -303,10 +329,33 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Walk the files again: what the app does instead of watching them. */
     fun rescan() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        _state.update { it.copy(indexing = true) }
-        runCatching { v.rescan() }
+        // A paused vault ignores the rescan, so no walk would come to say it was over.
+        if (!_state.value.paused) {
+            _state.update { it.copy(indexing = true) }
+            runCatching { v.rescan() }
+        }
         // An open note may have been changed by Syncthing while the app was away.
         _state.value.open?.let { onChanged(it.rel) }
+    }
+
+    /**
+     * Stop the walk, keeping what it has indexed.
+     *
+     * Nothing changes here yet: the walk finishes the file it is on and then says it stopped,
+     * and that reconcile is what pauses the vault ([apply]). Until it lands, Stop is still Stop.
+     */
+    fun stopIndexing() = viewModelScope.launch(Dispatchers.IO) {
+        runCatching { vault?.stopIndexing() }
+    }
+
+    /**
+     * Finish a stopped walk. Said at once, as the desktop does: a walk is starting, and a second
+     * press would ask for a second one.
+     */
+    fun resumeIndexing() = viewModelScope.launch(Dispatchers.IO) {
+        val v = vault ?: return@launch
+        _state.update { it.copy(indexing = true, paused = false) }
+        runCatching { v.resumeIndexing() }
     }
 
     // ------------------------------------------------------------------------------ one file
