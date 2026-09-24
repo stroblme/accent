@@ -21,7 +21,7 @@ mod search;
 mod style;
 mod tags;
 
-use chrome::bench_chrome;
+use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_lines,
     bench_compare_pads, bench_compare_row,
@@ -79,7 +79,9 @@ use tags::bench_tags;
 /// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
-/// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
+/// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
+/// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
+/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
@@ -452,6 +454,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_templates(&app);
         }
         if let Some(notes) = chrome {
+            if let Some(rels) = notes.strip_prefix("keys:") {
+                return bench_chrome_keys(&app, rels);
+            }
             return bench_chrome(&app, &notes);
         }
         if let Some(arg) = keys {

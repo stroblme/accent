@@ -162,3 +162,118 @@ fn bench_chrome_actions(app: &Rc<App>) {
         }
     }
 }
+
+/// Focus mode on the keys that step through a document, through the real key path: a note, the
+/// preview beside it and a PDF each get the keyboard in turn, and for every case the drill shows
+/// the chrome, prints `bench chrome_key_ready <case> <chord>` for an XTEST press of that chord
+/// (`build-aux/xtest.py :N "key <chord>"`), and a second later prints whether the chrome went.
+/// It first prints `bench chrome_keys focus_window` and waits for the window to have the X input
+/// focus, which under Xvfb is `xtest.py :N "move 700 400; focus"`.
+///
+/// The cases that must leave the chrome up: a press under a completion popup, whose arrows pick a
+/// row; one in the file tree, which is not a document; `Shift+Alt+Down`, which adds a caret; and
+/// Space in a PDF being presented, where presentation owns the chrome.
+pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
+    let Some((note, pdf)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (app, note, pdf) = (app.clone(), note.to_string(), pdf.to_string());
+    glib::spawn_future_local(async move {
+        println!("bench chrome_keys focus_window");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        app.open_path(&note);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let Some(tab) = app.active() else {
+            return bench_quit(&app);
+        };
+        let view = tab.view.clone().upcast::<gtk::Widget>();
+        // Long enough to scroll, so the scroll chord can show it still scrolls.
+        let own = tab.text();
+        tab.set_text(&"a line of the note\n".repeat(300));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        let scrolled = || tab.view.vadjustment().map_or(0.0, |a| a.value());
+        for (case, chord) in [
+            ("caret", "Down"),
+            ("word", "ctrl+Right"),
+            ("select", "shift+End"),
+            ("scroll_chord", "ctrl+Down"),
+            ("add_caret", "shift+alt+Down"),
+        ] {
+            let before = scrolled();
+            bench_chrome_key(&app, &view, case, chord).await;
+            println!("bench chrome_key {case} scrolled={}", scrolled() != before);
+        }
+        // A column of carets, which replays the arrows itself: it keeps both carets.
+        if let Some(column) = tab.ghost_view() {
+            println!("bench chrome_keys carets_before={}", column.has_carets());
+            bench_chrome_key(&app, &view, "carets", "Down").await;
+            println!("bench chrome_keys carets_after={}", column.has_carets());
+            column.clear_carets();
+        }
+        // The popup, as `keys::bench_popup` raises it, and Down inside it.
+        let completion = sourceview5::prelude::ViewExt::completion(&tab.view);
+        let words = sourceview5::CompletionWords::new(None);
+        sourceview5::prelude::CompletionWordsExt::register(&words, &tab.buffer);
+        completion.add_provider(&words);
+        tab.set_text("completion\n- comp");
+        tab.buffer.place_cursor(&tab.buffer.end_iter());
+        completion.show();
+        glib::timeout_future(Duration::from_millis(800)).await;
+        println!("bench chrome_keys popup_up={}", tab.popup_shown());
+        bench_chrome_key(&app, &view, "popup", "Down").await;
+        completion.hide();
+        completion.remove_provider(&words);
+        tab.set_text(&own);
+        if let Some(tree) = app.tree.get() {
+            let list = tree.view().clone().upcast::<gtk::Widget>();
+            bench_chrome_key(&app, &list, "tree", "Down").await;
+        }
+        app.set_mode(Mode::Split);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let preview = app.preview.borrow().as_ref().map(|p| p.widget().clone());
+        if let Some(preview) = preview {
+            for (case, chord) in [("preview_page", "Page_Down"), ("preview_space", "space")] {
+                bench_chrome_key(&app, &preview, case, chord).await;
+            }
+        }
+        app.set_mode(Mode::Editor);
+        app.open_path(&pdf);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        if let Some(reader) = app.active_pdf().map(|pdf| pdf.key_target()) {
+            for (case, chord) in [
+                ("pdf_page", "Page_Down"),
+                ("pdf_space", "space"),
+                ("pdf_n", "n"),
+            ] {
+                bench_chrome_key(&app, &reader, case, chord).await;
+            }
+            app.set_presenting(true);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            bench_chrome_key(&app, &reader, "presenting", "space").await;
+            app.set_presenting(false);
+        }
+        bench_quit(&app);
+    });
+}
+
+/// One case of [`bench_chrome_keys`]: the chrome shown and the keyboard on `target`, then the
+/// press asked for and what it did to the chrome.
+async fn bench_chrome_key(app: &Rc<App>, target: &gtk::Widget, case: &str, chord: &str) {
+    target.grab_focus();
+    app.show_chrome();
+    glib::timeout_future(Duration::from_millis(200)).await;
+    println!("bench chrome_key_ready {case} {chord}");
+    glib::timeout_future(Duration::from_millis(1200)).await;
+    let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+    println!(
+        "bench chrome_key {case} {chord} focused={} hidden={} header_class={}",
+        focus.is_some_and(|f| &f == target || f.is_ancestor(target)),
+        app.chrome_hidden.get(),
+        app.header.has_css_class("chrome-hidden")
+    );
+}
