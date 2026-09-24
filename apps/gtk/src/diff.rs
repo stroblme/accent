@@ -303,7 +303,7 @@ impl Pool {
 
 /// What a companion holds: `\n` line endings, as the editor's own buffer does, so a line's
 /// character count is the same to the diff and to the buffer.
-fn normalise(text: &str) -> String {
+pub(crate) fn normalise(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 

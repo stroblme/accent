@@ -481,6 +481,9 @@ impl Panel {
                 return;
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
+            // The history stays up until the refresh lands, and it is the other repository's: a
+            // file under it would be read in this one.
+            panel.collapse();
             panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes

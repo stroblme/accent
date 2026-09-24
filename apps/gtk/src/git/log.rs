@@ -31,6 +31,8 @@ enum LogItem {
         parent: Option<String>,
         letter: char,
         path: String,
+        /// Where a rename or copy came from, which is where the parent's side is read.
+        orig: Option<String>,
     },
     /// The last row while git has history the store does not: activating it pages the next
     /// [`PAGE`] in. A row rather than a button under the list, so it is reached by scrolling to
@@ -62,8 +64,12 @@ impl Panel {
             match item {
                 LogItem::Commit(row) => panel.toggle(&row.commit),
                 LogItem::File {
-                    oid, parent, path, ..
-                } => panel.compare(&path, &path, Sides::Commit { oid, parent }),
+                    oid,
+                    parent,
+                    path,
+                    orig,
+                    ..
+                } => panel.compare(&path, &path, Sides::Commit { oid, parent, orig }),
                 LogItem::More => panel.load_more(),
             }
         });
@@ -104,7 +110,7 @@ impl Panel {
     /// The file rows of one commit are contiguous and only one commit is ever expanded, so where
     /// they are is remembered rather than looked for: a scan would read every row in the store,
     /// and a `LogItem` is several `String`s.
-    fn collapse(&self) {
+    pub(super) fn collapse(&self) {
         self.expanded.replace(None);
         if let Some((start, n)) = self.expanded_at.take() {
             self.log.splice(start, n, &[] as &[glib::BoxedAnyObject]);
@@ -154,6 +160,7 @@ impl Panel {
                         parent: parent.clone(),
                         letter: file.letter,
                         path: file.path,
+                        orig: file.orig,
                     })
                 })
                 .collect();
