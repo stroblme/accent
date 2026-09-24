@@ -11,7 +11,7 @@
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
 use super::{FAILED, LOCK, SOCKET, lock, screen};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -27,7 +27,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a terminal may leave output unread before it is dropped.
 const STALL: Duration = Duration::from_secs(5);
@@ -38,13 +38,30 @@ const IDLE_MS: i32 = 1000;
 const GRACE: Duration = Duration::from_secs(1);
 /// The largest read from a pty, and the largest piece of a replay.
 const CHUNK: usize = 64 * 1024;
+/// How long a holder that holds no shell waits for a terminal before it leaves. The `attach` that
+/// starts a holder connects within two seconds or gives up (`client::connect`), and says HELLO at
+/// once, so five times that with nobody connecting means it died first. Short enough that a
+/// holder left that way is gone before anyone lists what is held.
+const WAIT: Duration = Duration::from_secs(10);
 
 /// Tells attached terminals apart, so that one leaving does not detach the one that took over.
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Daemon {
-    shells: Mutex<HashMap<String, Arc<Shell>>>,
+    shells: Mutex<Shells>,
     socket: PathBuf,
+    /// When a terminal last connected, for [`Daemon::watch`].
+    seen: Mutex<Instant>,
+}
+
+/// The shells held, by id, and the ids a kill named before any shell had them, under one lock so
+/// that a kill and the HELLO that would start the same shell are settled in one order or the
+/// other. Close Tab can land between a tab's `attach` connecting and its HELLO: the kill then
+/// finds nothing to end, and the HELLO must start nothing, or the shell is held for nobody.
+#[derive(Default)]
+struct Shells {
+    live: HashMap<String, Arc<Shell>>,
+    killed: HashSet<String>,
 }
 
 struct Shell {
@@ -77,8 +94,13 @@ pub fn run() -> io::Result<()> {
     let daemon = Arc::new(Daemon {
         shells: Mutex::default(),
         socket,
+        seen: Mutex::new(Instant::now()),
     });
+    let watched = daemon.clone();
+    thread::spawn(move || watched.watch());
     for conn in listener.incoming().flatten() {
+        // `super::lock`: `lock` here is the lock file.
+        *super::lock(&daemon.seen) = Instant::now();
         let daemon = daemon.clone();
         thread::spawn(move || daemon.serve(conn));
     }
@@ -113,7 +135,15 @@ impl Daemon {
     /// until it goes away.
     fn attach(self: &Arc<Self>, hello: &Hello, mut conn: UnixStream) {
         let shell = match self.open(hello) {
-            Ok(shell) => shell,
+            Ok(Some(shell)) => shell,
+            // Killed before it started: it ends the way the kill would have ended it, with the
+            // status of a hangup. The holder stays for [`WAIT`], which is what [`Daemon::watch`]
+            // gives it: another tab closed in the same moment may still have its HELLO on the
+            // way, and only this holder remembers its kill.
+            Ok(None) => {
+                let _ = protocol::write_frame(&mut conn, EXIT, &(128 + libc::SIGHUP).to_be_bytes());
+                return;
+            }
             Err(e) => {
                 let why = format!(
                     "accent-cli: cannot start {}: {e}\r\n",
@@ -148,12 +178,16 @@ impl Daemon {
         shell.detach(me);
     }
 
-    /// The shell `hello` names, started first if there is none by that id. Under the lock, so two
-    /// terminals attaching to a new id at once share one shell.
-    fn open(self: &Arc<Self>, hello: &Hello) -> io::Result<Arc<Shell>> {
+    /// The shell `hello` names, started first if there is none by that id, or `None` when a kill
+    /// named it before it was started. Under the lock, so two terminals attaching to a new id at
+    /// once share one shell.
+    fn open(self: &Arc<Self>, hello: &Hello) -> io::Result<Option<Arc<Shell>>> {
         let mut shells = lock(&self.shells);
-        if let Some(shell) = shells.get(&hello.id) {
-            return Ok(shell.clone());
+        if let Some(shell) = shells.live.get(&hello.id) {
+            return Ok(Some(shell.clone()));
+        }
+        if shells.killed.remove(&hello.id) {
+            return Ok(None);
         }
         let (master, slave) = open_pty()?;
         set_winsize(&master, hello.rows, hello.cols);
@@ -167,10 +201,10 @@ impl Daemon {
                 exit: None,
             }),
         });
-        shells.insert(hello.id.clone(), shell.clone());
+        shells.live.insert(hello.id.clone(), shell.clone());
         let (daemon, id, pumped) = (self.clone(), hello.id.clone(), shell.clone());
         thread::spawn(move || daemon.pump(&id, &pumped, child));
-        Ok(shell)
+        Ok(Some(shell))
     }
 
     /// Read the shell's output until it ends, into its screen model and on to its terminal, then
@@ -202,16 +236,29 @@ impl Daemon {
 
     /// A shell ended: forget it, tell its terminal, and leave if it was the last.
     fn gone(&self, id: &str, shell: &Shell, code: i32) {
-        lock(&self.shells).remove(id);
+        lock(&self.shells).live.remove(id);
         shell.ended(code);
         self.leave_if_idle();
+    }
+
+    /// Leave once no terminal has connected for [`WAIT`] and no shell is held: a holder whose
+    /// `attach` died before its HELLO would otherwise wait forever. Only the first shell needs
+    /// waiting for; once one has come, the holder leaves as the last one ends ([`Daemon::gone`]).
+    fn watch(&self) {
+        loop {
+            let left = wait_left(*lock(&self.seen), Instant::now());
+            if left.is_zero() {
+                return self.leave_if_idle();
+            }
+            thread::sleep(left);
+        }
     }
 
     /// Exit, taking the socket along, when no shell is held. The check and the exit happen under
     /// the lock `open` takes, so no shell can be started in between.
     fn leave_if_idle(&self) {
         let shells = lock(&self.shells);
-        if shells.is_empty() {
+        if shells.live.is_empty() {
             let _ = std::fs::remove_file(&self.socket);
             std::process::exit(0);
         }
@@ -220,10 +267,18 @@ impl Daemon {
     /// End shell `id` and what runs in its foreground: a hangup, as a closing terminal gives, and
     /// after [`GRACE`] a kill for whatever ignored it. Both go to process groups, the shell's and
     /// the foreground job's, which reaches every process of a pipeline. The shell hangs up its
-    /// other jobs itself. Nothing to do for an unknown id.
+    /// other jobs itself. An unknown id is remembered, so that a HELLO still on its way for it
+    /// starts nothing ([`Shells`]).
     fn kill(&self, id: &str) {
-        let Some(shell) = lock(&self.shells).get(id).cloned() else {
-            return;
+        let shell = {
+            let mut shells = lock(&self.shells);
+            match shells.live.get(id) {
+                Some(shell) => shell.clone(),
+                None => {
+                    shells.killed.insert(id.to_string());
+                    return;
+                }
+            }
         };
         // SAFETY: a plain query on a descriptor `shell` keeps open.
         let foreground = unsafe { libc::tcgetpgrp(shell.master.as_raw_fd()) };
@@ -245,6 +300,7 @@ impl Daemon {
     fn list(&self) -> Vec<u8> {
         // Copied out first, so the `screen` locks below are never taken under `shells`.
         let shells: Vec<_> = lock(&self.shells)
+            .live
             .iter()
             .map(|(id, shell)| (id.clone(), shell.clone()))
             .collect();
@@ -455,9 +511,34 @@ fn var<'a>(hello: &'a Hello, name: &str) -> Option<&'a OsStr> {
         .filter(|value| !value.is_empty())
 }
 
+/// How much of [`WAIT`] is left for a holder a terminal last connected to at `seen`.
+fn wait_left(seen: Instant, now: Instant) -> Duration {
+    WAIT.saturating_sub(now.saturating_duration_since(seen))
+}
+
 /// A status as a shell reports it: the exit code, or 128 plus the signal that ended the process.
 fn status(status: ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counted from the last terminal that connected; one that connected after the clock was read
+    /// leaves the whole wait to go.
+    #[test]
+    fn a_holder_with_nothing_to_hold_waits_from_the_last_terminal() {
+        let seen = Instant::now();
+        assert_eq!(wait_left(seen, seen), WAIT);
+        assert_eq!(
+            wait_left(seen, seen + Duration::from_secs(3)),
+            WAIT - Duration::from_secs(3)
+        );
+        assert_eq!(wait_left(seen, seen + WAIT), Duration::ZERO);
+        assert_eq!(wait_left(seen, seen + WAIT * 2), Duration::ZERO);
+        assert_eq!(wait_left(seen + Duration::from_secs(1), seen), WAIT);
+    }
 }

@@ -34,15 +34,15 @@ pub fn attach(id: &str, cwd: Option<PathBuf>) -> i32 {
     code
 }
 
-/// End shell `id`. Without a holder there is no shell to end, and none is started to find out.
+/// End shell `id`. A holder is started if none is running, since the `attach` that is to start
+/// the shell may still be on its way (Close Tab in the moment after New Terminal), and the kill
+/// has to be there before it: the holder then starts nothing for it.
 pub fn kill(id: &str) -> io::Result<()> {
-    let Some(mut conn) = holder()? else {
-        return Ok(());
-    };
-    protocol::write_frame(&mut conn, KILL, id.as_bytes())
+    protocol::write_frame(&mut connect()?, KILL, id.as_bytes())
 }
 
-/// Print the held shells, one JSON object per line: nothing when no holder is running.
+/// Print the held shells, one JSON object per line: nothing when no holder is running, and none
+/// is started to find out.
 pub fn held() -> io::Result<()> {
     let Some(mut conn) = holder()? else {
         return Ok(());
