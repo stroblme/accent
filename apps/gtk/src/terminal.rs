@@ -22,9 +22,12 @@
 //!
 //! A shell is held by `accent-cli` now, and what runs in the tab's pty is `accent-cli attach`: a
 //! hangup detaches it and leaves the shell running for the next window to take up, and Close Tab
-//! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go.
+//! ends it explicitly ([`Term::kill`]). A leaked view is an attach that never lets go. What a
+//! window leaves held without a session to name it in is ended at the next start ([`sweep`]).
 
 use std::cell::Cell;
+use std::collections::HashSet;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -747,6 +750,66 @@ pub fn end(key: &str, at: &str) {
     }
 }
 
+/// End the shells this machine's holder keeps that no session names: what is left of a window
+/// that did not close the ordinary way — a quit, SIGTERM, a logout — or of a Close Tab whose kill
+/// died with the process. Hosts are left alone.
+///
+/// Once per process, before its first window, so every shell the holder lists was started by an
+/// earlier run: none of this one's can be caught between the holder starting it and its tab
+/// attaching, when it would look like one nobody has. That puts one `accent-cli held` on the way
+/// to the first frame (3–4 ms in a debug build, most of it the process start), and the sessions
+/// are read only when something is held.
+pub fn sweep() {
+    let Some(cli) = cli() else {
+        return;
+    };
+    let held = match std::process::Command::new(cli).arg("held").output() {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => out.stdout,
+        _ => return,
+    };
+    // A session that cannot be read may be the one that names them.
+    let Some(sessions) = accent_core::config::Session::stored() else {
+        return tracing::warn!("a session cannot be read, so no held shell is ended");
+    };
+    let named: HashSet<String> = sessions
+        .into_iter()
+        .flat_map(|s| s.open.into_iter().chain(s.terminals.into_keys()))
+        .collect();
+    for key in orphans(&String::from_utf8_lossy(&held), &named, same_state) {
+        tracing::info!("ending the held shell {key}, which no session names");
+        end(&key, "");
+    }
+}
+
+/// The keys of the shells in `held` (what `accent-cli held` prints) that [`sweep`] ends: those no
+/// terminal has, which leaves another instance's alone, whose id is one accent chose, which
+/// leaves a hand-typed `accent-cli attach` alone, that `ours` says were started under this state
+/// directory, and that no session in `named` has.
+fn orphans(held: &str, named: &HashSet<String>, ours: impl Fn(u64) -> bool) -> Vec<String> {
+    held.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|shell| shell["attached"] == false)
+        .filter(|shell| shell["pid"].as_u64().is_some_and(&ours))
+        .filter_map(|shell| Some(format!("{KEY}{}", shell["id"].as_str()?)))
+        .filter(|key| is_key(key) && !named.contains(key))
+        .collect()
+}
+
+/// Whether process `pid` started with this process's `XDG_STATE_HOME`, where the sessions that
+/// could name it are. An instance run on a state directory of its own — a drill, `make smoke` —
+/// shares the holder whenever it shares `$TMPDIR`, and its sessions say nothing about the shells
+/// of the one the user runs.
+fn same_state(pid: u64) -> bool {
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    let theirs = environ
+        .split(|&b| b == 0)
+        .find_map(|var| var.strip_prefix(b"XDG_STATE_HOME="));
+    let ours = std::env::var_os("XDG_STATE_HOME");
+    theirs == ours.as_deref().map(OsStrExt::as_bytes)
+}
+
 /// Run a kill's argument vector and wait for it on a thread of its own, so Close Tab never waits
 /// on the holder or on a host. An empty one is a shell nothing holds.
 fn run_kill(argv: Vec<String>) {
@@ -822,6 +885,29 @@ mod tests {
         );
         assert_eq!(dir_of("file://elsewhere/home/me", "box"), None);
         assert_eq!(dir_of("https://box/home/me", "box"), None);
+    }
+
+    /// What the startup sweep ends: accent's own shells, that no terminal has, that were started
+    /// under this state directory, and that no session names.
+    #[test]
+    fn a_held_shell_no_session_names_is_an_orphan() {
+        let held = [
+            r#"{"attached":false,"cwd":"/","id":"00000000000000a1","pid":1,"title":""}"#,
+            // Named by a session, so it comes back when that session is opened.
+            r#"{"attached":false,"cwd":"/","id":"00000000000000a2","pid":2,"title":""}"#,
+            // In a terminal right now: another instance of accent on the same holder.
+            r#"{"attached":true,"cwd":"/","id":"00000000000000a3","pid":3,"title":""}"#,
+            // Not an id accent chose: an `accent-cli attach` typed by hand.
+            r#"{"attached":false,"cwd":"/","id":"demo","pid":4,"title":""}"#,
+            // Started under another state directory, whose sessions are not read here.
+            r#"{"attached":false,"cwd":"/","id":"00000000000000a5","pid":5,"title":""}"#,
+        ]
+        .join("\n");
+        let named = HashSet::from(["terminal:00000000000000a2".to_string()]);
+        assert_eq!(
+            orphans(&held, &named, |pid| pid != 5),
+            ["terminal:00000000000000a1"]
+        );
     }
 
     /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.

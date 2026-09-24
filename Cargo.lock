@@ -16,6 +16,7 @@ dependencies = [
  "libadwaita",
  "libspelling",
  "pulldown-cmark",
+ "serde_json",
  "sourceview5",
  "tracing",
  "tracing-subscriber",
