@@ -2,7 +2,7 @@
 Type=Application
 Name=Accent
 Comment=Markdown and PDF knowledge editor
-Exec=accent %F
+Exec=env GSK_RENDERER=cairo accent %F
 Icon=io.github.stroblme.Accent
 Terminal=false
 Categories=Office;Utility;TextEditor;GTK;GNOME;
@@ -13,4 +13,4 @@ Actions=new-window;
 
 [Desktop Action new-window]
 Name=New Window
-Exec=GSK_RENDERER=cairo accent --new-window
+Exec=env GSK_RENDERER=cairo accent --new-window
