@@ -28,6 +28,8 @@ vte4 = { version = "0.10", features = ["v0_76"] }
 libspelling = "0.5"
 # Only for "now" when expanding templates; core takes a NaiveDateTime.
 chrono.workspace = true
+# `accent-cli held` answers in JSON lines.
+serde_json.workspace = true
 # Hover documentation arrives as markdown and Pango wants markup; only the pull parser is needed.
 pulldown-cmark.workspace = true
 

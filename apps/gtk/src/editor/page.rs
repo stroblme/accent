@@ -2,7 +2,7 @@
 //! line-number gutter, the minimap and the sticky block title over the top of the view.
 
 use super::{Flavour, Tab, line_end};
-use crate::{highlight, lang};
+use crate::{highlight, lang, wrap};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
 use sourceview5::prelude::*;
@@ -364,10 +364,7 @@ impl Tab {
             zoom,
             &self.view.widget_name(),
         );
-        // Only a note has markers hanging in the gutter to re-measure.
-        if self.flavour.is_note() {
-            self.rehang();
-        }
+        self.rehang();
     }
 
     /// Scale the page with the text. Zoom used to touch the font alone, so a zoomed-in column
@@ -405,14 +402,20 @@ impl Tab {
         self.set_clamp();
     }
 
-    /// Re-measure the hanging heading markers from the next idle. A CSS font change only reaches
-    /// the view's pango context once the frame clock has validated the style, and gtk4-rs 0.11
-    /// exposes no `css_changed` vfunc to hang this off.
+    /// Re-measure the hanging heading markers and the wrap indents from the next idle. A CSS font
+    /// change only reaches the view's pango context once the frame clock has validated the style,
+    /// and gtk4-rs 0.11 exposes no `css_changed` vfunc to hang this off.
     pub fn rehang(self: &Rc<Self>) {
         glib::idle_add_local_once(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move || highlight::hang(&tab.buffer, &tab.view)
+            move || {
+                // Only a note has markers hanging in the gutter.
+                if tab.flavour.is_note() {
+                    highlight::hang(&tab.buffer, &tab.view);
+                }
+                wrap::measure(&tab.view);
+            }
         ));
     }
 

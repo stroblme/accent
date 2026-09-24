@@ -518,7 +518,7 @@ pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
 
 /// Return and Tab down every list line of the note, and then Tab on lines with text on them.
 fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
-    // What Tab is worth here: the preference in a code tab, GtkSourceView's own in prose.
+    // What a tab is worth here: the Indent Width preference.
     println!("bench list_indent_width {}", tab.view.tab_width());
     let lines: Vec<String> = original.lines().map(str::to_string).collect();
     let (mut asked, mut wrong) = (0, 0);
@@ -774,19 +774,88 @@ pub(super) fn bench_term(app: &Rc<App>) {
         if left > 0 {
             return glib::ControlFlow::Continue;
         }
-        bench_quit(&app);
+        bench_term_save(&app);
         glib::ControlFlow::Break
+    });
+}
+
+/// Save Session answered with a name, and whether the primary menu offers Close Session either
+/// side of it: the menu used to be the one the window opened with, unnamed, until it was opened
+/// again. The shell is closed at the end, so the holder keeps nothing of the drill's. A vault
+/// window has no session of shells to save.
+fn bench_term_save(app: &Rc<App>) {
+    if !app.key.borrow().is_terminal() {
+        return bench_quit(app);
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let closes = || {
+            let labels = app.menu.menu_model().map(|m| crate::fileops::labels(&m));
+            labels.is_some_and(|l| l.iter().any(|l| l == "Close Session"))
+        };
+        println!("bench term_menu before close_session={}", closes());
+        let _ = WidgetExt::activate_action(&app.window, "win.save-session", None);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        if let Some(dialog) = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+        {
+            let entry = dialog
+                .extra_child()
+                .and_then(|form| find_widget(&form, &|w| w.is::<gtk::Entry>()))
+                .and_downcast::<gtk::Entry>();
+            if let Some(entry) = entry {
+                entry.set_text("bench");
+            }
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            dialog.close();
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // A second run on the same state finds `bench` taken, and is asked before replacing it.
+        let replace = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        println!(
+            "bench term_menu replace={:?}",
+            replace.as_ref().map(|d| (d.heading(), d.body()))
+        );
+        if let Some(dialog) = replace {
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            dialog.close();
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
+        println!(
+            "bench term_menu after close_session={} window={:?}",
+            closes(),
+            app.window.title().unwrap_or_default()
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!("bench term_menu held={}", bench_held());
+        bench_quit(&app);
     });
 }
 
 /// `ACCENT_BENCH_HOLD=open|back`: a shell outliving its window. Run twice on one scratch state,
 /// `open` first. `open` sends a `cd` and a marker into the window's shell and quits the way
 /// Ctrl+Q does, which writes the session and leaves the shell held; `back` prints what the
-/// restore brought back — the key, where the shell is, and whether the marker came back on its
-/// screen — then closes the tab and prints how many shells the holder still has. Expected: the
-/// same key twice, `at=/tmp`, `replayed=true`, `held=0`. Under `SHELL=/bin/bash`, whose `vte.sh`
-/// reports the directory.
+/// restore brought back — the key, where the shell is, whether the marker came back on its
+/// screen, how many of its rows the replay filled and whether it has the keyboard — then closes
+/// the tab and prints how many shells the holder still has. Expected: the same key twice,
+/// `at=/tmp`, `replayed=true`, as many `lines` as `rows`, `focused=true`, `held=0`. Under
+/// `SHELL=/bin/bash`, whose `vte.sh` reports the directory.
+///
+/// `=early` closes new shells before their `attach` can have had them started: in the same tick,
+/// and a few milliseconds in, while the attach waits for the holder it started. Expected
+/// `held=0`. Against a vault, whose window opens no shell of its own, so the first one also starts
+/// the holder: with one already up (a holder waits ten seconds before it leaves) the same tick
+/// proves nothing.
 pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
+    if step == "early" {
+        return bench_hold_early(app);
+    }
     if app.terminals().is_empty() {
         app.open_terminal();
     }
@@ -798,7 +867,9 @@ pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
     // mode may flush what is waiting there.
     glib::timeout_add_local_once(Duration::from_millis(1000), move || {
         if open {
-            term.view.feed_child(b"cd /tmp && echo held-marker\n");
+            // Enough lines to fill the screen, so a replay drawn at another size shows.
+            term.view
+                .feed_child(b"cd /tmp && seq 1 100 && echo held-marker\n");
         }
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
             bench_hold_step(&app, &term, open)
@@ -823,11 +894,37 @@ fn bench_hold_step(app: &Rc<App>, term: &Rc<crate::terminal::Term>, open: bool) 
         .view
         .text_format(vte4::Format::Text)
         .is_some_and(|text| text.contains("held-marker"));
-    println!("bench hold back key={key} at={at} replayed={replayed} toasts={toasts}");
+    let text = term
+        .view
+        .text_format(vte4::Format::Text)
+        .unwrap_or_default();
+    let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+    let focused = gtk::prelude::GtkWindowExt::focus(&app.window)
+        .is_some_and(|widget| widget == *term.view.upcast_ref::<gtk::Widget>());
+    println!(
+        "bench hold back key={key} at={at} replayed={replayed} rows={} lines={lines} \
+         focused={focused} toasts={toasts}",
+        term.view.row_count()
+    );
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(500), move || {
         println!("bench hold held={}", bench_held());
+        bench_quit(&app);
+    });
+}
+
+/// The `=early` half of [`bench_hold`].
+fn bench_hold_early(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for wait in [0, 10, 30, 60, 120] {
+            app.open_terminal();
+            glib::timeout_future(Duration::from_millis(wait)).await;
+            let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            println!("bench hold early wait={wait} held={}", bench_held());
+        }
         bench_quit(&app);
     });
 }

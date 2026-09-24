@@ -1,6 +1,7 @@
 //! Drills over a note's text: styling as it is typed, pastes, Ctrl+hover and occurrences.
 
 use super::*;
+use crate::editor::line_end;
 use accent_core::config::Theme;
 use sourceview5::prelude::BufferExt as _;
 
@@ -183,6 +184,153 @@ fn bench_tag_at(tab: &Rc<Tab>, line: i32, name: &str) -> bool {
     tab.buffer
         .iter_at_line(line)
         .is_some_and(|iter| iter.has_tag(&tag))
+}
+
+/// Open each of `rels` in turn in a narrow window and print, for every line, the wrap tag on its
+/// first character, that tag's indent, and how far right of the line's first screen row its second
+/// one starts: the hang as GTK laid it out, `None` for a line that does not wrap. Each tab stays up
+/// for four seconds, for a screenshot. The last one, meant to be code, is then filled with 10k
+/// indented lines, three to a depth as code's blocks come, and the fill, a keystroke, a Return and
+/// a new indent width are timed, each with the tag it left on the line it touched.
+pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
+    let app = app.clone();
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    app.window.set_default_size(900, 880);
+    glib::spawn_future_local(async move {
+        let mut last = None;
+        for rel in &rels {
+            app.open_path(rel);
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == *rel) else {
+                println!("bench wrap {rel} not_open");
+                continue;
+            };
+            for line in 0..tab.buffer.line_count() {
+                println!("bench wrap {rel} {}", bench_wrap_line(&tab, line));
+            }
+            println!("bench wrap_hold {rel}");
+            glib::timeout_future(Duration::from_secs(4)).await;
+            last = Some(tab);
+        }
+        if let Some(tab) = last {
+            bench_wrap_cost(&tab);
+        }
+        bench_quit(&app);
+    });
+}
+
+fn bench_wrap_line(tab: &Rc<Tab>, line: i32) -> String {
+    let Some(start) = tab.buffer.iter_at_line(line) else {
+        return format!("line={line} missing");
+    };
+    let tag = start
+        .tags()
+        .into_iter()
+        .find(|tag| tag.name().is_some_and(|name| name.starts_with("wrap")));
+    let mut row = start;
+    let hang = (tab.view.forward_display_line(&mut row) && !row.starts_line())
+        .then(|| tab.view.iter_location(&row).x() - tab.view.iter_location(&start).x());
+    let mut head = start;
+    head.forward_chars(12);
+    format!(
+        "line={line} head={:?} tag={:?} indent={:?} hang={hang:?}",
+        tab.buffer
+            .text(&start, &head.min(line_end(&tab.buffer, line)), true),
+        tag.as_ref().and_then(|tag| tag.name()),
+        tag.map(|tag| tag.indent()),
+    )
+}
+
+/// The wrap tag on line `line`'s first character, by name.
+fn bench_wrap_tag(tab: &Rc<Tab>, line: i32) -> Option<String> {
+    tab.buffer
+        .iter_at_line(line)?
+        .tags()
+        .into_iter()
+        .find_map(|tag| {
+            tag.name()
+                .filter(|name| name.starts_with("wrap"))
+                .map(|name| name.to_string())
+        })
+}
+
+fn bench_wrap_cost(tab: &Rc<Tab>) {
+    let lines = 10_000;
+    let body: String = (0..lines)
+        .map(|i| {
+            format!(
+                "{}let value_{i} = compute({i});\n",
+                "    ".repeat(1 + i / 3 % 6)
+            )
+        })
+        .collect();
+    let t0 = Instant::now();
+    tab.buffer.set_text(&body);
+    let fill = ms_since(t0);
+    // The wrap pass alone, over every line with its tags already on.
+    let t0 = Instant::now();
+    tab.view.notify("tab-width");
+    let recheck = ms_since(t0);
+    println!(
+        "bench wrap_cost lines={lines} fill_ms={fill:.1} recheck_ms={recheck:.1} line1={:?}",
+        bench_wrap_tag(tab, 1)
+    );
+    let line = 5000;
+    tab.buffer.place_cursor(&line_end(&tab.buffer, line));
+    let t0 = Instant::now();
+    tab.buffer.insert_at_cursor("x");
+    println!(
+        "bench wrap_key us={} tag={:?}",
+        t0.elapsed().as_micros(),
+        bench_wrap_tag(tab, line)
+    );
+    // Return and the auto-indent behind it, as one insert.
+    let t0 = Instant::now();
+    tab.buffer.insert_at_cursor("\n            ");
+    println!(
+        "bench wrap_return us={} tag={:?}",
+        t0.elapsed().as_micros(),
+        bench_wrap_tag(tab, line + 1)
+    );
+    // The same line's indent taken away again, and then half of the line above's.
+    let mut start = tab.buffer.iter_at_line(line + 1).expect("bench line");
+    let mut indent = start;
+    indent.forward_chars(12);
+    tab.buffer.delete(&mut start, &mut indent);
+    let mut start = tab.buffer.iter_at_line(line).expect("bench line");
+    let mut half = start;
+    half.forward_chars(2);
+    tab.buffer.delete(&mut start, &mut half);
+    println!(
+        "bench wrap_unindent tag={:?} above={:?}",
+        bench_wrap_tag(tab, line + 1),
+        bench_wrap_tag(tab, line)
+    );
+    // A hundred plain lines pasted into the middle of an indented one, where they arrive inside
+    // its tag: the line keeps it, none of the pasted ones may, and the rest of the line, now a line
+    // of its own behind a space, hangs a level past that space.
+    let at = line + 10;
+    let mut middle = tab.buffer.iter_at_line(at).expect("bench line");
+    middle.forward_chars(24);
+    let t0 = Instant::now();
+    tab.buffer.insert(&mut middle, &"pasted\n".repeat(100));
+    let us = t0.elapsed().as_micros();
+    let pasted: Vec<_> = (at + 1..at + 100)
+        .filter_map(|n| bench_wrap_tag(tab, n))
+        .collect();
+    println!(
+        "bench wrap_paste us={us} line={:?} tagged_pasted={pasted:?} rest={:?}",
+        bench_wrap_tag(tab, at),
+        bench_wrap_tag(tab, at + 100)
+    );
+    // Four columns a level becomes two, which moves every indented line.
+    let t0 = Instant::now();
+    tab.set_indent_width(2);
+    println!(
+        "bench wrap_indent_width ms={:.1} line1={:?}",
+        ms_since(t0),
+        bench_wrap_tag(tab, 1)
+    );
 }
 
 /// Select things in the note at `rel` and print what the muted occurrence highlight made of each:

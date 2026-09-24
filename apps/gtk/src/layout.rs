@@ -374,6 +374,37 @@ impl App {
         self.promote(&tab.page);
     }
 
+    /// A key pressed anywhere in the window, heard before whatever has the keyboard: one that moves
+    /// through the document the keyboard is in fades the chrome, as typing does (DESIGN.md). Not
+    /// under a completion popup, whose arrows pick a row, and not while presenting, which owns the
+    /// chrome and shows the status bar on a hover.
+    pub fn on_key(&self, key: gdk::Key, state: gdk::ModifierType) {
+        if self.presenting.get().is_some() {
+            return;
+        }
+        let Some(focus) = self.focused() else {
+            return;
+        };
+        let editor = self
+            .open_tabs()
+            .into_iter()
+            .find(|tab| tab.view.upcast_ref::<gtk::Widget>() == &focus);
+        let preview = || {
+            let preview = self.preview.borrow();
+            preview.as_ref().is_some_and(|p| p.widget() == &focus)
+        };
+        let surface = match editor {
+            Some(tab) if tab.popup_shown() => return,
+            Some(_) => Surface::Text,
+            None if self.pdfs().iter().any(|pdf| pdf.key_target() == focus) => Surface::Pdf,
+            None if preview() => Surface::Preview,
+            None => return,
+        };
+        if navigates(key, state, surface) {
+            self.hide_chrome();
+        }
+    }
+
     /// `Root` and `GtkWindow` both spell this `focus`, so the window's one is named here once.
     fn focused(&self) -> Option<gtk::Widget> {
         gtk::prelude::GtkWindowExt::focus(&self.window)
@@ -452,5 +483,81 @@ impl App {
             .focused()
             .is_some_and(|w| w.ancestor(gtk::Popover::static_type()).is_some());
         in_popover || self.active().is_some_and(|tab| tab.banner.is_revealed())
+    }
+}
+
+/// What has the keyboard when a key may be a step through a document.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// An editor tab's text: a note, code or a CSV.
+    Text,
+    Pdf,
+    /// The rendered note beside the editor.
+    Preview,
+}
+
+/// Whether `key` moves through a document on `surface` rather than writing in it or firing a
+/// command: the caret keys anywhere, which are the arrows, Home, End, Page Up and Page Down, alone
+/// or with Shift and Ctrl; and where the document is read rather than written, Space too, which
+/// pages there, and a PDF's own `n` and `p`. Alt or Super makes a chord instead — Back, Forward,
+/// a caret added above — and Caps Lock and Num Lock change nothing.
+pub fn navigates(key: gdk::Key, state: gdk::ModifierType, surface: Surface) -> bool {
+    use gdk::{Key, ModifierType as M};
+    if state.intersects(M::ALT_MASK | M::SUPER_MASK | M::META_MASK | M::HYPER_MASK) {
+        return false;
+    }
+    match key {
+        Key::Up | Key::Down | Key::Left | Key::Right => true,
+        Key::KP_Up | Key::KP_Down | Key::KP_Left | Key::KP_Right => true,
+        Key::Home | Key::End | Key::Page_Up | Key::Page_Down => true,
+        Key::KP_Home | Key::KP_End | Key::KP_Page_Up | Key::KP_Page_Down => true,
+        Key::space | Key::KP_Space => surface != Surface::Text,
+        // `Ctrl+N` is New Note, and a capital is Shift.
+        Key::n | Key::p => surface == Surface::Pdf && !state.contains(M::CONTROL_MASK),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Surface, navigates};
+    use gtk::gdk::{Key, ModifierType as M};
+
+    /// The caret keys step through every document with any mix of Shift and Ctrl and none of Alt,
+    /// and the reading keys only through one that is read.
+    #[test]
+    fn a_step_through_the_document_is_a_caret_key_or_a_reading_one() {
+        let chords = [
+            M::empty(),
+            M::SHIFT_MASK,
+            M::CONTROL_MASK,
+            M::CONTROL_MASK | M::SHIFT_MASK,
+            M::LOCK_MASK,
+        ];
+        for key in [Key::Up, Key::Right, Key::Home, Key::Page_Down, Key::KP_End] {
+            for state in chords {
+                assert!(navigates(key, state, Surface::Text), "{key:?} {state:?}");
+                assert!(navigates(key, state, Surface::Preview), "{key:?} {state:?}");
+            }
+            assert!(
+                !navigates(key, M::ALT_MASK, Surface::Text),
+                "Back and Forward"
+            );
+            assert!(!navigates(key, M::ALT_MASK | M::SHIFT_MASK, Surface::Pdf));
+        }
+        assert!(
+            !navigates(Key::space, M::empty(), Surface::Text),
+            "a space is typed"
+        );
+        assert!(navigates(Key::space, M::SHIFT_MASK, Surface::Preview));
+        assert!(navigates(Key::space, M::empty(), Surface::Pdf));
+        assert!(navigates(Key::n, M::empty(), Surface::Pdf));
+        assert!(
+            !navigates(Key::n, M::CONTROL_MASK, Surface::Pdf),
+            "New Note"
+        );
+        assert!(!navigates(Key::n, M::empty(), Surface::Preview));
+        assert!(!navigates(Key::a, M::empty(), Surface::Pdf));
+        assert!(!navigates(Key::Return, M::empty(), Surface::Text));
     }
 }

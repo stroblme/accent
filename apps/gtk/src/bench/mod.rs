@@ -21,7 +21,7 @@ mod search;
 mod style;
 mod tags;
 
-use chrome::bench_chrome;
+use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
     bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_lines,
     bench_compare_pads, bench_compare_row,
@@ -41,12 +41,13 @@ use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{
-    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pins_restored, bench_tabs,
+    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window, bench_pins_restored,
+    bench_tabs,
 };
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
+use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme, bench_wrap};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -78,11 +79,15 @@ use tags::bench_tags;
 /// `build-aux/xtest.py :<display> "move 700 500; focus"` run beside it.
 /// `ACCENT_BENCH_CHROME=1` fires actions at a faded window and prints whether the
 /// chrome stayed away; `=<relA>,<relB>` then opens the two notes side by side, prints what each
-/// focus level fades, and holds the line fade on screen and times it. `ACCENT_BENCH_PATHS=1`
+/// focus level fades, and holds the line fade on screen and times it. `=keys:<note>,<pdf>` asks
+/// for XTEST presses of the keys that step through a note, the preview and a PDF, and prints
+/// whether each one faded the chrome (see `chrome::bench_chrome_keys`). `ACCENT_BENCH_PATHS=1`
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
-/// or a drop out of a styled or folded line brings its tags along.
+/// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
+/// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
+/// indent on 10k lines of code in the last one.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -109,11 +114,16 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
 /// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
+/// The vault-less window then answers Save Session with a name and prints whether its primary
+/// menu offers Close Session either side, and what it is asked before replacing the session a
+/// run before it saved under that name; give it a scratch `TMPDIR`, or its shell joins the
+/// holder of whatever session of accent is running.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_HOLD=open` then `=back`, on one scratch state, is a shell outliving its window:
 /// `open` leaves a marker in it and quits, `back` prints what the restore brought back and whether
-/// Close Tab ended it in the holder (see `keys::bench_hold`).
+/// Close Tab ended it in the holder (see `keys::bench_hold`). `=early` closes new shells before
+/// they can have started and prints whether any is held for nobody.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once
@@ -146,6 +156,8 @@ use tags::bench_tags;
 /// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
+/// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
+/// kept for loose files the way a drop there does, and prints both windows' tabs after each.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -399,6 +411,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if rels == "pins" {
                 return bench_pins_restored(&app);
             }
+            if let Some(rels) = rels.strip_prefix("pinwin:") {
+                return bench_pin_window(&app, rels);
+            }
             return bench_tabs(&app, &rels);
         }
         if let Some(rel) = occur {
@@ -441,6 +456,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_templates(&app);
         }
         if let Some(notes) = chrome {
+            if let Some(rels) = notes.strip_prefix("keys:") {
+                return bench_chrome_keys(&app, rels);
+            }
             return bench_chrome(&app, &notes);
         }
         if let Some(arg) = keys {
@@ -464,7 +482,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
-            return bench_style(&app, &rel);
+            return match rel.strip_prefix("wrap:") {
+                Some(rels) => bench_wrap(&app, rels),
+                None => bench_style(&app, &rel),
+            };
         }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);

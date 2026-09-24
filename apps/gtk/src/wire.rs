@@ -589,6 +589,8 @@ pub fn wire_window(app: &Rc<App>) {
     ));
     app.window.add_controller(scroll);
 
+    // A step through the document fades the chrome as typing does, heard here before the view
+    // it goes to can take it: a column of carets and a PDF's own keys both use up the arrows.
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed(glib::clone!(
@@ -596,9 +598,12 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, _| match key == gdk::Key::Escape && escape_first(&app) {
-            true => glib::Propagation::Stop,
-            false => glib::Propagation::Proceed,
+        move |_, key, _, state| {
+            app.on_key(key, state);
+            match key == gdk::Key::Escape && escape_first(&app) {
+                true => glib::Propagation::Stop,
+                false => glib::Propagation::Proceed,
+            }
         }
     ));
     // The other half of `Ctrl+Tab`: an action activation says nothing about the modifier still

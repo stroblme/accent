@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{diagnostics, diff, fold, highlight, lang, multicaret};
+use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
 use accent_api::{Diagnostic, Fold, Vault};
 use accent_core::fs::{self, Etag, SaveError};
 use accent_core::markdown::Link;
@@ -360,6 +360,8 @@ fn build(
 ) -> (sourceview5::View, sourceview5::Buffer) {
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_language(language.as_ref());
+    // First: a note's heading tags set an indent too, and have to outrank these.
+    wrap::install(&buffer);
     match flavour {
         Flavour::Note => highlight::install_tags(&buffer),
         Flavour::Csv => highlight::install_csv_tags(&buffer),
@@ -405,12 +407,14 @@ fn build(
     view.set_enable_snippets(true);
     sourceview5::SnippetManager::default().set_search_path(&[]);
     view.set_show_line_numbers(false);
+    // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab; a
+    // companion keeps it, so both sides of a comparison count a tab and a wrap level alike.
+    view.set_tab_width(4);
     if !flavour.is_note() {
         view.set_auto_indent(true);
         view.set_indent_on_tab(true);
         view.set_smart_backspace(true);
         view.set_highlight_current_line(true);
-        view.set_tab_width(4);
         // Everything but a makefile, where a leading tab is syntax.
         let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
         view.set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
@@ -419,6 +423,8 @@ fn build(
     // called from `set_font` below, puts the zoomed values here.
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
+    // Once the tab width is set, which the columns are counted in.
+    wrap::follow(&view, flavour.is_note());
     (view, buffer)
 }
 
@@ -1061,6 +1067,7 @@ impl Tab {
             Flavour::Csv => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
         }
+        wrap::measure(&self.view);
         self.marks.restyle(&self.view);
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
@@ -1235,12 +1242,11 @@ impl Tab {
 
     // --- preferences ---------------------------------------------------------------------
 
-    /// How wide one indent is, from preferences. Prose is left with GtkSourceView's own: Tab in a
-    /// note writes a literal tab or a list item's own indent, and neither is measured in columns.
+    /// How wide one indent is, from preferences: what a tab character is worth on screen and one
+    /// wrap level (`wrap.rs`), in a note as in code. A note's Tab still writes a literal tab or a
+    /// list item's own indent; four columns is also the tab stop CommonMark reads a note's tab at.
     pub fn set_indent_width(&self, columns: u32) {
-        if !self.flavour.is_note() {
-            self.view.set_tab_width(columns);
-        }
+        self.view.set_tab_width(columns);
     }
 
     pub fn set_spellcheck(&self, on: bool) {

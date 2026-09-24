@@ -20,6 +20,9 @@ pub enum Opened {
     /// Kept, and put back by the session restore, which says itself which tab each pane shows
     /// (see [`App::put_back`]): so it lands behind whatever its pane is showing.
     Restored,
+    /// Kept, and pinned: a pinned tab dragged in from another window, which is opened here afresh
+    /// (`Shell::adopt_page`) and lands at the end of its pane's pinned tabs.
+    Pinned,
 }
 
 impl App {
@@ -66,11 +69,15 @@ impl App {
         }
     }
 
-    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before.
+    /// A preview tab has arrived: it replaces whichever tab this pane was previewing before. A
+    /// pinned one is pinned here.
     ///
     /// The old tab goes after the new one is in place, so the pane never stands empty and closes
     /// itself out from under the note arriving in it.
-    pub(crate) fn mark_opened(&self, page: &adw::TabPage, how: Opened) {
+    pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
+        if how == Opened::Pinned {
+            return self.set_pinned(page, true);
+        }
         if how != Opened::Preview {
             return;
         }

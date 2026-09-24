@@ -583,6 +583,23 @@ impl Session {
         replace(&state_path(root), &serde_json::to_vec_pretty(self)?)
     }
 
+    /// Every session written down on this machine, whatever vault or terminal session it is for.
+    /// `None` when one of them cannot be read, so that nothing is decided on the rest alone.
+    pub fn stored() -> Option<Vec<Session>> {
+        let dir = match std::fs::read_dir(state_dir()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+            dir => dir.ok()?,
+        };
+        let mut sessions = Vec::new();
+        for entry in dir {
+            let path = entry.ok()?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                sessions.push(serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?);
+            }
+        }
+        Some(sessions)
+    }
+
     /// The panes to put back: the stored layout with the open tabs placed in it, or one pane
     /// holding them all when no layout was stored. `None` when there is no tab to put back.
     pub fn panes(&self) -> Option<Layout> {
@@ -815,9 +832,12 @@ pub fn config_path() -> PathBuf {
 }
 
 pub fn state_path(root: &Path) -> PathBuf {
-    xdg("XDG_STATE_HOME", ".local/state")
-        .join("accent")
-        .join(format!("{}.json", vault_hash(root)))
+    state_dir().join(format!("{}.json", vault_hash(root)))
+}
+
+/// Where the sessions are written, one file per vault or terminal session, and nothing else.
+fn state_dir() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("accent")
 }
 
 #[cfg(test)]

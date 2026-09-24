@@ -58,6 +58,7 @@ mod typing;
 mod widgets;
 mod wire;
 mod work;
+mod wrap;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};
@@ -66,7 +67,7 @@ use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
     ACTIONS, accels_for, install_actions, label_of, menu_button, mode_switcher, nav_action,
-    pane_rect, tab_menu,
+    pane_rect, primary_menu, tab_menu,
 };
 use adw::prelude::*;
 use build::{build_window, install_document_font};
@@ -171,6 +172,8 @@ fn main() -> glib::ExitCode {
         }
     }
     shell.install_app_actions(&app);
+    // The primary instance only, before its first window: see `terminal::sweep`.
+    app.connect_startup(|_| terminal::sweep());
     // The keyboard moving to another window changes no `focus-widget` — each window keeps its
     // own — so which shell has it is asked again here, of the window that has it now.
     app.connect_active_window_notify({

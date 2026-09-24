@@ -901,6 +901,17 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
 }
 
 pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
+    gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .tooltip_text("Main Menu")
+        .menu_model(&primary_menu(key))
+        .valign(gtk::Align::Center)
+        .build()
+}
+
+/// The primary menu's model for a window opened on `key`, and again whenever the window takes
+/// another key: a window of shells saved under a name gains Close Session there and then.
+pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
     let menu = gio::Menu::new();
     for group in primary_actions(key) {
         let section = gio::Menu::new();
@@ -909,12 +920,7 @@ pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
         }
         menu.append_section(None, &section);
     }
-    gtk::MenuButton::builder()
-        .icon_name("open-menu-symbolic")
-        .tooltip_text("Main Menu")
-        .menu_model(&menu)
-        .valign(gtk::Align::Center)
-        .build()
+    menu
 }
 
 /// The tab's own context menu, as a pane is built with it: nothing yet known about which page

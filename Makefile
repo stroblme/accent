@@ -244,9 +244,12 @@ smoke: gtk vault
 	@# which makes this check pass while proving nothing.
 	@# The XDG dirs point at a scratch directory, set outside the bus so whatever it activates sees
 	@# them too: a check must neither read the user's config nor write a session and an index.
-	xdg=$$(mktemp -d) && trap 'rm -rf "$$xdg"' EXIT && \
+	@# TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned
+	@# shells; under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
+	xdg=$$(mktemp -d /tmp/accent-smoke-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
+	mkdir "$$xdg/tmp" && \
 	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
-		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" \
+		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
 	dbus-run-session -- env $(XVFB_ENV) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
 ## server: build the static accent-cli that gets uploaded to a remote host

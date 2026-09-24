@@ -349,8 +349,8 @@ impl App {
         dialogs::focus_entry(&entry, |entry| entry.select_region(0, -1));
     }
 
-    /// Key this window by the session `name` and write it: into the recent list, and into the
-    /// state file every later change goes to.
+    /// Save this window as the session `name`, asked first when that replaces one saved before:
+    /// the shells it held that this window does not have end.
     fn save_session_as(self: &Rc<Self>, name: &str) {
         let key = terminal::session_key(name);
         if terminal::session_name(&key).is_none() {
@@ -360,6 +360,41 @@ impl App {
         if taken.is_some_and(|app| !Rc::ptr_eq(&app, self)) {
             return self.toast(&format!("{name} is open in another window"));
         }
+        if self.key.borrow().saved_as() == Some(key.as_path())
+            || !accent_core::config::state_path(&key).is_file()
+        {
+            return self.name_session(name);
+        }
+        let mine: HashSet<String> = self.terminals().iter().map(|t| t.key()).collect();
+        let ending = Session::load(&key)
+            .terminals
+            .keys()
+            .filter(|id| !mine.contains(*id))
+            .count();
+        let body = match ending {
+            0 => "This window takes its place.".to_string(),
+            1 => "Its shell ends, and this window takes its place.".to_string(),
+            n => format!("Its {n} shells end, and this window takes its place."),
+        };
+        let name = name.to_string();
+        dialogs::confirm(
+            &self.window,
+            &format!("Replace session {name}?"),
+            &body,
+            "Replace",
+            true,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.name_session(&name)
+            ),
+        );
+    }
+
+    /// Key this window by the session `name` and write it: into the recent list, and into the
+    /// state file every later change goes to.
+    fn name_session(self: &Rc<Self>, name: &str) {
+        let key = terminal::session_key(name);
         if self.key.borrow().saved_as() != Some(key.as_path()) {
             // A session of that name written before is replaced, so the shells it held and this
             // window does not have would be held with nothing left to open them again.
@@ -369,7 +404,7 @@ impl App {
                     terminal::end(&id, &place.at);
                 }
             }
-            *self.key.borrow_mut() = shell::WindowKey::Terminal(key.clone());
+            self.rekey(shell::WindowKey::Terminal(key.clone()));
             self.config.borrow_mut().touch_recent(&key);
             settings::save(&self.config.borrow());
             self.title.set_title(name);
@@ -377,6 +412,13 @@ impl App {
         }
         self.save_session();
         self.toast(&format!("Saved the session as {name}"));
+    }
+
+    /// Remember this window by `key` from now on, and offer in its menu what that key can do: the
+    /// menu is built for the key a window opens on, and Close Session is a named session's alone.
+    fn rekey(&self, key: shell::WindowKey) {
+        self.menu.set_menu_model(Some(&primary_menu(&key)));
+        *self.key.borrow_mut() = key;
     }
 
     /// Close Session: end the session for good — its shells, its state file and its row in the
@@ -414,7 +456,7 @@ impl App {
     /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
     /// session's file and its row go.
     fn end_session(self: &Rc<Self>, key: &std::path::Path) {
-        *self.key.borrow_mut() = shell::WindowKey::Loose(shell::Loose::Terminal);
+        self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
         let _ = std::fs::remove_file(accent_core::config::state_path(key));
         let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
@@ -671,6 +713,13 @@ impl App {
             .borrow_mut()
             .retain(|key, _| self.awaiting.borrow().contains_key(key));
         self.put_back(&restore);
+        // A shell is back at once, where a note lands later: the one in front of the pane the
+        // reader was in takes the keyboard, as a new one does.
+        if let Some(Doc::Terminal(term)) = self.active_doc()
+            && restore.active.as_deref() == Some(term.key().as_str())
+        {
+            self.focus_document(&self.pane());
+        }
     }
 
     /// Split `pane` the way `layout` is split, and note which pane each tab belongs in. The pane

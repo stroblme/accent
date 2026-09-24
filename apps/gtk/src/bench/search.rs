@@ -180,9 +180,10 @@ fn bench_search_print(app: &Rc<App>, step: &str) {
     let Some(sidebar) = app.sidebar.get() else {
         return println!("bench search step={step} pane=none");
     };
-    let (page, rows) = sidebar.search_state();
+    let (page, rows, count) = sidebar.search_state();
     let (button, sensitive) = sidebar.replace_all_state();
     println!(
-        "bench search step={step} page={page} rows={rows} button=\"{button}\" sensitive={sensitive}"
+        "bench search step={step} page={page} rows={rows} count={count:?} button=\"{button}\" \
+         sensitive={sensitive}"
     );
 }

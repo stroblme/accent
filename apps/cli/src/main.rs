@@ -123,8 +123,9 @@ enum Cmd {
     },
     /// Hold the terminals' shells: the daemon `attach` starts when none is running.
     ///
-    /// One per user and machine. It leaves on its own when its last shell has ended, and returns
-    /// at once when another holder is already up.
+    /// One per user and machine. It leaves on its own when its last shell has ended, or ten
+    /// seconds after it was last asked anything when it never held one, and returns at once when
+    /// another holder is already up.
     Hold,
     /// Attach this terminal to held shell ID, starting the holder and the shell if need be.
     ///
@@ -138,7 +139,10 @@ enum Cmd {
         cwd: Option<PathBuf>,
         id: String,
     },
-    /// End a held shell and everything running in it. Nothing to do if no shell has this id.
+    /// End a held shell and everything running in it.
+    ///
+    /// An id no shell has yet is remembered, so that an attach still on its way with it starts
+    /// nothing; a holder is started to remember it if none is running.
     Kill { id: String },
     /// List the held shells, one JSON object per line.
     Held,
