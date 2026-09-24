@@ -422,7 +422,7 @@ impl App {
     /// the first thing in it that will have it, which for a note is whatever its banner is showing
     /// and for a shell is the scroller around vte, which cannot hear a keystroke. An image, a
     /// status page and a two-blob comparison have no keys of their own and are left alone.
-    fn focus_document(&self, pane: &Pane) {
+    pub(crate) fn focus_document(&self, pane: &Pane) {
         let widget: gtk::Widget = match self.doc_of(pane) {
             Some(Doc::Text(tab)) => tab.view.clone().upcast(),
             Some(Doc::Terminal(term)) => term.view.clone().upcast(),

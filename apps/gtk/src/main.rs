@@ -172,6 +172,8 @@ fn main() -> glib::ExitCode {
         }
     }
     shell.install_app_actions(&app);
+    // The primary instance only, before its first window: see `terminal::sweep`.
+    app.connect_startup(|_| terminal::sweep());
     // The keyboard moving to another window changes no `focus-widget` — each window keeps its
     // own — so which shell has it is asked again here, of the window that has it now.
     app.connect_active_window_notify({
