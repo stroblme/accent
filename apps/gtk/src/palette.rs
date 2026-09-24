@@ -101,10 +101,14 @@ pub struct Sources {
     /// Bind an action to a new set of accelerators, or to its default when given `None`. Returns
     /// what is in force afterwards, so the row can be redrawn without asking again.
     pub on_rebind: Box<Rebind>,
-    /// Drop a vault from the recent list, by the key its row carries. Forgets a list entry and
-    /// deletes nothing, which is why the row's button asks nothing first.
-    pub on_forget: Box<dyn Fn(&str)>,
+    /// Drop a vault from the recent list, by the key its row carries, and run the callback once
+    /// the row may go: at once for a vault, after the question for a terminal session, whose
+    /// shells end with it (`Shell::remove_recent`), and never if that question is declined.
+    pub on_forget: Box<Forget>,
 }
+
+/// Remove the recent vault `key`, then run the callback once its row may go.
+pub type Forget = dyn Fn(&str, Box<dyn FnOnce()>);
 
 /// Bind `action` to `accels`, or to its default when they are `None`; yields what is in force.
 pub type Rebind = dyn Fn(&str, Option<Vec<String>>) -> Vec<String>;
@@ -294,8 +298,8 @@ fn accel_button(
 
 /// Forgetting a recent vault, the same removal the start screen's rows have. Always visible, not
 /// a hover affordance: a button that only appears under the pointer is not there at all for the
-/// keyboard or for a touchscreen. No confirmation either — it drops a list entry and deletes
-/// nothing on disk but a terminal session's own state file (`start::forget_vault`).
+/// keyboard or for a touchscreen. A vault goes without a question, being only a list entry; a
+/// terminal session is asked about, its shells ending with it (`Shell::remove_recent`).
 fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
@@ -807,22 +811,27 @@ pub fn present(
             (vaults.clone(), vault_places.clone(), refresh.clone());
         let (entry, selection) = (entry.clone(), selection.clone());
         move |key: &str| {
-            on_forget(key);
-            {
-                let mut vaults = vaults.borrow_mut();
-                vaults.retain(|vault| vault != key);
-                *vault_places.borrow_mut() = places(&vaults, &vaults);
-            }
-            let selected = selection.selected();
-            refresh(&entry.text());
-            if selected < selection.n_items() {
-                selection.set_selected(selected);
-            }
+            let (vaults, vault_places, refresh) =
+                (vaults.clone(), vault_places.clone(), refresh.clone());
+            let (entry, selection, gone) = (entry.clone(), selection.clone(), key.to_string());
+            let removed = move || {
+                {
+                    let mut vaults = vaults.borrow_mut();
+                    vaults.retain(|vault| *vault != gone);
+                    *vault_places.borrow_mut() = places(&vaults, &vaults);
+                }
+                let selected = selection.selected();
+                refresh(&entry.text());
+                if selected < selection.n_items() {
+                    selection.set_selected(selected);
+                }
+            };
+            on_forget(key, Box::new(removed));
         }
     });
     // Delete on a highlighted Open Recent row does what its trash button does — but only where
     // the key is free: in a text entry Delete takes the character after the caret, so it is the
-    // list's only when there is none to take. Nothing is deleted from disk either way.
+    // list's only when there is none to take.
     let forget_row: Rc<dyn Fn(&gtk::SearchEntry) -> glib::Propagation> = Rc::new({
         let (forget, selection) = (forget.clone(), selection.clone());
         move |entry: &gtk::SearchEntry| {

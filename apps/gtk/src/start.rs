@@ -27,12 +27,17 @@ const CONNECT: &str = "connect";
 /// worse than one that never completes.
 const PROBE_SECONDS: u32 = 5;
 
+/// Remove from Recents as the shell does it (`Shell::remove_recent`): the widget to ask over, the
+/// key, and what to run once the row may go.
+pub type Forget = Rc<dyn Fn(&gtk::Widget, &Path, Box<dyn FnOnce()>)>;
+
 /// The window shown when `accent` is launched without a vault path.
 /// `on_open` receives the chosen vault directory; a remote is `app.open-remote`'s job.
 pub fn present(
     app: &adw::Application,
     config: Rc<RefCell<Config>>,
     on_open: impl Fn(PathBuf) + 'static,
+    on_forget: Forget,
 ) -> adw::ApplicationWindow {
     // The start screen is a window like any other, so it follows the same theme preference.
     crate::theme::apply(config.borrow().theme);
@@ -112,7 +117,7 @@ pub fn present(
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
     window.set_content(Some(&toolbar));
-    match recent_section(&window, &config, &on_open) {
+    match recent_section(&window, &config, &on_open, &on_forget) {
         // Once there are vaults to go back to, they are what this screen is for, so they take the
         // window: no status page, whose icon and title would leave room for a row at most at the
         // default size. A long list fills the height between the margins and scrolls inside it.
@@ -174,6 +179,7 @@ fn recent_section(
     window: &adw::ApplicationWindow,
     config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
+    on_forget: &Forget,
 ) -> Option<(gtk::Box, gtk::SearchEntry)> {
     let recent = recent_vaults(config);
     if recent.is_empty() {
@@ -192,8 +198,8 @@ fn recent_section(
         list.append(&recent_row(
             path,
             home.as_deref(),
-            config,
             on_open,
+            on_forget,
             &section,
         ));
     }
@@ -276,8 +282,8 @@ fn matches(query: &str, title: &str, subtitle: &str) -> bool {
 fn recent_row(
     path: PathBuf,
     home: Option<&Path>,
-    config: &Rc<RefCell<Config>>,
     on_open: &Rc<dyn Fn(PathBuf)>,
+    on_forget: &Forget,
     section: &gtk::Box,
 ) -> adw::ActionRow {
     let (title, subtitle) = labels(&path, home);
@@ -304,13 +310,20 @@ fn recent_row(
     forget.add_css_class("flat");
     forget.connect_clicked({
         // Weak: the section holds this row, so a strong handle would be a cycle.
-        let (path, config, section) = (path.clone(), config.clone(), section.downgrade());
+        let (path, on_forget, section) = (path.clone(), on_forget.clone(), section.downgrade());
         move |button| {
-            forget_vault(&config, &path);
             // Looked up rather than captured, so the row does not hold a reference to itself.
-            if let Some(row) = button.ancestor(adw::ActionRow::static_type())
-                && let Some(list) = row.parent().and_downcast::<gtk::ListBox>()
-            {
+            let row = button
+                .ancestor(adw::ActionRow::static_type())
+                .map(|r| r.downgrade());
+            let section = section.clone();
+            let removed = move || {
+                let Some(row) = row.and_then(|row| row.upgrade()) else {
+                    return;
+                };
+                let Some(list) = row.parent().and_downcast::<gtk::ListBox>() else {
+                    return;
+                };
                 list.remove(&row);
                 // Nothing left to offer: the rule, the search and the card are what "the vaults
                 // it has seen" is made of, and an empty one says nothing. `recent_section`
@@ -322,21 +335,20 @@ fn recent_row(
                 {
                     section.set_visible(false);
                 }
-            }
+            };
+            on_forget(button.upcast_ref(), &path, Box::new(removed));
         }
     });
     row.add_suffix(&forget);
     row
 }
 
-/// Drop `path` from the recent vaults and write the config back. Shared with the Open Recent
-/// picker, which offers the same removal from its own rows, and with Close Session.
+/// Drop `path` from the recent vaults and write the config back: what Remove from Recents does
+/// once it may (`Shell::remove_recent`), and what Close Session ends with.
 ///
 /// A vault's own files are not touched, nor its state file: the list is the only thing that
 /// remembers a vault, and its tabs are still there when it is opened again. A terminal session is
-/// nothing but its state file, so that goes with the row, and the next start's sweep then finds
-/// its held shells named by no session and ends them (`terminal::sweep`); shells on a host are
-/// never swept.
+/// nothing but its state file, so that goes with the row; its shells have been ended by then.
 pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
     config.borrow_mut().recent_vaults.retain(|p| p != path);
     crate::settings::save(&config.borrow());
