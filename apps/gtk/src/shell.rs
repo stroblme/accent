@@ -680,12 +680,13 @@ impl Shell {
         let Some((from, doc)) = self.owner_of(page) else {
             return tracing::debug!("a tab in no window's bookkeeping; left where it is");
         };
-        // A shell is a running process and a diff is a view of two texts: neither is a file the
-        // other window could open, so the drag goes back where it came from.
-        if doc.is_transient() {
+        // A shell is a running process, a diff is a view of two texts and a remote vault's file is
+        // on its host: none is a file the other window could open, so the drag goes back where it
+        // came from.
+        let key = doc.key();
+        if doc.is_transient() || from.on_host(&key) {
             return return_page(into, &from, page, "This tab cannot move between windows.");
         }
-        let key = doc.key();
         let path = match doc::is_loose_key(&key) {
             true => PathBuf::from(&key),
             false => from.root().join(&key),
