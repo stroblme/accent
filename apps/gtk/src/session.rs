@@ -862,7 +862,7 @@ impl Drop for Asked {
 struct Unsized;
 
 /// How long a split is along the way it splits.
-fn extent_of(paned: &gtk::Paned) -> i32 {
+pub(crate) fn extent_of(paned: &gtk::Paned) -> i32 {
     match paned.orientation() {
         gtk::Orientation::Vertical => paned.height(),
         _ => paned.width(),

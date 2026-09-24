@@ -55,7 +55,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // Move the tab into the pane that way, splitting one off only when there is none. Left and
     // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
     // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
-    // `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
+    // `Alt+Up` / `Alt+Down` are on DESIGN.md's never-bind list, and `Ctrl+Alt`+arrow moves the
+    // dividers.
     ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
     (
         "win.move-tab-right",
@@ -64,6 +65,25 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.move-tab-up", "Move Tab Up", &[]),
     ("win.move-tab-down", "Move Tab Down", &[]),
+    // The divider of the nearest split around the active pane that runs that way, one step of a
+    // grid anchored at the centre (`panes::divider_step`). A stock GNOME takes all four chords
+    // for switching workspaces before the window sees them, which is what a rebind is for.
+    (
+        "win.divider-left",
+        "Move Divider Left",
+        &["<Control><Alt>Left"],
+    ),
+    (
+        "win.divider-right",
+        "Move Divider Right",
+        &["<Control><Alt>Right"],
+    ),
+    ("win.divider-up", "Move Divider Up", &["<Control><Alt>Up"]),
+    (
+        "win.divider-down",
+        "Move Divider Down",
+        &["<Control><Alt>Down"],
+    ),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
@@ -323,6 +343,10 @@ impl App {
             "move-tab-right" => self.move_tab(Side::Right),
             "move-tab-up" => self.move_tab(Side::Up),
             "move-tab-down" => self.move_tab(Side::Down),
+            "divider-left" => self.move_divider(Side::Left),
+            "divider-right" => self.move_divider(Side::Right),
+            "divider-up" => self.move_divider(Side::Up),
+            "divider-down" => self.move_divider(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
@@ -692,6 +716,9 @@ const CAPTURED: &[&str] = &[
 /// * `win.next-tab` / `win.previous-tab` (`Ctrl+Tab`) — the same rule as Close Tab, and these
 ///   were `AdwTabView`'s own capture-phase chords before they were actions, so a shell never had
 ///   them to lose. No readline meaning either: `Ctrl+I` is the completion key, not `Ctrl+Tab`.
+/// * the four Move Tab and four Move Divider actions — arranging the panes has to work from
+///   whatever is in one. `Shift+Alt`+arrow and `Ctrl+Alt`+arrow have no readline meaning; what a
+///   shell loses is a program that binds them itself, tmux's pane resizing being the usual one.
 /// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
 ///   scale one have to be reachable from inside one.
 /// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
@@ -713,6 +740,10 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.move-tab-right"
             | "win.move-tab-up"
             | "win.move-tab-down"
+            | "win.divider-left"
+            | "win.divider-right"
+            | "win.divider-up"
+            | "win.divider-down"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
@@ -1179,6 +1210,9 @@ mod tests {
         // `Shift+Alt`+arrow has no readline meaning to cost a shell.
         assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
         assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
+        // So does moving a divider, which is the pane's and not the tab's.
+        assert!(reserved("win.divider-left", "<Control><Alt>Left"));
+        assert!(reserved("win.divider-down", "<Control><Alt>Down"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
         for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {

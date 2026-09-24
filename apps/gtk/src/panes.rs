@@ -348,6 +348,31 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
     }
 }
 
+/// How far one Move Divider step goes, as a share of the split.
+const DIVIDER_STEP: f64 = 0.05;
+
+/// Where a divider at `position` in a split `extent` long goes one step towards the end
+/// (`forward`) or the start: the next stop on a grid of [`DIVIDER_STEP`]s anchored at the centre,
+/// which is where a split starts and where a double-click puts it back. So a divider the pointer
+/// left off the grid lands on it, and the centre is always a stop. A position within a pixel of a
+/// stop is that stop, a share of the split having been rounded to whole pixels.
+///
+/// Pure; keeping the answer inside what the split allows is the caller's.
+pub fn divider_step(position: i32, extent: i32, forward: bool) -> i32 {
+    let step = DIVIDER_STEP * f64::from(extent);
+    if step <= 0.0 {
+        return position;
+    }
+    let centre = f64::from(extent) / 2.0;
+    let at = (f64::from(position) - centre) / step;
+    let pixel = 1.0 / step;
+    let stop = match forward {
+        true => (at + pixel).floor() + 1.0,
+        false => (at - pixel).ceil() - 1.0,
+    };
+    (centre + stop * step).round() as i32
+}
+
 /// The pane on `side` of `from`, as an index into `others`: the nearest one that starts at or
 /// past `from`'s far edge on that axis and faces it on the other. Ties — two panes stacked
 /// against the same edge — go to whichever faces more of `from`.
@@ -955,6 +980,22 @@ mod tests {
         nav.forget("a.md");
         assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
         assert!(nav.back(caret("c.md", 1)).is_none());
+    }
+
+    /// The grid is anchored at the centre, so a divider dragged to 47 % steps to 50 % or 45 %,
+    /// never to 52 % or 42 %; and a stop rounded to whole pixels still counts as the stop.
+    #[test]
+    fn a_divider_steps_along_a_grid_anchored_at_the_centre() {
+        assert_eq!(divider_step(470, 1000, true), 500);
+        assert_eq!(divider_step(470, 1000, false), 450);
+        assert_eq!(divider_step(500, 1000, true), 550);
+        assert_eq!(divider_step(501, 1000, false), 450);
+        assert_eq!(divider_step(499, 1000, true), 550);
+        assert_eq!(
+            divider_step(300, 0, true),
+            300,
+            "an unallocated split stays put"
+        );
     }
 
     #[test]

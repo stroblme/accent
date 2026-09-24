@@ -36,11 +36,16 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
     const STEPS: &[&str] = &["win.split-right", "win.move-tab-left", "win.move-tab-right"];
     let Some(action) = STEPS.get(step) else {
         if let Some(gtk_app) = app.window.application() {
-            for accel in ["<Shift><Alt>Left", "<Shift><Alt>Right"] {
+            for accel in [
+                "<Shift><Alt>Left",
+                "<Shift><Alt>Right",
+                "<Control><Alt>Left",
+                "<Control><Alt>Up",
+            ] {
                 println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
             }
         }
-        return bench_quit(app);
+        return bench_dividers(app);
     };
     println!("bench step {action}");
     let _ = WidgetExt::activate_action(&app.window, action, None);
@@ -49,6 +54,34 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, step + 1);
     });
+}
+
+/// Move Divider over the split the steps above leave, from where a drag left it at 47 %: a step
+/// each way, which lands on the grid anchored at the centre; a step along the axis no split runs,
+/// which moves nothing; and a run of steps into the end of the range, which stops at what the
+/// pane's minimum width allows.
+fn bench_dividers(app: &Rc<App>) {
+    let Some(paned) = app.pane().widget().parent().and_downcast::<gtk::Paned>() else {
+        println!("bench divider none");
+        return bench_quit(app);
+    };
+    let extent = paned.width();
+    paned.set_position(extent * 47 / 100);
+    let say = |what: &str| {
+        let share = f64::from(paned.position()) / f64::from(extent);
+        println!("bench divider {what} {share:.3}");
+    };
+    say("dragged");
+    for side in ["right", "left", "left", "up"] {
+        let _ = WidgetExt::activate_action(&app.window, &format!("win.divider-{side}"), None);
+        say(side);
+    }
+    for _ in 0..30 {
+        let _ = WidgetExt::activate_action(&app.window, "win.divider-left", None);
+    }
+    say("left_x30");
+    println!("bench divider min {}", paned.min_position());
+    bench_quit(app);
 }
 
 /// How many panes there are, and where in the window three things sit: the pane holding `page`,

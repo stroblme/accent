@@ -262,6 +262,25 @@ impl App {
         self.focus_document(to);
     }
 
+    /// Move Divider: one step of the divider of the nearest split around the active pane that
+    /// runs across `side`'s axis, towards `side` (`panes::divider_step`), kept inside what the
+    /// panes' own minimum sizes allow. A window with no such split has nothing to move.
+    pub fn move_divider(&self, side: Side) {
+        let (orientation, _) = panes::arrange(side);
+        let forward = matches!(side, Side::Right | Side::Down);
+        let mut inner = self.pane().widget().clone();
+        // Up through the pane tree only: its root is a bin, so the walk never reaches the split
+        // between the document column and the preview, or the sidebar's.
+        while let Some(paned) = inner.parent().and_downcast::<gtk::Paned>() {
+            if paned.orientation() == orientation {
+                let to = panes::divider_step(paned.position(), session::extent_of(&paned), forward);
+                paned.set_position(to.min(paned.max_position()).max(paned.min_position()));
+                return;
+            }
+            inner = paned.upcast();
+        }
+    }
+
     /// A tab dropped on the middle of `pane`: at the end of its bar and with the keyboard, where
     /// [`Self::move_tab`] leaves one. libadwaita has already attached and selected it, at the
     /// front, the one position `create-window` can put a page in.
