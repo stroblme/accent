@@ -90,7 +90,8 @@ use tags::bench_tags;
 /// is one git has outgrown and the comparison would have nothing to show. `=row:staged:<repo_rel>`
 /// and `=row:commit:<repo_rel>` are the same shape for the two that open a tab of their own: a
 /// Staged row unstaged behind the pane's back, and the file at HEAD against HEAD~1 where HEAD did
-/// not touch it. `=diag:<rel_text_file>`
+/// not touch it; where HEAD did, the tab it opens says whether its first change is on screen and
+/// where the shared scrollbar is. `=diag:<rel_text_file>`
 /// collapses a run with warnings in it and prints how many end-of-line messages and gutter marks
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
