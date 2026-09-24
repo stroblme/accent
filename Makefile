@@ -61,7 +61,7 @@ SERVER_BIN  := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(MUSL_TARGE
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
 # Honours CARGO_TARGET_DIR, which parallel worktrees must each set to a directory of their
-# own (ROADMAP §6): without this `smoke` and `install` look for a binary cargo never wrote there.
+# own: without this `smoke` and `install` look for a binary cargo never wrote there.
 TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(PROFILE)
 
 # The vault used by every test and benchmark. Never point these at a real vault.
@@ -71,7 +71,7 @@ VAULT_FILES ?= 40000
 # Repo tooling rather than a CLI subcommand, so the fixtures are not a public feature of the app.
 GEN_VAULT := crates/core/examples/gen-vault.rs
 
-# Headless runs need an X server; :99 is what ROADMAP.md and CI use. GDK_BACKEND=x11 because
+# Headless runs need an X server; :99 is what CI uses. GDK_BACKEND=x11 because
 # DISPLAY alone leaves GTK on a Wayland session; cairo because there is no GL under Xvfb; no a11y
 # because the private bus has no registry; fatal-criticals so a GTK critical fails the check.
 DISPLAY_NUM ?= 99

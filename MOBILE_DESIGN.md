@@ -183,13 +183,48 @@ A PDF is recoloured in a dark theme the way the desktop does it: the document's 
 app's surface and its ink on the app's text, each pixel keeping its own chroma, so a coloured
 figure stays coloured.
 
+## Architecture
+
+The decisions under the Android app, each with its reason; the shared ones are in DESIGN.md.
+
+- **Scope**: reading the vault, small edits, reading and marking up PDFs, and serving as the
+  system's PDF viewer (`ACTION_VIEW`, no vault needed); the Pixel 8 is the reference device.
+- **Storage**: all-files access (`MANAGE_EXTERNAL_STORAGE`) and real paths, distributed as an APK
+  or through F-Droid, Play optional — the Storage Access Framework is 25–50× slower and cannot see a
+  Syncthing folder that already exists, and Play allows the permission only behind a declaration.
+- **The ffi** lives in `crates/api/src/ffi/` behind the `android` feature, core types declared with
+  `#[uniffi::remote]` — one façade, and no mirrored definitions to keep in step.
+- **`android/ffi` is a cdylib of its own** — `accent-api` as one would make every desktop build link a
+  shared object nobody loads, and the static musl server build refuses cdylibs.
+- **Text offsets become UTF-16 in the ffi** — the core counts bytes and Kotlin UTF-16, and a span in
+  the wrong unit lands beside the word.
+- **A colour crosses as one `u32`** (`0xRRGGBBAA`) — uniffi carries no arrays, and it is how Android
+  spells a colour.
+- **No watcher**: `Vault::open_unwatched`, and a rescan on every return to the app — inotify over
+  emulated storage drops events; the app's own writes still reach the index.
+- **A first index lets the reader in while it runs**: the walk commits in batches and the tree lists
+  what it has as it goes — a large vault's first walk is tens of seconds. Stopping it is the
+  desktop's pause, and the rescan on a return is one of the walks a pause refuses.
+- **The PDF rules are the core's**, called by both apps (`pdf::highlight_quads`,
+  `pdf::link_with_alias`, the ink ledger in `accent_core::pdf::ledger`) — the reader behaves as the
+  desktop's does, and only the gestures, the drawing and their arithmetic are Kotlin.
+- **Settings and sessions are Kotlin's** (`SharedPreferences`) — panes, splits and zoom do not exist
+  here; what the two apps share is the vault, and that is a path.
+- **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's
+  `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
+- **The editor is `BasicTextField(TextFieldState)`** with a styled `OutputTransformation` — the only
+  field that is not deprecated, and `TextFieldBuffer.addStyle` is where the core's spans go.
+- **Wet strokes are a Compose `Canvas`** path committed on release — about thirty lines and no View
+  interop; `androidx.ink` is the upgrade once a stylus has been held against it.
+- **minSdk 31** — where Material You reads the system colours the accent comes from.
+
 ## What is not here, and why
 
 Git, language servers, ghost text and word suggestions, remote vaults, the terminal, diagrams,
 multi-pane, comparison, Replace All, the minimap, focus-mode levels and presentation mode are
 desktop features. Some have no input model here (a shell without a keyboard), some duplicate what
 the platform already does (a phone keyboard completes words), and the rest would be a second app
-inside this one. The test is the one the roadmap set: does it help someone read their vault, make
+inside this one. The test is the one Android's brief set: does it help someone read their vault, make
 a small edit, or read and mark up a PDF.
 
 Deferred rather than refused: tags and backlinks, templates and the daily note, mermaid diagrams

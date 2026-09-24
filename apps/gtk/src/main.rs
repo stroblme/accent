@@ -1109,7 +1109,7 @@ impl App {
         let mut excluded = git.ignored();
         excluded.extend(self.config.borrow().search.exclude.iter().cloned());
         // Only where it really moved. A refresh lands on every save and the write below is a few
-        // thousand `UPDATE`s on a large vault — the very write the ROADMAP's "Index writes" row
+        // thousand `UPDATE`s on a large vault — the very write DESIGN.md's "Index writes" entry
         // records as contending with autosave's reindex. The set that was written last is kept so
         // the question can be asked at all, and it starts as `None` rather than empty: the first
         // refresh of a window has to clear whatever the last session recorded.
