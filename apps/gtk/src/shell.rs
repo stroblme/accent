@@ -510,11 +510,59 @@ impl Shell {
             window.present();
             return;
         }
-        let window = start::present(gtk_app, self.config.clone(), {
-            let (shell, gtk_app) = (self.clone(), gtk_app.clone());
-            move |root| shell.open_from_start(&gtk_app, root)
+        let on_forget: start::Forget = Rc::new({
+            let shell = Rc::downgrade(self);
+            move |over: &gtk::Widget, key: &Path, removed: Box<dyn FnOnce()>| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.remove_recent(over, key, removed);
+                }
+            }
         });
+        let window = start::present(
+            gtk_app,
+            self.config.clone(),
+            {
+                let (shell, gtk_app) = (self.clone(), gtk_app.clone());
+                move |root| shell.open_from_start(&gtk_app, root)
+            },
+            on_forget,
+        );
         self.start.set(Some(&window));
+    }
+
+    /// Remove from Recents, from the start screen or the Open Recent picker, and run `removed`
+    /// once the row may go. A vault goes at once: the list is all that remembers it. A terminal
+    /// session's shells are running, so it is asked about first, over the list, and they end on
+    /// the spot: read out of its state file before that goes. A session open in a window goes as
+    /// Close Session would take it, less the start screen, the reader being elsewhere: the window
+    /// closes unnamed, which ends its shells and writes nothing.
+    pub(crate) fn remove_recent(&self, over: &gtk::Widget, key: &Path, removed: Box<dyn FnOnce()>) {
+        let Some(name) = terminal::session_name(key) else {
+            start::forget_vault(&self.config, key);
+            return removed();
+        };
+        let open = self.app_for(key).map(|app| Rc::downgrade(&app));
+        let (config, key) = (self.config.clone(), key.to_path_buf());
+        dialogs::confirm(
+            over,
+            &format!("Remove session {name}?"),
+            "Its shells end now.",
+            "Remove",
+            true,
+            move || {
+                match open.and_then(|app| app.upgrade()) {
+                    Some(app) => {
+                        app.forget_session(&key);
+                        app.window.close();
+                    }
+                    None => {
+                        terminal::end_stored(&key);
+                        start::forget_vault(&config, &key);
+                    }
+                }
+                removed();
+            },
+        );
     }
 
     /// Open a vault picked on the start screen or in one of the dialogs that stand in for it, and

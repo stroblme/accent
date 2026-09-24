@@ -152,9 +152,11 @@ impl App {
             // The start screen's own removal, so one list is written one way.
             on_forget: Box::new({
                 let app = Rc::downgrade(self);
-                move |key: &str| {
-                    if let Some(app) = app.upgrade() {
-                        start::forget_vault(&app.config, Path::new(key));
+                move |key: &str, removed: Box<dyn FnOnce()>| {
+                    if let Some(app) = app.upgrade()
+                        && let Some(shell) = app.shell.upgrade()
+                    {
+                        shell.remove_recent(app.window.upcast_ref(), Path::new(key), removed);
                     }
                 }
             }),
@@ -452,12 +454,17 @@ impl App {
         );
     }
 
-    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
-    /// session's row goes, and its file with it (`start::forget_vault`).
     fn end_session(self: &Rc<Self>, key: &std::path::Path) {
+        self.forget_session(key);
+        let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
+    }
+
+    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
+    /// session's row goes, and its file with it (`start::forget_vault`). Close Session, and Remove
+    /// from Recents on a session this window has open (`Shell::remove_recent`).
+    pub(crate) fn forget_session(&self, key: &std::path::Path) {
         self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
-        let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
     }
 
     /// Let go of this window's shells as it closes. A window that keeps a session only detaches
