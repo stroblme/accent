@@ -148,12 +148,12 @@ impl Panel {
             };
             let rows: Vec<glib::BoxedAnyObject> = files
                 .into_iter()
-                .map(|(letter, path)| {
+                .map(|file| {
                     glib::BoxedAnyObject::new(LogItem::File {
                         oid: oid.clone(),
                         parent: parent.clone(),
-                        letter,
-                        path,
+                        letter: file.letter,
+                        path: file.path,
                     })
                 })
                 .collect();

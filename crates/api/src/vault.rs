@@ -420,7 +420,7 @@ methods! {
     /// there is nothing in it for a remote host to do.
     git git_log = log(repo: ref Repo, skip: val usize, limit: val usize) -> Vec<Commit>;
     git git_show = show(repo: ref Repo, rev: ref str, path: ref str) -> Option<git::Blob>;
-    git git_changed_files = changed_files(repo: ref Repo, oid: ref str) -> Vec<(char, String)>;
+    git git_changed_files = changed_files(repo: ref Repo, oid: ref str) -> Vec<git::ChangedFile>;
     git git_submodules = submodules(repo: ref Repo) -> Vec<Submodule>;
     git git_branches = branches(repo: ref Repo) -> git::Branches;
     git git_checkout = checkout(repo: ref Repo, branch: ref str) -> (),
