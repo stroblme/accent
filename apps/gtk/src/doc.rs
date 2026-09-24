@@ -185,6 +185,13 @@ pub fn kind_of(key: &str) -> Kind {
     }
 }
 
+/// Whether a file written under `to` opens as something other than the tab made for `from`: the
+/// extension picks the kind, the flavour and the language, so a different one wants a new tab.
+pub fn opens_differently(from: &str, to: &str) -> bool {
+    let extension = |key: &str| Path::new(key).extension().map(|e| e.to_ascii_lowercase());
+    extension(from) != extension(to)
+}
+
 /// The icon every file list leads a directory's row with.
 pub const FOLDER_ICON: &str = "filetype-folder-symbolic";
 
@@ -241,6 +248,21 @@ mod tests {
                 "{name} is not in the GResource"
             );
         }
+    }
+
+    #[test]
+    fn a_new_extension_opens_differently() {
+        assert!(!opens_differently("Inbox/note.md", "Archive/other.md"));
+        assert!(
+            !opens_differently("note.md", "note.MD"),
+            "case is not a new kind"
+        );
+        assert!(opens_differently("note.md", "note.txt"));
+        assert!(
+            opens_differently("main.rs", "main.py"),
+            "the language follows it"
+        );
+        assert!(opens_differently("LICENSE", "LICENSE.md"));
     }
 
     #[test]

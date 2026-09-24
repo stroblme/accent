@@ -285,7 +285,11 @@ impl App {
     }
 
     /// `App::land_flight` for a diagram: `report` is false for a write about to go after it.
-    fn land_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, report: bool) -> Option<bool> {
+    pub(crate) fn land_diagram(
+        self: &Rc<Self>,
+        tab: &Rc<DiagramTab>,
+        report: bool,
+    ) -> Option<bool> {
         self.land_flight(
             tab,
             Self::diagram_changed,

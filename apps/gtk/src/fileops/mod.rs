@@ -537,6 +537,34 @@ fn template_picker(templates: &[String]) -> Option<gtk::DropDown> {
 /// A file's extension starts outside the selection, so typing replaces the stem only, and a
 /// folder's name is selected whole, which is what every file manager does.
 pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
+    let note = is_markdown(basename(rel));
+    let from = rel.to_string();
+    path_dialog(ops, rel, is_dir, ("Rename", "Rename"), move |ops, to| {
+        if to == from {
+            return;
+        }
+        match note && !is_markdown(basename(&to)) {
+            true => confirm_demote(ops, &from, &to),
+            false => plan(ops, vec![(from.clone(), to.clone())], verb(&from, &to)),
+        }
+    });
+}
+
+/// Save As…'s dialog: Rename's, whose Save hands `then` the path typed. What is there already is
+/// the caller's question.
+pub fn save_as(ops: &Rc<Ops>, rel: &str, then: impl FnOnce(String) + 'static) {
+    path_dialog(ops, rel, false, ("Save As", "Save"), move |_, to| then(to));
+}
+
+/// The dialog Rename and Save As share: `rel`'s name in the vault's path field, and `then` handed
+/// the path it resolves to once `verb` is pressed.
+fn path_dialog(
+    ops: &Rc<Ops>,
+    rel: &str,
+    is_dir: bool,
+    (title, verb): (&str, &str),
+    then: impl FnOnce(&Rc<Ops>, String) + 'static,
+) {
     let current = basename(rel).to_string();
     let entry = name_entry("Name", &current);
     let form = form();
@@ -548,24 +576,16 @@ pub fn rename(ops: &Rc<Ops>, rel: &str, is_dir: bool) {
         move |typed| renamed_path(&rel, typed)
     }));
 
-    let dialog = name_dialog("Rename", "Rename", &form);
-    let note = is_markdown(&current);
+    let dialog = name_dialog(title, verb, &form);
     let (ops, rel, window) = (ops.clone(), rel.to_string(), ops.window.clone());
     let typed = entry.clone();
     choose(&dialog, Some(&window), move |response| {
         if response != CONFIRM {
             return;
         }
-        let to = match renamed_path(&rel, &typed.text()) {
-            Ok(to) => to,
-            Err(why) => return (ops.toast)(why),
-        };
-        if to == rel {
-            return;
-        }
-        match note && !is_markdown(basename(&to)) {
-            true => confirm_demote(&ops, &rel, &to),
-            false => plan(&ops, vec![(rel.clone(), to.clone())], verb(&rel, &to)),
+        match renamed_path(&rel, &typed.text()) {
+            Ok(to) => then(&ops, to),
+            Err(why) => (ops.toast)(why),
         }
     });
     let selected = renamed_part(&current, is_dir).chars().count() as i32;
@@ -1054,7 +1074,7 @@ fn with_home(root: &Path, rel: &str, home: Option<&Path>) -> String {
 /// levels it did manage. They are named rather than cleaned up — deleting a directory because a
 /// deeper one could not be made is the more dangerous of the two guesses, and one of the levels
 /// may have been there all along.
-fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
+pub(crate) fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
     let dir = parent_dir(rel);
     if dir.is_empty() || vault.exists(dir) {
         return Ok(());
@@ -1062,6 +1082,29 @@ fn make_parents(vault: &Vault, rel: &str) -> Result<(), String> {
     match vault.create_dir(dir) {
         Ok(()) => Ok(()),
         Err(e) => Err(made_what_it_could(vault, dir, &e.to_string())),
+    }
+}
+
+/// What a path Save As was given holds already.
+pub(crate) enum Taken {
+    Free,
+    File,
+    Folder,
+}
+
+/// Asked of the vault, a round trip on a remote one: a stat, and for something that is there the
+/// listing the tree is drawn from, since a stat answers for a folder as well.
+pub(crate) fn taken(vault: &Vault, rel: &str) -> Taken {
+    if !vault.exists(rel) {
+        return Taken::Free;
+    }
+    let folder = vault.list_dir(parent_dir(rel)).is_ok_and(|rows| {
+        rows.iter()
+            .any(|row| row.rel_path == rel && row.kind == FileKind::Dir)
+    });
+    match folder {
+        true => Taken::Folder,
+        false => Taken::File,
     }
 }
 

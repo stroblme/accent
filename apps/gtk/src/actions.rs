@@ -10,6 +10,7 @@ use super::*;
 /// libadwaita has no notion of that order.
 pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Control>s"]),
+    ("win.save-as", "Save As…", &["<Control><Shift>s"]),
     ("win.open-file", "Open File…", &["<Control>o"]),
     ("win.new-file", "New File", &["<Control>n"]),
     ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
@@ -247,6 +248,7 @@ impl App {
         }
         match name {
             "save" => self.save(),
+            "save-as" => self.save_as(),
             "close-session" => self.close_session(),
             "open-file" => self.open_file_dialog(),
             "new-file" => {
