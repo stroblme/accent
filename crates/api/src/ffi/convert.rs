@@ -344,6 +344,31 @@ pub struct SearchLine {
     pub quads: Vec<pdf::Rect>,
 }
 
+/// Where one note link lands on a page today: the quads to paint, and which of the links the
+/// caller handed over it is.
+#[derive(uniffi::Record)]
+pub struct LinkHighlight {
+    pub page: u32,
+    pub quads: Vec<pdf::Rect>,
+    pub link: u32,
+}
+
+/// The glyphs a link's four numbers cover on the page today, `start..end`, and their quads.
+#[derive(uniffi::Record)]
+pub struct Located {
+    pub start: u32,
+    pub end: u32,
+    pub quads: Vec<pdf::Rect>,
+}
+
+/// What a link's `#page=…&selection=…` names: the page, zero-based, and the four numbers if
+/// there are four.
+#[derive(uniffi::Record)]
+pub struct PdfAnchor {
+    pub page: u32,
+    pub selection: Option<Vec<u32>>,
+}
+
 // -------------------------------------------------------------------------------- conversions
 
 /// The one place a `Vec` of anything becomes a `Vec` of what it converts to.
@@ -376,6 +401,22 @@ impl From<index::SearchHit> for SearchHit {
                 end: r.end as u32,
             }),
         }
+    }
+}
+
+/// The way back, which fails for a selection that is not four numbers.
+impl TryFrom<PdfLink> for index::PdfLink {
+    type Error = ();
+
+    fn try_from(l: PdfLink) -> Result<Self, ()> {
+        let selection: Vec<usize> = l.selection.iter().map(|n| *n as usize).collect();
+        Ok(index::PdfLink {
+            src_rel_path: l.src_rel_path,
+            byte_start: l.byte_start,
+            page: l.page as usize,
+            selection: selection.try_into().map_err(|_| ())?,
+            alias: l.alias,
+        })
     }
 }
 

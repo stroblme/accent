@@ -39,7 +39,7 @@ fun HomeScreen(model: VaultModel) {
     val snackbar = remember { SnackbarHostState() }
 
     // Whatever opens arrives with its chrome up, however the last thing read was left.
-    LaunchedEffect(state.open?.rel, state.pdf) { chrome.show() }
+    LaunchedEffect(state.open?.rel, state.pdf?.rel) { chrome.show() }
 
     // Back undoes the last thing that opened, in the order it opened: the screen over the note
     // (Browse's handler is its own, below), then the note. Only with nothing left does it leave
@@ -66,7 +66,12 @@ fun HomeScreen(model: VaultModel) {
             val pdf = state.pdf
             val open = state.open
             when {
-                pdf != null -> PdfScreen(path = pdf, chrome = chrome)
+                pdf != null -> PdfScreen(
+                    model = model,
+                    pdf = pdf,
+                    indexing = state.indexing,
+                    chrome = chrome,
+                )
                 open != null -> NoteScreen(
                     model = model,
                     open = open,

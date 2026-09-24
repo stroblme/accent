@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Sender, TryRecvError, channel};
 
-use accent_api::PdfLink;
 use accent_core::pdf::{self, Ink, PdfDoc};
 use anyhow::{Result, anyhow};
 use gtk::glib;
@@ -42,51 +41,6 @@ pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<R
         })
         .map_err(|e| format!("cannot start the renderer: {e}"))?;
     Ok(tx)
-}
-
-/// Where each note link lands on the page today, per page, with the index of the link it is.
-///
-/// The four numbers first, and the text the link quotes as the fallback — a document rebuilt
-/// with different line breaks moves the numbers but not the sentence. A link whose quads a real
-/// `/Highlight` already covers is left out: it has been exported, and the annotation is in the
-/// page's own pixels.
-fn highlight_quads(doc: &PdfDoc, glyphs: &mut Glyphs, links: &[PdfLink]) -> Highlights {
-    let mut existing: HashMap<usize, Vec<pdf::Highlight>> = HashMap::new();
-    let mut out = Highlights::new();
-    for (at, link) in links.iter().enumerate() {
-        let page = link.page;
-        let found = glyphs
-            .entry(page)
-            .or_insert_with(|| doc.page_text(page).unwrap_or_default());
-        let quads = pdf::selection_quads(found, link.selection)
-            .map(|(_, quads)| quads)
-            .or_else(|| {
-                let text = link.alias.as_deref()?;
-                let hits = doc.search(page, text).ok()?;
-                // The link's own line number is still a hint at where on the page it was, even
-                // when its numbering no longer fits: the nearest hit to that line, rather than
-                // the first on the page, is what a second copy of the same phrase above it used
-                // to steal.
-                let Some(want) = pdf::line_top(found, link.selection[0]) else {
-                    return hits.into_iter().next();
-                };
-                let distance =
-                    |quads: &[pdf::Rect]| quads.first().map_or(f32::MAX, |q| (q.top - want).abs());
-                hits.into_iter()
-                    .min_by(|a, b| distance(a).total_cmp(&distance(b)))
-            });
-        let Some(quads) = quads.filter(|q| !q.is_empty()) else {
-            continue;
-        };
-        let already = existing
-            .entry(page)
-            .or_insert_with(|| doc.highlights_on(page).unwrap_or_default());
-        if already.iter().any(|h| pdf::same_quads(&h.quads, &quads)) {
-            continue;
-        }
-        out.entry(page).or_default().push((quads, at));
-    }
-    out
 }
 
 /// The glyphs of the pages this thread has read, kept until the document is re-read.
@@ -409,11 +363,11 @@ fn render_loop(
                     drop(ack);
                 }
                 Request::Highlights(links) => {
-                    let quads = highlight_quads(&doc, &mut glyphs, &links);
+                    let quads: Highlights = pdf::highlight_quads(&doc, &mut glyphs, &links);
                     send(&view, Reply::Highlights(quads));
                 }
                 Request::Export { links, color } => {
-                    let quads = highlight_quads(&doc, &mut glyphs, &links);
+                    let quads = pdf::highlight_quads(&doc, &mut glyphs, &links);
                     // What each page gains, so only those tiles are rendered again.
                     let pages: Vec<(usize, pdf::Rect)> = quads
                         .iter()

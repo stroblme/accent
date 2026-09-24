@@ -789,6 +789,61 @@ fn selection_quads_round_trips_selection_link() {
     assert!(selection_quads(&glyphs, [0, 0, 0, 0]).is_none());
 }
 
+/// A note link lands by its numbers, or failing them by the text it quotes; one pointing at
+/// nothing paints nothing, and one exported into the file steps aside for the annotation.
+#[test]
+fn a_note_link_lands_by_its_numbers_then_its_text() {
+    let Some((_d, mut doc)) = open_tiny() else {
+        return;
+    };
+    let link = |selection: [usize; 4], alias: Option<&str>| crate::index::PdfLink {
+        src_rel_path: "Note.md".to_string(),
+        byte_start: 0,
+        page: 0,
+        selection,
+        alias: alias.map(str::to_string),
+    };
+    let links = [
+        link([0, 0, 0, 5], None),
+        // Numbers from another edition of the document: the quoted text still finds it.
+        link([7, 0, 7, 6], Some("accent")),
+        link([7, 0, 7, 6], Some("not on the page")),
+    ];
+    let mut glyphs = std::collections::HashMap::new();
+    let found = highlight_quads(&doc, &mut glyphs, &links);
+    let on_page: Vec<usize> = found[&0].iter().map(|(_, at)| *at).collect();
+    assert_eq!(on_page, [0, 1], "{found:?}");
+    assert!(
+        glyphs.contains_key(&0),
+        "the page's text is kept for the next ask"
+    );
+
+    let exported = Highlight {
+        page: 0,
+        quads: found[&0][0].0.clone(),
+        color: [255, 255, 0, 255],
+        contents: None,
+    };
+    doc.add_highlights(&[exported]).unwrap();
+    let after = highlight_quads(&doc, &mut glyphs, &links);
+    let on_page: Vec<usize> = after[&0].iter().map(|(_, at)| *at).collect();
+    assert_eq!(
+        on_page,
+        [1],
+        "the exported one is in the page's own pixels now"
+    );
+}
+
+#[test]
+fn link_with_alias_quotes_the_text_on_one_line() {
+    let link = "[[a.pdf#page=1&selection=0,0,0,5]]";
+    assert_eq!(
+        link_with_alias(link, " a |b]]\n c "),
+        "[[a.pdf#page=1&selection=0,0,0,5|a b c]]"
+    );
+    assert_eq!(link_with_alias(link, "  \n "), link);
+}
+
 #[test]
 fn reads_existing_highlight_annotations() {
     let Some((_d, doc)) = open_tiny_with(true) else {

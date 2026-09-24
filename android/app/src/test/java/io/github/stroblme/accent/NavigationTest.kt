@@ -1,12 +1,16 @@
 package io.github.stroblme.accent
 
+import androidx.compose.ui.unit.IntSize
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
+import io.github.stroblme.accent.ui.Mark
 import io.github.stroblme.accent.ui.Pagination
 import io.github.stroblme.accent.ui.hit
+import io.github.stroblme.accent.ui.markAt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -135,5 +139,53 @@ class NavigationTest {
         val under = link(100f, 200f, 300f, 220f, LinkTarget.Page(1u, null))
         val over = link(150f, 200f, 250f, 220f, LinkTarget.Page(2u, null))
         assertEquals(over, hit(listOf(under, over), Point(200f, 210f), slop = 0f))
+    }
+
+    private val screen = IntSize(1080, 2000)
+
+    @Test
+    fun `a passage already in view is left where it is`() {
+        val rect = Rect(100f, 300f, 200f, 312f)
+        assertNull(pages.reveal(0, rect, above = 0f, panX = 0f, screen, 1f, clear = 150f))
+    }
+
+    /** Down the document, it comes to the middle of what the bar leaves of the screen. */
+    @Test
+    fun `a passage further down is brought to the middle`() {
+        val rect = Rect(100f, 400f, 200f, 412f)
+        val to = pages.reveal(3, rect, above = 0f, panX = 0f, screen, 1f, clear = 150f)!!
+        val above = pages.top(to.row, width, 1f) + to.into
+        val middle = pages.top(3, width, 1f) + 406f * (1080f / 595f)
+        assertEquals((150f + 2000f) / 2, middle - above, 1f)
+        assertEquals(0f, to.panX, 0f)
+    }
+
+    /** At 4× a passage off the side is panned to the middle, and the scroll is left alone. */
+    @Test
+    fun `a passage off to the side is panned to it`() {
+        val scale = 4 * 1080f / 595f
+        val above = pages.top(1, width, 4f) + 400f * scale - 1000f
+        val rect = Rect(400f, 400f, 440f, 412f)
+        val to = pages.reveal(1, rect, above, panX = 0f, screen, 4f, clear = 0f)!!
+        assertEquals(540f - 420f * scale, to.panX, 1f)
+        assertEquals(above, pages.top(to.row, width, 4f) + to.into, 1f)
+    }
+
+    private fun mark(src: String, vararg quads: Rect) =
+        Mark(quads.toList(), PdfLink(src, 0L, 0u, listOf(0u, 0u, 0u, 5u), null))
+
+    /**
+     * A highlight over two lines is hit on either, and where two notes highlight the same words
+     * the first listed opens, as the desktop's `highlight_at` has it — unlike a `/Link`, where
+     * the later box is the one on top.
+     */
+    @Test
+    fun `a tap on a highlight finds its note, the first where two overlap`() {
+        val a = mark("A.md", Rect(100f, 200f, 300f, 210f), Rect(100f, 212f, 180f, 222f))
+        val b = mark("B.md", Rect(150f, 200f, 250f, 210f))
+        assertEquals(a, markAt(listOf(a, b), Point(200f, 205f), slop = 0f))
+        assertEquals(a, markAt(listOf(a, b), Point(120f, 220f), slop = 0f))
+        assertEquals(b, markAt(listOf(b, a), Point(200f, 205f), slop = 0f))
+        assertNull(markAt(listOf(a, b), Point(200f, 240f), slop = 8f))
     }
 }
