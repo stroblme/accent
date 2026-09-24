@@ -128,13 +128,10 @@ impl App {
             if app.doc_for(&key).is_some() {
                 return;
             }
-            match read {
-                Some(read) => app.adopt_text(&key, read, flavour, how),
-                // The tab is never going to arrive, so whatever was waiting for it is let go.
-                None => {
-                    app.awaiting.borrow_mut().remove(&key);
-                }
-            }
+            // A worker that panicked is one more way for the read to fail, and is said as the others
+            // are: the open named in a toast, and whatever was waiting on the tab let go with it.
+            let read = read.unwrap_or_else(|| Err(std::io::Error::other("the worker stopped")));
+            app.adopt_text(&key, read, flavour, how);
         });
     }
 
