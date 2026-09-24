@@ -58,6 +58,7 @@ mod typing;
 mod widgets;
 mod wire;
 mod work;
+mod wrap;
 mod zoom;
 
 use accent_api::{Config, Etag, Event, Location, SaveError, Session, Vault, ssh};

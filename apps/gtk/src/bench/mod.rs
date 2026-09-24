@@ -47,7 +47,7 @@ use panes::{
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme};
+use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme, bench_wrap};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -83,7 +83,9 @@ use tags::bench_tags;
 /// drives a path entry's completion, and prints widths and the text its keys apply.
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
-/// or a drop out of a styled or folded line brings its tags along.
+/// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
+/// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
+/// indent on 10k lines of code in the last one.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -473,7 +475,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
-            return bench_style(&app, &rel);
+            return match rel.strip_prefix("wrap:") {
+                Some(rels) => bench_wrap(&app, rels),
+                None => bench_style(&app, &rel),
+            };
         }
         if let Some(rel) = expand {
             bench_expand(&app, &rel);

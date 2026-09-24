@@ -9,7 +9,7 @@
 //! callback and what it needs from the vault arrives as a closure, so a tab can be built, moved
 //! and closed without `main` reaching inside it.
 
-use crate::{diagnostics, diff, fold, highlight, lang, multicaret};
+use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
 use accent_api::{Diagnostic, Fold, Vault};
 use accent_core::fs::{self, Etag, SaveError};
 use accent_core::markdown::Link;
@@ -360,6 +360,8 @@ fn build(
 ) -> (sourceview5::View, sourceview5::Buffer) {
     let buffer = sourceview5::Buffer::new(None);
     buffer.set_language(language.as_ref());
+    // First: a note's heading tags set an indent too, and have to outrank these.
+    wrap::install(&buffer);
     match flavour {
         Flavour::Note => highlight::install_tags(&buffer),
         Flavour::Csv => highlight::install_csv_tags(&buffer),
@@ -419,6 +421,8 @@ fn build(
     // called from `set_font` below, puts the zoomed values here.
     view.set_pixels_above_lines(2);
     view.set_pixels_below_lines(2);
+    // Once the tab width is set, which the columns are counted in.
+    wrap::follow(&view, flavour.is_note());
     (view, buffer)
 }
 
@@ -1061,6 +1065,7 @@ impl Tab {
             Flavour::Csv => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
         }
+        wrap::measure(&self.view);
         self.marks.restyle(&self.view);
         diagnostics::restyle(&self.buffer, &self.view);
         self.fold_renderer.restyle(&self.view);
