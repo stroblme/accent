@@ -407,12 +407,14 @@ fn build(
     view.set_enable_snippets(true);
     sourceview5::SnippetManager::default().set_search_path(&[]);
     view.set_show_line_numbers(false);
+    // The Indent Width preference's default, which `Tab::set_indent_width` replaces in a tab; a
+    // companion keeps it, so both sides of a comparison count a tab and a wrap level alike.
+    view.set_tab_width(4);
     if !flavour.is_note() {
         view.set_auto_indent(true);
         view.set_indent_on_tab(true);
         view.set_smart_backspace(true);
         view.set_highlight_current_line(true);
-        view.set_tab_width(4);
         // Everything but a makefile, where a leading tab is syntax.
         let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
         view.set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
@@ -1240,12 +1242,11 @@ impl Tab {
 
     // --- preferences ---------------------------------------------------------------------
 
-    /// How wide one indent is, from preferences. Prose is left with GtkSourceView's own: Tab in a
-    /// note writes a literal tab or a list item's own indent, and neither is measured in columns.
+    /// How wide one indent is, from preferences: what a tab character is worth on screen and one
+    /// wrap level (`wrap.rs`), in a note as in code. A note's Tab still writes a literal tab or a
+    /// list item's own indent; four columns is also the tab stop CommonMark reads a note's tab at.
     pub fn set_indent_width(&self, columns: u32) {
-        if !self.flavour.is_note() {
-            self.view.set_tab_width(columns);
-        }
+        self.view.set_tab_width(columns);
     }
 
     pub fn set_spellcheck(&self, on: bool) {

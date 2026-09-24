@@ -518,7 +518,7 @@ pub(super) fn bench_list(app: &Rc<App>, rel: &str) {
 
 /// Return and Tab down every list line of the note, and then Tab on lines with text on them.
 fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
-    // What Tab is worth here: the preference in a code tab, GtkSourceView's own in prose.
+    // What a tab is worth here: the Indent Width preference.
     println!("bench list_indent_width {}", tab.view.tab_width());
     let lines: Vec<String> = original.lines().map(str::to_string).collect();
     let (mut asked, mut wrong) = (0, 0);

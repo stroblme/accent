@@ -488,7 +488,7 @@ mod tests {
     /// deeper than the line's own indent, in a note and in code alike.
     #[test]
     fn a_wrapped_line_hangs_behind_its_own_gutter() {
-        // A note: tabs every 8 columns, and a tab is one level.
+        // A note's rule, markers on, here with 8-column tabs and levels.
         let note = |line| wrap_column(line, 8, 8, true);
         assert_eq!(note("- item"), 2);
         assert_eq!(note("* item"), 2);
