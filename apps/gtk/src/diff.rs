@@ -307,20 +307,28 @@ pub(crate) fn normalise(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
 
-/// Where each `\n`-separated line of `text` starts, in characters, with the text's end appended
-/// so line `n` (1-based) always spans `starts[n - 1]..starts[n]`, its newline included.
+/// Where each line of `text` starts, in characters, with the text's end appended so line `n`
+/// (1-based) always spans `starts[n - 1]..starts[n]`, its line ending included. A line ends where
+/// `similar` ends one: at `\n`, at `\r\n`, and at a `\r` on its own, so the diff's line numbers
+/// index this.
 ///
 /// Counted in characters and not taken from the buffer's own line numbers: `GtkTextBuffer`
 /// breaks a line at U+2029 too, and the diff does not, so a note carrying one puts the two
 /// numberings permanently out of step. A character offset means the same thing to both.
 fn line_starts(text: &str) -> Vec<i32> {
-    let mut starts = Vec::new();
+    let mut starts = vec![0];
+    let mut chars = text.chars().peekable();
     let mut at = 0;
-    for line in text.split('\n') {
-        starts.push(at);
-        at += line.chars().count() as i32 + 1;
+    while let Some(c) = chars.next() {
+        at += 1;
+        if c == '\r' && chars.next_if_eq(&'\n').is_some() {
+            at += 1;
+        }
+        if matches!(c, '\n' | '\r') {
+            starts.push(at);
+        }
     }
-    starts.push(at - 1);
+    starts.push(at);
     starts
 }
 
@@ -1598,6 +1606,8 @@ mod tests {
             vec![0, 0],
             "an empty text still has an end"
         );
+        // `similar` ends a line at a lone `\r` too, and at `\r\n` once.
+        assert_eq!(line_starts("a\rb\r\nc\n"), vec![0, 2, 5, 7, 7]);
     }
 
     #[test]
