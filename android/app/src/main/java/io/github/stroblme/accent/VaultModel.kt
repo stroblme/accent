@@ -94,7 +94,7 @@ data class VaultState(
     /**
      * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
      * and nothing but [VaultModel.resumeIndexing] walks again — not even the rescan every return
-     * to the app asks for. Opening the vault again is a resume too.
+     * to the app asks for. Opening the vault again is a resume too, as is Reload Vault.
      */
     val paused: Boolean = false,
     /** Files the walk has been through so far, for as long as one is running. */
@@ -361,6 +361,19 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             runCatching { v.rescan() }
         }
         // An open note may have been changed by Syncthing while the app was away.
+        _state.value.open?.let { onChanged(it.rel) }
+    }
+
+    /**
+     * Reload Vault: a [rescan], except on a paused vault, which refuses every walk but a resume.
+     * A reader asking for the vault to be read again there means the rest of it, so it resumes.
+     */
+    fun reloadVault() {
+        if (!_state.value.paused) {
+            rescan()
+            return
+        }
+        resumeIndexing()
         _state.value.open?.let { onChanged(it.rel) }
     }
 
