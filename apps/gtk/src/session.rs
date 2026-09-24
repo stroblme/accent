@@ -233,6 +233,7 @@ impl App {
             return;
         }
         let stored = self.stored_session();
+        let (sidebar, width) = self.sidebar_saved();
         let session = Session {
             open: self
                 .docs
@@ -243,12 +244,10 @@ impl App {
                 .collect(),
             active: self.restorable_active(),
             layout: self.layout(),
-            // Presentation is not a session state, so the sidebar it hid is saved as it was.
-            sidebar: match self.presenting.get() {
-                Some(before) => before.sidebar,
-                None => self.sidebar_column.is_visible(),
-            },
-            sidebar_width: sidebar_width(self.split.position()),
+            // Neither presentation nor a narrow window is session state, so a sidebar either one
+            // hid is saved as it was.
+            sidebar,
+            sidebar_width: sidebar_width(width),
             view: self.mode.get().name().to_string(),
             zoom: self.zoom.get(),
             recent_notes: self.recent_notes.borrow().clone(),
@@ -594,9 +593,7 @@ impl App {
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
         // answer to a question they asked in another sitting.
-        self.sidebar_column.set_visible(session.sidebar);
-        self.split
-            .set_position(sidebar_width(session.sidebar_width));
+        self.restore_sidebar(session.sidebar, sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
         // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
         // of them, and the order they happened to restore in says nothing about how they were

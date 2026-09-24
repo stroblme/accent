@@ -75,7 +75,7 @@ use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
 use events::start_events;
 use gtk::{gdk, gio, glib, graphene};
-use layout::{Mode, Presenting};
+use layout::{Collapsed, Mode, Presenting};
 use open::Opened;
 use panes::{Pane, Place, Side, Spot, Zone};
 // The widget and the tab kept the names the rest of the window calls them by when
@@ -309,6 +309,9 @@ struct App {
     zoom: Cell<f64>,
     /// `Some` while presenting, holding what to restore on the way out.
     presenting: Cell<Option<Presenting>>,
+    /// `Some` while the window is too narrow for the sidebar (`layout::COLLAPSE`), holding what
+    /// widening it puts back, which is also what the session saves.
+    collapsed: Cell<Option<Collapsed>>,
     chrome_hidden: Cell<bool>,
     /// True while Back or Forward is walking a pane's history, so the selection change and the
     /// caret move it makes are not recorded as places of their own — which would clear the
