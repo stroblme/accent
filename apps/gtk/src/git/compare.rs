@@ -47,6 +47,7 @@ impl Panel {
         let left_title = format!("{left_name} ({})", what.sides.left_title());
         let right_title = format!("{name} ({})", what.sides.right_title());
         let nothing = what.sides.nothing_to_show();
+        let endings = line_endings_only(&left, &right);
         match what.sides.clone() {
             // The working tree is the file itself, so the comparison lives in its tab and the
             // refresh only ever has the index side to re-read.
@@ -62,8 +63,15 @@ impl Panel {
                         // or committed — from the pane itself, or from a terminal — and then the
                         // two sides carry the same text and the comparison shows nothing. Two
                         // identical columns are not an answer: say so and ask git again, so the
-                        // row goes as well.
+                        // row goes as well. Unless the file's line endings are all that changed,
+                        // which git goes on listing however often it is asked.
                         if compare.counts().1 == 0 {
+                            if endings {
+                                (panel.hooks.toast)(&format!(
+                                    "{name} differs only in line endings"
+                                ));
+                                return false;
+                            }
                             (panel.hooks.toast)(&format!("{name} {nothing}"));
                             panel.schedule_refresh(Depth::Everything);
                             return false;
@@ -84,9 +92,7 @@ impl Panel {
                     (self.hooks.toast)(&format!("{name} {nothing}"));
                     return self.schedule_refresh(Depth::Everything);
                 }
-                // The panes hold `\n` line endings whatever the file has, so a change of line
-                // endings alone would open a tab with nothing marked in it.
-                if crate::diff::normalise(&left) == crate::diff::normalise(&right) {
+                if endings {
                     return (self.hooks.toast)(&format!("{name} differs only in line endings"));
                 }
                 let key = format!("diff:{}:{}", what.sides.tag(), what.key);
@@ -276,6 +282,12 @@ impl Sides {
     }
 }
 
+/// Whether `left` and `right` differ in their line endings and in nothing else. The panes hold
+/// `\n` endings whatever the file has, so such a comparison would open with nothing marked in it.
+fn line_endings_only(left: &str, right: &str) -> bool {
+    left != right && crate::diff::normalise(left) == crate::diff::normalise(right)
+}
+
 /// What one comparison compares: the half of a [`Watch`] the worker reads with.
 #[derive(Clone)]
 struct What {
@@ -379,7 +391,11 @@ impl What {
             false => vault.read_text(&self.key),
         };
         match read {
-            Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+            // With the line endings the file has, which reading it as text takes away: a change
+            // of those alone is a change to git, and [`line_endings_only`] has to see it.
+            Ok(accent_api::fs::Read::Text(t)) => {
+                Blob::Text(accent_api::fs::for_disk(&t.text, t.crlf, false))
+            }
             Ok(_) => Blob::Binary,
             // A file that is no longer there really is a deletion, and an empty right side is
             // what draws one. This used to be every absolute key as well, which drew a file
@@ -395,6 +411,16 @@ impl What {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_of_line_endings_alone_is_told_from_no_change_and_from_an_edit() {
+        assert!(line_endings_only("a\r\nb\r\n", "a\nb\n"));
+        assert!(!line_endings_only("a\nb\n", "a\nb\n"), "no change at all");
+        assert!(
+            !line_endings_only("a\r\nb\r\n", "a\nc\n"),
+            "an edit as well"
+        );
+    }
 
     #[test]
     fn a_comparison_with_nothing_in_it_names_the_side_the_row_came_from() {
