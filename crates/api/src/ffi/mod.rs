@@ -23,6 +23,6 @@ pub use convert::*;
 pub use error::AccentError;
 pub use event::Event;
 pub use fuzzy::fuzzy_rank;
-pub use markdown::{analyze_utf16, to_html};
-pub use pdf::PdfSession;
+pub use markdown::{analyze_utf16, pdf_anchor, to_html};
+pub use pdf::{PdfSession, link_with_alias};
 pub use vault::Vault;

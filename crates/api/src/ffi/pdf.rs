@@ -18,10 +18,17 @@ use accent_core::fs::{self, Etag};
 use accent_core::pdf::{self, Ink, NamedInk, PdfDoc};
 
 use crate::ffi::convert::{
-    self, Glyph, Highlight, History, InkStyle, Outline, PageArea, PageSize, PdfLinkBox, Point,
-    SearchLine, Theme, Tile,
+    self, Glyph, Highlight, History, InkStyle, LinkHighlight, Located, Outline, PageArea, PageSize,
+    PdfLink, PdfLinkBox, Point, SearchLine, Theme, Tile,
 };
 use crate::ffi::error::{AccentError, Answer};
+
+/// A selection link with the selected text as its alias, which is what Copy Link puts on the
+/// clipboard: `[[f.pdf#page=1&selection=…|the text]]`. See [`pdf::link_with_alias`].
+#[uniffi::export]
+pub fn link_with_alias(link: String, text: String) -> String {
+    pdf::link_with_alias(&link, &text)
+}
 
 struct State {
     doc: PdfDoc,
@@ -161,8 +168,9 @@ impl PdfSession {
         })
     }
 
-    /// Where the four numbers of a note's link land on the page today, as quads to paint.
-    pub fn link_quads(&self, page: u32, selection: Vec<u32>) -> Answer<Vec<pdf::Rect>> {
+    /// The glyphs the four numbers of a link cover on the page today, which is what following
+    /// one shows as the selection. `None` when they no longer fit the page's lines.
+    pub fn locate(&self, page: u32, selection: Vec<u32>) -> Answer<Option<Located>> {
         self.with(|s| {
             let Ok(sel): Result<[usize; 4], _> = selection
                 .iter()
@@ -175,10 +183,41 @@ impl PdfSession {
                 });
             };
             let glyphs = s.page_glyphs(page as usize)?;
-            Ok(pdf::selection_quads(glyphs, sel)
-                .map(|(_, quads)| quads)
-                .unwrap_or_default())
+            Ok(
+                pdf::selection_quads(glyphs, sel).map(|(range, quads)| Located {
+                    start: range.start as u32,
+                    end: range.end as u32,
+                    quads,
+                }),
+            )
         })
+    }
+
+    /// Where the note links that highlight this document land today, by the desktop's rules
+    /// ([`pdf::highlight_quads`]), in page order. `link` is the index into `links`, so a caller
+    /// may hand over one page's links or all of them; a link whose selection is not four numbers
+    /// lands nowhere.
+    pub fn link_highlights(&self, links: Vec<PdfLink>) -> Vec<LinkHighlight> {
+        let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let State { doc, glyphs, .. } = &mut *s;
+        let (at, links): (Vec<usize>, Vec<_>) = links
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, l)| Some((i, l.try_into().ok()?)))
+            .unzip();
+        let mut found: Vec<_> = pdf::highlight_quads(doc, glyphs, &links)
+            .into_iter()
+            .collect();
+        found.sort_by_key(|(page, _)| *page);
+        found
+            .into_iter()
+            .flat_map(|(page, quads)| quads.into_iter().map(move |(quads, i)| (page, quads, i)))
+            .map(|(page, quads, i)| LinkHighlight {
+                page: page as u32,
+                quads,
+                link: at[i] as u32,
+            })
+            .collect()
     }
 
     pub fn links(&self, page: u32) -> Answer<Vec<PdfLinkBox>> {
@@ -446,6 +485,67 @@ mod tests {
             "a save against a stale stamp must be refused"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// One 200 x 100 pt page reading "Hello accent" on one line.
+    fn text_pdf() -> Vec<u8> {
+        let content = "BT /F1 24 Tf 20 40 Td (Hello accent) Tj ET";
+        let objs = [
+            "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]\
+             /Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>"
+                .to_string(),
+            "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+            format!("<</Length {}>>stream\n{content}\nendstream", content.len()),
+        ];
+        let mut out = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (i, o) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+        }
+        let xref = out.len();
+        out.push_str("xref\n0 6\n0000000000 65535 f \n");
+        for off in offsets {
+            out.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        out.push_str(&format!(
+            "trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n"
+        ));
+        out.into_bytes()
+    }
+
+    /// A note's links land where their numbers say and keep the index they were handed at, one
+    /// that is not four numbers included; a followed link locates its glyphs, and numbers that
+    /// fit no line locate nothing.
+    #[test]
+    fn a_note_link_lands_and_a_followed_link_is_located() {
+        if !pdf::available() {
+            eprintln!("skipping: no libpdfium");
+            return;
+        }
+        let s = PdfSession::open_bytes(text_pdf()).unwrap();
+        let link = |selection: Vec<u32>| PdfLink {
+            src_rel_path: "Note.md".to_string(),
+            byte_start: 0,
+            page: 0,
+            selection,
+            alias: None,
+        };
+        let found = s.link_highlights(vec![
+            link(vec![0, 0, 0, 5]),
+            link(vec![1, 2]),
+            link(vec![0, 6, 0, 12]),
+        ]);
+        let at: Vec<u32> = found.iter().map(|h| h.link).collect();
+        assert_eq!(at, [0, 2]);
+        assert!(found.iter().all(|h| h.page == 0 && !h.quads.is_empty()));
+
+        let hello = s.locate(0, vec![0, 0, 0, 5]).unwrap().expect("on the page");
+        assert_eq!((hello.start, hello.end), (0, 5));
+        assert!(s.locate(0, vec![9, 0, 9, 1]).unwrap().is_none());
+        assert!(s.locate(0, vec![1, 2]).is_err());
     }
 
     /// A document with no file behind it draws and hands its bytes back, and never writes.

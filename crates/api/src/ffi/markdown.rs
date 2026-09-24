@@ -5,7 +5,18 @@
 
 use accent_core::markdown;
 
-use crate::ffi::convert::{Analysis, Heading, Link, Span, Tag, Utf16};
+use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, Utf16};
+
+/// What a link's anchor names inside a PDF — `page=3&selection=0,4,1,9` — or `None` for a
+/// heading or a block, which is what tells a link into a PDF apart. The page is zero-based.
+#[uniffi::export]
+pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
+    let (page, selection) = markdown::pdf_anchor(&anchor)?;
+    Some(PdfAnchor {
+        page: page as u32,
+        selection: selection.map(|s| s.iter().map(|n| *n as u32).collect()),
+    })
+}
 
 /// The note rendered as an HTML fragment, exactly as the desktop preview gets it: wikilinks as
 /// `accent://open/…`, embeds as `accent://file/…`, maths as MathML, a `data-line` marker before
@@ -102,6 +113,19 @@ mod tests {
         assert_eq!(link.target, "Other Note");
         assert_eq!(link.alias.as_deref(), Some("alias"));
         assert_eq!(link.range.start, 3, "two units for the emoji and a space");
+    }
+
+    #[test]
+    fn a_pdf_anchor_is_a_page_and_its_numbers() {
+        let at = pdf_anchor("page=3&selection=1,2,3,4".to_string()).unwrap();
+        assert_eq!((at.page, at.selection), (2, Some(vec![1, 2, 3, 4])));
+        assert!(
+            pdf_anchor("page=3".to_string())
+                .unwrap()
+                .selection
+                .is_none()
+        );
+        assert!(pdf_anchor("A Heading".to_string()).is_none());
     }
 
     #[test]
