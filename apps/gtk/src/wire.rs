@@ -585,15 +585,9 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, _| {
-            if key == gdk::Key::Escape {
-                // The way out of presentation, where there is no chrome to bring back.
-                match app.presenting.get().is_some() {
-                    true => app.set_presenting(false),
-                    false => app.show_chrome(),
-                }
-            }
-            glib::Propagation::Proceed
+        move |_, key, _, _| match key == gdk::Key::Escape && escape_first(&app) {
+            true => glib::Propagation::Stop,
+            false => glib::Propagation::Proceed,
         }
     ));
     // The other half of `Ctrl+Tab`: an action activation says nothing about the modifier still
@@ -691,6 +685,19 @@ pub fn wire_window(app: &Rc<App>) {
             }
         }
     ));
+}
+
+/// Escape as the window hears it first, ahead of everything: the way out of presentation, where
+/// there is no chrome to bring back, and nothing else on that press — the find bar or a
+/// comparison waits for the next one. Otherwise it brings the chrome back and goes on to whatever
+/// wants it. Says whether the press was used up.
+pub fn escape_first(app: &Rc<App>) -> bool {
+    if app.presenting.get().is_none() {
+        app.show_chrome();
+        return false;
+    }
+    app.set_presenting(false);
+    true
 }
 
 /// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the
