@@ -1284,6 +1284,8 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .valign(gtk::Align::Center)
         .build();
     button.add_css_class("flat");
+    // The tooltip's words are its name for a screen reader too, an icon having none of its own.
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
     button
 }
 

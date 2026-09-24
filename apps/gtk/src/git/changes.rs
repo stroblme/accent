@@ -222,8 +222,8 @@ fn change_row(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Stack {
         .ellipsize(pango::EllipsizeMode::End)
         .build();
     title.add_css_class("heading");
-    let all = gtk::Button::builder().build();
-    all.add_css_class("flat");
+    // Stage All or Unstage All, as the binder says: the +/− a row's own buttons use.
+    let all = icon_button("list-add-symbolic", "Stage All");
     let weak = panel.clone();
     all.connect_clicked(glib::clone!(
         #[weak]
@@ -453,6 +453,10 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
     let Some(actions) = buttons(entry.last_child()) else {
         return;
     };
+    // A header only titles its section and activating it does nothing, so it takes no hover
+    // highlight: the row lit up around its own button read as one control. A recycled row may
+    // have been a header, which is why every other row sets it back.
+    item.set_activatable(!matches!(row, Row::Header { .. }));
 
     match row {
         Row::Header {
@@ -463,10 +467,13 @@ fn bind_change(item: &gtk::ListItem, panel: &Weak<Panel>) {
             stack.set_tooltip_text(None);
             title.set_text(text);
             all.set_visible(section.is_some());
-            all.set_label(match section {
-                Some(Section::Staged) => "Unstage All",
-                _ => "Stage All",
-            });
+            let (icon, tip) = match section {
+                Some(Section::Staged) => ("list-remove-symbolic", "Unstage All"),
+                _ => ("list-add-symbolic", "Stage All"),
+            };
+            all.set_icon_name(icon);
+            all.set_tooltip_text(Some(tip));
+            all.update_property(&[gtk::accessible::Property::Label(tip)]);
         }
         Row::Folder {
             label,

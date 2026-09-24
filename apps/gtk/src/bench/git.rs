@@ -104,7 +104,7 @@ fn bench_git_stage(app: &Rc<App>) {
             .as_ref()
             .and_then(|w| find_widget(w, &|w| w.is::<gtk::ListView>()))
             .and_downcast::<gtk::ListView>();
-        if let Some(model) = view.and_then(|v| v.model()) {
+        if let Some(model) = view.as_ref().and_then(|v| v.model()) {
             model.connect_items_changed(|_, at, removed, added| {
                 println!("bench git_splice at={at} removed={removed} added={added}");
             });
@@ -137,6 +137,9 @@ fn bench_git_stage(app: &Rc<App>) {
             println!("bench git_kept {below} {kept}");
         }
         println!("bench git_changes_rows {}", git.changes_rows());
+        if let Some(view) = &view {
+            bench_git_headers(view);
+        }
 
         // A folder's own buttons: all of `src` into the index and out again, then its Discard,
         // whose question is printed and answered — and the permanent delete's too, where the
@@ -169,6 +172,41 @@ fn bench_git_stage(app: &Rc<App>) {
         println!("bench git_changes_rows {}", git.changes_rows());
         bench_quit(&app);
     });
+}
+
+/// The section headers on screen: their title, their bulk button's icon and tooltip, and whether
+/// their row is `.activatable`, the class Adwaita's hover and press highlight is written for. The
+/// file and folder rows are counted beside them, and every one of those is to keep it.
+fn bench_git_headers(view: &gtk::ListView) {
+    let (mut rows, mut lit) = (0, 0);
+    let mut row = view.first_child();
+    while let Some(r) = row {
+        row = r.next_sibling();
+        // Only a mapped row: the list keeps the widgets it has no item for, with their old names.
+        let stack = r.first_child().and_downcast::<gtk::Stack>();
+        let Some(stack) = stack.filter(|_| r.is_mapped()) else {
+            continue;
+        };
+        let activatable = r.has_css_class("activatable");
+        if stack.visible_child_name().as_deref() != Some("header") {
+            rows += 1;
+            lit += usize::from(activatable);
+            continue;
+        }
+        let header = stack.visible_child();
+        let title = header.as_ref().and_then(|h| h.first_child());
+        let button = header
+            .as_ref()
+            .and_then(|h| h.last_child())
+            .and_downcast::<gtk::Button>();
+        println!(
+            "bench git_header {:?} activatable={activatable} icon={:?} tip={:?}",
+            title.and_downcast::<gtk::Label>().map(|l| l.text()),
+            button.as_ref().and_then(|b| b.icon_name()),
+            button.as_ref().and_then(|b| b.tooltip_text()),
+        );
+    }
+    println!("bench git_header_rows activatable={lit}/{rows}");
 }
 
 /// What a row's name has room for either side of the pointer arriving on it.
