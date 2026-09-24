@@ -4,8 +4,8 @@
     <!--
       A vault is a Syncthing folder anywhere on shared storage, holding tens of thousands of
       files. The Storage Access Framework cannot see one that already exists and is 25-50x
-      slower when it can (ROADMAP §7.A), so this is the permission the app asks for — the same
-      one Markor ships with.
+      slower when it can (MOBILE_DESIGN.md, Architecture), so this is the permission the app
+      asks for — the same one Markor ships with.
     -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 

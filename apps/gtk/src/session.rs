@@ -152,9 +152,11 @@ impl App {
             // The start screen's own removal, so one list is written one way.
             on_forget: Box::new({
                 let app = Rc::downgrade(self);
-                move |key: &str| {
-                    if let Some(app) = app.upgrade() {
-                        start::forget_vault(&app.config, Path::new(key));
+                move |key: &str, removed: Box<dyn FnOnce()>| {
+                    if let Some(app) = app.upgrade()
+                        && let Some(shell) = app.shell.upgrade()
+                    {
+                        shell.remove_recent(app.window.upcast_ref(), Path::new(key), removed);
                     }
                 }
             }),
@@ -233,6 +235,7 @@ impl App {
             return;
         }
         let stored = self.stored_session();
+        let (sidebar, width) = self.sidebar_saved();
         let session = Session {
             open: self
                 .docs
@@ -243,12 +246,10 @@ impl App {
                 .collect(),
             active: self.restorable_active(),
             layout: self.layout(),
-            // Presentation is not a session state, so the sidebar it hid is saved as it was.
-            sidebar: match self.presenting.get() {
-                Some(before) => before.sidebar,
-                None => self.sidebar_column.is_visible(),
-            },
-            sidebar_width: sidebar_width(self.split.position()),
+            // Neither presentation nor a narrow window is session state, so a sidebar either one
+            // hid is saved as it was.
+            sidebar,
+            sidebar_width: sidebar_width(width),
             view: self.mode.get().name().to_string(),
             zoom: self.zoom.get(),
             recent_notes: self.recent_notes.borrow().clone(),
@@ -453,13 +454,17 @@ impl App {
         );
     }
 
-    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
-    /// session's file and its row go.
     fn end_session(self: &Rc<Self>, key: &std::path::Path) {
+        self.forget_session(key);
+        let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
+    }
+
+    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
+    /// session's row goes, and its file with it (`start::forget_vault`). Close Session, and Remove
+    /// from Recents on a session this window has open (`Shell::remove_recent`).
+    pub(crate) fn forget_session(&self, key: &std::path::Path) {
         self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
-        let _ = std::fs::remove_file(accent_core::config::state_path(key));
-        let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
     }
 
     /// Let go of this window's shells as it closes. A window that keeps a session only detaches
@@ -595,9 +600,7 @@ impl App {
         // Which pane was showing is deliberately not restored: Files is where a vault is opened,
         // every time. A window that came back on Search or Git left the reader looking at the
         // answer to a question they asked in another sitting.
-        self.sidebar_column.set_visible(session.sidebar);
-        self.split
-            .set_position(sidebar_width(session.sidebar_width));
+        self.restore_sidebar(session.sidebar, sidebar_width(session.sidebar_width));
         self.set_mode(Mode::from_name(&session.view));
         // Last, and merged rather than assigned: opening the tabs above ran `note_used` for each
         // of them, and the order they happened to restore in says nothing about how they were

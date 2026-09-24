@@ -41,13 +41,16 @@ use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{
-    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window, bench_pins_restored,
-    bench_tabs,
+    bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
+    bench_pins_restored, bench_tabs,
 };
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme, bench_wrap};
+use style::{
+    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_style,
+    bench_theme, bench_wrap,
+};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -87,7 +90,8 @@ use tags::bench_tags;
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
 /// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
 /// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
-/// indent on 10k lines of code in the last one.
+/// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
+/// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -157,7 +161,8 @@ use tags::bench_tags;
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
-/// kept for loose files the way a drop there does, and prints both windows' tabs after each.
+/// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
+/// remote vault it waits for the host, and neither tab may leave: the file is on the host.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -172,6 +177,11 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
+///
+/// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
+/// Numbers switch in the preferences three times, printing after each step whether every open tab
+/// shows its numbers, how wide the column is and whether the tab is in front: the third file
+/// opens after the first flip, and the last flip is made with both notes behind the code.
 ///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
 /// system switch and the preferences do, and prints what the note's theme-derived tags hold on
@@ -232,6 +242,12 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
 /// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
 ///
+/// `ACCENT_BENCH_COLLAPSE=1` drags the sidebar to 400 px and takes the window to 360 px, below the
+/// width the sidebar collapses at, and back, printing the window's width, whether the sidebar
+/// shows, where the divider is and what a session would save (sidebar, width): before, narrow,
+/// after F9 twice while narrow, wide again, and the same round with the sidebar hidden before it.
+/// The divider has to read 400 again once the window is wide.
+///
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
 /// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
@@ -266,12 +282,14 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let theme = std::env::var("ACCENT_BENCH_THEME").ok();
+    let numbers = std::env::var("ACCENT_BENCH_NUMBERS").ok();
     let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let outline = std::env::var("ACCENT_BENCH_OUTLINE").ok();
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
+    let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
@@ -304,10 +322,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && theme.is_none()
+        && numbers.is_none()
         && reveal.is_none()
         && follow.is_none()
         && outline.is_none()
         && layout.is_none()
+        && !collapse
         && git.is_none()
         && keys.is_none()
         && chrome.is_none()
@@ -334,6 +354,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = layout {
             return bench_layout(&app, &arg);
+        }
+        if collapse {
+            return bench_collapse(&app);
         }
         if let Some(rel) = compare {
             if let Some(rel) = rel.strip_prefix("lines:") {
@@ -422,6 +445,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = theme {
             return bench_theme(&app, &rel);
         }
+        if let Some(rels) = numbers {
+            return bench_numbers(&app, &rels);
+        }
         if let Some(rel) = reveal {
             return bench_reveal(&app, &rel);
         }
@@ -482,6 +508,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
+            if let Some(rel) = rel.strip_prefix("dragfold:") {
+                return bench_drag_fold(&app, rel);
+            }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),
                 None => bench_style(&app, &rel),

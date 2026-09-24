@@ -793,6 +793,14 @@ pub fn end(key: &str, at: &str) {
     }
 }
 
+/// End every shell the session stored under `key` holds, here or on a host: a session removed
+/// while no window has it open, whose shells nothing would attach to again.
+pub fn end_stored(key: &Path) {
+    for (id, place) in accent_core::config::Session::load(key).terminals {
+        end(&id, &place.at);
+    }
+}
+
 /// End the shells this machine's holder keeps that no session names: what is left of a window
 /// that did not close the ordinary way — a quit, SIGTERM, a logout — or of a Close Tab whose kill
 /// died with the process. Hosts are left alone.

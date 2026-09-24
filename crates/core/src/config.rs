@@ -95,8 +95,8 @@ pub struct Config {
     pub ghost_text: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
-    /// Numbers in the editor's left gutter. Off by default: a note is prose, and the gutter is
-    /// what an ATX heading's markers hang in.
+    /// Numbers in the editor's left gutter, in every text tab, code as well as prose. Off by
+    /// default: a note is prose, and the gutter is what an ATX heading's markers hang in.
     pub line_numbers: bool,
     /// Group the Git pane's changed files by folder rather than listing them flat. On by default:
     /// a vault's changes arrive a folder at a time, and a flat list of thirty repeats the same
