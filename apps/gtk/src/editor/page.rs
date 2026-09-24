@@ -419,11 +419,10 @@ impl Tab {
         ));
     }
 
-    /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in.
+    /// Numbers in the left gutter, outside the 48 px page gutter the heading markers hang in. The
+    /// preference decides for every text tab, code as well as prose.
     pub fn set_line_numbers(&self, on: bool) {
-        // The preference is about prose, where a number beside every line is clutter. Code is
-        // read by line number — a compiler error names one — so it always has them.
-        self.numbers.set_visible(on || !self.flavour.is_note());
+        self.numbers.set_visible(on);
     }
 
     /// Whether the line numbers are on, and the width the gutter gave them. Only
