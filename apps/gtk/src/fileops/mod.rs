@@ -1040,11 +1040,21 @@ pub fn reveal(window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str)
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     launcher.open_containing_folder(Some(window), gio::Cancellable::NONE, move |result| {
-        // Only the failure is worth saying: a file manager that opened is its own report.
-        if let Err(e) = result {
+        // Only the failure is worth saying: a file manager that opened is its own report, and a
+        // chooser the user closed was their answer.
+        if let Err(e) = result
+            && !declined(&e)
+        {
             toast(&format!("Cannot show {name}: {e}"));
         }
     });
+}
+
+/// Whether a launcher's error is the user saying no rather than something failing. GTK reports
+/// both ways of saying it in its own domain: the portal's chooser dismissed, and a cancelled call
+/// (the portal and the `FileManager1` fallback turn `G_IO_ERROR_CANCELLED` into the latter).
+fn declined(e: &glib::Error) -> bool {
+    e.matches(gtk::DialogError::Dismissed) || e.matches(gtk::DialogError::Cancelled)
 }
 
 /// The vault path of `rel` as GNOME writes it, `$HOME` abbreviated to `~`. Read-only decoration
@@ -1223,6 +1233,14 @@ fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dismissed_chooser_is_no_failure() {
+        assert!(declined(&glib::Error::new(gtk::DialogError::Dismissed, "")));
+        assert!(declined(&glib::Error::new(gtk::DialogError::Cancelled, "")));
+        assert!(!declined(&glib::Error::new(gtk::DialogError::Failed, "")));
+        assert!(!declined(&glib::Error::new(gio::IOErrorEnum::NotFound, "")));
+    }
 
     #[test]
     fn drawing_size_is_a4_turned_four_ways() {
