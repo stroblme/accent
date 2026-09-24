@@ -55,3 +55,56 @@ internal fun Selection.pieces(glyphs: Map<Int, List<Glyph>>): List<Piece>? {
     }
     return out
 }
+
+/** The smallest box holding both. */
+internal fun Rect.union(other: Rect) = Rect(
+    minOf(left, other.left),
+    minOf(top, other.top),
+    maxOf(right, other.right),
+    maxOf(bottom, other.bottom),
+)
+
+/** One match of a find: the page it is on, and the box it covers there. */
+internal data class Hit(val page: Int, val box: Rect)
+
+/**
+ * What a find has found so far, in page order, and which of it the reader is on: [at], `null`
+ * until the first has been gone to.
+ */
+internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null) {
+    /**
+     * With one page's matches added in page order, [at] kept on the match it was on. A find walks
+     * round from the page being read, so the pages before it arrive last and go in front.
+     */
+    fun plus(page: Int, boxes: List<Rect>): Found {
+        if (boxes.isEmpty()) return this
+        val i = hits.indexOfFirst { it.page > page }.let { if (it < 0) hits.size else it }
+        val added = boxes.map { Hit(page, it) }
+        val kept = at?.let { if (it >= i) it + added.size else it }
+        return Found(hits.subList(0, i) + added + hits.subList(i, hits.size), kept)
+    }
+
+    /** The first match at or after [page]: the one a find lands on first. */
+    fun from(page: Int): Int? = hits.indexOfFirst { it.page >= page }.takeIf { it >= 0 }
+
+    /** The next match, or the one before, round the ends of the document. */
+    fun step(forward: Boolean): Found {
+        if (hits.isEmpty()) return this
+        val n = hits.size
+        val next = when (val now = at) {
+            null -> if (forward) 0 else n - 1
+            else -> if (forward) (now + 1) % n else (now + n - 1) % n
+        }
+        return copy(at = next)
+    }
+
+    /**
+     * "3/12", as a note's find says it — or nothing while the pages are still being searched with
+     * nothing found yet, and "None" once they all have been ([done]).
+     */
+    fun count(done: Boolean): String = when {
+        hits.isEmpty() -> if (done) "None" else ""
+        at == null -> "${hits.size}"
+        else -> "${at + 1}/${hits.size}"
+    }
+}

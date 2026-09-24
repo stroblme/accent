@@ -255,14 +255,14 @@ private fun LazyListScope.rows(
 class Command(val label: String, val run: (VaultModel) -> Unit)
 
 /**
- * Find in this note is the palette's one entry that changes the screen rather than the vault:
- * it opens the note's own find bar (`NoteScreen`), which searches the page in front where Search
- * above searches every note. Close Vault was reachable only from the screen with nothing open,
+ * Find is the palette's one entry that changes the screen rather than the vault: it opens the find
+ * bar of the note or the PDF in front, which searches that where Search above searches every
+ * note. Close Vault was reachable only from the screen with nothing open,
  * which is the one place a reader is not thinking about the vault they are in.
  */
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
-    Command("Find in this note") { it.finding(true) },
+    Command("Find") { it.finding(true) },
     Command("Reload Vault") { it.reloadVault() },
     Command("Close Note") { it.close() },
     Command("Close Vault") { it.closeVault() },

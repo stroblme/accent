@@ -16,8 +16,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.SpanStyle
@@ -70,11 +68,11 @@ fun NoteScreen(model: VaultModel, open: Open, root: String, chrome: Chrome) {
             // Done is the only way out of the editor, so it has to stay where it can be reached.
             barShown = editing || chrome.shown,
             bar = {
-                DocumentBar(
-                    title = File(open.rel).name.removeSuffix(".md"),
-                    action = if (editing) "Done" else "Edit",
-                    onAction = { editing = !editing },
-                )
+                DocumentBar(title = File(open.rel).name.removeSuffix(".md")) {
+                    TextButton(onClick = { editing = !editing }) {
+                        Text(if (editing) "Done" else "Edit")
+                    }
+                }
             },
             modifier = Modifier.weight(1f),
         ) { bar ->
@@ -269,64 +267,23 @@ private fun Rendered(model: VaultModel, open: Open, root: String, chrome: Chrome
             },
         )
         if (open.finding) {
+            val (active, total) = matches
             FindBar(
                 query = query,
                 onQuery = { query = it },
-                matches = matches,
+                placeholder = "Find in this note",
+                count = when {
+                    query.isBlank() -> ""
+                    total == 0 -> "None"
+                    else -> "${active + 1}/$total"
+                },
+                // Off while there is nothing to step through, and off on an emptied field: the
+                // count is whatever the last find reported, and the marks it counted have been
+                // cleared.
+                canStep = query.isNotBlank() && total > 1,
                 onStep = { forward -> view?.findNext(forward) },
             )
         }
-    }
-}
-
-/**
- * The note's own find: the page in front, where Browse's Search is every note in the vault.
- *
- * At the foot of the screen, which is where every query field in this app is and where the
- * keyboard leaves the thumb. It is the one piece of chrome that does not go while the keyboard is
- * up, because the keyboard is what it is for — the Browse pill goes instead, so the vault's search
- * and the page's find are never on the screen together. It takes its space from the note rather
- * than floating over it: a bar over the last lines would cover the match it had just found.
- *
- * Back is the way out, as it is out of the panel. The arrows are disabled rather than absent while
- * there is nothing to step through, and the count is the only thing that says a word is not on the
- * page at all — everything else about a find that matches nothing looks like a find that has not
- * scrolled yet.
- */
-@Composable
-private fun FindBar(
-    query: String,
-    onQuery: (String) -> Unit,
-    matches: Pair<Int, Int>,
-    onStep: (Boolean) -> Unit,
-) {
-    val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-    val (active, total) = matches
-    Row(
-        Modifier.fillMaxWidth().padding(end = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Field(
-            value = query,
-            onValue = onQuery,
-            placeholder = "Find in this note",
-            modifier = Modifier.weight(1f).focusRequester(focus),
-        )
-        Text(
-            when {
-                query.isBlank() -> ""
-                total == 0 -> "None"
-                else -> "${active + 1}/$total"
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        // Off while there is nothing to step through, and off on an emptied field: the count is
-        // whatever the last find reported, and the marks it counted have been cleared.
-        val stepping = query.isNotBlank() && total > 1
-        TextButton(onClick = { onStep(false) }, enabled = stepping) { Text("▴") }
-        TextButton(onClick = { onStep(true) }, enabled = stepping) { Text("▾") }
     }
 }
 
