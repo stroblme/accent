@@ -322,6 +322,8 @@ struct App {
     /// right-clicked rather than on the selected one. `None` once the popup is gone, which is
     /// what makes the same actions work from the palette.
     menu_page: RefCell<Option<adw::TabPage>>,
+    /// The pinned tabs, in whichever panes they are: see [`App::is_pinned`].
+    pinned: RefCell<Vec<adw::TabPage>>,
     /// When the tree was last re-read during the first index, from `glib::monotonic_time`.
     tree_painted: Cell<i64>,
     /// The pending post-edit refresh: the preview's re-render and the status bar's word count.

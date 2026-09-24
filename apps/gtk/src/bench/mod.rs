@@ -35,12 +35,14 @@ use files::{
 use find::bench_find;
 use git::{
     bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_press, bench_git_rebase,
-    bench_git_sync_over_fetch,
+    bench_git_switch, bench_git_sync_over_fetch,
 };
 use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
-use panes::{bench_layout, bench_layout_pick, bench_panes, bench_tabs};
+use panes::{
+    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pins_restored, bench_tabs,
+};
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
@@ -56,13 +58,15 @@ use tags::bench_tags;
 /// times, plus the branch readout and how many history rows a background fetch marked as not
 /// pulled yet, then what a commit row's two buttons are and whether the revealer holds them away
 /// until the pointer is on the row, and then the changes list's splices across a refresh that
-/// changes nothing and two Stage clicks. `=press:<path>` instead prints where that row's Stage button is and stays up, for
+/// changes nothing and two Stage clicks, and each section header's button and whether its row
+/// takes the hover highlight. `=press:<path>` instead prints where that row's Stage button is and stays up, for
 /// an XTEST press held while the repository changes. `=init` is the pane's own visibility: whether
 /// the sidebar has a Git pane either side of a `git init` in the vault root, which it runs itself.
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
-/// row's buttons are out.
+/// row's buttons are out. `=switch` picks the second repository and clicks the history's first row
+/// at once, and prints what that asked for.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -79,7 +83,8 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_STYLE=<rel_path>` types a heading into a note at two sizes and prints whether it
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
 /// or a drop out of a styled or folded line brings its tags along.
-/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed.
+/// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
+/// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
 /// what the panes hold and whether their rows line up. `=pads:<rel_path>` instead stages a note of
 /// long paragraphs in a repository it makes itself and types at the start of the two lines whose
@@ -136,6 +141,11 @@ use tags::bench_tags;
 /// closes the lot, printing what the find bar and the Outline pane say at each step: what a tab
 /// switch and the last tab's close leave behind. The note opens as a preview and is kept by its
 /// eye first, and its title and indicator are printed either side of that.
+/// `=pin:<a>,<b>,<c>,<d>` opens four notes in one pane and prints each pane's tabs, pinned ones
+/// marked `^`, after every step: `c` pinned from its tab menu and `b` from the palette, `c`
+/// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
+/// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
+/// writes the session; `=pins` on the same scratch state prints what the restore brought back.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -383,6 +393,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_diagram(&app, &arg);
         }
         if let Some(rels) = tabs {
+            if let Some(rels) = rels.strip_prefix("pin:") {
+                return bench_pin(&app, rels);
+            }
+            if rels == "pins" {
+                return bench_pins_restored(&app);
+            }
             return bench_tabs(&app, &rels);
         }
         if let Some(rel) = occur {
@@ -443,6 +459,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "sync") => bench_git_sync_over_fetch(&app),
                 (None, "rebase") => bench_git_rebase(&app),
                 (None, "focus") => bench_git_focus(&app),
+                (None, "switch") => bench_git_switch(&app),
                 _ => bench_git(&app),
             };
         }

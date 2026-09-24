@@ -310,6 +310,9 @@ pub struct Session {
     pub diagram: BTreeMap<String, DiagramPlace>,
     /// Where each open shell was, keyed by its tab key (`terminal:<id>`).
     pub terminals: BTreeMap<String, ShellPlace>,
+    /// The keys of the pinned tabs. Which pane each is in, and where, is the layout's: a pinned
+    /// tab is always ahead of the others in its pane's `tabs`.
+    pub pinned: Vec<String>,
 }
 
 impl Default for Session {
@@ -327,6 +330,7 @@ impl Default for Session {
             pdf: BTreeMap::new(),
             diagram: BTreeMap::new(),
             terminals: BTreeMap::new(),
+            pinned: Vec::new(),
         }
     }
 }
@@ -1193,6 +1197,7 @@ daily_dir = "Daily"
                     at: "/home/me/src".to_string(),
                 },
             )]),
+            pinned: vec!["b.md".to_string()],
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1214,6 +1219,7 @@ daily_dir = "Daily"
             assert_eq!(back.recent_notes, s.recent_notes);
             assert_eq!(back.recent_commands, s.recent_commands);
             assert_eq!(back.terminals, s.terminals);
+            assert_eq!(back.pinned, s.pinned);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");

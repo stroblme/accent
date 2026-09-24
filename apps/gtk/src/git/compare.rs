@@ -47,6 +47,7 @@ impl Panel {
         let left_title = format!("{left_name} ({})", what.sides.left_title());
         let right_title = format!("{name} ({})", what.sides.right_title());
         let nothing = what.sides.nothing_to_show();
+        let endings = line_endings_only(&left, &right);
         match what.sides.clone() {
             // The working tree is the file itself, so the comparison lives in its tab and the
             // refresh only ever has the index side to re-read.
@@ -62,8 +63,15 @@ impl Panel {
                         // or committed — from the pane itself, or from a terminal — and then the
                         // two sides carry the same text and the comparison shows nothing. Two
                         // identical columns are not an answer: say so and ask git again, so the
-                        // row goes as well.
+                        // row goes as well. Unless the file's line endings are all that changed,
+                        // which git goes on listing however often it is asked.
                         if compare.counts().1 == 0 {
+                            if endings {
+                                (panel.hooks.toast)(&format!(
+                                    "{name} differs only in line endings"
+                                ));
+                                return false;
+                            }
                             (panel.hooks.toast)(&format!("{name} {nothing}"));
                             panel.schedule_refresh(Depth::Everything);
                             return false;
@@ -75,7 +83,7 @@ impl Panel {
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, Box::new(register));
             }
-            Sides::Staged | Sides::Deleted | Sides::Commit { .. } => {
+            Sides::Staged { .. } | Sides::Deleted | Sides::Commit { .. } => {
                 // The same test, made where this side can make it: before the tab is opened
                 // rather than once it holds a comparison. A Staged row the index has outgrown
                 // and a file listed under a commit that did not change it both read the same
@@ -84,9 +92,7 @@ impl Panel {
                     (self.hooks.toast)(&format!("{name} {nothing}"));
                     return self.schedule_refresh(Depth::Everything);
                 }
-                // The panes hold `\n` line endings whatever the file has, so a change of line
-                // endings alone would open a tab with nothing marked in it.
-                if crate::diff::normalise(&left) == crate::diff::normalise(&right) {
+                if endings {
                     return (self.hooks.toast)(&format!("{name} differs only in line endings"));
                 }
                 let key = format!("diff:{}:{}", what.sides.tag(), what.key);
@@ -98,7 +104,7 @@ impl Panel {
                     (&right_title, &right),
                 );
                 // A commit never changes; the index does.
-                if let (Some(tab), Sides::Staged | Sides::Deleted) = (tab, &what.sides) {
+                if let (Some(tab), Sides::Staged { .. } | Sides::Deleted) = (tab, &what.sides) {
                     self.offer_lines(tab.comparison(), &what);
                     self.watch(what, Target::Diff(Rc::downgrade(&tab)));
                 }
@@ -113,7 +119,7 @@ impl Panel {
     fn offer_lines(self: &Rc<Self>, compare: &Compare, what: &What) {
         let (label, unstage) = match what.sides {
             Sides::Worktree => ("Stage Selected Lines", false),
-            Sides::Staged => ("Unstage Selected Lines", true),
+            Sides::Staged { .. } => ("Unstage Selected Lines", true),
             Sides::Deleted | Sides::Commit { .. } => return,
         };
         let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
@@ -141,7 +147,7 @@ impl Panel {
 
     /// The staged comparison of `key`, HEAD against the index, likewise.
     pub fn compare_staged(self: &Rc<Self>, key: &str) {
-        self.compare(key, key, Sides::Staged);
+        self.compare(key, key, Sides::Staged { orig: None });
     }
 
     /// The comparison a file under a history row opens: `oid` against `parent`, likewise.
@@ -205,8 +211,9 @@ impl Panel {
 /// Which two things a row's diff compares.
 #[derive(Clone)]
 pub(super) enum Sides {
-    /// HEAD against the index: what this commit would add.
-    Staged,
+    /// HEAD against the index: what this commit would add. `orig` is the path a staged rename
+    /// or copy came from, which is the one HEAD has.
+    Staged { orig: Option<String> },
     /// The index against the file on disk: what is not staged yet.
     Worktree,
     /// The index against nothing: a file deleted from the working tree, which has no tab to
@@ -226,7 +233,7 @@ impl Sides {
     /// The revision the left pane reads, `None` meaning there is nothing on that side at all.
     fn left_rev(&self) -> Option<&str> {
         match self {
-            Sides::Staged => Some("HEAD"),
+            Sides::Staged { .. } => Some("HEAD"),
             Sides::Worktree | Sides::Deleted => Some(""),
             Sides::Commit { parent, .. } => parent.as_deref(),
         }
@@ -234,7 +241,7 @@ impl Sides {
 
     fn left_title(&self) -> String {
         match self {
-            Sides::Staged => "HEAD".to_string(),
+            Sides::Staged { .. } => "HEAD".to_string(),
             Sides::Worktree | Sides::Deleted => "Index".to_string(),
             Sides::Commit { parent, .. } => match parent {
                 Some(parent) => short(parent),
@@ -245,7 +252,7 @@ impl Sides {
 
     fn right_title(&self) -> String {
         match self {
-            Sides::Staged => "Index".to_string(),
+            Sides::Staged { .. } => "Index".to_string(),
             Sides::Worktree => "Working Tree".to_string(),
             Sides::Deleted => "Deleted".to_string(),
             Sides::Commit { oid, .. } => short(oid),
@@ -257,7 +264,7 @@ impl Sides {
     /// once and stays where it is, so either can be older than the repository it describes.
     fn nothing_to_show(&self) -> &'static str {
         match self {
-            Sides::Staged => "has no staged changes",
+            Sides::Staged { .. } => "has no staged changes",
             Sides::Worktree | Sides::Deleted => "has no unstaged changes",
             Sides::Commit { .. } => "is unchanged in this commit",
         }
@@ -267,12 +274,18 @@ impl Sides {
     /// the one already open.
     fn tag(&self) -> String {
         match self {
-            Sides::Staged => "index".to_string(),
+            Sides::Staged { .. } => "index".to_string(),
             Sides::Worktree => "worktree".to_string(),
             Sides::Deleted => "deleted".to_string(),
             Sides::Commit { oid, .. } => format!("commit:{}", short(oid)),
         }
     }
+}
+
+/// Whether `left` and `right` differ in their line endings and in nothing else. The panes hold
+/// `\n` endings whatever the file has, so such a comparison would open with nothing marked in it.
+fn line_endings_only(left: &str, right: &str) -> bool {
+    left != right && crate::diff::normalise(left) == crate::diff::normalise(right)
 }
 
 /// What one comparison compares: the half of a [`Watch`] the worker reads with.
@@ -318,7 +331,7 @@ impl What {
             None => Blob::Text(String::new()),
         };
         let right = match &self.sides {
-            Sides::Staged => self.side(vault, "", &self.rel)?,
+            Sides::Staged { .. } => self.side(vault, "", &self.rel)?,
             // The working tree side is the file itself, which on a remote vault is on the other
             // machine: reading it through the vault is what makes the diff work there as well
             // as here. It is read even though the tab shows its own buffer, so that the same
@@ -330,10 +343,12 @@ impl What {
         Ok((left, right))
     }
 
-    /// The path the left side is read at: the old one, where a commit renamed the file.
+    /// The path the left side is read at: the old one, where a commit or the index renamed the
+    /// file.
     fn left_rel(&self) -> &str {
         match &self.sides {
-            Sides::Commit {
+            Sides::Staged { orig: Some(orig) }
+            | Sides::Commit {
                 orig: Some(orig), ..
             } => orig,
             _ => &self.rel,
@@ -376,7 +391,11 @@ impl What {
             false => vault.read_text(&self.key),
         };
         match read {
-            Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
+            // With the line endings the file has, which reading it as text takes away: a change
+            // of those alone is a change to git, and [`line_endings_only`] has to see it.
+            Ok(accent_api::fs::Read::Text(t)) => {
+                Blob::Text(accent_api::fs::for_disk(&t.text, t.crlf, false))
+            }
             Ok(_) => Blob::Binary,
             // A file that is no longer there really is a deletion, and an empty right side is
             // what draws one. This used to be every absolute key as well, which drew a file
@@ -394,13 +413,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_change_of_line_endings_alone_is_told_from_no_change_and_from_an_edit() {
+        assert!(line_endings_only("a\r\nb\r\n", "a\nb\n"));
+        assert!(!line_endings_only("a\nb\n", "a\nb\n"), "no change at all");
+        assert!(
+            !line_endings_only("a\r\nb\r\n", "a\nc\n"),
+            "an edit as well"
+        );
+    }
+
+    #[test]
     fn a_comparison_with_nothing_in_it_names_the_side_the_row_came_from() {
         let commit = Sides::Commit {
             oid: "abc1234".to_string(),
             parent: None,
             orig: None,
         };
-        assert_eq!(Sides::Staged.nothing_to_show(), "has no staged changes");
+        assert_eq!(
+            Sides::Staged { orig: None }.nothing_to_show(),
+            "has no staged changes"
+        );
         assert_eq!(commit.nothing_to_show(), "is unchanged in this commit");
         // A deleted file's row sits in the same section as a modified one, and says the same.
         assert_eq!(

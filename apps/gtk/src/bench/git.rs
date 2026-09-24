@@ -81,6 +81,37 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
     });
 }
 
+/// A commit row of the history clicked the moment another repository is picked, before the
+/// refresh that reads the new one's has landed. Point it at a vault holding two repositories with
+/// a commit each. The row used to be the old repository's, asked of the new one, which toasted
+/// `Cannot list the commit's files: fatal: bad object …`; now the history is empty until then.
+pub(super) fn bench_git_switch(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(
+            || app.git.get().is_some_and(|git| git.log_rows() > 0),
+            30000,
+        )
+        .await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        println!("bench git_switch before rows={}", git.log_rows());
+        let said = app.toasted.get();
+        git.select_repo(1);
+        let rows = git.log_rows();
+        git.activate_log_row(0);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!(
+            "bench git_switch clicked rows={rows} toasts={} said={:?} after={}",
+            app.toasted.get() - said,
+            bench_said(&app),
+            git.log_rows()
+        );
+        bench_quit(&app);
+    });
+}
+
 /// Whether the sidebar is showing a Git pane at all, which is the whole readout above: the pane
 /// appearing is a switcher icon, and the headless image has no pointer to find it with.
 fn has_git_pane(app: &Rc<App>) -> bool {
@@ -104,7 +135,7 @@ fn bench_git_stage(app: &Rc<App>) {
             .as_ref()
             .and_then(|w| find_widget(w, &|w| w.is::<gtk::ListView>()))
             .and_downcast::<gtk::ListView>();
-        if let Some(model) = view.and_then(|v| v.model()) {
+        if let Some(model) = view.as_ref().and_then(|v| v.model()) {
             model.connect_items_changed(|_, at, removed, added| {
                 println!("bench git_splice at={at} removed={removed} added={added}");
             });
@@ -137,6 +168,9 @@ fn bench_git_stage(app: &Rc<App>) {
             println!("bench git_kept {below} {kept}");
         }
         println!("bench git_changes_rows {}", git.changes_rows());
+        if let Some(view) = &view {
+            bench_git_headers(view);
+        }
 
         // A folder's own buttons: all of `src` into the index and out again, then its Discard,
         // whose question is printed and answered — and the permanent delete's too, where the
@@ -169,6 +203,41 @@ fn bench_git_stage(app: &Rc<App>) {
         println!("bench git_changes_rows {}", git.changes_rows());
         bench_quit(&app);
     });
+}
+
+/// The section headers on screen: their title, their bulk button's icon and tooltip, and whether
+/// their row is `.activatable`, the class Adwaita's hover and press highlight is written for. The
+/// file and folder rows are counted beside them, and every one of those is to keep it.
+fn bench_git_headers(view: &gtk::ListView) {
+    let (mut rows, mut lit) = (0, 0);
+    let mut row = view.first_child();
+    while let Some(r) = row {
+        row = r.next_sibling();
+        // Only a mapped row: the list keeps the widgets it has no item for, with their old names.
+        let stack = r.first_child().and_downcast::<gtk::Stack>();
+        let Some(stack) = stack.filter(|_| r.is_mapped()) else {
+            continue;
+        };
+        let activatable = r.has_css_class("activatable");
+        if stack.visible_child_name().as_deref() != Some("header") {
+            rows += 1;
+            lit += usize::from(activatable);
+            continue;
+        }
+        let header = stack.visible_child();
+        let title = header.as_ref().and_then(|h| h.first_child());
+        let button = header
+            .as_ref()
+            .and_then(|h| h.last_child())
+            .and_downcast::<gtk::Button>();
+        println!(
+            "bench git_header {:?} activatable={activatable} icon={:?} tip={:?}",
+            title.and_downcast::<gtk::Label>().map(|l| l.text()),
+            button.as_ref().and_then(|b| b.icon_name()),
+            button.as_ref().and_then(|b| b.tooltip_text()),
+        );
+    }
+    println!("bench git_header_rows activatable={lit}/{rows}");
 }
 
 /// What a row's name has room for either side of the pointer arriving on it.

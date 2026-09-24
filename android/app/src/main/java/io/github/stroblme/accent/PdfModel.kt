@@ -8,14 +8,21 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
+import io.github.stroblme.accent.ffi.LinkHighlight
+import io.github.stroblme.accent.ffi.Located
 import io.github.stroblme.accent.ffi.Outline
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.PdfSession
 import io.github.stroblme.accent.ffi.Point
+import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.Tile
+import io.github.stroblme.accent.ffi.linkWithAlias
+import io.github.stroblme.accent.ui.union
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -109,6 +116,44 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     /** The `/Link` boxes on a page, in page points. Uncached: a read is cheap beside a render. */
     suspend fun links(index: Int): List<PdfLinkBox> = on {
         runCatching { session.links(index.toUInt()) }.getOrDefault(emptyList())
+    }
+
+    /** Every character of a page with its box, in reading order: what a selection is made of. */
+    suspend fun glyphs(index: Int): List<Glyph> = on {
+        runCatching { session.glyphs(index.toUInt()) }.getOrDefault(emptyList())
+    }
+
+    /** The glyphs a link's four numbers cover on [index] today, or `null` if they fit no line. */
+    suspend fun locate(index: Int, numbers: List<UInt>): Located? = on {
+        runCatching { session.locate(index.toUInt(), numbers) }.getOrNull()
+    }
+
+    /**
+     * The link glyphs [start] until [end] of page [index] make into this document, named [name],
+     * with the text they spell as its alias: what Copy Link puts on the clipboard, in the
+     * desktop's words — `[[name#page=N&selection=a,b,c,d|the text]]`.
+     */
+    suspend fun link(name: String, index: Int, start: Int, end: Int): String? = on {
+        runCatching { session.selectionLink(name, index.toUInt(), start.toUInt(), end.toUInt()) }
+            .map { linkWithAlias(it.link, it.text) }
+            .getOrNull()
+    }
+
+    /**
+     * Every match of [text] on page [index], one box each over the lines it runs across — the
+     * desktop marks a match the same way. One page per call, so a find can stop between two.
+     */
+    suspend fun search(index: Int, text: String): List<Rect> = on {
+        runCatching { session.search(index.toUInt(), text) }.getOrDefault(emptyList())
+            .mapNotNull { hit -> hit.quads.reduceOrNull { a, b -> a.union(b) } }
+    }
+
+    /**
+     * Where these note links land on their pages today, each answer naming its link by its index
+     * in [links]. Uncached: the core keeps the page text it reads, which is most of the cost.
+     */
+    suspend fun highlights(links: List<PdfLink>): List<LinkHighlight> = on {
+        session.linkHighlights(links)
     }
 
     suspend fun stroke(page: Int, points: List<Point>, style: InkStyle) = on {

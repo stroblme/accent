@@ -11,10 +11,12 @@ import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.NoteAlias
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.Vault
+import io.github.stroblme.accent.ffi.pdfAnchor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -88,13 +90,37 @@ data class Open(
     fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
 }
 
+/**
+ * The PDF in front of the reader: where it is in the vault, where on disk, and where it opens —
+ * and whether its find is open ([VaultModel.finding]), as a note's is ([Open.finding]).
+ */
+data class OpenPdf(
+    val rel: String,
+    val path: String,
+    val at: PdfPlace? = null,
+    val finding: Boolean = false,
+)
+
+/**
+ * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
+ * the place a reader left it, which Back from a note returns them to. Or the page a link into it
+ * names and the four numbers of the passage it quotes there, shown as the selection.
+ */
+data class PdfPlace(
+    val page: Int,
+    val top: Float = 0f,
+    val zoom: Float = 1f,
+    val panX: Float = 0f,
+    val selection: List<UInt>? = null,
+)
+
 data class VaultState(
     val root: String? = null,
     val indexing: Boolean = false,
     /**
      * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
      * and nothing but [VaultModel.resumeIndexing] walks again — not even the rescan every return
-     * to the app asks for. Opening the vault again is a resume too.
+     * to the app asks for. Opening the vault again is a resume too, as is Reload Vault.
      */
     val paused: Boolean = false,
     /** Files the walk has been through so far, for as long as one is running. */
@@ -121,7 +147,12 @@ data class VaultState(
     val expanded: Set<String> = setOf(""),
     val results: List<SearchHit> = emptyList(),
     val open: Open? = null,
-    val pdf: String? = null,
+    val pdf: OpenPdf? = null,
+    /**
+     * The PDF the open note was reached from, by a tap on a highlight its link paints, and where
+     * the reader was in it: what closing the note goes back to. Anything else opened lets it go.
+     */
+    val back: OpenPdf? = null,
     val message: String? = null,
 )
 
@@ -365,6 +396,19 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
+     * Reload Vault: a [rescan], except on a paused vault, which refuses every walk but a resume.
+     * A reader asking for the vault to be read again there means the rest of it, so it resumes.
+     */
+    fun reloadVault() {
+        if (!_state.value.paused) {
+            rescan()
+            return
+        }
+        resumeIndexing()
+        _state.value.open?.let { onChanged(it.rel) }
+    }
+
+    /**
      * Stop the walk, keeping what it has indexed.
      *
      * Nothing changes here yet: the walk finishes the file it is on and then says it stopped,
@@ -391,9 +435,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      *
      * [find] is the query rather than [SearchHit.at]: the hit's range is bytes into the markdown
      * source and the screen holds the page that source rendered to, so the only thing that
-     * survives the crossing is the words. A PDF drops it; there is no find in that reader yet.
+     * survives the crossing is the words. A PDF drops it.
+     *
+     * [at] is where a PDF opens, and [back] the PDF a note is opened from, for [close] to return
+     * to; see [openFromPdf].
      */
-    fun openFile(rel: String, find: String? = null) {
+    fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: OpenPdf? = null) {
         val v = vault ?: return
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
@@ -402,7 +449,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             recents.touch(Recents.Kind.Notes, rel)
             if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
-                path.onSuccess { p -> _state.update { it.copy(pdf = p, open = null) } }
+                path.onSuccess { p ->
+                    _state.update { it.copy(pdf = OpenPdf(rel, p, at), open = null, back = null) }
+                }
                     .onFailure { fail("Cannot open this file", it) }
                 return@leave
             }
@@ -417,14 +466,33 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     it.copy(
                         pdf = null,
                         open = Open(rel, note.text, note.etag, conflicts = conflicts, find = find),
+                        back = back,
                     )
                 }
             }.onFailure { fail("Cannot read this note", it) }
         }
     }
 
-    /** Put the note down, writing anything the pause was still holding. */
-    fun close() = leave { _state.update { it.copy(open = null, pdf = null) } }
+    /**
+     * Put the note down, writing anything the pause was still holding — and go back to the PDF it
+     * was reached from, where the reader left it, if a highlight there is what opened it.
+     */
+    fun close() = leave { _state.update { it.copy(open = null, pdf = it.back, back = null) } }
+
+    /**
+     * Open the note whose link paints a highlight on the PDF in front, marked at the text the link
+     * quotes, as the desktop opens it on a click. The PDF is kept at [place], where the reader
+     * was, for Back from the note to return to.
+     */
+    fun openFromPdf(link: PdfLink, place: PdfPlace) {
+        val from = _state.value.pdf ?: return
+        openFile(link.srcRelPath, find = link.alias, back = from.copy(at = place, finding = false))
+    }
+
+    /** The note links into this PDF, which paint as its highlights. */
+    suspend fun pdfLinks(rel: String): List<PdfLink> = withContext(Dispatchers.IO) {
+        runCatching { vault?.pdfLinks(rel) }.getOrNull().orEmpty()
+    }
 
     /**
      * Put the vault down and go back to the picker.
@@ -453,14 +521,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * disk, for a file in a tree the index does not hold (a gitignored `build/`); a target
      * neither can place is a link to a note nobody has written yet, which only the switcher
      * writes.
+     *
+     * A PDF opens on the page the link names, showing the passage its numbers quote there, as the
+     * desktop follows one. A heading after a note's name is not placed yet.
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val name = target.substringBefore('#')
         val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
+        val at = pdfAnchor(target.substringAfter('#', ""))?.let {
+            PdfPlace(it.page.toInt(), selection = it.selection)
+        }
         when (val rel = found) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
-            else -> openFile(rel)
+            else -> openFile(rel, at = at)
         }
     }
 
@@ -624,12 +698,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     fun found() = _state.update { it.copy(open = it.open?.copy(find = null)) }
 
     /**
-     * Open or put away the note's own find.
+     * Open or put away the find of whatever is in front, a note or a PDF.
      *
      * With nothing in front there is nothing to find in and this does nothing, which is what
      * [close] already does from the same palette.
      */
-    fun finding(on: Boolean) = _state.update { it.copy(open = it.open?.copy(finding = on)) }
+    fun finding(on: Boolean) = _state.update {
+        it.copy(open = it.open?.copy(finding = on), pdf = it.pdf?.copy(finding = on))
+    }
 
     fun said(message: String?) = _state.update { it.copy(message = message) }
 

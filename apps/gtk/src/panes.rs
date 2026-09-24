@@ -30,6 +30,13 @@ const EDGE: f64 = 0.25;
 const PREVIEW_ICON: &str = "view-reveal-symbolic";
 const PREVIEW_TIP: &str = "Preview — Click to Keep";
 
+/// What a pinned tab carries in the same slot. A mark rather than a button, unlike the eye:
+/// unpinning is the tab menu's, not something a stray click on the tab's edge should do. The
+/// outside-the-vault mark keeps the slot here too, since where a save goes matters more than
+/// what the tab's place at the start of the bar already says.
+const PINNED_ICON: &str = "view-pin-symbolic";
+const PINNED_TIP: &str = "Pinned";
+
 /// What `AdwTabView` keeps of its own chords. Six are taken away: `Ctrl+Tab` and
 /// `Ctrl+Shift+Tab` are `win.next-tab` / `win.previous-tab`, which walk the tabs in the order
 /// they were last used rather than along the bar, and both Home / End pairs go back to
@@ -167,6 +174,29 @@ pub fn cycle_to(len: usize, at: usize, forward: bool) -> usize {
 pub fn to_front<T: Clone + PartialEq>(order: &mut Vec<T>, item: &T) {
     order.retain(|p| p != item);
     order.insert(0, item.clone());
+}
+
+/// Where a tab at `at` belongs in a bar holding `pinned` pinned tabs besides it, which are always
+/// its first ones: a pinned tab no further right than the end of that group, any other no further
+/// left. Pure, and the whole of pinning's order — pinning or unpinning a tab is flipping its state
+/// and asking this, which lands it on the boundary; so is any move that crossed it.
+pub fn pinned_slot(at: usize, pinned: usize, is_pinned: bool) -> usize {
+    match is_pinned {
+        true => at.min(pinned),
+        false => at.max(pinned),
+    }
+}
+
+/// Put the pin in `page`'s indicator slot, or take it out. A slot something else holds is left to
+/// it (see [`PINNED_ICON`]).
+pub fn mark_pinned(page: &adw::TabPage, pinned: bool) {
+    if pinned && page.indicator_icon().is_none() {
+        page.set_indicator_icon(Some(&gio::ThemedIcon::new(PINNED_ICON)));
+        page.set_indicator_tooltip(PINNED_TIP);
+    } else if !pinned && page.indicator_tooltip() == PINNED_TIP {
+        page.set_indicator_icon(None::<&gio::Icon>);
+        page.set_indicator_tooltip("");
+    }
 }
 
 // --- back and forward ----------------------------------------------------------------------
@@ -346,6 +376,31 @@ pub fn arrange(side: Side) -> (gtk::Orientation, bool) {
         Side::Up => (gtk::Orientation::Vertical, true),
         Side::Down => (gtk::Orientation::Vertical, false),
     }
+}
+
+/// How far one Move Divider step goes, as a share of the split.
+const DIVIDER_STEP: f64 = 0.05;
+
+/// Where a divider at `position` in a split `extent` long goes one step towards the end
+/// (`forward`) or the start: the next stop on a grid of [`DIVIDER_STEP`]s anchored at the centre,
+/// which is where a split starts and where a double-click puts it back. So a divider the pointer
+/// left off the grid lands on it, and the centre is always a stop. A position within a pixel of a
+/// stop is that stop, a share of the split having been rounded to whole pixels.
+///
+/// Pure; keeping the answer inside what the split allows is the caller's.
+pub fn divider_step(position: i32, extent: i32, forward: bool) -> i32 {
+    let step = DIVIDER_STEP * f64::from(extent);
+    if step <= 0.0 {
+        return position;
+    }
+    let centre = f64::from(extent) / 2.0;
+    let at = (f64::from(position) - centre) / step;
+    let pixel = 1.0 / step;
+    let stop = match forward {
+        true => (at + pixel).floor() + 1.0,
+        false => (at - pixel).ceil() - 1.0,
+    };
+    (centre + stop * step).round() as i32
 }
 
 /// The pane on `side` of `from`, as an index into `others`: the nearest one that starts at or
@@ -955,6 +1010,34 @@ mod tests {
         nav.forget("a.md");
         assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
         assert!(nav.back(caret("c.md", 1)).is_none());
+    }
+
+    /// Two tabs pinned besides the one asked about: a pinned tab goes no further right than the
+    /// end of that group, and any other no further left, whatever moved it there.
+    #[test]
+    fn pinned_tabs_stay_left_of_the_rest() {
+        // Dragged to the far end, a pinned tab comes back to the end of its group.
+        assert_eq!(pinned_slot(4, 2, true), 2);
+        assert_eq!(pinned_slot(1, 2, true), 1);
+        // Dragged in front of the pinned ones, any other comes back to just after them.
+        assert_eq!(pinned_slot(0, 2, false), 2);
+        assert_eq!(pinned_slot(3, 2, false), 3);
+    }
+
+    /// The grid is anchored at the centre, so a divider dragged to 47 % steps to 50 % or 45 %,
+    /// never to 52 % or 42 %; and a stop rounded to whole pixels still counts as the stop.
+    #[test]
+    fn a_divider_steps_along_a_grid_anchored_at_the_centre() {
+        assert_eq!(divider_step(470, 1000, true), 500);
+        assert_eq!(divider_step(470, 1000, false), 450);
+        assert_eq!(divider_step(500, 1000, true), 550);
+        assert_eq!(divider_step(501, 1000, false), 450);
+        assert_eq!(divider_step(499, 1000, true), 550);
+        assert_eq!(
+            divider_step(300, 0, true),
+            300,
+            "an unallocated split stays put"
+        );
     }
 
     #[test]

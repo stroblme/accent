@@ -118,7 +118,8 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             // it was built from, so this is what puts Rename and Move to Trash on a vault file's
             // tab and on no other. One model per pane, which is the one asked for here.
             if let Some(menu) = tabs.menu_model().and_downcast::<gio::Menu>() {
-                actions::fill_tab_menu(&menu, app.menu_file().is_some());
+                let pinned = page.is_some_and(|page| app.is_pinned(page));
+                actions::fill_tab_menu(&menu, app.menu_file().is_some(), pinned);
             }
         }
     ));
@@ -192,7 +193,17 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             if let Some(shell) = app.shell.upgrade() {
                 shell.landed(&app, &pane, page);
             }
+            app.hold_pinned_soon(&pane, page);
         }
+    ));
+    // A tab moved along the bar — dragged, or by the bar's own `Ctrl+Shift+PageUp` — stays on
+    // its side of the pinned ones, and so does one arriving from another pane, above.
+    pane.tabs.connect_page_reordered(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_, page, _| app.hold_pinned_soon(&pane, page)
     ));
     // A pane that has just lost its last page has nothing left to be. Closing it from an idle
     // rather than here, because this also fires in the middle of `transfer_page`, which is still

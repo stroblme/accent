@@ -95,6 +95,24 @@ pub fn selection_link(glyphs: &[Glyph], rel_pdf_path: &str, sel: &Selection) -> 
     }
 }
 
+/// Put the selected text into a link as its alias: `[[f.pdf#page=1&selection=…|the text]]`.
+///
+/// The alias is what a reader sees in the note and what re-anchors the highlight when the
+/// selection numbers no longer fit the document, so it is the text and not a label. Newlines
+/// collapse — a link is one line — and the three characters that would end the link early are
+/// dropped rather than escaped, because a wikilink has no escape for them.
+pub fn link_with_alias(link: &str, text: &str) -> String {
+    let alias: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(['|', '[', ']'], "");
+    match alias.is_empty() {
+        true => link.to_string(),
+        false => format!("{}|{alias}]]", link.trim_end_matches("]]")),
+    }
+}
+
 /// The reverse of [`selection_link`]: what `a,b,c,d` covers on this page today.
 ///
 /// `None` when the numbers do not fit the page's lines, which is what a link written against

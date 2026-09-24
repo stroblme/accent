@@ -1,14 +1,27 @@
 package io.github.stroblme.accent.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect as AndroidRect
 import android.net.Uri
+import android.os.Build
+import android.provider.OpenableColumns
+import android.view.ActionMode
+import android.view.Menu
+import android.view.MenuItem
+import android.view.View
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.AnimationState
 import androidx.compose.animation.core.animateDecay
 import androidx.compose.animation.core.exponentialDecay
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -26,11 +39,17 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
@@ -43,13 +62,19 @@ import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.constrainWidth
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
+import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.PdfModel
+import io.github.stroblme.accent.PdfPlace
+import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.Outline
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.Point
+import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import java.io.File
 import kotlinx.coroutines.flow.collectLatest
@@ -64,9 +89,13 @@ import kotlinx.coroutines.withContext
  */
 enum class Tool { Read, Pen, Highlighter, Eraser }
 
-/** A PDF inside a vault: strokes are written back into the file it came from. */
+/**
+ * A PDF inside a vault: strokes are written back into the file it came from, and the notes that
+ * link into it paint their highlights over it.
+ */
 @Composable
-fun PdfScreen(path: String, chrome: Chrome) {
+fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome) {
+    val path = pdf.path
     var doc by remember(path) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(path) { mutableStateOf<String?>(null) }
     LaunchedEffect(path) {
@@ -75,7 +104,21 @@ fun PdfScreen(path: String, chrome: Chrome) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
-    Reader(doc, failed, File(path).name.removeSuffix(".pdf"), chrome) { it.save() }
+    // Asked again whenever a walk ends, which is when a link written elsewhere reaches the index.
+    var notes by remember(pdf.rel) { mutableStateOf(emptyList<PdfLink>()) }
+    LaunchedEffect(pdf.rel, indexing) { if (!indexing) notes = model.pdfLinks(pdf.rel) }
+    Reader(
+        doc,
+        failed,
+        File(path).name.removeSuffix(".pdf"),
+        chrome,
+        linkName = pdf.rel,
+        at = pdf.at,
+        notes = notes,
+        onNote = model::openFromPdf,
+        finding = pdf.finding,
+        onFinding = model::finding,
+    ) { it.save() }
 }
 
 /** A PDF opened from somewhere else: there is no vault, so it is written back where it came from. */
@@ -100,11 +143,29 @@ fun LoosePdfScreen(uri: Uri) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
-    val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".pdf").orEmpty()
+    // The name the app that handed the file over gives it: what the bar shows, and what a copied
+    // link names it by, as the desktop links a PDF from outside any vault by its file name. The
+    // URI's own last segment is often an opaque id, and is only the fallback.
+    var name by remember(uri) {
+        mutableStateOf(uri.lastPathSegment?.substringAfterLast('/').orEmpty())
+    }
+    LaunchedEffect(uri) {
+        withContext(Dispatchers.IO) { displayName(context, uri) }?.let { name = it }
+    }
+    // No palette out here, so the bar's Find is the only way in and the flag is this screen's own.
+    var finding by remember(uri) { mutableStateOf(false) }
     // Opened straight from another app, so there is no vault screen around this one to keep it
     // clear of the status bar and the gesture strip.
     Box(Modifier.windowInsetsPadding(WindowInsets.safeDrawing)) {
-        Reader(doc, failed, name, chrome) { model ->
+        Reader(
+            doc,
+            failed,
+            name.removeSuffix(".pdf"),
+            chrome,
+            linkName = name,
+            finding = finding,
+            onFinding = { finding = it },
+        ) { model ->
             // No path on this side: the bytes go back through whatever handed them over.
             val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
             runCatching {
@@ -116,12 +177,28 @@ fun LoosePdfScreen(uri: Uri) {
     }
 }
 
+/** What the provider calls the file behind [uri], if it says. */
+private fun displayName(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        ?.use { if (it.moveToFirst()) it.getString(0) else null }
+}.getOrNull()
+
 @Composable
 private fun Reader(
     doc: PdfModel?,
     failed: String?,
     title: String,
     chrome: Chrome,
+    /** What a copied link calls the document: its vault path, or its file name from outside. */
+    linkName: String,
+    /** Where it opens, if not at the top. */
+    at: PdfPlace? = null,
+    /** The note links into it, which paint as highlights; none for a document from outside. */
+    notes: List<PdfLink> = emptyList(),
+    onNote: (PdfLink, PdfPlace) -> Unit = { _, _ -> },
+    /** Whether its find bar is open. */
+    finding: Boolean,
+    onFinding: (Boolean) -> Unit,
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
@@ -173,18 +250,33 @@ private fun Reader(
             DocumentFrame(
                 barShown = chrome.shown,
                 bar = {
-                    // The bar has one action, and Contents is now what a PDF puts in it: it says
-                    // so even on a file carrying no outline, the way it used to say Edit. Where
-                    // the annotation tools go is still open ([ANNOTATIONS]) and is not this slot.
-                    DocumentBar(
-                        title = title,
-                        action = "Contents",
-                        enabled = marks.isNotEmpty(),
-                        onAction = { contents = true },
-                    )
+                    // Find, and the bookmarks. Contents says so even on a file carrying no
+                    // outline, the way it used to say Edit: a gap where a control belongs is worse
+                    // than one that says it has nothing to offer. Where the annotation tools go is
+                    // still open ([ANNOTATIONS]).
+                    DocumentBar(title) {
+                        TextButton(onClick = { onFinding(true) }) { Text("Find") }
+                        TextButton(onClick = { contents = true }, enabled = marks.isNotEmpty()) {
+                            Text("Contents")
+                        }
+                    }
                 },
-            ) {
-                Pages(doc, tool, chrome, wanted) { wanted = null }
+            ) { bar ->
+                val clear = with(LocalDensity.current) { bar.toPx() }
+                Pages(
+                    doc,
+                    linkName,
+                    tool,
+                    chrome,
+                    wanted,
+                    at,
+                    notes,
+                    onNote,
+                    clear,
+                    finding,
+                    onFinding,
+                    onSay = { scope.launch { snackbar.showSnackbar(it) } },
+                ) { wanted = null }
                 if (ANNOTATIONS) {
                     PdfToolbar(
                         tool = tool,
@@ -275,7 +367,24 @@ private const val INK_SAVE_MS = 1000L
  * zoom the fingers leave it at.
  */
 @Composable
-private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWent: () -> Unit) {
+private fun Pages(
+    doc: PdfModel,
+    linkName: String,
+    tool: Tool,
+    chrome: Chrome,
+    wanted: Int?,
+    /** Where the document opens, if not at the top. */
+    opening: PdfPlace?,
+    notes: List<PdfLink>,
+    onNote: (PdfLink, PdfPlace) -> Unit,
+    /** How much of the top of the screen the document's bar covers, in pixels. */
+    clear: Float,
+    finding: Boolean,
+    onFinding: (Boolean) -> Unit,
+    /** A line for the snackbar. */
+    onSay: (String) -> Unit,
+    onWent: () -> Unit,
+) {
     val density = LocalDensity.current
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -313,6 +422,28 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      * away takes its entry with it.
      */
     val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
+    /** The highlights a note's links paint on the composed pages, left here as [links] are. */
+    val marks = remember(doc) { mutableStateMapOf<Int, List<Mark>>() }
+    val notesOn = remember(notes) { notes.groupBy { it.page.toInt() } }
+    val openNote by rememberUpdatedState(onNote)
+    /** The glyphs of the pages a selection has needed, read once each. */
+    val glyphs = remember(doc) { mutableStateMapOf<Int, List<Glyph>>() }
+    var selection by remember(doc) { mutableStateOf<Selection?>(null) }
+    val chosen by remember(doc) { derivedStateOf { selection?.pieces(glyphs).orEmpty() } }
+    /** Pages whose glyphs are on their way, so a drag over one asks for them once. */
+    val asked = remember(doc) { mutableSetOf<Int>() }
+    /** The word a long press made, which the drag after it grows from. */
+    var word by remember(doc) { mutableStateOf<Selection?>(null) }
+    /**
+     * Whether the selection has its menu: one the reader made has, one a followed link shows does
+     * not until a handle is touched — it is there to be read, not copied.
+     */
+    var menu by remember(doc) { mutableStateOf(false) }
+    /** A finger is on a handle or still growing a long press's word. */
+    var dragging by remember(doc) { mutableStateOf(false) }
+    /** Where the pages' box is in the window, which is where the menu is placed from. */
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    val haptics = LocalHapticFeedback.current
     /**
      * Where each jump in this document was taken from, the latest last: what Back retraces before
      * it leaves. Kept as a page and points down it rather than the row and offset the column was
@@ -354,6 +485,19 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
     }
 
     /**
+     * Bring [rect], in points on page [index], into view below the bar if it is not: to the middle
+     * of what the bar leaves, so it arrives with room around it to be read in. [jumped] puts where
+     * the reader was on the way Back, as a find's first match does and its steps do not.
+     */
+    fun show(index: Int, rect: Rect, jumped: Boolean = false) {
+        val above = pages.above(list, viewport.width, zoom)
+        val to = pages.reveal(index, rect, above, panX, viewport, zoom, clear) ?: return
+        if (jumped) back += pages.place(above, viewport.width, zoom)
+        panX = to.panX
+        list.requestScrollToItem(to.row, to.into)
+    }
+
+    /**
      * [goTo], remembering where the reader was so Back returns there. Only jumps come here: a
      * link and a bookmark, as on the desktop. Scrolling is reading, and a history of every page
      * passed would have nothing left to go back to.
@@ -379,6 +523,124 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
         }
     }
 
+    /** Read a page's glyphs if they are not here and not on their way. */
+    fun need(page: Int) {
+        if (page in glyphs || !asked.add(page)) return
+        scope.launch { glyphs[page] = doc.glyphs(page) }
+    }
+
+    fun select(to: Selection) {
+        for (page in to.from.page..to.to.page) need(page)
+        selection = to
+    }
+
+    /** Where a point on the screen falls in the text: a page, and the glyph nearest it there. */
+    fun caretAt(at: Offset): Caret? {
+        val above = pages.above(list, viewport.width, zoom)
+        val land = pages.on(at.x - panX, at.y + above, viewport.width, zoom) ?: return null
+        val on = glyphs[land.page] ?: return null.also { need(land.page) }
+        return nearest(on, land.point)?.let { Caret(land.page, it) }
+    }
+
+    /** A long press: the word under the finger, once its page's glyphs are here. */
+    fun pressed(at: Offset) {
+        val above = pages.above(list, viewport.width, zoom)
+        val land = pages.on(at.x - panX, at.y + above, viewport.width, zoom) ?: return
+        scope.launch {
+            val on = glyphs[land.page] ?: doc.glyphs(land.page).also { glyphs[land.page] = it }
+            val glyph = nearest(on, land.point) ?: return@launch
+            val range = wordAt(on, glyph)
+            word = Selection(Caret(land.page, range.first), Caret(land.page, range.last))
+                .also { select(it) }
+            menu = true
+        }
+    }
+
+    /**
+     * Where the two handles hang from on the screen: the foot of the first glyph's start and of
+     * the last one's end. None while a pinch holds the layer scaled.
+     */
+    fun anchors(): Pair<Offset, Offset>? {
+        if (live != 1f) return null
+        val first = chosen.firstOrNull { it.boxes.isNotEmpty() } ?: return null
+        val last = chosen.lastOrNull { it.boxes.isNotEmpty() } ?: return null
+        val (a, b) = first.boxes.first() to last.boxes.last()
+        val above = pages.above(list, viewport.width, zoom)
+        return pages.screen(first.page, a.left, a.bottom, above, panX, viewport.width, zoom) to
+            pages.screen(last.page, b.right, b.bottom, above, panX, viewport.width, zoom)
+    }
+
+    /**
+     * The end a press on a handle keeps still, which is the other one; `null` for a press on
+     * neither. The nearer handle where the two are close.
+     */
+    fun heldAt(at: Offset): Caret? {
+        val (start, end) = anchors() ?: return null
+        val now = selection ?: return null
+        val r = with(density) { HANDLE.toPx() }
+        val reach = with(density) { HANDLE_REACH.toPx() }
+        val toStart = (at - (start + Offset(-r, r))).getDistance()
+        val toEnd = (at - (end + Offset(r, r))).getDistance()
+        return when {
+            minOf(toStart, toEnd) > reach -> null
+            toStart < toEnd -> now.to
+            else -> now.from
+        }
+    }
+
+    /** The window rectangle the menu keeps clear of: what is on screen of the selection. */
+    fun menuAround(): AndroidRect? {
+        if (live != 1f) return null
+        val above = pages.above(list, viewport.width, zoom)
+        var box: Rect? = null
+        val width = viewport.width
+        for (piece in chosen) for (glyph in piece.boxes) {
+            val a = pages.screen(piece.page, glyph.left, glyph.top, above, panX, width, zoom)
+            val b = pages.screen(piece.page, glyph.right, glyph.bottom, above, panX, width, zoom)
+            val onScreen = Rect(a.x, a.y, b.x, b.y)
+            box = box?.union(onScreen) ?: onScreen
+        }
+        val on = box ?: return null
+        val left = maxOf(on.left, 0f)
+        val top = maxOf(on.top, clear)
+        val right = minOf(on.right, viewport.width.toFloat())
+        val bottom = minOf(on.bottom, viewport.height.toFloat())
+        if (left >= right || top >= bottom) return null
+        return AndroidRect(
+            (origin.x + left).toInt(),
+            (origin.y + top).toInt(),
+            (origin.x + right).toInt(),
+            (origin.y + bottom).toInt(),
+        )
+    }
+
+    fun clip(text: String) {
+        context.getSystemService(ClipboardManager::class.java)
+            .setPrimaryClip(ClipData.newPlainText("PDF text", text))
+        // Android 13 and later say so themselves, with what was copied.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) onSay("Copied")
+    }
+
+    /** Put the selection on the clipboard and let it go, as a copy from a text view does. */
+    fun copy() {
+        chosen.text().takeIf { it.isNotEmpty() }?.let(::clip)
+        selection = null
+    }
+
+    /**
+     * Put the link to the selection on the clipboard, one per page it covers — `page=N` names one
+     * page — and let it go. Pasting it into a note is what makes the highlight: there is no
+     * Highlight of its own, as on the desktop.
+     */
+    fun copyLink() {
+        val pieces = chosen
+        selection = null
+        scope.launch {
+            val links = pieces.mapNotNull { doc.link(linkName, it.page, it.start, it.end) }
+            if (links.isNotEmpty()) clip(links.joinToString("\n"))
+        }
+    }
+
     /**
      * Whether this tap belongs to a link rather than to the chrome.
      *
@@ -389,14 +651,56 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      *
      * A tool in hand claims nothing. The page is a canvas then, and the drawing handler on it owns
      * every press that lands.
+     *
+     * A highlight is asked after the links, as on the desktop: a link inside one is still a link.
+     * It opens the note it comes from, and hands over where the reader is, for Back from that note
+     * to come back to.
+     *
+     * While there is a selection a tap only lets it go, wherever it lands — but for a tap on one
+     * of its handles, which leaves it be.
      */
     fun claimed(at: Offset): Boolean {
+        if (selection != null) {
+            if (heldAt(at) == null) selection = null
+            return true
+        }
         if (inHand != Tool.Read || viewport.width == 0) return false
         val scrolled = pages.above(list, viewport.width, zoom)
         val land = pages.on(at.x - panX, at.y + scrolled, viewport.width, zoom) ?: return false
-        val box = hit(links[land.page].orEmpty(), land.point, TAP_SLOP / land.scale) ?: return false
-        follow(box.target)
+        val slop = TAP_SLOP / land.scale
+        hit(links[land.page].orEmpty(), land.point, slop)?.let {
+            follow(it.target)
+            return true
+        }
+        val mark = markAt(marks[land.page].orEmpty(), land.point, slop) ?: return false
+        val (page, top) = pages.place(scrolled, viewport.width, zoom)
+        openNote(mark.link, PdfPlace(page, top, zoom, panX))
         return true
+    }
+
+    // Where the document opens, once the screen has a size to lay it out at: the place a reader
+    // left it for a note, which Back from the note returns to, or the passage a followed link
+    // quotes, shown as the selection. Once — after that the column is wherever the reader takes
+    // it.
+    var opened by remember(doc) { mutableStateOf(false) }
+    LaunchedEffect(viewport) {
+        val place = opening ?: return@LaunchedEffect
+        if (opened || viewport.width == 0) return@LaunchedEffect
+        opened = true
+        zoom = place.zoom.coerceIn(MIN_ZOOM, maxZoom)
+        panX = holdXAt(place.panX, viewport.width, zoom)
+        // Numbers written against another engine's reading of the page point at nothing here, and
+        // the page they name is still where the reader wanted to be — the desktop's rule.
+        val found = place.selection?.let { doc.locate(place.page, it) }
+        if (found == null || found.quads.isEmpty()) {
+            goTo(place.page, place.top)
+            return@LaunchedEffect
+        }
+        glyphs[place.page] = doc.glyphs(place.page)
+        val (start, end) = found.start.toInt() to found.end.toInt()
+        selection = Selection(Caret(place.page, start), Caret(place.page, end - 1))
+        menu = false
+        show(place.page, found.quads.reduce(Rect::union))
     }
 
     // A bookmark is the same jump from further away: the panel that made it is gone by now, and
@@ -414,6 +718,43 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
         val (page, top) = back.removeAt(back.lastIndex)
         goTo(page, top)
     }
+    // The find: the whole document a page at a time, from the page under the middle of the screen
+    // round to the one before it, so the match the reader lands on is found first — the first at or
+    // after that page, as a note's find lands on the first after where it is. Typing again starts
+    // over, and what was running stops between two pages: one page is the smallest unit pdfium
+    // searches, and tiles asked for meanwhile are drawn between them. Opening the bar starts empty.
+    var query by remember(doc, finding) { mutableStateOf("") }
+    var found by remember(doc) { mutableStateOf(Found()) }
+    var searched by remember(doc) { mutableStateOf(false) }
+    LaunchedEffect(query) {
+        found = Found()
+        searched = false
+        if (query.isBlank()) return@LaunchedEffect
+        delay(FIND_AFTER_MS)
+        val middle = pages.above(list, viewport.width, zoom) + viewport.height / 2f
+        val reading = pages.at(middle, viewport.width, zoom).first
+        for (page in (reading until doc.pageCount) + (0 until reading)) {
+            found = found.plus(page, doc.search(page, query))
+            if (found.at == null) found.from(reading)?.let { first ->
+                found = found.copy(at = first)
+                found.hits[first].let { show(it.page, it.box, jumped = true) }
+            }
+        }
+        searched = true
+        // Nothing at or after the page being read: the first there is, round the end.
+        if (found.at == null && found.hits.isNotEmpty()) {
+            found = found.copy(at = 0)
+            found.hits[0].let { show(it.page, it.box, jumped = true) }
+        }
+    }
+    fun step(forward: Boolean) {
+        found = found.step(forward)
+        found.at?.let { found.hits[it] }?.let { show(it.page, it.box) }
+    }
+
+    // After the jumps', so a find open and then a selection are put away first.
+    BackHandler(enabled = finding) { onFinding(false) }
+    BackHandler(enabled = selection != null) { selection = null }
 
     /** Take what the fingers did to the layer and lay the column out that way. */
     fun commit() {
@@ -428,96 +769,162 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
         shift = Offset.Zero
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .clipToBounds()
-            .onSizeChanged { viewport = it }
-            .onTap(chrome, claimed = ::claimed)
-            .pointerInput(doc, viewport) {
-                val decay = exponentialDecay<Float>()
-                panZoom(
-                    onGesture = { centroid, pan, step ->
-                        if (live == 1f && step == 1f) {
-                            // One finger: the column scrolls and the pages slide, both at once.
-                            list.dispatchRawDelta(-pan.y)
-                            panX = holdXAt(panX + pan.x, viewport.width, zoom)
-                            chrome.scrolled(-pan.y)
-                        } else {
-                            // Two: the layer below carries all of it until they are lifted.
-                            if (live == 1f) pivot = centroid
-                            live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
-                            shift += pan
-                        }
-                    },
-                    onEnd = { velocity ->
-                        if (live != 1f) {
-                            // The one place the column is laid out again, on a list that has not
-                            // moved since the pinch began: where the reader was, plus what the
-                            // fingers did to it, is where they have to be put back.
-                            commit()
-                            return@panZoom
-                        }
-                        scope.launch {
-                            var last = 0f
-                            AnimationState(0f, -velocity.y).animateDecay(decay) {
-                                list.dispatchRawDelta(value - last)
-                                last = value
+    Column(Modifier.fillMaxSize()) {
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { viewport = it }
+                .onGloballyPositioned { origin = it.positionInRoot() }
+                .onTap(chrome, claimed = ::claimed)
+                .pointerInput(doc, viewport) {
+                    val decay = exponentialDecay<Float>()
+                    panZoom(
+                        onGesture = { centroid, pan, step ->
+                            if (live == 1f && step == 1f) {
+                                // One finger: the column scrolls and the pages slide, both at once.
+                                list.dispatchRawDelta(-pan.y)
+                                panX = holdXAt(panX + pan.x, viewport.width, zoom)
+                                chrome.scrolled(-pan.y)
+                            } else {
+                                // Two: the layer below carries all of it until they are lifted.
+                                if (live == 1f) pivot = centroid
+                                live = (live * step).coerceIn(MIN_ZOOM / zoom, maxZoom / zoom)
+                                shift += pan
                             }
-                        }
-                        scope.launch {
-                            var last = 0f
-                            AnimationState(0f, velocity.x).animateDecay(decay) {
-                                panX = holdXAt(panX + (value - last), viewport.width, zoom)
-                                last = value
+                        },
+                        onEnd = { velocity ->
+                            if (live != 1f) {
+                                // The one place the column is laid out again, on a list that has
+                                // not moved since the pinch began: where the reader was, plus what
+                                // the fingers did to it, is where they have to be put back.
+                                commit()
+                                return@panZoom
                             }
-                        }
-                    },
-                )
-            },
-    ) {
-        LazyColumn(
-            state = list,
-            // Every drag goes through the gesture above, which is what lets one follow both axes.
-            userScrollEnabled = false,
-            modifier = Modifier
-                // As wide as the zoom makes it, and — while a pinch is shrinking the layer — tall
-                // enough that the rows to fill the screen are still composed.
-                .oversize(
-                    width = (viewport.width * zoom).toInt(),
-                    height = (viewport.height / live.coerceAtMost(1f)).toInt(),
-                )
-                .graphicsLayer {
-                    transformOrigin = TransformOrigin(0f, 0f)
-                    scaleX = live
-                    scaleY = live
-                    translationX = liveShift(pivot.x, live, panX, shift.x)
-                    translationY = liveShift(pivot.y, live, 0f, shift.y)
-                },
-            verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
-        ) {
-            items(doc.pageCount) { index ->
-                val size = doc.sizes.getOrNull(index)
-                if (size != null && viewport.width > 0) {
-                    Page(
-                        doc = doc,
-                        index = index,
-                        pageWidth = size.width,
-                        pageHeight = size.height,
-                        shownPx = (viewport.width * zoom).toInt(),
-                        renderPx = (viewport.width * settled.zoom).toInt(),
-                        // The settled screen in this page's own pixels: a page is exactly as wide
-                        // as the column, so the only difference is where the page starts down it.
-                        window = settled.window.translate(
-                            0,
-                            -pages.top(index, viewport.width, settled.zoom).roundToInt(),
-                        ),
-                        theme = theme,
-                        tool = tool,
-                        links = links,
+                            scope.launch {
+                                var last = 0f
+                                AnimationState(0f, -velocity.y).animateDecay(decay) {
+                                    list.dispatchRawDelta(value - last)
+                                    last = value
+                                }
+                            }
+                            scope.launch {
+                                var last = 0f
+                                AnimationState(0f, velocity.x).animateDecay(decay) {
+                                    panX = holdXAt(panX + (value - last), viewport.width, zoom)
+                                    last = value
+                                }
+                            }
+                        },
                     )
                 }
+                // After the pan and the pinch, so it is asked first and what it takes they drop:
+                // a press on a handle moves that end, and a long press selects the word under
+                // the finger and grows it as the finger moves on. Before either, a scroll or a
+                // pinch has already taken the gesture, which is what cancels a long press.
+                .pointerInput(doc, viewport, tool) {
+                    if (tool != Tool.Read) return@pointerInput
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val held = heldAt(down.position)
+                        val press = if (held != null) down.also { it.consume() }
+                        else awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                        if (held == null) {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            // Not the last press's word: this one's may still be on its way.
+                            word = null
+                            pressed(press.position)
+                        }
+                        menu = true
+                        dragging = true
+                        try {
+                            drag(press.id) { change ->
+                                change.consume()
+                                val caret = caretAt(change.position) ?: return@drag
+                                if (held != null) select(Selection.between(held, caret))
+                                else word?.let { select(it.grownTo(caret)) }
+                            }
+                        } finally {
+                            dragging = false
+                        }
+                    }
+                },
+        ) {
+            LazyColumn(
+                state = list,
+                // Every drag goes through the gesture above, which is what lets one follow both
+                // axes.
+                userScrollEnabled = false,
+                modifier = Modifier
+                    // As wide as the zoom makes it, and — while a pinch is shrinking the layer —
+                    // tall enough that the rows to fill the screen are still composed.
+                    .oversize(
+                        width = (viewport.width * zoom).toInt(),
+                        height = (viewport.height / live.coerceAtMost(1f)).toInt(),
+                    )
+                    .graphicsLayer {
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        scaleX = live
+                        scaleY = live
+                        translationX = liveShift(pivot.x, live, panX, shift.x)
+                        translationY = liveShift(pivot.y, live, 0f, shift.y)
+                    },
+                verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+            ) {
+                items(doc.pageCount) { index ->
+                    val size = doc.sizes.getOrNull(index)
+                    if (size != null && viewport.width > 0) {
+                        Page(
+                            doc = doc,
+                            index = index,
+                            pageWidth = size.width,
+                            pageHeight = size.height,
+                            shownPx = (viewport.width * zoom).toInt(),
+                            renderPx = (viewport.width * settled.zoom).toInt(),
+                            // The settled screen in this page's own pixels: a page is exactly as
+                            // wide as the column, so the only difference is where the page starts
+                            // down it.
+                            window = settled.window.translate(
+                                0,
+                                -pages.top(index, viewport.width, settled.zoom).roundToInt(),
+                            ),
+                            theme = theme,
+                            tool = tool,
+                            links = links,
+                            notes = notesOn[index].orEmpty(),
+                            marks = marks,
+                            chosen = chosen.firstOrNull { it.page == index }?.boxes.orEmpty(),
+                            hits = found.hits.filter { it.page == index }.map { it.box },
+                            current = found.at?.let { found.hits[it] }
+                                ?.takeIf { it.page == index }?.box,
+                        )
+                    }
+                }
             }
+            // Over the pages rather than on them, where no page's edge can cut one off.
+            val grip = colors.primary
+            Canvas(Modifier.matchParentSize()) {
+                val (start, end) = anchors() ?: return@Canvas
+                handle(start, HANDLE.toPx(), toRight = false, grip)
+                handle(end, HANDLE.toPx(), toRight = true, grip)
+            }
+        }
+        SelectionMenu(
+            around = { if (selection != null && menu && !dragging) menuAround() else null },
+            actions = listOf("Copy" to ::copy, "Copy link" to ::copyLink),
+        )
+        // Below the pages rather than over them, as a note's is: a bar over the foot of the screen
+        // would cover the match it had just found.
+        if (finding) {
+            FindBar(
+                query = query,
+                onQuery = { query = it },
+                placeholder = "Find in this document",
+                count = found.count(searched),
+                canStep = found.hits.size > 1,
+                onStep = ::step,
+            )
         }
     }
 }
@@ -647,7 +1054,57 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         val size = sizes.getOrNull(index) ?: return index to 0f
         return index to into / (width * zoom / size.width)
     }
+
+    /**
+     * Where [x], [y] points on page [index] are on the screen, [above] pixels scrolled and pushed
+     * [panX] sideways: [on] the other way round, for what is drawn over the pages rather than on
+     * them.
+     */
+    fun screen(
+        index: Int,
+        x: Float,
+        y: Float,
+        above: Float,
+        panX: Float,
+        width: Int,
+        zoom: Float,
+    ): Offset {
+        val scale = width * zoom / (sizes.getOrNull(index)?.width ?: return Offset.Zero)
+        return Offset(panX + x * scale, top(index, width, zoom) - above + y * scale)
+    }
+
+    /**
+     * Where the column has to be for [rect], in points on page [index], to be in view — or `null`
+     * when it already is, [above] pixels scrolled and pushed [panX] sideways on a [viewport] whose
+     * top [clear] pixels a bar covers. What is out of view along an axis is brought to the middle
+     * of what the bar leaves along it; an axis it is already in view along is left alone.
+     */
+    fun reveal(
+        index: Int,
+        rect: Rect,
+        above: Float,
+        panX: Float,
+        viewport: IntSize,
+        zoom: Float,
+        clear: Float,
+    ): Reveal? {
+        val size = sizes.getOrNull(index) ?: return null
+        val scale = viewport.width * zoom / size.width
+        val top = top(index, viewport.width, zoom)
+        val (y0, y1) = top + rect.top * scale to top + rect.bottom * scale
+        val (x0, x1) = rect.left * scale to rect.right * scale
+        val down = y0 >= above + clear && y1 <= above + viewport.height
+        val across = x0 >= -panX && x1 <= -panX + viewport.width
+        if (down && across) return null
+        val y = if (down) above else (y0 + y1) / 2 - (clear + viewport.height) / 2
+        val x = if (across) panX else viewport.width / 2f - (x0 + x1) / 2
+        val (row, into) = at(y, viewport.width, zoom)
+        return Reveal(row, into, holdXAt(x, viewport.width, zoom))
+    }
 }
+
+/** Where the column has to be for something to be in view: the row, the offset into it, the pan. */
+internal data class Reveal(val row: Int, val into: Int, val panX: Float)
 
 /** Where a point on the pages fell: which page, where on it in points, and at what scale. */
 internal data class Landing(val page: Int, val point: Point, val scale: Float)
@@ -667,6 +1124,9 @@ private const val MIN_ZOOM = 1f
  * not got, and a shallower range is easier to land a pinch with on the thing being looked at.
  */
 private const val MAX_ZOOM = 8f
+
+/** How long the typing rests before a find starts over. */
+private const val FIND_AFTER_MS = 150L
 
 /** How long the hands rest before the pages are drawn again at where they left them. */
 private const val RESHARPEN_MS = 180L
@@ -720,6 +1180,15 @@ private fun Page(
     tool: Tool,
     /** Where this page leaves its `/Link` boxes for the box above to hit-test against. */
     links: MutableMap<Int, List<PdfLinkBox>>,
+    /** The note links into this page. */
+    notes: List<PdfLink>,
+    /** Where this page leaves the highlights they paint, as it leaves [links]. */
+    marks: MutableMap<Int, List<Mark>>,
+    /** The boxes of the selected glyphs on this page. */
+    chosen: List<Rect>,
+    /** The find's matches on this page, and the one stepped to if it is here. */
+    hits: List<Rect>,
+    current: Rect?,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -749,7 +1218,22 @@ private fun Page(
     LaunchedEffect(index, tool) {
         if (tool == Tool.Read) links[index] = doc.links(index) else links.remove(index)
     }
-    DisposableEffect(index) { onDispose { links.remove(index) } }
+    // Where the note links land on the page today, which is the core's to say: by their numbers,
+    // then by the text they quote, and not at all once exported into the file.
+    LaunchedEffect(index, notes) {
+        if (notes.isEmpty()) marks.remove(index)
+        else marks[index] = doc.highlights(notes).map { Mark(it.quads, notes[it.link.toInt()]) }
+    }
+    DisposableEffect(index) {
+        onDispose {
+            links.remove(index)
+            marks.remove(index)
+        }
+    }
+    val highlight = colors.primary.copy(alpha = HIGHLIGHT_ALPHA)
+    val selected = colors.primary.copy(alpha = SELECTION_ALPHA)
+    val match = colors.primary.copy(alpha = MARK_ALPHA)
+    val stepped = colors.primary.copy(alpha = CURRENT_MARK_ALPHA)
 
     Box(
         Modifier
@@ -819,8 +1303,87 @@ private fun Page(
             Modifier.fillMaxSize(),
             Alignment.Center,
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
+        // Over the page rather than in its pixels, so a highlight comes and goes without a render
+        // and shows on a page still waiting for one; at the size the page is shown, so a pinch
+        // carries it along. The highlights under the selection and the find's matches, as on the
+        // desktop: they are what the page says, the other two what the reader is doing to it now.
+        val painted = marks[index].orEmpty()
+        if (painted.isNotEmpty() || chosen.isNotEmpty() || hits.isNotEmpty()) {
+            Canvas(Modifier.fillMaxSize()) {
+                for (mark in painted) for (quad in mark.quads) box(quad, scale, highlight)
+                for (glyph in chosen) box(glyph, scale, selected)
+                for (hit in hits) box(hit, scale, if (hit == current) stepped else match)
+            }
+        }
     }
 }
+
+/**
+ * A selection handle hanging from [at]: a round drop whose one square corner points at the glyph,
+ * up and to the left for the end of a selection and up and to the right for its start — the
+ * shape the platform's text handles have.
+ */
+private fun DrawScope.handle(at: Offset, r: Float, toRight: Boolean, colour: Color) {
+    val side = if (toRight) 1f else -1f
+    drawCircle(colour, r, at + Offset(side * r, r))
+    drawRect(colour, Offset(if (toRight) at.x else at.x - r, at.y), Size(r, r))
+}
+
+/** How big a selection handle is drawn, and how far from its middle a finger still takes it. */
+private val HANDLE = 10.dp
+private val HANDLE_REACH = 24.dp
+
+/**
+ * The platform's floating text toolbar over what is selected, as every text view raises one: the
+ * system draws it, places it clear of what [around] answers (window pixels) and follows it when
+ * told the selection moved. `null` puts it away.
+ *
+ * [around] is read here rather than handed in as a value, so a scroll under a selection moves the
+ * toolbar without composing the pages again.
+ */
+@Composable
+private fun SelectionMenu(around: () -> AndroidRect?, actions: List<Pair<String, () -> Unit>>) {
+    val view = LocalView.current
+    val ask by rememberUpdatedState(around)
+    val rect by remember { derivedStateOf { ask() } }
+    val run by rememberUpdatedState(actions)
+    val mode = remember { mutableStateOf<ActionMode?>(null) }
+    val shown = rect != null
+    DisposableEffect(shown) {
+        if (!shown) return@DisposableEffect onDispose {}
+        val callback = object : ActionMode.Callback2() {
+            override fun onCreateActionMode(m: ActionMode, menu: Menu): Boolean {
+                run.forEachIndexed { i, (label, _) -> menu.add(Menu.NONE, i, i, label) }
+                return true
+            }
+
+            override fun onPrepareActionMode(m: ActionMode, menu: Menu) = false
+
+            override fun onActionItemClicked(m: ActionMode, item: MenuItem): Boolean {
+                run.getOrNull(item.itemId)?.second?.invoke()
+                return true
+            }
+
+            override fun onDestroyActionMode(m: ActionMode) {
+                mode.value = null
+            }
+
+            override fun onGetContentRect(m: ActionMode, v: View, out: AndroidRect) {
+                rect?.let { out.set(it) }
+            }
+        }
+        mode.value = view.startActionMode(callback, ActionMode.TYPE_FLOATING)
+        onDispose { mode.value?.finish() }
+    }
+    LaunchedEffect(rect) { mode.value?.invalidateContentRect() }
+}
+
+/** Fill [r], in page points, on a page drawn at [scale] pixels per point. */
+private fun DrawScope.box(r: Rect, scale: Float, colour: Color) = drawRect(
+    colour,
+    topLeft = Offset(r.left * scale, r.top * scale),
+    size = Size((r.right - r.left) * scale, (r.bottom - r.top) * scale),
+)
 
 /** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
 private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
@@ -834,10 +1397,22 @@ private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
  * `/Link` boxes may overlap, and the later annotation is the one drawn on top of the other.
  */
 internal fun hit(links: List<PdfLinkBox>, at: Point, slop: Float): PdfLinkBox? =
-    links.lastOrNull {
-        at.x >= it.rect.left - slop && at.x <= it.rect.right + slop &&
-            at.y >= it.rect.top - slop && at.y <= it.rect.bottom + slop
-    }
+    links.lastOrNull { it.rect.near(at, slop) }
+
+/** A highlight a note's link paints, and the link that paints it. */
+internal data class Mark(val quads: List<Rect>, val link: PdfLink)
+
+/**
+ * Which highlight a tap landed in, or none: the first whose quads it is [near], which is the one
+ * the desktop's `highlight_at` opens where two overlap — the links arrive in the order the index
+ * lists them.
+ */
+internal fun markAt(marks: List<Mark>, at: Point, slop: Float): Mark? =
+    marks.firstOrNull { mark -> mark.quads.any { it.near(at, slop) } }
+
+/** Whether [at] is on this box or within [slop] of it, all in page points. */
+private fun Rect.near(at: Point, slop: Float): Boolean =
+    at.x >= left - slop && at.x <= right + slop && at.y >= top - slop && at.y <= bottom + slop
 
 /** How far off a link a tap may land and still count, in view pixels. */
 private const val TAP_SLOP = 12f

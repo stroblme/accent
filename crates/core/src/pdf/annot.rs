@@ -9,8 +9,67 @@ use pdfium_render::prelude::*;
 use super::ink::{
     Drawn, Seg, catmull_rom, cut, flatten, points_of, segments_of, thin, transformed,
 };
-use super::text::same_quads;
-use super::{Cut, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock};
+use super::text::{line_top, same_quads, selection_quads};
+use super::{
+    Cut, Glyph, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
+};
+use crate::index::PdfLink;
+
+/// Where the note links that highlight a document land, per page: the quads to paint and the
+/// index of the link they came from.
+pub type LinkHighlights = HashMap<usize, Vec<(Vec<Rect>, usize)>>;
+
+/// Where each note link lands on the page today, per page, with the index of the link it is.
+///
+/// The four numbers first, and the text the link quotes as the fallback — a document rebuilt
+/// with different line breaks moves the numbers but not the sentence. A link whose quads a real
+/// `/Highlight` already covers is left out: it has been exported, and the annotation is in the
+/// page's own pixels.
+///
+/// `glyphs` is the caller's cache of page text, read into as needed: extracting a page's text is
+/// most of the work, and the same page is asked for again by a selection and an export.
+pub fn highlight_quads(
+    doc: &PdfDoc,
+    glyphs: &mut HashMap<usize, Vec<Glyph>>,
+    links: &[PdfLink],
+) -> LinkHighlights {
+    let mut existing: HashMap<usize, Vec<Highlight>> = HashMap::new();
+    let mut out = LinkHighlights::new();
+    for (at, link) in links.iter().enumerate() {
+        let page = link.page;
+        let found = glyphs
+            .entry(page)
+            .or_insert_with(|| doc.page_text(page).unwrap_or_default());
+        let quads = selection_quads(found, link.selection)
+            .map(|(_, quads)| quads)
+            .or_else(|| {
+                let text = link.alias.as_deref()?;
+                let hits = doc.search(page, text).ok()?;
+                // The link's own line number is still a hint at where on the page it was, even
+                // when its numbering no longer fits: the nearest hit to that line, rather than
+                // the first on the page, is what a second copy of the same phrase above it used
+                // to steal.
+                let Some(want) = line_top(found, link.selection[0]) else {
+                    return hits.into_iter().next();
+                };
+                let distance =
+                    |quads: &[Rect]| quads.first().map_or(f32::MAX, |q| (q.top - want).abs());
+                hits.into_iter()
+                    .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+            });
+        let Some(quads) = quads.filter(|q| !q.is_empty()) else {
+            continue;
+        };
+        let already = existing
+            .entry(page)
+            .or_insert_with(|| doc.highlights_on(page).unwrap_or_default());
+        if already.iter().any(|h| same_quads(&h.quads, &quads)) {
+            continue;
+        }
+        out.entry(page).or_default().push((quads, at));
+    }
+    out
+}
 
 impl PdfDoc {
     /// Existing `/Highlight` annotations on one page.

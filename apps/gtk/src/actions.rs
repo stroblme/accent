@@ -55,7 +55,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // Move the tab into the pane that way, splitting one off only when there is none. Left and
     // right alone carry chords: `Shift+Alt+Up` / `Shift+Alt+Down` are the multi-caret pair, and
     // every plainer arrow chord is spoken for — `Alt+Left` / `Alt+Right` are Back and Forward,
-    // `Alt+Up` / `Alt+Down` and `Ctrl+Alt`+arrow are on DESIGN.md's never-bind list.
+    // `Alt+Up` / `Alt+Down` are on DESIGN.md's never-bind list, and `Ctrl+Alt`+arrow moves the
+    // dividers.
     ("win.move-tab-left", "Move Tab Left", &["<Shift><Alt>Left"]),
     (
         "win.move-tab-right",
@@ -64,11 +65,38 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.move-tab-up", "Move Tab Up", &[]),
     ("win.move-tab-down", "Move Tab Down", &[]),
+    // Held at the start of its pane's bar, keeping its title and its close button. Two actions
+    // rather than one toggle, so the menu names what it will do and the label still comes from
+    // this table.
+    ("win.pin-tab", "Pin Tab", &[]),
+    ("win.unpin-tab", "Unpin Tab", &[]),
+    // The divider of the nearest split around the active pane that runs that way, one step of a
+    // grid anchored at the centre (`panes::divider_step`). A stock GNOME takes all four chords
+    // for switching workspaces before the window sees them, which is what a rebind is for.
+    (
+        "win.divider-left",
+        "Move Divider Left",
+        &["<Control><Alt>Left"],
+    ),
+    (
+        "win.divider-right",
+        "Move Divider Right",
+        &["<Control><Alt>Right"],
+    ),
+    ("win.divider-up", "Move Divider Up", &["<Control><Alt>Up"]),
+    (
+        "win.divider-down",
+        "Move Divider Down",
+        &["<Control><Alt>Down"],
+    ),
     ("app.new-window", "New Window", &[]),
     ("app.open-vault", "Open Folder…", &["<Control><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
     ("win.open-recent", "Open Recent…", &["<Control>r"]),
     ("app.close-vault", "Close Vault", &[]),
+    // Save's session half, for the primary menu of a window of shells: a focused shell keeps
+    // `Ctrl+S`, and Save over a note in front saves the note.
+    ("win.save-session", "Save Session", &[]),
     ("win.close-session", "Close Session", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
     ("win.palette-files", "Go to File…", &["<Control>e"]),
@@ -249,6 +277,7 @@ impl App {
         match name {
             "save" => self.save(),
             "save-as" => self.save_as(),
+            "save-session" => self.save_shells(),
             "close-session" => self.close_session(),
             "open-file" => self.open_file_dialog(),
             "new-file" => {
@@ -319,6 +348,12 @@ impl App {
             "move-tab-right" => self.move_tab(Side::Right),
             "move-tab-up" => self.move_tab(Side::Up),
             "move-tab-down" => self.move_tab(Side::Down),
+            "pin-tab" => self.pin_tab(true),
+            "unpin-tab" => self.pin_tab(false),
+            "divider-left" => self.move_divider(Side::Left),
+            "divider-right" => self.move_divider(Side::Right),
+            "divider-up" => self.move_divider(Side::Up),
+            "divider-down" => self.move_divider(Side::Down),
             "palette-files" => self.palette(palette::Mode::Files),
             "palette-commands" => self.palette(palette::Mode::Commands),
             "open-recent" => self.palette(palette::Mode::Vaults),
@@ -688,6 +723,9 @@ const CAPTURED: &[&str] = &[
 /// * `win.next-tab` / `win.previous-tab` (`Ctrl+Tab`) — the same rule as Close Tab, and these
 ///   were `AdwTabView`'s own capture-phase chords before they were actions, so a shell never had
 ///   them to lose. No readline meaning either: `Ctrl+I` is the completion key, not `Ctrl+Tab`.
+/// * the four Move Tab and four Move Divider actions — arranging the panes has to work from
+///   whatever is in one. `Shift+Alt`+arrow and `Ctrl+Alt`+arrow have no readline meaning; what a
+///   shell loses is a program that binds them itself, tmux's pane resizing being the usual one.
 /// * `win.terminal` (`Ctrl+J`) and the three zoom actions — the chords that open a shell and
 ///   scale one have to be reachable from inside one.
 /// * `win.fullscreen` (`F11`) — no readline or curses meaning, and GNOME Terminal keeps the same
@@ -709,6 +747,10 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.move-tab-right"
             | "win.move-tab-up"
             | "win.move-tab-down"
+            | "win.divider-left"
+            | "win.divider-right"
+            | "win.divider-up"
+            | "win.divider-down"
             | "win.terminal"
             | "win.zoom-in"
             | "win.zoom-out"
@@ -823,10 +865,10 @@ pub fn label_of(action: &str) -> &str {
 /// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
 /// files in this window, which vault it is on, what it shows, and the application. What needs a
 /// vault — making a file or a folder in it, closing it — is left off a window without one rather
-/// than offered and refused. A named session has Close Session as its way out. A shell on this
-/// machine is its own item only where New Terminal opens one on a host. Every item is the window's
-/// whichever tab is in front: what acts on the document, Save, Find and Toggle Preview among
-/// them, is left to its chord and the palette.
+/// than offered and refused. A window of shells has Save Session, and a named one Close Session
+/// as its way out. A shell on this machine is its own item only where New Terminal opens one on a
+/// host. Every item is the window's whichever tab is in front: what acts on the document, Save,
+/// Find and Toggle Preview among them, is left to its chord and the palette.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -843,6 +885,9 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let mut vaults = vec!["app.open-vault", "app.open-remote", "win.open-recent"];
     if vault {
         vaults.push("app.close-vault");
+    }
+    if key.is_terminal() {
+        vaults.push("win.save-session");
     }
     if matches!(key, crate::shell::WindowKey::Terminal(_)) {
         vaults.push("win.close-session");
@@ -873,10 +918,10 @@ pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
 }
 
 /// The tab's own context menu, as a pane is built with it: nothing yet known about which page
-/// will show it, so without the two items that name a file.
+/// will show it, so without the two items that name a file, and offering Pin Tab.
 pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    fill_tab_menu(&menu, false);
+    fill_tab_menu(&menu, false, false);
     menu
 }
 
@@ -887,12 +932,13 @@ pub fn tab_menu() -> gio::Menu {
 /// `file` says whether the tab about to show this holds a file of this vault, which is what
 /// Rename and Move to Trash need and nothing else here does: a shell and a comparison are no
 /// file, and a loose one is outside the vault those two act in. On such a tab the two are not on
-/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1).
+/// the menu at all rather than on it and refusing (DESIGN.md, Principle 1). `pinned` says which
+/// of Pin Tab and Unpin Tab it offers.
 ///
 /// Filled in place rather than built afresh, because `AdwTabView` holds one model per pane and a
 /// `GtkPopoverMenu` follows the model it was made from: the page about to show the menu is what
 /// decides what it says (`wire::wire_pane`, `setup-menu`).
-pub fn fill_tab_menu(menu: &gio::Menu, file: bool) {
+pub fn fill_tab_menu(menu: &gio::Menu, file: bool, pinned: bool) {
     menu.remove_all();
     let split = gio::Menu::new();
     for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
@@ -905,6 +951,12 @@ pub fn fill_tab_menu(menu: &gio::Menu, file: bool) {
         let action = format!("win.move-tab-{}", side.action());
         move_tab.append(Some(label_of(&action)), Some(&action));
     }
+    // After the moves, as GNOME Web has it: pinning is where in the bar the tab stays.
+    let pin = match pinned {
+        true => "win.unpin-tab",
+        false => "win.pin-tab",
+    };
+    move_tab.append(Some(label_of(pin)), Some(pin));
     menu.append_section(None, &move_tab);
     for action in [
         "win.copy-name",
@@ -1033,7 +1085,7 @@ mod tests {
                 );
             }
         }
-        for action in ["win.rename", "win.trash"] {
+        for action in ["win.rename", "win.trash", "win.pin-tab", "win.unpin-tab"] {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| *name == action),
                 "{action} is on the tab menu but not in ACTIONS"
@@ -1059,8 +1111,8 @@ mod tests {
                 "app.close-vault"
             ]
         );
-        // Without a vault there is nothing to make a file in and no vault to close, and a named
-        // session is closed as one.
+        // Without a vault there is nothing to make a file in and no vault to close. A window of
+        // shells saves its session, named or not, and a named session is closed as one.
         let named = primary_actions(&WindowKey::Terminal("terminal://dev".into()));
         let unnamed = primary_actions(&WindowKey::Loose(Loose::Terminal));
         for menu in [&named, &unnamed] {
@@ -1073,16 +1125,25 @@ mod tests {
                 "app.open-vault",
                 "app.open-remote",
                 "win.open-recent",
+                "win.save-session",
                 "win.close-session"
             ]
         );
         assert_eq!(
             unnamed[1],
-            ["app.open-vault", "app.open-remote", "win.open-recent"]
+            [
+                "app.open-vault",
+                "app.open-remote",
+                "win.open-recent",
+                "win.save-session"
+            ]
         );
         let documents = primary_actions(&WindowKey::Loose(Loose::Documents));
         assert_eq!(documents[0], ["win.open-file"]);
-        assert_eq!(documents[1], unnamed[1]);
+        assert_eq!(
+            documents[1],
+            ["app.open-vault", "app.open-remote", "win.open-recent"]
+        );
         // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
         // this machine is an item of its own.
         let remote = primary_actions(&WindowKey::Vault("ssh://box/srv/vault".into()));
@@ -1101,7 +1162,7 @@ mod tests {
             ]
         );
         // Every item is a command the window has, which is where its label comes from.
-        for menu in [vault, documents, remote, named] {
+        for menu in [vault, documents, remote, named, unnamed] {
             for action in menu.iter().flatten() {
                 assert!(
                     ACTIONS.iter().any(|(name, _, _)| name == action),
@@ -1122,11 +1183,27 @@ mod tests {
     fn the_tab_menu_names_a_file_only_where_there_is_one() {
         let sections = |file| {
             let menu = gio::Menu::new();
-            fill_tab_menu(&menu, file);
+            fill_tab_menu(&menu, file, false);
             menu.n_items()
         };
         assert_eq!(sections(true), sections(false) + 2);
         assert_eq!(tab_menu().n_items(), sections(false));
+    }
+
+    /// Pin Tab or Unpin Tab, whichever the page is not yet, closing the section that moves it.
+    #[test]
+    fn the_tab_menu_offers_the_pin_the_page_does_not_have() {
+        let last_move = |pinned| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(&menu, false, pinned);
+            let moves = menu.item_link(1, "section").expect("the move section");
+            let last = moves.n_items() - 1;
+            moves
+                .item_attribute_value(last, "action", None)
+                .and_then(|action| action.get::<String>())
+        };
+        assert_eq!(last_move(false).as_deref(), Some("win.pin-tab"));
+        assert_eq!(last_move(true).as_deref(), Some("win.unpin-tab"));
     }
 
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one
@@ -1163,6 +1240,9 @@ mod tests {
         // `Shift+Alt`+arrow has no readline meaning to cost a shell.
         assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
         assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
+        // So does moving a divider, which is the pane's and not the tab's.
+        assert!(reserved("win.divider-left", "<Control><Alt>Left"));
+        assert!(reserved("win.divider-down", "<Control><Alt>Down"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
         for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
