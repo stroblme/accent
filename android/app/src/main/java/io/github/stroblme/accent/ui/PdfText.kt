@@ -1,6 +1,7 @@
 package io.github.stroblme.accent.ui
 
 import io.github.stroblme.accent.ffi.Glyph
+import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
 
 /*
@@ -108,3 +109,53 @@ internal data class Found(val hits: List<Hit> = emptyList(), val at: Int? = null
         else -> "${at + 1}/${hits.size}"
     }
 }
+
+/**
+ * The glyph nearest a point on the page, which is the one a finger means: one whose box holds the
+ * point outright, or else the closest box, so a finger in the margin still takes the line it is
+ * level with. The desktop's `nearest`; `null` for a page with no text.
+ */
+internal fun nearest(glyphs: List<Glyph>, at: Point): Int? {
+    var best: Int? = null
+    var bestDistance = Float.MAX_VALUE
+    for ((i, glyph) in glyphs.withIndex()) {
+        val r = glyph.rect
+        if (at.x in r.left..r.right && at.y in r.top..r.bottom) return i
+        // Distance to the box, nothing along an axis the point already lies within.
+        val dx = maxOf(r.left - at.x, 0f, at.x - r.right)
+        val dy = maxOf(r.top - at.y, 0f, at.y - r.bottom)
+        val distance = dx * dx + dy * dy
+        if (distance < bestDistance) {
+            bestDistance = distance
+            best = i
+        }
+    }
+    return best
+}
+
+/**
+ * The word glyph [at] is in, which is what a long press selects: the run of letters and digits
+ * around it, or the glyph alone when it is neither.
+ */
+internal fun wordAt(glyphs: List<Glyph>, at: Int): IntRange {
+    fun letter(i: Int) = glyphs[i].ch.firstOrNull()?.isLetterOrDigit() == true
+    if (!letter(at)) return at..at
+    var lo = at
+    var hi = at
+    while (lo > 0 && letter(lo - 1)) lo--
+    while (hi < glyphs.lastIndex && letter(hi + 1)) hi++
+    return lo..hi
+}
+
+/**
+ * A long press's word grown towards [caret] as the finger that made it moves on, keeping the word:
+ * dragged back past its start, it runs from the finger to the word's end.
+ */
+internal fun Selection.grownTo(caret: Caret): Selection = when {
+    caret < from -> Selection(caret, to)
+    caret > to -> Selection(from, caret)
+    else -> this
+}
+
+/** The text a selection spells: a page break reads as a line break, as a pasted passage should. */
+internal fun List<Piece>.text(): String = joinToString("\n") { it.text }
