@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use accent_core::pdf::{self, LinkTarget};
+use accent_core::pdf::{self, LinkTarget, link_with_alias};
 use adw::prelude::*;
 
 use super::protocol::Request;
@@ -196,24 +196,6 @@ impl PdfTab {
             .get(&page)?
             .iter()
             .find_map(|link| link.rect.contains((px, py)).then(|| link.target.clone()))
-    }
-}
-
-/// Put the selected text into a link as its alias: `[[f.pdf#page=1&selection=…|the text]]`.
-///
-/// The alias is what a reader sees in the note and what re-anchors the highlight when the
-/// selection numbers no longer fit the document, so it is the text and not a label. Newlines
-/// collapse — a link is one line — and the three characters that would end the link early are
-/// dropped rather than escaped, because a wikilink has no escape for them.
-fn link_with_alias(link: &str, text: &str) -> String {
-    let alias: String = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(['|', '[', ']'], "");
-    match alias.is_empty() {
-        true => link.to_string(),
-        false => format!("{}|{alias}]]", link.trim_end_matches("]]")),
     }
 }
 
