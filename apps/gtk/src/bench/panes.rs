@@ -436,6 +436,158 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
     });
 }
 
+/// One step of [`bench_pin`], named for its printout.
+type PinStep = (&'static str, Box<dyn Fn(&Rc<App>, &[adw::TabPage])>);
+
+/// See `ACCENT_BENCH_TABS=pin:` above.
+pub(super) fn bench_pin(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    if rels.len() != 4 {
+        return bench_quit(app);
+    }
+    for rel in &rels {
+        app.open_path(rel);
+    }
+    let steps: Vec<PinStep> = vec![
+        ("open", Box::new(|_, _| {})),
+        (
+            "pin_c_menu",
+            Box::new(|app, p| bench_pin_menu(app, &p[2], "win.pin-tab")),
+        ),
+        (
+            "pin_b_palette",
+            Box::new(|app, p| {
+                app.reveal_page(&p[1]);
+                let _ = WidgetExt::activate_action(&app.window, "win.pin-tab", None);
+            }),
+        ),
+        (
+            "unpin_c_menu",
+            Box::new(|app, p| bench_pin_menu(app, &p[2], "win.unpin-tab")),
+        ),
+        (
+            "pin_c_palette",
+            Box::new(|app, p| {
+                app.reveal_page(&p[2]);
+                let _ = WidgetExt::activate_action(&app.window, "win.pin-tab", None);
+            }),
+        ),
+        // Where a drag along the bar ends: the tab view told to put the page there.
+        (
+            "drag_a_first",
+            Box::new(|app, p| {
+                app.tabs().reorder_page(&p[0], 0);
+            }),
+        ),
+        (
+            "drag_b_last",
+            Box::new(|app, p| {
+                app.tabs().reorder_page(&p[1], 3);
+            }),
+        ),
+        (
+            "move_d_right",
+            Box::new(|app, p| {
+                app.reveal_page(&p[3]);
+                let _ = WidgetExt::activate_action(&app.window, "win.move-tab-right", None);
+            }),
+        ),
+        (
+            "move_c_right",
+            Box::new(|app, p| {
+                app.reveal_page(&p[2]);
+                let _ = WidgetExt::activate_action(&app.window, "win.move-tab-right", None);
+            }),
+        ),
+    ];
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        let pages: Vec<adw::TabPage> = rels
+            .iter()
+            .filter_map(|rel| app.doc_for(rel).map(|doc| doc.page().clone()))
+            .collect();
+        bench_pin_step(&app, Rc::new(steps), Rc::new(pages), 0);
+    });
+}
+
+/// Run step `i` and print the panes once the holds it queued have run, then the next one.
+fn bench_pin_step(app: &Rc<App>, steps: Rc<Vec<PinStep>>, pages: Rc<Vec<adw::TabPage>>, i: usize) {
+    let Some((what, step)) = steps.get(i) else {
+        println!("bench pinned_tab {}", bench_tab_line(&pages[2]));
+        if let Some(gtk_app) = app.window.application() {
+            gtk_app.activate_action("quit", None);
+        }
+        return;
+    };
+    let what = *what;
+    step(app, &pages);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+        println!("bench pins {what} {}", bench_pins_line(&app));
+        bench_pin_step(&app, steps, pages, i + 1);
+    });
+}
+
+/// Open `page`'s tab menu, print the pin item it offers, and take it.
+fn bench_pin_menu(app: &Rc<App>, page: &adw::TabPage, action: &str) {
+    let Some(tabs) = app.pane_of(page).map(|pane| pane.tabs.clone()) else {
+        return;
+    };
+    tabs.emit_by_name::<()>("setup-menu", &[&Some(page)]);
+    let offered = tabs
+        .menu_model()
+        .and_then(|menu| menu.item_link(1, "section"))
+        .and_then(|moves| moves.item_attribute_value(moves.n_items() - 1, "action", None))
+        .and_then(|action| action.get::<String>());
+    println!("bench pin_menu offers {offered:?}");
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+}
+
+/// Every pane's tabs in bar order, pinned ones marked `^`, panes in the order they were made.
+fn bench_pins_line(app: &Rc<App>) -> String {
+    let panes: Vec<String> = app
+        .panes
+        .borrow()
+        .iter()
+        .map(|pane| {
+            let tabs: Vec<String> = pane
+                .pages()
+                .iter()
+                .map(|page| {
+                    let key = app.doc_for_page(page).map(|d| d.key()).unwrap_or_default();
+                    match app.is_pinned(page) {
+                        true => format!("^{key}"),
+                        false => key,
+                    }
+                })
+                .collect();
+            format!("[{}]", tabs.join(" "))
+        })
+        .collect();
+    panes.join(" ")
+}
+
+/// See `ACCENT_BENCH_TABS=pins` above: the panes once every restored tab has landed.
+pub(super) fn bench_pins_restored(app: &Rc<App>) {
+    let (app, landing) = (app.clone(), app.clone());
+    let landed = move || landing.restored.get() && landing.awaiting.borrow().is_empty();
+    bench_layout_when(landed, move || {
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            println!("bench pins restored {}", bench_pins_line(&app));
+            let pinned = app.pinned.borrow().clone();
+            for page in &pinned {
+                println!("bench pinned_tab {}", bench_tab_line(page));
+            }
+            bench_quit(&app);
+        });
+    });
+}
+
 /// How many items a pane's tab menu holds once it has been told which page is about to show it.
 ///
 /// `setup-menu` is emitted by hand: there is no pointer headless, so this runs the handler

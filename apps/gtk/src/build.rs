@@ -313,6 +313,7 @@ pub fn build_window(
         reconciled: Cell::new(false),
         restored: Cell::new(false),
         menu_page: RefCell::new(None),
+        pinned: RefCell::new(Vec::new()),
         tree_painted: Cell::new(0),
         refresh: widgets::Debounce::new(RENDER),
         pdf_links: widgets::Debounce::new(PDF_LINKS),

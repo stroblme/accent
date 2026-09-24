@@ -179,6 +179,73 @@ impl App {
         }
     }
 
+    // --- pinned tabs ---------------------------------------------------------------------
+
+    /// Whether `page` is pinned: held at the start of its pane's bar, after the tabs pinned
+    /// before it. The window's rather than the pane's, so a pinned tab moved into another pane is
+    /// still pinned there.
+    pub fn is_pinned(&self, page: &adw::TabPage) -> bool {
+        self.pinned.borrow().contains(page)
+    }
+
+    /// Pin Tab and Unpin Tab: the page the tab menu was opened on, or the tab in front.
+    pub fn pin_tab(self: &Rc<Self>, pin: bool) {
+        let page = self.menu_page.borrow().clone();
+        if let Some(page) = page.or_else(|| self.tabs().selected_page()) {
+            self.set_pinned(&page, pin);
+        }
+    }
+
+    /// Pin or unpin `page` where it is: a pinned tab is a kept one, never a preview, and either
+    /// way it moves to the boundary between the pinned tabs and the rest — the end of the pinned
+    /// ones, or the start of the others.
+    pub(crate) fn set_pinned(self: &Rc<Self>, page: &adw::TabPage, pin: bool) {
+        let Some(pane) = self.pane_of(page) else {
+            return;
+        };
+        if self.is_pinned(page) == pin {
+            return;
+        }
+        match pin {
+            true => {
+                pane.keep(page);
+                self.pinned.borrow_mut().push(page.clone());
+            }
+            false => self.pinned.borrow_mut().retain(|p| p != page),
+        }
+        panes::mark_pinned(page, pin);
+        self.hold_pinned(&pane, page);
+        self.save_session_soon();
+    }
+
+    /// Put `page` back on its side of the pinned tabs in `pane`, if something has taken it across
+    /// (`panes::pinned_slot`).
+    fn hold_pinned(&self, pane: &Pane, page: &adw::TabPage) {
+        let pages = pane.pages();
+        let Some(at) = pages.iter().position(|p| p == page) else {
+            return;
+        };
+        let pinned = pages
+            .iter()
+            .filter(|p| *p != page && self.is_pinned(p))
+            .count();
+        let to = panes::pinned_slot(at, pinned, self.is_pinned(page));
+        if to != at {
+            pane.tabs.reorder_page(page, to as i32);
+        }
+    }
+
+    /// The same once the tab view is done with `page`: a reorder or an attach is reported from
+    /// inside libadwaita's own drag handling, which a reorder of ours must not cut across.
+    pub fn hold_pinned_soon(self: &Rc<Self>, pane: &Rc<Pane>, page: &adw::TabPage) {
+        let (app, pane, page) = (Rc::downgrade(self), Rc::downgrade(pane), page.clone());
+        glib::idle_add_local_once(move || {
+            if let (Some(app), Some(pane)) = (app.upgrade(), pane.upgrade()) {
+                app.hold_pinned(&pane, &page);
+            }
+        });
+    }
+
     // --- panes ---------------------------------------------------------------------------
 
     /// A new, empty pane beside `at`. The caller has to put something in it: an empty pane closes
