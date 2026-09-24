@@ -812,6 +812,20 @@ fn bench_term_save(app: &Rc<App>) {
             dialog.close();
         }
         glib::timeout_future(Duration::from_millis(300)).await;
+        // A second run on the same state finds `bench` taken, and is asked before replacing it.
+        let replace = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        println!(
+            "bench term_menu replace={:?}",
+            replace.as_ref().map(|d| (d.heading(), d.body()))
+        );
+        if let Some(dialog) = replace {
+            dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+            dialog.close();
+            glib::timeout_future(Duration::from_millis(300)).await;
+        }
         println!(
             "bench term_menu after close_session={} window={:?}",
             closes(),

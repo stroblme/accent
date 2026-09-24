@@ -349,8 +349,8 @@ impl App {
         dialogs::focus_entry(&entry, |entry| entry.select_region(0, -1));
     }
 
-    /// Key this window by the session `name` and write it: into the recent list, and into the
-    /// state file every later change goes to.
+    /// Save this window as the session `name`, asked first when that replaces one saved before:
+    /// the shells it held that this window does not have end.
     fn save_session_as(self: &Rc<Self>, name: &str) {
         let key = terminal::session_key(name);
         if terminal::session_name(&key).is_none() {
@@ -360,6 +360,41 @@ impl App {
         if taken.is_some_and(|app| !Rc::ptr_eq(&app, self)) {
             return self.toast(&format!("{name} is open in another window"));
         }
+        if self.key.borrow().saved_as() == Some(key.as_path())
+            || !accent_core::config::state_path(&key).is_file()
+        {
+            return self.name_session(name);
+        }
+        let mine: HashSet<String> = self.terminals().iter().map(|t| t.key()).collect();
+        let ending = Session::load(&key)
+            .terminals
+            .keys()
+            .filter(|id| !mine.contains(*id))
+            .count();
+        let body = match ending {
+            0 => "This window takes its place.".to_string(),
+            1 => "Its shell ends, and this window takes its place.".to_string(),
+            n => format!("Its {n} shells end, and this window takes its place."),
+        };
+        let name = name.to_string();
+        dialogs::confirm(
+            &self.window,
+            &format!("Replace session {name}?"),
+            &body,
+            "Replace",
+            true,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.name_session(&name)
+            ),
+        );
+    }
+
+    /// Key this window by the session `name` and write it: into the recent list, and into the
+    /// state file every later change goes to.
+    fn name_session(self: &Rc<Self>, name: &str) {
+        let key = terminal::session_key(name);
         if self.key.borrow().saved_as() != Some(key.as_path()) {
             // A session of that name written before is replaced, so the shells it held and this
             // window does not have would be held with nothing left to open them again.
