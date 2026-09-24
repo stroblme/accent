@@ -209,6 +209,13 @@ impl Vault {
         Ok(self.inner.resolve_link(&target)?)
     }
 
+    /// Which file following a link to `target` opens: what [`Vault::resolve_link`] says, or else
+    /// the file creating the note would write, when it is on disk in a tree the index does not
+    /// hold — a gitignored `build/`, a `node_modules`. `None` when there is nothing there.
+    pub fn follow(&self, target: String) -> Answer<Option<String>> {
+        Ok(self.inner.follow(&target)?)
+    }
+
     // --------------------------------------------------------------------------- sync conflicts
 
     /// The conflict copies Syncthing left beside this note.

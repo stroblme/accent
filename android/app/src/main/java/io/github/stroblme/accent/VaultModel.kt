@@ -449,13 +449,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Follow a link out of the rendered note.
      *
      * The target is what the link spelled — a note's name, a path, possibly with a `#heading` or
-     * a PDF's `page=` after it. The index is what knows which file that is; a target it cannot
-     * place is a link to a note nobody has written yet.
+     * a PDF's `page=` after it. The index is what knows which file that is, and failing it the
+     * disk, for a file in a tree the index does not hold (a gitignored `build/`); a target
+     * neither can place is a link to a note nobody has written yet, which only the switcher
+     * writes.
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val name = target.substringBefore('#')
-        val found = withContext(Dispatchers.IO) { runCatching { v.resolveLink(name) }.getOrNull() }
+        val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
         when (val rel = found) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
             else -> openFile(rel)
