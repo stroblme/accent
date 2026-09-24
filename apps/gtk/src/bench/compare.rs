@@ -11,7 +11,8 @@ use accent_api::{Fold, Severity};
 /// claim) — before a Find Next into the hidden run, which has to open it on both sides, the first
 /// hunk is taken from Theirs, the hidden run is opened, and the same is read again, with the
 /// button of the changed-on-disk banner that stands over it (none while the comparison is up,
-/// Compare once it has gone). Then two blobs in a tab of their own, at a
+/// Compare once it has gone, which is the third Escape out of presentation with a find bar up).
+/// Then two blobs in a tab of their own, at a
 /// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under
 /// git, last, the working tree against the index in the note's tab: whether it opened with the run
 /// before the first change folded and the caret on that change, and then a character typed into
@@ -94,9 +95,27 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                     "bench compare_after {} line3={line:?}",
                     bench_compare_line(&compare)
                 );
-                tab.leave_compare();
+                // Escape as the window hears it when nothing closer to the focus took it: out of
+                // presentation first, then the pane's find bar, and only the third stops comparing.
+                let find = app.pane().find.clone();
+                find.open(crate::find::Mode::Goto);
+                app.set_presenting(true);
                 println!(
-                    "bench compare_left comparing={} banner_button={:?}",
+                    "bench compare_present escaped={} presenting={} find_open={} comparing={}",
+                    wire::escape_first(&app),
+                    app.presenting.get().is_some(),
+                    find.is_open(),
+                    tab.comparison().is_some()
+                );
+                println!(
+                    "bench compare_escape dismissed={} find_open={} comparing={}",
+                    wire::dismiss(&app),
+                    find.is_open(),
+                    tab.comparison().is_some()
+                );
+                println!(
+                    "bench compare_left dismissed={} comparing={} banner_button={:?}",
+                    wire::dismiss(&app),
                     tab.comparison().is_some(),
                     bench_banner_button(&tab)
                 );
@@ -139,9 +158,11 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                         );
                         let caret = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
                         println!(
-                            "bench compare_open leading_hidden={} caret_on_first_change={}",
+                            "bench compare_open leading_hidden={} caret_on_first_change={} \
+                             first_hunk_on_screen={}",
                             compare.hides_row(0),
-                            compare.opens_at() == Some(caret.offset())
+                            compare.opens_at() == Some(caret.offset()),
+                            compare.first_hunk_on_screen()
                         );
                         let then = tab.clone();
                         bench_compare_type(&tab, 0.5, None, move || {
@@ -166,6 +187,10 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
 /// back and activates that row. `commit:<rel>` asks for the file at HEAD against HEAD~1, where
 /// HEAD did not touch it — the shape a commit's file list has once history has moved under it.
 /// All three now say so and ask git again instead of opening a tab of two identical columns.
+///
+/// Pointed at a file HEAD did change, `commit:` prints whether the tab opened with its first change
+/// on screen, and the shared scrollbar's value, upper and page size: a long file whose one change
+/// is deep inside used to open scrolled away from it, with everything around it folded.
 pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     let (mode, rel) = match rel.split_once(':') {
@@ -235,11 +260,18 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 tab.rel(),
                 bench_compare_line(&compare)
             ),
-            // A Staged row and a commit's file open a tab of two read-only panes instead.
-            (None, Some(Doc::Diff(diff))) => println!(
-                "bench compare_row opened key={key:?} {}",
-                bench_compare_line(diff.comparison())
-            ),
+            // A Staged row and a commit's file open a tab of two read-only panes instead, which
+            // has to open scrolled to the first change.
+            (None, Some(Doc::Diff(diff))) => {
+                let compare = diff.comparison();
+                let (value, upper, page) = compare.vscroll();
+                println!(
+                    "bench compare_row opened key={key:?} {} first_hunk_on_screen={} \
+                     scroll={value}/{upper}/{page}",
+                    bench_compare_line(compare),
+                    compare.first_hunk_on_screen()
+                );
+            }
             // The refusal is a toast, and it asks git again, so the row it refused goes too.
             (None, _) => println!(
                 "bench compare_row opened tabs={:?} comparing=false toasts={}",

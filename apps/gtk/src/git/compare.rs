@@ -27,8 +27,10 @@ impl Panel {
                 let what = what.clone();
                 crate::work::off_thread("git", move || what.read(&vault)).await
             };
-            if let Some(read) = read {
-                panel.show(what, read);
+            match read {
+                Some(Ok(read)) => panel.show(what, read),
+                Some(Err(why)) => (panel.hooks.toast)(&why),
+                None => {}
             }
         });
     }
@@ -41,7 +43,8 @@ impl Panel {
         let (Blob::Text(left), Blob::Text(right)) = read else {
             return (self.hooks.toast)(&format!("{name} is binary"));
         };
-        let left_title = format!("{name} ({})", what.sides.left_title());
+        let left_name = split_name(what.left_rel()).1;
+        let left_title = format!("{left_name} ({})", what.sides.left_title());
         let right_title = format!("{name} ({})", what.sides.right_title());
         let nothing = what.sides.nothing_to_show();
         match what.sides.clone() {
@@ -80,6 +83,11 @@ impl Panel {
                 if left == right {
                     (self.hooks.toast)(&format!("{name} {nothing}"));
                     return self.schedule_refresh(Depth::Everything);
+                }
+                // The panes hold `\n` line endings whatever the file has, so a change of line
+                // endings alone would open a tab with nothing marked in it.
+                if crate::diff::normalise(&left) == crate::diff::normalise(&right) {
+                    return (self.hooks.toast)(&format!("{name} differs only in line endings"));
                 }
                 let key = format!("diff:{}:{}", what.sides.tag(), what.key);
                 let tab = (self.hooks.open_diff)(
@@ -141,6 +149,7 @@ impl Panel {
         let sides = Sides::Commit {
             oid: oid.to_string(),
             parent: Some(parent.to_string()),
+            orig: None,
         };
         self.compare(key, key, sides);
     }
@@ -169,8 +178,11 @@ impl Panel {
                 .await
             };
             let Some(reads) = reads else { return };
-            for (watch, (left, right)) in watches.into_iter().zip(reads) {
-                let (Blob::Text(left), Blob::Text(right)) = (left, right) else {
+            for (watch, read) in watches.into_iter().zip(reads) {
+                // What could not be read leaves the comparison showing what it had.
+                let Ok((Blob::Text(left), Blob::Text(right))) =
+                    read.inspect_err(|why| tracing::debug!("{why}"))
+                else {
                     continue;
                 };
                 match watch.target {
@@ -201,8 +213,13 @@ pub(super) enum Sides {
     /// compare inside, so this is a tab of its own the way a staged change is.
     Deleted,
     /// One commit against its first parent, which is what a file under an expanded history row
-    /// shows. `parent` is `None` on a root commit, whose left side is simply empty.
-    Commit { oid: String, parent: Option<String> },
+    /// shows. `parent` is `None` on a root commit, whose left side is simply empty. `orig` is the
+    /// path a rename or copy came from, which is the one the parent has.
+    Commit {
+        oid: String,
+        parent: Option<String>,
+        orig: Option<String>,
+    },
 }
 
 impl Sides {
@@ -294,24 +311,49 @@ impl Target {
 }
 
 impl What {
-    /// Both sides, on the worker. A side git has no file for is a new or deleted file, and an
-    /// empty string is exactly the right thing to diff against.
-    fn read(&self, vault: &Vault) -> (Blob, Blob) {
+    /// Both sides, on the worker, or the toast that says which one git would not read.
+    fn read(&self, vault: &Vault) -> Result<(Blob, Blob), String> {
         let left = match self.sides.left_rev() {
-            Some(rev) => side(vault.git_show(&self.repo, rev, &self.rel)),
+            Some(rev) => self.side(vault, rev, self.left_rel())?,
             None => Blob::Text(String::new()),
         };
         let right = match &self.sides {
-            Sides::Staged => side(vault.git_show(&self.repo, "", &self.rel)),
+            Sides::Staged => self.side(vault, "", &self.rel)?,
             // The working tree side is the file itself, which on a remote vault is on the other
             // machine: reading it through the vault is what makes the diff work there as well
             // as here. It is read even though the tab shows its own buffer, so that the same
             // hop answers "is this binary" for both.
             Sides::Worktree => self.worktree(vault),
             Sides::Deleted => Blob::Text(String::new()),
-            Sides::Commit { oid, .. } => side(vault.git_show(&self.repo, oid, &self.rel)),
+            Sides::Commit { oid, .. } => self.side(vault, oid, &self.rel)?,
         };
-        (left, right)
+        Ok((left, right))
+    }
+
+    /// The path the left side is read at: the old one, where a commit renamed the file.
+    fn left_rel(&self) -> &str {
+        match &self.sides {
+            Sides::Commit {
+                orig: Some(orig), ..
+            } => orig,
+            _ => &self.rel,
+        }
+    }
+
+    /// `rel` at `rev`. A file git has none of there is a new or deleted file, and an empty string
+    /// is exactly the right thing to diff against. A read that failed is not that: an empty side
+    /// would draw the whole file as added or deleted, so it is the toast instead.
+    fn side(&self, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, String> {
+        match vault.git_show(&self.repo, rev, rel) {
+            Ok(blob) => Ok(blob.unwrap_or_else(|| Blob::Text(String::new()))),
+            Err(e) => {
+                let at = match rev {
+                    "" => "the index".to_string(),
+                    rev => short(rev),
+                };
+                Err(format!("Cannot read {} at {at}: {e:#}", split_name(rel).1))
+            }
+        }
     }
 
     /// The file on disk, as the working-tree side of a comparison.
@@ -347,16 +389,6 @@ impl What {
     }
 }
 
-fn side(read: anyhow::Result<Option<Blob>>) -> Blob {
-    match read {
-        Ok(blob) => blob.unwrap_or_else(|| Blob::Text(String::new())),
-        Err(e) => {
-            tracing::debug!("git show: {e:#}");
-            Blob::Text(String::new())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +398,7 @@ mod tests {
         let commit = Sides::Commit {
             oid: "abc1234".to_string(),
             parent: None,
+            orig: None,
         };
         assert_eq!(Sides::Staged.nothing_to_show(), "has no staged changes");
         assert_eq!(commit.nothing_to_show(), "is unchanged in this commit");

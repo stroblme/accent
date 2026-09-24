@@ -818,6 +818,214 @@ impl App {
         }
         self.sync_conflict_banner(original, Some(conflict));
     }
+
+    /// Save As…: the file in front written under a path typed in the vault's path field, and its
+    /// tab moved onto the new file (DESIGN.md, Keyboard). What the tab holds goes there, and the
+    /// original keeps what was last written to it. Only a vault's own text, diagram or PDF: a
+    /// loose tab, a window without a vault and a tab that is no file have no vault path to type,
+    /// so there it does nothing.
+    pub fn save_as(self: &Rc<Self>) {
+        let Some(doc) = self.active_doc().filter(|doc| {
+            matches!(doc, Doc::Text(_) | Doc::Diagram(_) | Doc::Pdf(_)) && !doc.is_loose()
+        }) else {
+            return;
+        };
+        let Some(ops) = self.ops() else {
+            return;
+        };
+        let app = Rc::downgrade(self);
+        fileops::save_as(ops, &doc.key(), move |to| {
+            if let Some(app) = app.upgrade() {
+                app.save_as_to(doc, to);
+            }
+        });
+    }
+
+    /// Save As once the path is typed, looked at before anything is written: a folder is refused,
+    /// a file asks to be replaced — saying so when a tab has it open, which then closes without
+    /// saving — and a free path is written at once. The tab's own path is a plain Save.
+    pub(crate) fn save_as_to(self: &Rc<Self>, doc: Doc, to: String) {
+        if to == doc.key() {
+            return self.save_active();
+        }
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let app = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let taken = crate::work::off_thread("save as", {
+                let to = to.clone();
+                move || fileops::taken(&vault, &to)
+            })
+            .await;
+            let (Some(app), Some(taken)) = (app.upgrade(), taken) else {
+                return;
+            };
+            let name = doc::file_name(&to).to_string();
+            match taken {
+                fileops::Taken::Free => app.write_as(doc, to, true),
+                fileops::Taken::Folder => app.cannot(&format!("save as {name}"), "it is a folder"),
+                fileops::Taken::File => {
+                    let open = app.doc_for(&to);
+                    let mut body = format!("{to} already exists, and saving replaces it.");
+                    if open.is_some() {
+                        body.push_str(" It is open in a tab, which closes without saving.");
+                    }
+                    let weak = Rc::downgrade(&app);
+                    dialogs::confirm(
+                        &app.window,
+                        &format!("Replace {name}?"),
+                        &body,
+                        "Replace",
+                        true,
+                        move || {
+                            let Some(app) = weak.upgrade() else { return };
+                            if let Some(open) = open {
+                                app.close_unsaved(&open);
+                            }
+                            app.write_as(doc, to, false);
+                        },
+                    );
+                }
+            }
+        });
+    }
+
+    /// Write what `doc` holds to `to`, then move its tab there. A save still on its way lands
+    /// first, or its answer would come back to a tab that has moved, and a comparison goes, being
+    /// about the old file. A PDF's strokes are written out and the file copied: its bytes are the
+    /// render thread's. `free` says nothing was at `to` when it was looked at.
+    fn write_as(self: &Rc<Self>, doc: Doc, to: String, free: bool) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let (contents, edits) = match &doc {
+            Doc::Text(tab) => {
+                self.land_save(tab, false);
+                tab.leave_compare();
+                (Contents::Text(tab.for_disk()), tab.save.edits.get())
+            }
+            Doc::Diagram(diagram) => {
+                self.land_diagram(diagram, false);
+                diagram.finish_label();
+                (Contents::Text(diagram.for_disk()), diagram.save.edits.get())
+            }
+            // No edit count: the strokes are all in the file once it is flushed.
+            Doc::Pdf(pdf) => {
+                pdf.flush_blocking();
+                (Contents::File(pdf.path()), 0)
+            }
+            _ => return,
+        };
+        let from = doc.key();
+        let name = doc::file_name(&to).to_string();
+        let app = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            // The folders, then the file: each a round trip on a remote vault.
+            let written = crate::work::off_thread("save as", {
+                let (to, name) = (to.clone(), name.clone());
+                move || {
+                    fileops::make_parents(&vault, &to)?;
+                    let written = match contents {
+                        // A free path is claimed first, as New File claims one, which also
+                        // gives the file a new file's mode rather than the write's private one.
+                        Contents::Text(text) => match free {
+                            true => vault.create_note(&to, None).map(drop),
+                            false => Ok(()),
+                        }
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|()| {
+                            vault
+                                .save(&to, &text, None)
+                                .map(Some)
+                                .map_err(|e| e.to_string())
+                        }),
+                        Contents::File(local) => copy_pdf(&vault, &from, &local, &to)
+                            .map(|()| None)
+                            .map_err(|e| e.to_string()),
+                    };
+                    written.map_err(|why| format!("Cannot save as {name}: {why}"))
+                }
+            })
+            .await;
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            match written {
+                Some(Ok(etag)) => {
+                    app.follow_save_as(doc, &to, etag, edits);
+                    app.toast(&format!("Saved as {to}"));
+                }
+                Some(Err(why)) => app.toast(&why),
+                None => app.cannot(&format!("save as {name}"), "the worker stopped"),
+            }
+        });
+    }
+
+    /// The tab once Save As has written `to`: reopened there when the extension changes what the
+    /// file opens as, and otherwise pointed at it — clean, unless it was typed into while the
+    /// write was out, which the next autosave then writes to the new file.
+    fn follow_save_as(self: &Rc<Self>, doc: Doc, to: &str, etag: Option<Etag>, edits: u64) {
+        if doc::opens_differently(&doc.key(), to) {
+            // What it held is in the new file, and the original keeps what it had.
+            self.close_unsaved(&doc);
+            return self.open_path(to);
+        }
+        doc.retarget(&self.root(), to);
+        match (&doc, etag) {
+            (Doc::Text(tab), Some(etag)) => {
+                // What the old file's banner said is not about the new one.
+                tab.save.disk_changed.set(false);
+                tab.clear_disk_alert();
+                self.wrote(tab, etag, tab.save.edits.get() == edits);
+                self.fetch_head(tab);
+            }
+            (Doc::Diagram(diagram), Some(etag)) => {
+                diagram.clear_changed();
+                match diagram.save.edits.get() == edits {
+                    true => diagram.mark_clean(etag),
+                    false => diagram.save.etag.set(Some(etag)),
+                }
+            }
+            // A refused upload of the old file left its copy's name for the next one to reuse.
+            (Doc::Pdf(pdf), _) => pdf.clear_conflict(),
+            _ => {}
+        }
+        self.sync_active();
+        self.save_session_soon();
+    }
+
+    /// Close `doc` without writing what it has not saved: its file is being written over, or
+    /// what it held is already in the file Save As wrote.
+    fn close_unsaved(self: &Rc<Self>, doc: &Doc) {
+        match doc {
+            Doc::Text(tab) => tab.discard(),
+            Doc::Diagram(diagram) => diagram.discard(),
+            _ => {}
+        }
+        self.close_page(doc.page());
+    }
+}
+
+/// What Save As writes: a tab's text, or a PDF's file as it is on this machine.
+enum Contents {
+    Text(String),
+    File(PathBuf),
+}
+
+/// A PDF's bytes at `to`. The vault copies the file where it is, except on a remote vault: there
+/// the tab reads and writes the ssh cache copy, which reaches the host by a push of its own that
+/// may still be on its way. So the cache copy goes up itself, and comes back down as `to`'s own
+/// cache copy with its stamp, or the next stroke's push would take the host's file for somebody
+/// else's change.
+fn copy_pdf(vault: &Vault, from: &str, local: &Path, to: &str) -> std::io::Result<()> {
+    match vault.is_remote() {
+        false => vault.copy(from, to),
+        true => vault
+            .upload(local, to)
+            .and_then(|()| vault.fetch(to))
+            .map(drop),
+    }
 }
 
 /// One write's outcome, on the `SAVES` target the save path has always logged to.

@@ -585,15 +585,9 @@ pub fn wire_window(app: &Rc<App>) {
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, _| {
-            if key == gdk::Key::Escape {
-                // The way out of presentation, where there is no chrome to bring back.
-                match app.presenting.get().is_some() {
-                    true => app.set_presenting(false),
-                    false => app.show_chrome(),
-                }
-            }
-            glib::Propagation::Proceed
+        move |_, key, _, _| match key == gdk::Key::Escape && escape_first(&app) {
+            true => glib::Propagation::Stop,
+            false => glib::Propagation::Proceed,
         }
     ));
     // The other half of `Ctrl+Tab`: an action activation says nothing about the modifier still
@@ -626,22 +620,19 @@ pub fn wire_window(app: &Rc<App>) {
     // pressed inside it, and the user who typed a query and went back to reading has the focus in
     // the document. Bubble phase, and a separate controller from the capture one above, so
     // everything that answers to Escape closer to the focus still gets it first — the signature
-    // popover dismissing itself, a popover, a menu.
-    let dismiss = gtk::EventControllerKey::new();
-    dismiss.connect_key_pressed(glib::clone!(
+    // popover dismissing itself, a popover, a menu. With no bar up, it stops comparing.
+    let escape = gtk::EventControllerKey::new();
+    escape.connect_key_pressed(glib::clone!(
         #[weak]
         app,
         #[upgrade_or]
         glib::Propagation::Proceed,
-        move |_, key, _, _| match key == gdk::Key::Escape && app.pane().find.is_open() {
-            true => {
-                app.pane().find.close();
-                glib::Propagation::Stop
-            }
+        move |_, key, _, _| match key == gdk::Key::Escape && dismiss(&app) {
+            true => glib::Propagation::Stop,
             false => glib::Propagation::Proceed,
         }
     ));
-    app.window.add_controller(dismiss);
+    app.window.add_controller(escape);
     app.window.connect_notify_local(
         Some("focus-widget"),
         glib::clone!(
@@ -694,6 +685,37 @@ pub fn wire_window(app: &Rc<App>) {
             }
         }
     ));
+}
+
+/// Escape as the window hears it first, ahead of everything: the way out of presentation, where
+/// there is no chrome to bring back, and nothing else on that press — the find bar or a
+/// comparison waits for the next one. Otherwise it brings the chrome back and goes on to whatever
+/// wants it. Says whether the press was used up.
+pub fn escape_first(app: &Rc<App>) -> bool {
+    if app.presenting.get().is_none() {
+        app.show_chrome();
+        return false;
+    }
+    app.set_presenting(false);
+    true
+}
+
+/// An Escape nothing closer to the focus wanted: the active pane's find bar goes first, then the
+/// comparison its tab is hosting, one per press, as the Stop Comparing button would. A diff tab of
+/// its own has no such button and is left alone. Says whether there was anything to put away.
+pub fn dismiss(app: &App) -> bool {
+    let pane = app.pane();
+    if pane.find.is_open() {
+        pane.find.close();
+        return true;
+    }
+    match app.tab_of(&pane).filter(|tab| tab.comparison().is_some()) {
+        Some(tab) => {
+            tab.leave_compare();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Right-click and Menu open the file-operations menu; Delete trashes. A key controller on the

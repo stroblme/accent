@@ -10,6 +10,7 @@ import io.github.stroblme.accent.ffi.AccentException
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
@@ -90,6 +91,12 @@ data class Open(
 data class VaultState(
     val root: String? = null,
     val indexing: Boolean = false,
+    /**
+     * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
+     * and nothing but [VaultModel.resumeIndexing] walks again — not even the rescan every return
+     * to the app asks for. Opening the vault again is a resume too.
+     */
+    val paused: Boolean = false,
     /** Files the walk has been through so far, for as long as one is running. */
     val scanned: Long = 0,
     /**
@@ -105,7 +112,8 @@ data class VaultState(
      * A latch, because [indexing] is about work running and not about the index being empty. It
      * is false for exactly one stretch of a vault's life — its first walk, until the first batch
      * of files has been read — and a walk over an index that already has files (the rescan every
-     * resume starts) leaves it alone, those files still being there to browse.
+     * resume starts) leaves it alone, those files still being there to browse. A walk stopped
+     * before its first batch sets it only if an earlier walk left files in the index.
      */
     val ready: Boolean = false,
     /** The directories whose children have been listed, so the tree redraws in place. */
@@ -119,16 +127,40 @@ data class VaultState(
 
 /**
  * What the switcher ranks: every file, then every note a link names that is not there yet, by the
- * path creating it would give it.
+ * path creating it would give it, then every front matter alias, by the alias.
  *
- * One list, so the two rank together, and the files first: the ranking is stable, so a file that
- * is there leads a note only linked to at the same score.
+ * One list, so they rank together, in that order: the ranking is stable, so at the same score a
+ * file that is there leads a note only linked to, and a path leads an alias. A row is a place in
+ * [names] rather than the string there, because one alias can name two notes.
  */
-class Corpus(files: List<String>, missing: List<String>) {
-    val paths = files + missing
+class Corpus(
+    files: List<String> = emptyList(),
+    missing: List<String> = emptyList(),
+    aliases: List<NoteAlias> = emptyList(),
+) {
+    /** What the ranking reads. */
+    val names = files + missing + aliases.map { it.name }
 
-    /** The notes in [paths] that are not there yet: a pick writes one rather than opens it. */
-    val unwritten = missing.toHashSet()
+    private val written = files.size
+    private val paths = written + missing.size
+    private val notes = aliases.map { it.relPath }
+
+    /** The row the [i]th of [names] stands for. */
+    fun row(i: Int): Row = when {
+        i < written -> Row(names[i].substringAfterLast('/'), names[i])
+        i < paths -> Row(names[i].substringAfterLast('/'), names[i], unwritten = true)
+        else -> Row(names[i], notes[i - paths])
+    }
+
+    /** Where [rel] is among the paths, if it is: how a recent note finds its row. */
+    fun find(rel: String): Int? = names.subList(0, paths).indexOf(rel).takeIf { it >= 0 }
+
+    /**
+     * What a row reads and what picking it does: [name] over [rel], and a pick opens [rel], or
+     * writes it first when it is [unwritten]. A path's name is its file's; an alias is its own,
+     * with the whole path of its note under it, since the alias says nothing of where that is.
+     */
+    data class Row(val name: String, val rel: String, val unwritten: Boolean = false)
 }
 
 /**
@@ -211,9 +243,13 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     private suspend fun apply(batch: List<Event>) {
         var reindexed = false
+        var stopped = false
         val touched = mutableSetOf<String>()
         for (event in batch) when (event) {
-            is Event.Reconciled -> reindexed = true
+            is Event.Reconciled -> {
+                reindexed = true
+                stopped = event.stopped
+            }
             is Event.DirsChanged -> touched += event.dirs
             is Event.FileChanged -> onChanged(event.rel)
             is Event.FileRemoved -> touched += parentOf(event.rel)
@@ -226,10 +262,24 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             is Event.Progress -> seen = event.progress
         }
         if (reindexed) {
-            // The walk is over, so whatever the vault holds is in the index.
-            _state.update { it.copy(indexing = false, scanned = 0, phase = null, ready = true) }
+            // The walk is over, so whatever the vault holds is in the index — unless it was
+            // stopped, and then the index holds what it had read by then.
+            _state.update {
+                it.copy(
+                    indexing = false,
+                    paused = stopped,
+                    scanned = 0,
+                    phase = null,
+                    ready = it.ready || !stopped,
+                )
+            }
             corpus = null
             relist(_state.value.expanded)
+            // Stopped while it was still finding the files, a walk writes nothing, so whether
+            // there is anything to browse is whatever an earlier walk left behind.
+            if (stopped) {
+                _state.update { it.copy(ready = it.ready || !it.children[""].isNullOrEmpty()) }
+            }
         } else if (touched.isNotEmpty()) {
             relist(touched.intersect(_state.value.children.keys))
         } else {
@@ -252,6 +302,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         _state.update {
             it.copy(
                 indexing = true,
+                paused = false,
                 scanned = p.done.toLong(),
                 phase = p.phase,
                 ready = it.ready || read,
@@ -267,14 +318,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** The switcher's corpus, fetched the first time it is asked for. */
     suspend fun corpus(): Corpus {
-        corpus?.takeIf { it.paths.isNotEmpty() }?.let { return it }
-        val v = vault ?: return Corpus(emptyList(), emptyList())
+        corpus?.takeIf { it.names.isNotEmpty() }?.let { return it }
+        val v = vault ?: return Corpus()
         // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
         // the only thing that wants them, rather than after every reconcile.
         val read = withContext(Dispatchers.IO) {
             Corpus(
                 runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
                 runCatching { v.missingNotes() }.getOrDefault(emptyList()),
+                runCatching { v.noteAliases() }.getOrDefault(emptyList()),
             )
         }
         corpus = read
@@ -303,10 +355,33 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Walk the files again: what the app does instead of watching them. */
     fun rescan() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        _state.update { it.copy(indexing = true) }
-        runCatching { v.rescan() }
+        // A paused vault ignores the rescan, so no walk would come to say it was over.
+        if (!_state.value.paused) {
+            _state.update { it.copy(indexing = true) }
+            runCatching { v.rescan() }
+        }
         // An open note may have been changed by Syncthing while the app was away.
         _state.value.open?.let { onChanged(it.rel) }
+    }
+
+    /**
+     * Stop the walk, keeping what it has indexed.
+     *
+     * Nothing changes here yet: the walk finishes the file it is on and then says it stopped,
+     * and that reconcile is what pauses the vault ([apply]). Until it lands, Stop is still Stop.
+     */
+    fun stopIndexing() = viewModelScope.launch(Dispatchers.IO) {
+        runCatching { vault?.stopIndexing() }
+    }
+
+    /**
+     * Finish a stopped walk. Said at once, as the desktop does: a walk is starting, and a second
+     * press would ask for a second one.
+     */
+    fun resumeIndexing() = viewModelScope.launch(Dispatchers.IO) {
+        val v = vault ?: return@launch
+        _state.update { it.copy(indexing = true, paused = false) }
+        runCatching { v.resumeIndexing() }
     }
 
     // ------------------------------------------------------------------------------ one file
@@ -374,13 +449,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * Follow a link out of the rendered note.
      *
      * The target is what the link spelled — a note's name, a path, possibly with a `#heading` or
-     * a PDF's `page=` after it. The index is what knows which file that is; a target it cannot
-     * place is a link to a note nobody has written yet.
+     * a PDF's `page=` after it. The index is what knows which file that is, and failing it the
+     * disk, for a file in a tree the index does not hold (a gitignored `build/`); a target
+     * neither can place is a link to a note nobody has written yet, which only the switcher
+     * writes.
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val name = target.substringBefore('#')
-        val found = withContext(Dispatchers.IO) { runCatching { v.resolveLink(name) }.getOrNull() }
+        val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
         when (val rel = found) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
             else -> openFile(rel)

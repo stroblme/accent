@@ -75,8 +75,11 @@ fun HomeScreen(model: VaultModel) {
                 )
                 else -> Empty(
                     indexing = state.indexing,
+                    paused = state.paused,
                     scanned = state.scanned,
                     ready = state.ready,
+                    onStop = { model.stopIndexing() },
+                    onResume = { model.resumeIndexing() },
                     onCloseVault = { model.closeVault() },
                 )
             }
@@ -161,6 +164,10 @@ private val ProgressHeight: Dp = 4.dp
  * platform's own indeterminate bar under them. Indeterminate because the walk has no total until
  * it ends, and a percentage nobody can honour is worse than a bar that only says "still going".
  *
+ * Stop sits under the bar while the walk runs, and Resume in its place once it has stopped: the
+ * desktop's control beside its indexing line, with the same meaning. Stopping is a pause, not a
+ * cancel — what was read stays browsable, and Resume reads the rest.
+ *
  * Closing the vault belongs here and nowhere else. It is the one thing that makes sense with no
  * note in front of the reader, and a control that reached over an open document would be a way of
  * losing one's place by mistake.
@@ -168,8 +175,11 @@ private val ProgressHeight: Dp = 4.dp
 @Composable
 private fun Empty(
     indexing: Boolean,
+    paused: Boolean,
     scanned: Long,
     ready: Boolean,
+    onStop: () -> Unit,
+    onResume: () -> Unit,
     onCloseVault: () -> Unit,
 ) {
     Column(
@@ -178,12 +188,20 @@ private fun Empty(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            if (indexing) "Reading your vault…" else "Nothing open",
+            when {
+                indexing -> "Reading your vault…"
+                paused -> "Reading paused"
+                else -> "Nothing open"
+            },
             style = MaterialTheme.typography.headlineSmall,
         )
         Spacer(Modifier.height(8.dp))
         Text(
             when {
+                // Ahead of the lines below, which are about a walk still running: a stopped one
+                // may have read nothing at all.
+                paused && ready -> "What it has read so far is kept."
+                paused -> "It stopped before reading any files."
                 // A first walk of a large vault takes minutes over shared storage, so it says how
                 // far it has got. Nothing can be opened while it is still finding the files;
                 // once it starts reading them, what it has read is already there to open — which
@@ -205,6 +223,11 @@ private fun Empty(
             if (indexing) LinearProgressIndicator(Modifier.width(ProgressWidth))
         }
         Spacer(Modifier.height(24.dp))
-        TextButton(onClick = onCloseVault) { Text("Close vault") }
+        // One row, so the lines above stay put when either control comes or goes.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (indexing) TextButton(onClick = onStop) { Text("Stop") }
+            if (paused) TextButton(onClick = onResume) { Text("Resume") }
+            TextButton(onClick = onCloseVault) { Text("Close vault") }
+        }
     }
 }

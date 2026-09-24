@@ -974,12 +974,22 @@ fn parse_submodule(line: &str) -> Option<Submodule> {
 
 // -------------------------------------------------------------- read and write
 
-/// What one commit changed: a status letter and a path per file.
+/// One file a commit changed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangedFile {
+    /// git's status letter: `A`, `M`, `D`, `R`, `C` or `T`.
+    pub letter: char,
+    pub path: String,
+    /// Where a rename or copy came from: the path the parent has the file under.
+    pub orig: Option<String>,
+}
+
+/// What one commit changed, a row per file.
 ///
 /// `-m --first-parent` is what makes a merge answer at all — plain `git show` prints nothing for
 /// one, and `-m` alone prints a diff against every parent in turn. A root commit needs no special
 /// case: every file in it comes back as `A`.
-pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Error> {
+pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<ChangedFile>, Error> {
     let out = run(
         &repo.root,
         &[
@@ -997,9 +1007,11 @@ pub fn changed_files(repo: &Repo, oid: &str) -> Result<Vec<(char, String)>, Erro
 }
 
 /// Parse `--name-status -z`: a status token, then its path — except a rename or a copy, whose
-/// token is followed by *two* paths. That is the same trap [`parse_status`] handles for porcelain
-/// records, and it gets the same answer: the new path is the one the row is about.
-fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
+/// token is followed by *two* paths, the old one first. That is the same trap [`parse_status`]
+/// handles for porcelain records, and it gets the same answer: the new path is the one the row is
+/// about, and the old one is where the parent's side of it is read.
+fn parse_name_status(bytes: &[u8]) -> Vec<ChangedFile> {
+    let lossy = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
     let mut files = Vec::new();
     let mut tokens = bytes.split(|b| *b == 0).filter(|t| !t.is_empty());
     while let Some(token) = tokens.next() {
@@ -1009,11 +1021,18 @@ fn parse_name_status(bytes: &[u8]) -> Vec<(char, String)> {
         let Some(path) = tokens.next() else {
             break;
         };
-        let path = match letter {
-            'R' | 'C' => tokens.next().unwrap_or(path),
-            _ => path,
+        let (path, orig) = match letter {
+            'R' | 'C' => match tokens.next() {
+                Some(new) => (new, Some(lossy(path))),
+                None => (path, None),
+            },
+            _ => (path, None),
         };
-        files.push((letter, String::from_utf8_lossy(path).into_owned()));
+        files.push(ChangedFile {
+            letter,
+            path: lossy(path),
+            orig,
+        });
     }
     files
 }
@@ -1051,15 +1070,25 @@ impl Blob {
 ///
 /// An empty `rev` means the index, which is what the diff view compares a staged change against.
 /// A file that is new — untracked, or added but not yet committed — is a normal answer here, not
-/// an error, so the four ways git words "it isn't there" all become `Ok(None)`.
+/// an error, so the four ways git words "it isn't there" all become `Ok(None)`, and so does HEAD
+/// before the first commit, which has no files at all.
+///
+/// A revision is peeled to its commit first. git words a full object name it does not have the
+/// same way as a path the commit lacks, so a commit asked of the wrong repository would read as
+/// a file that is not there; peeled, it is "invalid object name", which stays an error.
 pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
-    match run(&repo.root, &["show", &format!("{rev}:{path}")], true) {
+    let object = match rev {
+        "" => format!(":{path}"),
+        rev => format!("{rev}^{{commit}}:{path}"),
+    };
+    match run(&repo.root, &["show", &object], true) {
         Ok(bytes) => Ok(Some(Blob::of(&bytes))),
         Err(Error::Git(msg))
             if msg.contains("does not exist") || msg.contains("exists on disk, but not in") =>
         {
             Ok(None)
         }
+        Err(Error::Git(msg)) if rev == "HEAD" && msg.contains("invalid object name") => Ok(None),
         Err(e) => Err(e),
     }
 }

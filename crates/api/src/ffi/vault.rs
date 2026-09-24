@@ -13,7 +13,7 @@ use accent_core::config::VaultConfig;
 use accent_core::fs::Etag;
 use accent_core::index::{Backlink, FileRow};
 
-use crate::ffi::convert::{self, NewNote, Note, PdfLink, SearchHit, TagCount, Utf16};
+use crate::ffi::convert::{self, NewNote, Note, NoteAlias, PdfLink, SearchHit, TagCount, Utf16};
 use crate::ffi::error::Answer;
 use crate::ffi::event::{self, Event};
 
@@ -52,6 +52,19 @@ impl Vault {
     /// Walk the files again and bring the index level with them.
     pub fn rescan(&self) -> Answer<()> {
         Ok(self.inner.rescan()?)
+    }
+
+    /// Stop the walk that is running, keeping every file it has already indexed.
+    ///
+    /// The [`Event::Reconciled`] that ends it says `stopped`, and the vault then ignores
+    /// [`Vault::rescan`] until [`Vault::resume_indexing`]. Opening it again resumes too.
+    pub fn stop_indexing(&self) -> Answer<()> {
+        Ok(self.inner.stop_indexing()?)
+    }
+
+    /// Walk again after [`Vault::stop_indexing`], indexing what the stopped walk had not reached.
+    pub fn resume_indexing(&self) -> Answer<()> {
+        Ok(self.inner.resume_indexing()?)
     }
 
     /// Everything the vault has said since this was last asked, waiting up to `timeout_ms` for
@@ -180,9 +193,27 @@ impl Vault {
         Ok(self.inner.missing_notes()?)
     }
 
+    /// Every front matter alias with the note that carries it, by alias: the names the switcher
+    /// also finds a note by. A link still resolves by the file's name alone.
+    pub fn note_aliases(&self) -> Answer<Vec<NoteAlias>> {
+        Ok(self
+            .inner
+            .note_aliases()?
+            .into_iter()
+            .map(|(name, rel_path)| NoteAlias { name, rel_path })
+            .collect())
+    }
+
     /// What a link target resolves to, or `None` when nothing in the vault answers to it.
     pub fn resolve_link(&self, target: String) -> Answer<Option<String>> {
         Ok(self.inner.resolve_link(&target)?)
+    }
+
+    /// Which file following a link to `target` opens: what [`Vault::resolve_link`] says, or else
+    /// the file creating the note would write, when it is on disk in a tree the index does not
+    /// hold — a gitignored `build/`, a `node_modules`. `None` when there is nothing there.
+    pub fn follow(&self, target: String) -> Answer<Option<String>> {
+        Ok(self.inner.follow(&target)?)
     }
 
     // --------------------------------------------------------------------------- sync conflicts
