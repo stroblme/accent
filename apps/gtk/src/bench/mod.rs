@@ -30,7 +30,7 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use files::{
     bench_clip, bench_close, bench_drop, bench_expand, bench_hidden, bench_menu, bench_menu_press,
-    bench_paths, bench_templates, bench_watch,
+    bench_paths, bench_save_as, bench_templates, bench_watch,
 };
 use find::bench_find;
 use git::{
@@ -170,6 +170,8 @@ use tags::bench_tags;
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.
+/// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
+/// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
 /// list the way the popover's own grab does, printing which row stays highlighted while the menu
 /// is up and which once it has closed. Then it marks that row and one more, the way a Ctrl+click
@@ -257,7 +259,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
+    let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     if expand.is_none()
+        && save_as.is_none()
         && find.is_none()
         && diag.is_none()
         && tags.is_none()
@@ -343,6 +347,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = clip {
             return bench_clip(&app, &rel);
+        }
+        if let Some(rel) = save_as {
+            return bench_save_as(&app, &rel);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

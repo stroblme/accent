@@ -1133,3 +1133,121 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
         bench_quit(&app);
     });
 }
+
+/// `ACCENT_BENCH_SAVE_AS=<rel>`: Save As on the file at `rel`, past the dialog, which is only the
+/// path field Rename has. It writes to `Saved As/`, a folder that is not there yet, and prints the
+/// tab's key after and what each file holds. A note is also given an edit it has not saved first,
+/// which only the copy may hold, a diagram likewise, and a PDF a page before and a page after,
+/// which only the copy may get the second of; then a note is saved onto a folder, which is refused, onto its old
+/// name while a tab of its own has that open, whose Replace question is answered, and as `.txt`,
+/// which reopens it as text.
+pub(super) fn bench_save_as(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        let disk = |rel: &str| std::fs::read(app.root().join(rel)).ok();
+        wait(800).await;
+        let Some(doc) = app.doc_for(&rel) else {
+            println!("bench save_as none");
+            return bench_quit(&app);
+        };
+        let tab = doc.tab().cloned();
+        if let Some(tab) = &tab {
+            tab.set_text("saved\n");
+            let _ = app.write_tab(tab, None);
+            tab.buffer.insert(&mut tab.buffer.end_iter(), "typed\n");
+        }
+        // A page not written out yet, which Save As writes before it copies.
+        if let Some(pdf) = doc.pdf() {
+            pdf.add_page();
+        }
+        // A diagram's edit not saved yet, which only the copy may hold.
+        if let Some(diagram) = doc.diagram() {
+            diagram.rename_page("Renamed Unsaved");
+        }
+        let copy = format!("Saved As/{}", doc::file_name(&rel));
+        app.save_as_to(doc.clone(), copy.clone());
+        wait(800).await;
+        // One more page afterwards, which only the copy may get.
+        if let Some(pdf) = doc.pdf() {
+            let sizes = |rel: &str| disk(rel).map(|b| b.len());
+            println!(
+                "bench save_as_pdf original={:?} copy={:?}",
+                sizes(&rel),
+                sizes(&copy)
+            );
+            pdf.add_page();
+            wait(2000).await;
+            println!(
+                "bench save_as_pdf_after original={:?} copy={:?} pages={}",
+                sizes(&rel),
+                sizes(&copy),
+                pdf.page_count()
+            );
+        }
+        let text = |bytes: Option<Vec<u8>>| bytes.map(|b| String::from_utf8_lossy(&b).into_owned());
+        println!(
+            "bench save_as key={:?} modified={:?} original={:?} copy={:?} same_bytes={}",
+            doc.key(),
+            tab.as_ref().map(|tab| tab.save.modified.get()),
+            tab.as_ref().and(text(disk(&rel))),
+            tab.as_ref().and(text(disk(&copy))),
+            disk(&rel) == disk(&copy),
+        );
+        if let Some(diagram) = doc.diagram() {
+            let renamed = |rel: &str| text(disk(rel)).map(|t| t.contains("Renamed Unsaved"));
+            println!(
+                "bench save_as_diagram modified={} original={:?} copy={:?}",
+                diagram.save.modified.get(),
+                renamed(&rel),
+                renamed(&copy)
+            );
+        }
+        let Some(tab) = tab else {
+            return bench_quit(&app);
+        };
+        let toasted = app.toasted.get();
+        app.save_as_to(doc.clone(), accent_core::path::parent_dir(&rel).to_string());
+        wait(500).await;
+        println!(
+            "bench save_as_folder key={:?} toasted={}",
+            tab.rel(),
+            app.toasted.get() - toasted
+        );
+        app.open_path(&rel);
+        wait(600).await;
+        tab.buffer.insert(&mut tab.buffer.end_iter(), "again\n");
+        app.save_as_to(doc.clone(), rel.clone());
+        wait(500).await;
+        let dialog = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        println!(
+            "bench save_as_replace heading={:?} body={:?}",
+            dialog.as_ref().and_then(|d| d.heading()),
+            dialog.as_ref().map(|d| d.body()),
+        );
+        if let Some(dialog) = dialog {
+            dialog.emit_by_name::<()>("response", &[&dialogs::CONFIRM]);
+            dialog.close();
+        }
+        wait(800).await;
+        println!(
+            "bench save_as_replaced key={:?} tabs_on_it={} original={:?}",
+            tab.rel(),
+            app.docs().iter().filter(|d| d.key() == rel).count(),
+            text(disk(&rel)),
+        );
+        let txt = format!("{}.txt", copy.trim_end_matches(".md"));
+        app.save_as_to(doc.clone(), txt.clone());
+        wait(1000).await;
+        println!(
+            "bench save_as_reopened flavour={:?} old_open={}",
+            app.doc_for(&txt).and_then(|d| d.tab().map(|t| t.flavour())),
+            app.open_tabs().iter().any(|t| Rc::ptr_eq(t, &tab)),
+        );
+        bench_quit(&app);
+    });
+}

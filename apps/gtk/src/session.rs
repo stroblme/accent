@@ -290,15 +290,31 @@ impl App {
         self.key.borrow().saved_as().is_some()
     }
 
-    /// Save Session…: give this terminal window's shells a name to come back to. From then on the
-    /// window writes its session the way a vault's does; asked again, it saves under another name.
-    pub(crate) fn save_session_dialog(self: &Rc<Self>) {
+    /// Save: the note or diagram in front, and in a window of shells with none in front the
+    /// session, which is all Save can mean there — asked for a name the first time, and written
+    /// at once from then on, the way a document is.
+    pub(crate) fn save(self: &Rc<Self>) {
+        if self.active().is_some() || self.active_diagram().is_some() {
+            return self.save_active();
+        }
         let named = match &*self.key.borrow() {
             shell::WindowKey::Terminal(key) => terminal::session_name(key).map(str::to_string),
             key if key.is_terminal() => None,
-            _ => return self.toast("A vault window's session is saved with the vault"),
+            _ => return,
         };
-        let entry = dialogs::name_entry("Session name", &named.unwrap_or_default());
+        match named {
+            Some(name) => {
+                self.save_session();
+                self.toast(&format!("Saved the session as {name}"));
+            }
+            None => self.save_session_dialog(),
+        }
+    }
+
+    /// The name this window's shells are saved under, asked once: from then on the window
+    /// writes its session the way a vault's does.
+    fn save_session_dialog(self: &Rc<Self>) {
+        let entry = dialogs::name_entry("Session name", "");
         let form = dialogs::form();
         form.append(&entry);
         let dialog = dialogs::name_dialog("Save Session", "Save", &form);
@@ -347,6 +363,47 @@ impl App {
         }
         self.save_session();
         self.toast(&format!("Saved the session as {name}"));
+    }
+
+    /// Close Session: end the session for good — its shells, its state file and its row in the
+    /// recent list — and leave for the start screen, as Close Vault does. Asked first, since the
+    /// shells are running.
+    pub(crate) fn close_session(self: &Rc<Self>) {
+        let named = match &*self.key.borrow() {
+            shell::WindowKey::Terminal(key) => {
+                terminal::session_name(key).map(|name| (key.clone(), name.to_string()))
+            }
+            _ => None,
+        };
+        let Some((key, name)) = named else {
+            return;
+        };
+        let body = match self.terminals().len() {
+            0 => "It leaves the recent list.".to_string(),
+            1 => "Its shell ends, and it leaves the recent list.".to_string(),
+            n => format!("Its {n} shells end, and it leaves the recent list."),
+        };
+        dialogs::confirm(
+            &self.window,
+            &format!("Close the session {name}?"),
+            &body,
+            "Close Session",
+            true,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || app.end_session(&key)
+            ),
+        );
+    }
+
+    /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
+    /// session's file and its row go.
+    fn end_session(self: &Rc<Self>, key: &std::path::Path) {
+        *self.key.borrow_mut() = shell::WindowKey::Loose(shell::Loose::Terminal);
+        start::forget_vault(&self.config, key);
+        let _ = std::fs::remove_file(accent_core::config::state_path(key));
+        let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
     }
 
     /// Let go of this window's shells as it closes. A window that keeps a session only detaches

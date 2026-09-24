@@ -11,7 +11,8 @@ use accent_api::{Fold, Severity};
 /// claim) — before a Find Next into the hidden run, which has to open it on both sides, the first
 /// hunk is taken from Theirs, the hidden run is opened, and the same is read again, with the
 /// button of the changed-on-disk banner that stands over it (none while the comparison is up,
-/// Compare once it has gone). Then two blobs in a tab of their own, at a
+/// Compare once it has gone, which is the third Escape out of presentation with a find bar up).
+/// Then two blobs in a tab of their own, at a
 /// zoom, for the same numbers and the page margins, which follow the zoom. With the vault under
 /// git, last, the working tree against the index in the note's tab: whether it opened with the run
 /// before the first change folded and the caret on that change, and then a character typed into
@@ -94,9 +95,27 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
                     "bench compare_after {} line3={line:?}",
                     bench_compare_line(&compare)
                 );
-                tab.leave_compare();
+                // Escape as the window hears it when nothing closer to the focus took it: out of
+                // presentation first, then the pane's find bar, and only the third stops comparing.
+                let find = app.pane().find.clone();
+                find.open(crate::find::Mode::Goto);
+                app.set_presenting(true);
                 println!(
-                    "bench compare_left comparing={} banner_button={:?}",
+                    "bench compare_present escaped={} presenting={} find_open={} comparing={}",
+                    wire::escape_first(&app),
+                    app.presenting.get().is_some(),
+                    find.is_open(),
+                    tab.comparison().is_some()
+                );
+                println!(
+                    "bench compare_escape dismissed={} find_open={} comparing={}",
+                    wire::dismiss(&app),
+                    find.is_open(),
+                    tab.comparison().is_some()
+                );
+                println!(
+                    "bench compare_left dismissed={} comparing={} banner_button={:?}",
+                    wire::dismiss(&app),
                     tab.comparison().is_some(),
                     bench_banner_button(&tab)
                 );
