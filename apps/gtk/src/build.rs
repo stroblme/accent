@@ -236,8 +236,9 @@ pub fn build_window(
     toolbar.add_css_class("accent-flat");
 
     // ponytail: a plain `GtkPaned` so the sidebar can be dragged, which `AdwOverlaySplitView`
-    // cannot do. The cost is its adaptive collapse on a narrow window; go back to it if that
-    // ever matters more than resizing.
+    // cannot do. A narrow window hides the sidebar through a breakpoint of ours instead
+    // (`App::install_collapse`); what the split view had and this lacks is laying the sidebar
+    // over the note when it is asked for there.
     let split = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .start_child(&sidebar_column)
@@ -308,6 +309,7 @@ pub fn build_window(
         mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
         presenting: Cell::new(None),
+        collapsed: Cell::new(None),
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
         reconciled: Cell::new(false),
@@ -356,6 +358,7 @@ pub fn build_window(
 
     install_actions(&app);
     wire_window(&app);
+    app.install_collapse();
     if vault.is_some() {
         wire_tree(&app);
     }

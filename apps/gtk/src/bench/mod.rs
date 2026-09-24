@@ -41,8 +41,8 @@ use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{
-    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window, bench_pins_restored,
-    bench_tabs,
+    bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
+    bench_pins_restored, bench_tabs,
 };
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
@@ -242,6 +242,12 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_DIAGRAM=<rel>` edits a diagram (a sample is written there if there is none) and
 /// prints each step through the save; `=shot:<rel>:<dir>` paints every page into `<dir>`.
 ///
+/// `ACCENT_BENCH_COLLAPSE=1` drags the sidebar to 400 px and takes the window to 360 px, below the
+/// width the sidebar collapses at, and back, printing the window's width, whether the sidebar
+/// shows, where the divider is and what a session would save (sidebar, width): before, narrow,
+/// after F9 twice while narrow, wide again, and the same round with the sidebar hidden before it.
+/// The divider has to read 400 again once the window is wide.
+///
 /// `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>` lays four notes out as `[a b | [c / d]]`, `a` in front
 /// on the left and `c`'s pane active, with the handles at 30 % and 60 %, prints the tree and
 /// quits the way Ctrl+Q does, which writes the session; a fifth field of `shell` goes back to
@@ -283,6 +289,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let close = std::env::var("ACCENT_BENCH_CLOSE").is_ok();
     let hidden = std::env::var("ACCENT_BENCH_HIDDEN").is_ok();
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
+    let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
@@ -320,6 +327,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && follow.is_none()
         && outline.is_none()
         && layout.is_none()
+        && !collapse
         && git.is_none()
         && keys.is_none()
         && chrome.is_none()
@@ -346,6 +354,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = layout {
             return bench_layout(&app, &arg);
+        }
+        if collapse {
+            return bench_collapse(&app);
         }
         if let Some(rel) = compare {
             if let Some(rel) = rel.strip_prefix("lines:") {

@@ -191,6 +191,51 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
     });
 }
 
+/// See `ACCENT_BENCH_COLLAPSE` in `install_bench_hooks`.
+pub(super) fn bench_collapse(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let step = |what: &str| {
+            println!(
+                "bench collapse {what} width={} sidebar={} divider={} saved={:?}",
+                app.window.width(),
+                app.sidebar_column.is_visible(),
+                app.split.position(),
+                app.sidebar_saved()
+            )
+        };
+        let settle = || glib::timeout_future(Duration::from_millis(500));
+        let f9 = || WidgetExt::activate_action(&app.window, "win.sidebar", None);
+        // A dragged divider, which the round trip must leave where it is.
+        app.split.set_position(400);
+        settle().await;
+        step("wide");
+        for hidden in [false, true] {
+            if hidden {
+                let _ = f9();
+                settle().await;
+                step("wide_hidden");
+            }
+            // Narrower than the dragged sidebar, which `GtkPaned` then clamps.
+            app.window.set_default_size(360, 700);
+            settle().await;
+            step("narrow");
+            if !hidden {
+                let _ = f9();
+                settle().await;
+                step("narrow_f9");
+                let _ = f9();
+                settle().await;
+                step("narrow_f9_again");
+            }
+            app.window.set_default_size(1100, 760);
+            settle().await;
+            step("wide_again");
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Run `then` once `ready` holds, looked at every 50 ms: on a remote vault a read is a round trip
 /// away, so the layout drill waits for what it needs rather than for a set time.
 fn bench_layout_when(ready: impl Fn() -> bool + 'static, then: impl FnOnce() + 'static) {

@@ -44,6 +44,12 @@ impl Mode {
     }
 }
 
+/// Below this width the sidebar steps aside for the note: the default sidebar (280 px) beside the
+/// narrowest cap the note's column ever gets (`COLUMN_FLOOR`, 480 px), under which the clamp stops
+/// applying and the text takes whatever width is left. In `sp`, so a larger interface text size
+/// collapses it sooner, as it makes the sidebar's rows wider.
+const COLLAPSE: f64 = 760.0;
+
 /// What leaving presentation mode has to put back. The window's size is not part of it: F5 only
 /// takes the chrome away, and fullscreen stays F11's job, so the two compose freely.
 #[derive(Clone, Copy)]
@@ -52,7 +58,102 @@ pub struct Presenting {
     pub sidebar: bool,
 }
 
+/// What a window narrower than [`COLLAPSE`] puts back when it widens: whether the sidebar was up,
+/// and where the divider was. The divider has to be kept as well as the sidebar, because
+/// `GtkPaned` clamps it to a window narrower than it, and a dragged 400 px came back as 349 from a
+/// 350 px window.
+#[derive(Clone, Copy)]
+pub struct Collapsed {
+    sidebar: bool,
+    width: i32,
+}
+
 impl App {
+    /// Hide the sidebar while the window is narrower than [`COLLAPSE`], where `AdwOverlaySplitView`
+    /// would have collapsed it, and put back what was there, at the width it was dragged to, on the
+    /// way up. F9 still shows the sidebar while collapsed, beside the note rather than over it.
+    pub(crate) fn install_collapse(self: &Rc<Self>) {
+        let condition = adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            COLLAPSE,
+            adw::LengthUnit::Sp,
+        );
+        let breakpoint = adw::Breakpoint::new(condition);
+        // The clamp comes first: libadwaita lays the window out at its new width, sidebar and
+        // all, before it applies a breakpoint. So the width kept is the last one the divider had
+        // short of the far edge, where a clamp leaves it.
+        let dragged = Rc::new(Cell::new(self.split.position()));
+        self.split.connect_position_notify(glib::clone!(
+            #[strong]
+            dragged,
+            move |split| {
+                if split.position() < split.max_position() {
+                    dragged.set(split.position());
+                }
+            }
+        ));
+        breakpoint.connect_apply(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                app.collapsed.set(Some(Collapsed {
+                    sidebar: app.sidebar_shown(),
+                    width: dragged.get(),
+                }));
+                app.show_sidebar(false);
+            }
+        ));
+        breakpoint.connect_unapply(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| {
+                let Some(before) = app.collapsed.take() else {
+                    return;
+                };
+                // Unless F9 has it up, when the width may be one the reader dragged since.
+                if !app.sidebar_column.is_visible() {
+                    app.split.set_position(before.width);
+                }
+                app.show_sidebar(before.sidebar);
+            }
+        ));
+        self.window.add_breakpoint(breakpoint);
+    }
+
+    /// Whether the sidebar is up once presentation mode is over: what leaving it puts back while
+    /// it lasts, what is on screen otherwise.
+    fn sidebar_shown(&self) -> bool {
+        self.presenting
+            .get()
+            .map_or_else(|| self.sidebar_column.is_visible(), |p| p.sidebar)
+    }
+
+    /// Put the sidebar up or down, or, while presenting, have leaving presentation do it.
+    fn show_sidebar(&self, on: bool) {
+        match self.presenting.get() {
+            Some(p) => self.presenting.set(Some(Presenting { sidebar: on, ..p })),
+            None => self.sidebar_column.set_visible(on),
+        }
+    }
+
+    /// The sidebar and its width as a session keeps them: as they were before a narrow window or
+    /// presentation mode took the sidebar away.
+    pub(crate) fn sidebar_saved(&self) -> (bool, i32) {
+        match self.collapsed.get() {
+            Some(before) => (before.sidebar, before.width),
+            None => (self.sidebar_shown(), self.split.position()),
+        }
+    }
+
+    /// Put back the sidebar a session saved: now, or once the window is wide enough for it.
+    pub(crate) fn restore_sidebar(&self, sidebar: bool, width: i32) {
+        self.split.set_position(width);
+        match self.collapsed.get() {
+            Some(_) => self.collapsed.set(Some(Collapsed { sidebar, width })),
+            None => self.sidebar_column.set_visible(sidebar),
+        }
+    }
+
     pub fn set_mode(self: &Rc<Self>, mode: Mode) {
         self.mode.set(mode);
         self.modes.set_icon_name(mode.icon());
