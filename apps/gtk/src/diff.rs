@@ -41,8 +41,6 @@ const CONTEXT: usize = 3;
 /// quarter down rather than at the top, so the lines that lead up to the change are visible too.
 const FIRST_HUNK_AT: f64 = 0.25;
 
-/// The mark [`Compare::reveal_first_hunk`] scrolls to, one per buffer and reused.
-const MARK_FIRST_HUNK: &str = "diff-first-hunk";
 /// Blank space a hidden run leaves behind, for the button that opens it to sit in.
 const GAP_PX: i32 = 28;
 /// Inset of the hunk buttons from the pane's right edge.
@@ -473,7 +471,7 @@ fn carried(view: &sourceview5::View, at: &gtk::TextIter) -> (i32, i32) {
 
 /// Give the paragraph `from..to` (its newline included) `above` pixels of padding above it and
 /// `below` under it, where its first character does not carry exactly that already: a paragraph
-/// left alone is not laid out again.
+/// left alone is not laid out again. `true` when it was not left alone.
 ///
 /// GTK reads a paragraph's spacing off its first character alone, but the tags cover the newline
 /// before the paragraph and the paragraph itself up to its own newline. Text typed at its start
@@ -489,13 +487,14 @@ fn pad(
     to: i32,
     above: i32,
     below: i32,
-) {
+) -> bool {
     let first = buffer.iter_at_offset(from);
     let (start, end) = (
         buffer.iter_at_offset((from - 1).max(0)),
         buffer.iter_at_offset((to - 1).max(from + 1)),
     );
     let (had_above, had_below) = carried(view, &first);
+    let mut changed = false;
     for (px, had, prefix, base) in [
         (above, had_above, PAD_ABOVE, view.pixels_above_lines()),
         (below, had_below, PAD_BELOW, view.pixels_below_lines()),
@@ -503,6 +502,7 @@ fn pad(
         if px == had {
             continue;
         }
+        changed = true;
         for tag in first.tags() {
             if tag.name().is_some_and(|name| name.starts_with(prefix)) {
                 buffer.remove_tag(&tag, &start, &end);
@@ -512,6 +512,7 @@ fn pad(
             buffer.apply_tag(&pad_tag(buffer, prefix, base + px), &start, &end);
         }
     }
+    changed
 }
 
 fn is_pad(tag: &gtk::TextTag) -> bool {
@@ -665,9 +666,9 @@ pub struct Compare {
     /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
     /// about forever.
     settling: Cell<u8>,
-    /// Whether the next refresh should put the first hunk on screen. Set once, when the
+    /// Whether the next relayout should put the first hunk on screen. Set once, when the
     /// comparison is built: a diff opens on what changed rather than on the top of a file whose
-    /// first difference is four hundred lines down. Cleared by the refresh that does it, because
+    /// first difference is four hundred lines down. Cleared by the relayout that does it, because
     /// after that where the view sits is the reader's business.
     first_view: Cell<bool>,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
@@ -1029,9 +1030,6 @@ impl Compare {
         *self.overlays.borrow_mut() = overlays;
         self.settling.set(SETTLE);
         self.relayout();
-        if self.first_view.get() {
-            self.reveal_first_hunk();
-        }
         if let Some(laid) = self.laid.borrow().as_ref() {
             laid();
         }
@@ -1045,42 +1043,31 @@ impl Compare {
         *self.laid.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Put the first hunk on screen, once. Both panes share a vertical adjustment, so scrolling
-    /// either scrolls both, and the first one with a line in that hunk is the one asked.
+    /// Put the first hunk at [`FIRST_HUNK_AT`] of the page, once, from the rows the last relayout
+    /// measured. Both panes share the vertical adjustment, so setting it scrolls both.
+    ///
+    /// The grid rather than GTK's own figures, and not before the relayout: GTK lays lines out
+    /// lazily and the padding just laid is not in its figures yet, so a `scroll_to_mark` made as
+    /// the comparison opened landed wherever the estimates put the line, which in a long file
+    /// with its unchanged runs folded away was nowhere near it.
     fn reveal_first_hunk(&self) {
-        let (lines, rows, starts) = (
-            self.lines.borrow(),
-            self.rows.borrow(),
-            self.starts.borrow(),
-        );
-        let Some(hunk) = diff::hunks(&lines, &rows).into_iter().next() else {
-            // Nothing has changed yet — an untouched buffer against its own index side. The next
-            // refresh that finds a difference is the one that opens on it.
+        let row = {
+            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+            diff::hunks(&lines, &rows).first().map(|hunk| hunk.start)
+        };
+        // Nothing has changed yet — an untouched buffer against its own index side. The next
+        // relayout that finds a difference is the one that opens on it.
+        let Some(top) = row.and_then(|r| self.grid.borrow().tops.get(r).copied()) else {
             return;
         };
         self.first_view.set(false);
-        for side in [Side::Old, Side::New] {
-            let Some(n) = hunk
-                .clone()
-                .find_map(|r| side.of(&rows[r]).and_then(|i| side.number(&lines[i])))
-            else {
-                continue;
-            };
-            let pane = self.pane(side);
-            let at = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
-            // A mark rather than the iter: `scroll_to_iter` gives up when the line it wants has
-            // not been laid out yet, which on a comparison that is opening is every line.
-            let mark = match pane.buffer.mark(MARK_FIRST_HUNK) {
-                Some(mark) => {
-                    pane.buffer.move_mark(&mark, &at);
-                    mark
-                }
-                None => pane.buffer.create_mark(Some(MARK_FIRST_HUNK), &at, true),
-            };
-            pane.view
-                .scroll_to_mark(&mark, 0.0, true, 0.0, FIRST_HUNK_AT);
-            return;
-        }
+        // `visible_rect` is in buffer coordinates and the adjustment is not — the top margin
+        // lies between them — so the scroll moves by the distance from what is on screen now.
+        let (adj, seen) = (
+            self.panes[0].scroller.vadjustment(),
+            self.panes[0].view.visible_rect(),
+        );
+        adj.set_value(adj.value() + f64::from(top - seen.y()) - FIRST_HUNK_AT * adj.page_size());
     }
 
     /// Take the tints, the emphasis and the hidden runs off `side`, which a refresh lays down
@@ -1219,6 +1206,7 @@ impl Compare {
         }
         let (pads, tops) = padding(&heights[0], &heights[1], &extra);
 
+        let mut repadded = false;
         for side in [Side::Old, Side::New] {
             let pane = self.pane(side);
             let st = &starts[side.idx()];
@@ -1234,7 +1222,7 @@ impl Compare {
                     continue;
                 };
                 let below = if last == Some(r) { now.below_last } else { 0 };
-                pad(
+                repadded |= pad(
                     &pane.view,
                     &pane.buffer,
                     st[n - 1],
@@ -1263,8 +1251,12 @@ impl Compare {
             extra,
             tops,
         };
-        // GTK had not laid some line out yet: ask again once it has.
-        if estimated.get() && self.settling.get() > 0 && self.pending.borrow().is_none() {
+        // GTK had not laid some line out yet: ask again once it has. So too while the first hunk
+        // waits for a pass that moved nothing: padding GTK has not laid out yet is not in where
+        // the scroll puts a line, and each view keeps its top line where it was as it catches up.
+        let unsettled = estimated.get() || (self.first_view.get() && repadded);
+        let exhausted = self.settling.get() == 0;
+        if unsettled && !exhausted && self.pending.borrow().is_none() {
             self.settling.set(self.settling.get() - 1);
             let weak = self.weak.clone();
             let id = glib::timeout_add_local_once(SETTLE_AFTER, move || {
@@ -1274,6 +1266,14 @@ impl Compare {
                 }
             });
             *self.pending.borrow_mut() = Some(id);
+        }
+        // Once every row is measured and laid as the grid has it, or GTK has been asked as often
+        // as it will be. After the borrows: moving the scroll runs handlers that may lay the
+        // comparison again.
+        let reveal = self.first_view.get() && (!unsettled || exhausted);
+        drop((lines, rows, starts, hidden));
+        if reveal {
+            self.reveal_first_hunk();
         }
     }
 
@@ -1300,6 +1300,42 @@ impl Compare {
                 .map_or(0.0, |p| p.y())
         };
         (top(Side::New) - top(Side::Old)).round() as i32
+    }
+
+    /// Whether the first hunk's first line is inside its view right now, on the first side that
+    /// has a line in it: what a comparison has to open on.
+    pub fn first_hunk_on_screen(&self) -> bool {
+        let Some((side, at)) = self.first_hunk_line() else {
+            return false;
+        };
+        let view = &self.pane(side).view;
+        let (line, seen) = (
+            view.iter_location(&self.pane(side).buffer.iter_at_offset(at)),
+            view.visible_rect(),
+        );
+        line.y() >= seen.y() && line.y() + line.height() <= seen.y() + seen.height()
+    }
+
+    /// Where the first hunk starts, in characters, on the first side with a line in it.
+    fn first_hunk_line(&self) -> Option<(Side, i32)> {
+        let (lines, rows, starts) = (
+            self.lines.borrow(),
+            self.rows.borrow(),
+            self.starts.borrow(),
+        );
+        let hunk = diff::hunks(&lines, &rows).into_iter().next()?;
+        [Side::Old, Side::New].into_iter().find_map(|side| {
+            let n = hunk
+                .clone()
+                .find_map(|r| side.of(&rows[r]).and_then(|i| side.number(&lines[i])))?;
+            Some((side, starts[side.idx()][n - 1]))
+        })
+    }
+
+    /// The shared vertical scrollbar: value, upper and page size.
+    pub fn vscroll(&self) -> (f64, f64, f64) {
+        let adj = self.panes[0].scroller.vadjustment();
+        (adj.value(), adj.upper(), adj.page_size())
     }
 
     /// Whether row `r` is in a hidden run right now.
