@@ -592,6 +592,14 @@ pub(super) fn bench_pins_restored(app: &Rc<App>) {
 /// one of that window's tab views, which `transfer_page` does here; what follows is the receiving
 /// window's own adoption (`Shell::landed`), which reopens the file there.
 pub(super) fn bench_pin_window(app: &Rc<App>, rels: &str) {
+    // A remote vault opens nothing before its host has answered.
+    if !app.restored.get() {
+        let (waiting, app, rels) = (app.clone(), app.clone(), rels.to_string());
+        return bench_layout_when(
+            move || waiting.restored.get(),
+            move || bench_pin_window(&app, &rels),
+        );
+    }
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     if rels.len() != 3 {
         return bench_quit(app);

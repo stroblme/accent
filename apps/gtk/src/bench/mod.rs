@@ -47,7 +47,10 @@ use panes::{
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme, bench_wrap};
+use style::{
+    bench_drag_fold, bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme,
+    bench_wrap,
+};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -87,7 +90,8 @@ use tags::bench_tags;
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
 /// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
 /// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
-/// indent on 10k lines of code in the last one.
+/// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
+/// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -157,7 +161,8 @@ use tags::bench_tags;
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
-/// kept for loose files the way a drop there does, and prints both windows' tabs after each.
+/// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
+/// remote vault it waits for the host, and neither tab may leave: the file is on the host.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -482,6 +487,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
+            if let Some(rel) = rel.strip_prefix("dragfold:") {
+                return bench_drag_fold(&app, rel);
+            }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),
                 None => bench_style(&app, &rel),
