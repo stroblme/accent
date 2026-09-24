@@ -35,7 +35,7 @@ use files::{
 use find::bench_find;
 use git::{
     bench_git, bench_git_close, bench_git_focus, bench_git_init, bench_git_press, bench_git_rebase,
-    bench_git_sync_over_fetch,
+    bench_git_switch, bench_git_sync_over_fetch,
 };
 use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
@@ -65,7 +65,8 @@ use tags::bench_tags;
 /// `=close:<pull|push|fetch>` closes the window while git runs there and prints what the close did,
 /// and `=sync` asks for a Sync during the fetch on opening and prints whether it waited for it.
 /// `=focus` clicks rows and walks the keyboard over them through XTEST, and prints whether each
-/// row's buttons are out.
+/// row's buttons are out. `=switch` picks the second repository and clicks the history's first row
+/// at once, and prints what that asked for.
 /// `ACCENT_BENCH_KEYS=1` likewise for the editor's key semantics, and prints text and caret
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
@@ -458,6 +459,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 (None, "sync") => bench_git_sync_over_fetch(&app),
                 (None, "rebase") => bench_git_rebase(&app),
                 (None, "focus") => bench_git_focus(&app),
+                (None, "switch") => bench_git_switch(&app),
                 _ => bench_git(&app),
             };
         }
