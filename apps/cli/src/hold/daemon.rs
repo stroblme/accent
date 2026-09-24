@@ -11,7 +11,7 @@
 
 use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
 use super::{FAILED, LOCK, SOCKET, lock, screen};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -48,10 +48,20 @@ const WAIT: Duration = Duration::from_secs(10);
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Daemon {
-    shells: Mutex<HashMap<String, Arc<Shell>>>,
+    shells: Mutex<Shells>,
     socket: PathBuf,
     /// When a terminal last connected, for [`Daemon::watch`].
     seen: Mutex<Instant>,
+}
+
+/// The shells held, by id, and the ids a kill named before any shell had them, under one lock so
+/// that a kill and the HELLO that would start the same shell are settled in one order or the
+/// other. Close Tab can land between a tab's `attach` connecting and its HELLO: the kill then
+/// finds nothing to end, and the HELLO must start nothing, or the shell is held for nobody.
+#[derive(Default)]
+struct Shells {
+    live: HashMap<String, Arc<Shell>>,
+    killed: HashSet<String>,
 }
 
 struct Shell {
@@ -125,7 +135,15 @@ impl Daemon {
     /// until it goes away.
     fn attach(self: &Arc<Self>, hello: &Hello, mut conn: UnixStream) {
         let shell = match self.open(hello) {
-            Ok(shell) => shell,
+            Ok(Some(shell)) => shell,
+            // Killed before it started: it ends the way the kill would have ended it, with the
+            // status of a hangup. The holder stays for [`WAIT`], which is what [`Daemon::watch`]
+            // gives it: another tab closed in the same moment may still have its HELLO on the
+            // way, and only this holder remembers its kill.
+            Ok(None) => {
+                let _ = protocol::write_frame(&mut conn, EXIT, &(128 + libc::SIGHUP).to_be_bytes());
+                return;
+            }
             Err(e) => {
                 let why = format!(
                     "accent-cli: cannot start {}: {e}\r\n",
@@ -160,12 +178,16 @@ impl Daemon {
         shell.detach(me);
     }
 
-    /// The shell `hello` names, started first if there is none by that id. Under the lock, so two
-    /// terminals attaching to a new id at once share one shell.
-    fn open(self: &Arc<Self>, hello: &Hello) -> io::Result<Arc<Shell>> {
+    /// The shell `hello` names, started first if there is none by that id, or `None` when a kill
+    /// named it before it was started. Under the lock, so two terminals attaching to a new id at
+    /// once share one shell.
+    fn open(self: &Arc<Self>, hello: &Hello) -> io::Result<Option<Arc<Shell>>> {
         let mut shells = lock(&self.shells);
-        if let Some(shell) = shells.get(&hello.id) {
-            return Ok(shell.clone());
+        if let Some(shell) = shells.live.get(&hello.id) {
+            return Ok(Some(shell.clone()));
+        }
+        if shells.killed.remove(&hello.id) {
+            return Ok(None);
         }
         let (master, slave) = open_pty()?;
         set_winsize(&master, hello.rows, hello.cols);
@@ -179,10 +201,10 @@ impl Daemon {
                 exit: None,
             }),
         });
-        shells.insert(hello.id.clone(), shell.clone());
+        shells.live.insert(hello.id.clone(), shell.clone());
         let (daemon, id, pumped) = (self.clone(), hello.id.clone(), shell.clone());
         thread::spawn(move || daemon.pump(&id, &pumped, child));
-        Ok(shell)
+        Ok(Some(shell))
     }
 
     /// Read the shell's output until it ends, into its screen model and on to its terminal, then
@@ -214,7 +236,7 @@ impl Daemon {
 
     /// A shell ended: forget it, tell its terminal, and leave if it was the last.
     fn gone(&self, id: &str, shell: &Shell, code: i32) {
-        lock(&self.shells).remove(id);
+        lock(&self.shells).live.remove(id);
         shell.ended(code);
         self.leave_if_idle();
     }
@@ -236,7 +258,7 @@ impl Daemon {
     /// the lock `open` takes, so no shell can be started in between.
     fn leave_if_idle(&self) {
         let shells = lock(&self.shells);
-        if shells.is_empty() {
+        if shells.live.is_empty() {
             let _ = std::fs::remove_file(&self.socket);
             std::process::exit(0);
         }
@@ -245,10 +267,18 @@ impl Daemon {
     /// End shell `id` and what runs in its foreground: a hangup, as a closing terminal gives, and
     /// after [`GRACE`] a kill for whatever ignored it. Both go to process groups, the shell's and
     /// the foreground job's, which reaches every process of a pipeline. The shell hangs up its
-    /// other jobs itself. Nothing to do for an unknown id.
+    /// other jobs itself. An unknown id is remembered, so that a HELLO still on its way for it
+    /// starts nothing ([`Shells`]).
     fn kill(&self, id: &str) {
-        let Some(shell) = lock(&self.shells).get(id).cloned() else {
-            return;
+        let shell = {
+            let mut shells = lock(&self.shells);
+            match shells.live.get(id) {
+                Some(shell) => shell.clone(),
+                None => {
+                    shells.killed.insert(id.to_string());
+                    return;
+                }
+            }
         };
         // SAFETY: a plain query on a descriptor `shell` keeps open.
         let foreground = unsafe { libc::tcgetpgrp(shell.master.as_raw_fd()) };
@@ -270,6 +300,7 @@ impl Daemon {
     fn list(&self) -> Vec<u8> {
         // Copied out first, so the `screen` locks below are never taken under `shells`.
         let shells: Vec<_> = lock(&self.shells)
+            .live
             .iter()
             .map(|(id, shell)| (id.clone(), shell.clone()))
             .collect();

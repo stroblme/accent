@@ -121,7 +121,8 @@ use tags::bench_tags;
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_HOLD=open` then `=back`, on one scratch state, is a shell outliving its window:
 /// `open` leaves a marker in it and quits, `back` prints what the restore brought back and whether
-/// Close Tab ended it in the holder (see `keys::bench_hold`).
+/// Close Tab ended it in the holder (see `keys::bench_hold`). `=early` closes new shells before
+/// they can have started and prints whether any is held for nobody.
 /// `ACCENT_BENCH_PDF=<rel_path>` opens a PDF, fits it to the page from a mid-page scroll position
 /// and prints the layout either side of it, then appends a page with `win.pdf-add-page` and
 /// prints the page count, where the reader landed and the page sizes the file holds on disk once

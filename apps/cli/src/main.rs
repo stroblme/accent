@@ -139,7 +139,10 @@ enum Cmd {
         cwd: Option<PathBuf>,
         id: String,
     },
-    /// End a held shell and everything running in it. Nothing to do if no shell has this id.
+    /// End a held shell and everything running in it.
+    ///
+    /// An id no shell has yet is remembered, so that an attach still on its way with it starts
+    /// nothing; a holder is started to remember it if none is running.
     Kill { id: String },
     /// List the held shells, one JSON object per line.
     Held,

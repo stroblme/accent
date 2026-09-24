@@ -197,3 +197,61 @@ fn a_shell_that_cannot_start_says_why_and_leaves_no_holder() {
     assert_eq!(code, Some(254));
     holder.assert_gone();
 }
+
+/// Close Tab in the moment between a tab's `attach` connecting and the holder starting its shell:
+/// the kill arrives first and finds nothing to end. The HELLO after it must not start a shell
+/// that nobody will ever attach to again.
+#[test]
+fn a_shell_killed_before_it_started_never_starts() {
+    let Some(holder) = Holder::start("early") else {
+        return;
+    };
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", "t4"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // `kill` returns once it has asked, not once the holder has acted on it.
+    std::thread::sleep(Duration::from_millis(200));
+    let conn = holder.hello("t4", "/bin/sh");
+    // Ended the way a kill ends one, by a hangup, and before any output.
+    assert_eq!(frame(&conn), (EXIT, 129i32.to_be_bytes().to_vec()));
+    let held = cli(&holder.tmp).arg("held").output().unwrap();
+    assert!(held.stdout.is_empty(), "{held:?}");
+}
+
+/// The same with no holder running: the kill has to start one, or the `attach` on its way would
+/// start it, and the shell with it, after the kill had found nobody to tell.
+#[test]
+fn a_kill_with_no_holder_running_still_comes_first() {
+    let Some(mut stopped) = Holder::start("none") else {
+        return;
+    };
+    // Gone the hard way, as a crashed one would be, leaving its socket behind.
+    stopped.child.kill().unwrap();
+    stopped.child.wait().unwrap();
+    assert!(
+        cli(&stopped.tmp)
+            .args(["kill", "t5"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let conn = stopped.hello("t5", "/bin/sh");
+    assert_eq!(frame(&conn), (EXIT, 129i32.to_be_bytes().to_vec()));
+    // The holder the kill started leaves as any other does, once its last shell has.
+    let conn = stopped.hello("t6", "/bin/sh");
+    send(&conn, INPUT, b"exit\n");
+    assert_eq!(until(&conn, None).1, Some(0));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while stopped.socket().exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the holder outlived its last shell"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

@@ -831,7 +831,16 @@ fn bench_term_save(app: &Rc<App>) {
 /// screen — then closes the tab and prints how many shells the holder still has. Expected: the
 /// same key twice, `at=/tmp`, `replayed=true`, `held=0`. Under `SHELL=/bin/bash`, whose `vte.sh`
 /// reports the directory.
+///
+/// `=early` closes new shells before their `attach` can have had them started: in the same tick,
+/// and a few milliseconds in, while the attach waits for the holder it started. Expected
+/// `held=0`. Against a vault, whose window opens no shell of its own, so the first one also starts
+/// the holder: with one already up (a holder waits ten seconds before it leaves) the same tick
+/// proves nothing.
 pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
+    if step == "early" {
+        return bench_hold_early(app);
+    }
     if app.terminals().is_empty() {
         app.open_terminal();
     }
@@ -873,6 +882,21 @@ fn bench_hold_step(app: &Rc<App>, term: &Rc<crate::terminal::Term>, open: bool) 
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(500), move || {
         println!("bench hold held={}", bench_held());
+        bench_quit(&app);
+    });
+}
+
+/// The `=early` half of [`bench_hold`].
+fn bench_hold_early(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        for wait in [0, 10, 30, 60, 120] {
+            app.open_terminal();
+            glib::timeout_future(Duration::from_millis(wait)).await;
+            let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+            glib::timeout_future(Duration::from_millis(2500)).await;
+            println!("bench hold early wait={wait} held={}", bench_held());
+        }
         bench_quit(&app);
     });
 }
