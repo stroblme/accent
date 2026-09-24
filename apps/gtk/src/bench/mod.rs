@@ -41,7 +41,8 @@ use image::bench_image;
 use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
 use outline::bench_outline;
 use panes::{
-    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pins_restored, bench_tabs,
+    bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window, bench_pins_restored,
+    bench_tabs,
 };
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
@@ -149,6 +150,8 @@ use tags::bench_tags;
 /// unpinned and pinned again, `a` and then `b` moved across the pinned ones as a drag along the
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
+/// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
+/// kept for loose files the way a drop there does, and prints both windows' tabs after each.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
@@ -401,6 +404,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if rels == "pins" {
                 return bench_pins_restored(&app);
+            }
+            if let Some(rels) = rels.strip_prefix("pinwin:") {
+                return bench_pin_window(&app, rels);
             }
             return bench_tabs(&app, &rels);
         }
