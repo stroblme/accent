@@ -26,6 +26,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -43,13 +44,18 @@ import androidx.compose.ui.unit.constrainHeight
 import androidx.compose.ui.unit.constrainWidth
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
+import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.PdfModel
+import io.github.stroblme.accent.PdfPlace
+import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.Outline
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.Point
+import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import java.io.File
 import kotlinx.coroutines.flow.collectLatest
@@ -64,9 +70,13 @@ import kotlinx.coroutines.withContext
  */
 enum class Tool { Read, Pen, Highlighter, Eraser }
 
-/** A PDF inside a vault: strokes are written back into the file it came from. */
+/**
+ * A PDF inside a vault: strokes are written back into the file it came from, and the notes that
+ * link into it paint their highlights over it.
+ */
 @Composable
-fun PdfScreen(path: String, chrome: Chrome) {
+fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome) {
+    val path = pdf.path
     var doc by remember(path) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(path) { mutableStateOf<String?>(null) }
     LaunchedEffect(path) {
@@ -75,7 +85,18 @@ fun PdfScreen(path: String, chrome: Chrome) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
-    Reader(doc, failed, File(path).name.removeSuffix(".pdf"), chrome) { it.save() }
+    // Asked again whenever a walk ends, which is when a link written elsewhere reaches the index.
+    var notes by remember(pdf.rel) { mutableStateOf(emptyList<PdfLink>()) }
+    LaunchedEffect(pdf.rel, indexing) { if (!indexing) notes = model.pdfLinks(pdf.rel) }
+    Reader(
+        doc,
+        failed,
+        File(path).name.removeSuffix(".pdf"),
+        chrome,
+        at = pdf.at,
+        notes = notes,
+        onNote = model::openFromPdf,
+    ) { it.save() }
 }
 
 /** A PDF opened from somewhere else: there is no vault, so it is written back where it came from. */
@@ -122,6 +143,11 @@ private fun Reader(
     failed: String?,
     title: String,
     chrome: Chrome,
+    /** Where it opens, if not at the top. */
+    at: PdfPlace? = null,
+    /** The note links into it, which paint as highlights; none for a document from outside. */
+    notes: List<PdfLink> = emptyList(),
+    onNote: (PdfLink, PdfPlace) -> Unit = { _, _ -> },
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
@@ -184,7 +210,7 @@ private fun Reader(
                     )
                 },
             ) {
-                Pages(doc, tool, chrome, wanted) { wanted = null }
+                Pages(doc, tool, chrome, wanted, at, notes, onNote) { wanted = null }
                 if (ANNOTATIONS) {
                     PdfToolbar(
                         tool = tool,
@@ -275,7 +301,17 @@ private const val INK_SAVE_MS = 1000L
  * zoom the fingers leave it at.
  */
 @Composable
-private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWent: () -> Unit) {
+private fun Pages(
+    doc: PdfModel,
+    tool: Tool,
+    chrome: Chrome,
+    wanted: Int?,
+    /** Where the document opens, if not at the top. */
+    opening: PdfPlace?,
+    notes: List<PdfLink>,
+    onNote: (PdfLink, PdfPlace) -> Unit,
+    onWent: () -> Unit,
+) {
     val density = LocalDensity.current
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -313,6 +349,10 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      * away takes its entry with it.
      */
     val links = remember(doc) { mutableStateMapOf<Int, List<PdfLinkBox>>() }
+    /** The highlights a note's links paint on the composed pages, left here as [links] are. */
+    val marks = remember(doc) { mutableStateMapOf<Int, List<Mark>>() }
+    val notesOn = remember(notes) { notes.groupBy { it.page.toInt() } }
+    val openNote by rememberUpdatedState(onNote)
     /**
      * Where each jump in this document was taken from, the latest last: what Back retraces before
      * it leaves. Kept as a page and points down it rather than the row and offset the column was
@@ -389,14 +429,37 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
      *
      * A tool in hand claims nothing. The page is a canvas then, and the drawing handler on it owns
      * every press that lands.
+     *
+     * A highlight is asked after the links, as on the desktop: a link inside one is still a link.
+     * It opens the note it comes from, and hands over where the reader is, for Back from that note
+     * to come back to.
      */
     fun claimed(at: Offset): Boolean {
         if (inHand != Tool.Read || viewport.width == 0) return false
         val scrolled = pages.above(list, viewport.width, zoom)
         val land = pages.on(at.x - panX, at.y + scrolled, viewport.width, zoom) ?: return false
-        val box = hit(links[land.page].orEmpty(), land.point, TAP_SLOP / land.scale) ?: return false
-        follow(box.target)
+        val slop = TAP_SLOP / land.scale
+        hit(links[land.page].orEmpty(), land.point, slop)?.let {
+            follow(it.target)
+            return true
+        }
+        val mark = markAt(marks[land.page].orEmpty(), land.point, slop) ?: return false
+        val (page, top) = pages.place(scrolled, viewport.width, zoom)
+        openNote(mark.link, PdfPlace(page, top, zoom, panX))
         return true
+    }
+
+    // Where the document opens, once the screen has a size to lay it out at: the place a reader
+    // left it for a note, which Back from the note returns to. Once — after that the column is
+    // wherever the reader takes it.
+    var opened by remember(doc) { mutableStateOf(false) }
+    LaunchedEffect(viewport) {
+        val place = opening ?: return@LaunchedEffect
+        if (opened || viewport.width == 0) return@LaunchedEffect
+        opened = true
+        zoom = place.zoom.coerceIn(MIN_ZOOM, maxZoom)
+        panX = holdXAt(place.panX, viewport.width, zoom)
+        goTo(place.page, place.top)
     }
 
     // A bookmark is the same jump from further away: the panel that made it is gone by now, and
@@ -515,6 +578,8 @@ private fun Pages(doc: PdfModel, tool: Tool, chrome: Chrome, wanted: Int?, onWen
                         theme = theme,
                         tool = tool,
                         links = links,
+                        notes = notesOn[index].orEmpty(),
+                        marks = marks,
                     )
                 }
             }
@@ -720,6 +785,10 @@ private fun Page(
     tool: Tool,
     /** Where this page leaves its `/Link` boxes for the box above to hit-test against. */
     links: MutableMap<Int, List<PdfLinkBox>>,
+    /** The note links into this page. */
+    notes: List<PdfLink>,
+    /** Where this page leaves the highlights they paint, as it leaves [links]. */
+    marks: MutableMap<Int, List<Mark>>,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -749,7 +818,19 @@ private fun Page(
     LaunchedEffect(index, tool) {
         if (tool == Tool.Read) links[index] = doc.links(index) else links.remove(index)
     }
-    DisposableEffect(index) { onDispose { links.remove(index) } }
+    // Where the note links land on the page today, which is the core's to say: by their numbers,
+    // then by the text they quote, and not at all once exported into the file.
+    LaunchedEffect(index, notes) {
+        if (notes.isEmpty()) marks.remove(index)
+        else marks[index] = doc.highlights(notes).map { Mark(it.quads, notes[it.link.toInt()]) }
+    }
+    DisposableEffect(index) {
+        onDispose {
+            links.remove(index)
+            marks.remove(index)
+        }
+    }
+    val highlight = colors.primary.copy(alpha = HIGHLIGHT_ALPHA)
 
     Box(
         Modifier
@@ -819,8 +900,24 @@ private fun Page(
             Modifier.fillMaxSize(),
             Alignment.Center,
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
+        // Over the page rather than in its pixels, so a highlight comes and goes without a render
+        // and shows on a page still waiting for one; at the size the page is shown, so a pinch
+        // carries it along.
+        val painted = marks[index].orEmpty()
+        if (painted.isNotEmpty()) {
+            Canvas(Modifier.fillMaxSize()) {
+                for (mark in painted) for (quad in mark.quads) box(quad, scale, highlight)
+            }
+        }
     }
 }
+
+/** Fill [r], in page points, on a page drawn at [scale] pixels per point. */
+private fun DrawScope.box(r: Rect, scale: Float, colour: Color) = drawRect(
+    colour,
+    topLeft = Offset(r.left * scale, r.top * scale),
+    size = Size((r.right - r.left) * scale, (r.bottom - r.top) * scale),
+)
 
 /** A page as it was last drawn: the bitmap, the part of the page it covers, and in what pixels. */
 private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
@@ -834,10 +931,22 @@ private data class Sheet(val image: ImageBitmap, val at: IntRect, val px: Int)
  * `/Link` boxes may overlap, and the later annotation is the one drawn on top of the other.
  */
 internal fun hit(links: List<PdfLinkBox>, at: Point, slop: Float): PdfLinkBox? =
-    links.lastOrNull {
-        at.x >= it.rect.left - slop && at.x <= it.rect.right + slop &&
-            at.y >= it.rect.top - slop && at.y <= it.rect.bottom + slop
-    }
+    links.lastOrNull { it.rect.near(at, slop) }
+
+/** A highlight a note's link paints, and the link that paints it. */
+internal data class Mark(val quads: List<Rect>, val link: PdfLink)
+
+/**
+ * Which highlight a tap landed in, or none: the first whose quads it is [near], which is the one
+ * the desktop's `highlight_at` opens where two overlap — the links arrive in the order the index
+ * lists them.
+ */
+internal fun markAt(marks: List<Mark>, at: Point, slop: Float): Mark? =
+    marks.firstOrNull { mark -> mark.quads.any { it.near(at, slop) } }
+
+/** Whether [at] is on this box or within [slop] of it, all in page points. */
+private fun Rect.near(at: Point, slop: Float): Boolean =
+    at.x >= left - slop && at.x <= right + slop && at.y >= top - slop && at.y <= bottom + slop
 
 /** How far off a link a tap may land and still count, in view pixels. */
 private const val TAP_SLOP = 12f

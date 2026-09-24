@@ -2,11 +2,14 @@ package io.github.stroblme.accent
 
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.PageSize
+import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.PdfLinkBox
 import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
+import io.github.stroblme.accent.ui.Mark
 import io.github.stroblme.accent.ui.Pagination
 import io.github.stroblme.accent.ui.hit
+import io.github.stroblme.accent.ui.markAt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -135,5 +138,23 @@ class NavigationTest {
         val under = link(100f, 200f, 300f, 220f, LinkTarget.Page(1u, null))
         val over = link(150f, 200f, 250f, 220f, LinkTarget.Page(2u, null))
         assertEquals(over, hit(listOf(under, over), Point(200f, 210f), slop = 0f))
+    }
+
+    private fun mark(src: String, vararg quads: Rect) =
+        Mark(quads.toList(), PdfLink(src, 0L, 0u, listOf(0u, 0u, 0u, 5u), null))
+
+    /**
+     * A highlight over two lines is hit on either, and where two notes highlight the same words
+     * the first listed opens, as the desktop's `highlight_at` has it — unlike a `/Link`, where
+     * the later box is the one on top.
+     */
+    @Test
+    fun `a tap on a highlight finds its note, the first where two overlap`() {
+        val a = mark("A.md", Rect(100f, 200f, 300f, 210f), Rect(100f, 212f, 180f, 222f))
+        val b = mark("B.md", Rect(150f, 200f, 250f, 210f))
+        assertEquals(a, markAt(listOf(a, b), Point(200f, 205f), slop = 0f))
+        assertEquals(a, markAt(listOf(a, b), Point(120f, 220f), slop = 0f))
+        assertEquals(b, markAt(listOf(b, a), Point(200f, 205f), slop = 0f))
+        assertNull(markAt(listOf(a, b), Point(200f, 240f), slop = 8f))
     }
 }
