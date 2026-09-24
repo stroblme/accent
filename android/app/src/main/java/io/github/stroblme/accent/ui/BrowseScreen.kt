@@ -263,7 +263,7 @@ class Command(val label: String, val run: (VaultModel) -> Unit)
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
     Command("Find in this note") { it.finding(true) },
-    Command("Reload Vault") { it.rescan() },
+    Command("Reload Vault") { it.reloadVault() },
     Command("Close Note") { it.close() },
     Command("Close Vault") { it.closeVault() },
 )
