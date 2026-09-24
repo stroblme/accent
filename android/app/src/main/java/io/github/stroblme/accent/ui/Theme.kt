@@ -125,11 +125,12 @@ internal fun ColorScheme.flattened(dark: Boolean): ColorScheme {
 }
 
 /**
- * How strongly what the reader does to a PDF page is painted over it, in the accent: here the
- * highlight a note's link makes. The desktop's own number (`apps/gtk/src/theme.rs`), so a page
- * reads the same on both.
+ * How strongly what the reader does to a PDF page is painted over it, in the accent: the highlight
+ * a note's link makes, and the text selection. The desktop's own numbers (`apps/gtk/src/theme.rs`),
+ * so a page reads the same on both.
  */
 internal const val HIGHLIGHT_ALPHA = 0.2f
+internal const val SELECTION_ALPHA = 0.35f
 
 /**
  * Hierarchy by size and weight, not by colour or rule. The body is the system's own size, which

@@ -48,6 +48,7 @@ import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.PdfPlace
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
 import io.github.stroblme.accent.ffi.LinkTarget
 import io.github.stroblme.accent.ffi.Outline
@@ -209,8 +210,9 @@ private fun Reader(
                         onAction = { contents = true },
                     )
                 },
-            ) {
-                Pages(doc, tool, chrome, wanted, at, notes, onNote) { wanted = null }
+            ) { bar ->
+                val clear = with(LocalDensity.current) { bar.toPx() }
+                Pages(doc, tool, chrome, wanted, at, notes, onNote, clear) { wanted = null }
                 if (ANNOTATIONS) {
                     PdfToolbar(
                         tool = tool,
@@ -310,6 +312,8 @@ private fun Pages(
     opening: PdfPlace?,
     notes: List<PdfLink>,
     onNote: (PdfLink, PdfPlace) -> Unit,
+    /** How much of the top of the screen the document's bar covers, in pixels. */
+    clear: Float,
     onWent: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -353,6 +357,10 @@ private fun Pages(
     val marks = remember(doc) { mutableStateMapOf<Int, List<Mark>>() }
     val notesOn = remember(notes) { notes.groupBy { it.page.toInt() } }
     val openNote by rememberUpdatedState(onNote)
+    /** The glyphs of the pages a selection has needed, read once each. */
+    val glyphs = remember(doc) { mutableStateMapOf<Int, List<Glyph>>() }
+    var selection by remember(doc) { mutableStateOf<Selection?>(null) }
+    val chosen by remember(doc) { derivedStateOf { selection?.pieces(glyphs).orEmpty() } }
     /**
      * Where each jump in this document was taken from, the latest last: what Back retraces before
      * it leaves. Kept as a page and points down it rather than the row and offset the column was
@@ -391,6 +399,17 @@ private fun Pages(
     fun goTo(index: Int, top: Float) {
         val (row, into) = pages.to(index, top, viewport.width, zoom)
         list.requestScrollToItem(row, into)
+    }
+
+    /**
+     * Bring [rect], in points on page [index], into view below the bar if it is not: to the middle
+     * of what the bar leaves, so it arrives with room around it to be read in.
+     */
+    fun show(index: Int, rect: Rect) {
+        val above = pages.above(list, viewport.width, zoom)
+        val to = pages.reveal(index, rect, above, panX, viewport, zoom, clear) ?: return
+        panX = to.panX
+        list.requestScrollToItem(to.row, to.into)
     }
 
     /**
@@ -433,8 +452,14 @@ private fun Pages(
      * A highlight is asked after the links, as on the desktop: a link inside one is still a link.
      * It opens the note it comes from, and hands over where the reader is, for Back from that note
      * to come back to.
+     *
+     * While there is a selection a tap only lets it go, wherever it lands.
      */
     fun claimed(at: Offset): Boolean {
+        if (selection != null) {
+            selection = null
+            return true
+        }
         if (inHand != Tool.Read || viewport.width == 0) return false
         val scrolled = pages.above(list, viewport.width, zoom)
         val land = pages.on(at.x - panX, at.y + scrolled, viewport.width, zoom) ?: return false
@@ -450,8 +475,9 @@ private fun Pages(
     }
 
     // Where the document opens, once the screen has a size to lay it out at: the place a reader
-    // left it for a note, which Back from the note returns to. Once — after that the column is
-    // wherever the reader takes it.
+    // left it for a note, which Back from the note returns to, or the passage a followed link
+    // quotes, shown as the selection. Once — after that the column is wherever the reader takes
+    // it.
     var opened by remember(doc) { mutableStateOf(false) }
     LaunchedEffect(viewport) {
         val place = opening ?: return@LaunchedEffect
@@ -459,7 +485,17 @@ private fun Pages(
         opened = true
         zoom = place.zoom.coerceIn(MIN_ZOOM, maxZoom)
         panX = holdXAt(place.panX, viewport.width, zoom)
-        goTo(place.page, place.top)
+        // Numbers written against another engine's reading of the page point at nothing here, and
+        // the page they name is still where the reader wanted to be — the desktop's rule.
+        val found = place.selection?.let { doc.locate(place.page, it) }
+        if (found == null || found.quads.isEmpty()) {
+            goTo(place.page, place.top)
+            return@LaunchedEffect
+        }
+        glyphs[place.page] = doc.glyphs(place.page)
+        val (start, end) = found.start.toInt() to found.end.toInt()
+        selection = Selection(Caret(place.page, start), Caret(place.page, end - 1))
+        show(place.page, found.quads.reduce(Rect::union))
     }
 
     // A bookmark is the same jump from further away: the panel that made it is gone by now, and
@@ -477,6 +513,8 @@ private fun Pages(
         val (page, top) = back.removeAt(back.lastIndex)
         goTo(page, top)
     }
+    // After the jumps', so it is asked first: a selection is the nearest thing to put away.
+    BackHandler(enabled = selection != null) { selection = null }
 
     /** Take what the fingers did to the layer and lay the column out that way. */
     fun commit() {
@@ -580,6 +618,7 @@ private fun Pages(
                         links = links,
                         notes = notesOn[index].orEmpty(),
                         marks = marks,
+                        chosen = chosen.firstOrNull { it.page == index }?.boxes.orEmpty(),
                     )
                 }
             }
@@ -712,7 +751,47 @@ internal class Pagination(private val sizes: List<PageSize>, private val gap: Fl
         val size = sizes.getOrNull(index) ?: return index to 0f
         return index to into / (width * zoom / size.width)
     }
+
+    /**
+     * Where the column has to be for [rect], in points on page [index], to be in view — or `null`
+     * when it already is, [above] pixels scrolled and pushed [panX] sideways on a [viewport] whose
+     * top [clear] pixels a bar covers. What is out of view along an axis is brought to the middle
+     * of what the bar leaves along it; an axis it is already in view along is left alone.
+     */
+    fun reveal(
+        index: Int,
+        rect: Rect,
+        above: Float,
+        panX: Float,
+        viewport: IntSize,
+        zoom: Float,
+        clear: Float,
+    ): Reveal? {
+        val size = sizes.getOrNull(index) ?: return null
+        val scale = viewport.width * zoom / size.width
+        val top = top(index, viewport.width, zoom)
+        val (y0, y1) = top + rect.top * scale to top + rect.bottom * scale
+        val (x0, x1) = rect.left * scale to rect.right * scale
+        val down = y0 >= above + clear && y1 <= above + viewport.height
+        val across = x0 >= -panX && x1 <= -panX + viewport.width
+        if (down && across) return null
+        val y = if (down) above else (y0 + y1) / 2 - (clear + viewport.height) / 2
+        val x = if (across) panX else viewport.width / 2f - (x0 + x1) / 2
+        val (row, into) = at(y, viewport.width, zoom)
+        return Reveal(row, into, holdXAt(x, viewport.width, zoom))
+    }
 }
+
+/** Where the column has to be for something to be in view: the row, the offset into it, the pan. */
+internal data class Reveal(val row: Int, val into: Int, val panX: Float)
+
+/** The smallest box holding both. */
+private fun Rect.union(other: Rect) = Rect(
+    minOf(left, other.left),
+    minOf(top, other.top),
+    maxOf(right, other.right),
+    maxOf(bottom, other.bottom),
+)
 
 /** Where a point on the pages fell: which page, where on it in points, and at what scale. */
 internal data class Landing(val page: Int, val point: Point, val scale: Float)
@@ -789,6 +868,8 @@ private fun Page(
     notes: List<PdfLink>,
     /** Where this page leaves the highlights they paint, as it leaves [links]. */
     marks: MutableMap<Int, List<Mark>>,
+    /** The boxes of the selected glyphs on this page. */
+    chosen: List<Rect>,
 ) {
     val density = LocalDensity.current
     val scale = shownPx / pageWidth
@@ -831,6 +912,7 @@ private fun Page(
         }
     }
     val highlight = colors.primary.copy(alpha = HIGHLIGHT_ALPHA)
+    val selected = colors.primary.copy(alpha = SELECTION_ALPHA)
 
     Box(
         Modifier
@@ -902,11 +984,13 @@ private fun Page(
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
         // Over the page rather than in its pixels, so a highlight comes and goes without a render
         // and shows on a page still waiting for one; at the size the page is shown, so a pinch
-        // carries it along.
+        // carries it along. The highlights under the selection, as on the desktop: they are what
+        // the page says, the selection what the reader is doing to it now.
         val painted = marks[index].orEmpty()
-        if (painted.isNotEmpty()) {
+        if (painted.isNotEmpty() || chosen.isNotEmpty()) {
             Canvas(Modifier.fillMaxSize()) {
                 for (mark in painted) for (quad in mark.quads) box(quad, scale, highlight)
+                for (glyph in chosen) box(glyph, scale, selected)
             }
         }
     }

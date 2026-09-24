@@ -16,6 +16,7 @@ import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.Vault
+import io.github.stroblme.accent.ffi.pdfAnchor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,9 +95,16 @@ data class OpenPdf(val rel: String, val path: String, val at: PdfPlace? = null)
 
 /**
  * Where a PDF opens: [top] points down page [page], at [zoom] and pushed [panX] pixels sideways —
- * the place a reader left it, which Back from a note returns them to.
+ * the place a reader left it, which Back from a note returns them to. Or the page a link into it
+ * names and the four numbers of the passage it quotes there, shown as the selection.
  */
-data class PdfPlace(val page: Int, val top: Float = 0f, val zoom: Float = 1f, val panX: Float = 0f)
+data class PdfPlace(
+    val page: Int,
+    val top: Float = 0f,
+    val zoom: Float = 1f,
+    val panX: Float = 0f,
+    val selection: List<UInt>? = null,
+)
 
 data class VaultState(
     val root: String? = null,
@@ -421,9 +429,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * source and the screen holds the page that source rendered to, so the only thing that
      * survives the crossing is the words. A PDF drops it; there is no find in that reader yet.
      *
-     * [back] is the PDF a note is opened from, for [close] to return to; see [openFromPdf].
+     * [at] is where a PDF opens, and [back] the PDF a note is opened from, for [close] to return
+     * to; see [openFromPdf].
      */
-    fun openFile(rel: String, find: String? = null, back: OpenPdf? = null) {
+    fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: OpenPdf? = null) {
         val v = vault ?: return
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
@@ -433,7 +442,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             if (rel.endsWith(".pdf", ignoreCase = true)) {
                 val path = withContext(Dispatchers.IO) { runCatching { v.pathOf(rel) } }
                 path.onSuccess { p ->
-                    _state.update { it.copy(pdf = OpenPdf(rel, p), open = null, back = null) }
+                    _state.update { it.copy(pdf = OpenPdf(rel, p, at), open = null, back = null) }
                 }
                     .onFailure { fail("Cannot open this file", it) }
                 return@leave
@@ -504,14 +513,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * disk, for a file in a tree the index does not hold (a gitignored `build/`); a target
      * neither can place is a link to a note nobody has written yet, which only the switcher
      * writes.
+     *
+     * A PDF opens on the page the link names, showing the passage its numbers quote there, as the
+     * desktop follows one. A heading after a note's name is not placed yet.
      */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val name = target.substringBefore('#')
         val found = withContext(Dispatchers.IO) { runCatching { v.follow(name) }.getOrNull() }
+        val at = pdfAnchor(target.substringAfter('#', ""))?.let {
+            PdfPlace(it.page.toInt(), selection = it.selection)
+        }
         when (val rel = found) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
-            else -> openFile(rel)
+            else -> openFile(rel, at = at)
         }
     }
 
