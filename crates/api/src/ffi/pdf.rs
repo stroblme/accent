@@ -544,6 +544,12 @@ mod tests {
 
         let hello = s.locate(0, vec![0, 0, 0, 5]).unwrap().expect("on the page");
         assert_eq!((hello.start, hello.end), (0, 5));
+        // And what Copy Link makes of those glyphs is the desktop's link, quoting them.
+        let copied = s.selection_link("a.pdf".to_string(), 0, 0, 5).unwrap();
+        assert_eq!(
+            link_with_alias(copied.link, copied.text),
+            "[[a.pdf#page=1&selection=0,0,0,5|Hello]]"
+        );
         assert!(s.locate(0, vec![9, 0, 9, 1]).unwrap().is_none());
         assert!(s.locate(0, vec![1, 2]).is_err());
     }

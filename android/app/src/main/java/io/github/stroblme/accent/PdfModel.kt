@@ -21,6 +21,7 @@ import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import io.github.stroblme.accent.ffi.Tile
+import io.github.stroblme.accent.ffi.linkWithAlias
 import io.github.stroblme.accent.ui.union
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -125,6 +126,17 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     /** The glyphs a link's four numbers cover on [index] today, or `null` if they fit no line. */
     suspend fun locate(index: Int, numbers: List<UInt>): Located? = on {
         runCatching { session.locate(index.toUInt(), numbers) }.getOrNull()
+    }
+
+    /**
+     * The link glyphs [start] until [end] of page [index] make into this document, named [name],
+     * with the text they spell as its alias: what Copy Link puts on the clipboard, in the
+     * desktop's words — `[[name#page=N&selection=a,b,c,d|the text]]`.
+     */
+    suspend fun link(name: String, index: Int, start: Int, end: Int): String? = on {
+        runCatching { session.selectionLink(name, index.toUInt(), start.toUInt(), end.toUInt()) }
+            .map { linkWithAlias(it.link, it.text) }
+            .getOrNull()
     }
 
     /**

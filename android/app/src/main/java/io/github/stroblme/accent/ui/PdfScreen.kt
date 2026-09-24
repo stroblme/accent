@@ -7,6 +7,7 @@ import android.content.Intent
 import android.graphics.Rect as AndroidRect
 import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import android.view.ActionMode
 import android.view.Menu
 import android.view.MenuItem
@@ -111,6 +112,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         failed,
         File(path).name.removeSuffix(".pdf"),
         chrome,
+        linkName = pdf.rel,
         at = pdf.at,
         notes = notes,
         onNote = model::openFromPdf,
@@ -141,7 +143,15 @@ fun LoosePdfScreen(uri: Uri) {
             .onFailure { failed = it.message ?: "This file could not be opened." }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
-    val name = uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".pdf").orEmpty()
+    // The name the app that handed the file over gives it: what the bar shows, and what a copied
+    // link names it by, as the desktop links a PDF from outside any vault by its file name. The
+    // URI's own last segment is often an opaque id, and is only the fallback.
+    var name by remember(uri) {
+        mutableStateOf(uri.lastPathSegment?.substringAfterLast('/').orEmpty())
+    }
+    LaunchedEffect(uri) {
+        withContext(Dispatchers.IO) { displayName(context, uri) }?.let { name = it }
+    }
     // No palette out here, so the bar's Find is the only way in and the flag is this screen's own.
     var finding by remember(uri) { mutableStateOf(false) }
     // Opened straight from another app, so there is no vault screen around this one to keep it
@@ -150,8 +160,9 @@ fun LoosePdfScreen(uri: Uri) {
         Reader(
             doc,
             failed,
-            name,
+            name.removeSuffix(".pdf"),
             chrome,
+            linkName = name,
             finding = finding,
             onFinding = { finding = it },
         ) { model ->
@@ -166,12 +177,20 @@ fun LoosePdfScreen(uri: Uri) {
     }
 }
 
+/** What the provider calls the file behind [uri], if it says. */
+private fun displayName(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        ?.use { if (it.moveToFirst()) it.getString(0) else null }
+}.getOrNull()
+
 @Composable
 private fun Reader(
     doc: PdfModel?,
     failed: String?,
     title: String,
     chrome: Chrome,
+    /** What a copied link calls the document: its vault path, or its file name from outside. */
+    linkName: String,
     /** Where it opens, if not at the top. */
     at: PdfPlace? = null,
     /** The note links into it, which paint as highlights; none for a document from outside. */
@@ -246,6 +265,7 @@ private fun Reader(
                 val clear = with(LocalDensity.current) { bar.toPx() }
                 Pages(
                     doc,
+                    linkName,
                     tool,
                     chrome,
                     wanted,
@@ -349,6 +369,7 @@ private const val INK_SAVE_MS = 1000L
 @Composable
 private fun Pages(
     doc: PdfModel,
+    linkName: String,
     tool: Tool,
     chrome: Chrome,
     wanted: Int?,
@@ -593,15 +614,31 @@ private fun Pages(
         )
     }
 
-    /** Put the selection on the clipboard and let it go, as a copy from a text view does. */
-    fun copy() {
-        val text = chosen.text()
-        if (text.isEmpty()) return
+    fun clip(text: String) {
         context.getSystemService(ClipboardManager::class.java)
             .setPrimaryClip(ClipData.newPlainText("PDF text", text))
         // Android 13 and later say so themselves, with what was copied.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) onSay("Copied")
+    }
+
+    /** Put the selection on the clipboard and let it go, as a copy from a text view does. */
+    fun copy() {
+        chosen.text().takeIf { it.isNotEmpty() }?.let(::clip)
         selection = null
+    }
+
+    /**
+     * Put the link to the selection on the clipboard, one per page it covers — `page=N` names one
+     * page — and let it go. Pasting it into a note is what makes the highlight: there is no
+     * Highlight of its own, as on the desktop.
+     */
+    fun copyLink() {
+        val pieces = chosen
+        selection = null
+        scope.launch {
+            val links = pieces.mapNotNull { doc.link(linkName, it.page, it.start, it.end) }
+            if (links.isNotEmpty()) clip(links.joinToString("\n"))
+        }
     }
 
     /**
@@ -875,7 +912,7 @@ private fun Pages(
         }
         SelectionMenu(
             around = { if (selection != null && menu && !dragging) menuAround() else null },
-            actions = listOf("Copy" to ::copy),
+            actions = listOf("Copy" to ::copy, "Copy link" to ::copyLink),
         )
         // Below the pages rather than over them, as a note's is: a bar over the foot of the screen
         // would cover the match it had just found.
