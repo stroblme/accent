@@ -823,15 +823,12 @@ pub fn label_of(action: &str) -> &str {
 /// vault — making a file or a folder in it, closing it — is left off a window without one rather
 /// than offered and refused. In a window of shells Save is the session's, so it needs no item of
 /// its own, and a named session has Close Session as its way out. A shell on this machine is its
-/// own item only where New Terminal opens one on a host.
+/// own item only where New Terminal opens one on a host. Every item is the window's whichever tab
+/// is in front: what acts on the document, Find and Toggle Preview among them, is left to its chord
+/// and the palette.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
-    let mut shows = vec![
-        "win.find",
-        "win.view-mode",
-        "win.terminal",
-        "win.terminal-remote",
-    ];
+    let mut shows = vec!["win.terminal", "win.terminal-remote"];
     if key.vault().is_some_and(ssh::is_remote_path) {
         shows.push("win.terminal-local");
     }
@@ -1092,21 +1089,14 @@ mod tests {
         // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
         // this machine is an item of its own.
         let remote = primary_actions(&WindowKey::Vault("ssh://box/srv/vault".into()));
+        // Find and Toggle Preview act on the document, not the window.
         assert_eq!(
             vault[2],
-            [
-                "win.find",
-                "win.view-mode",
-                "win.terminal",
-                "win.terminal-remote",
-                "win.present"
-            ]
+            ["win.terminal", "win.terminal-remote", "win.present"]
         );
         assert_eq!(
             remote[2],
             [
-                "win.find",
-                "win.view-mode",
                 "win.terminal",
                 "win.terminal-remote",
                 "win.terminal-local",
