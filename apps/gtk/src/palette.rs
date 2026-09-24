@@ -295,7 +295,7 @@ fn accel_button(
 /// Forgetting a recent vault, the same removal the start screen's rows have. Always visible, not
 /// a hover affordance: a button that only appears under the pointer is not there at all for the
 /// keyboard or for a touchscreen. No confirmation either — it drops a list entry and deletes
-/// nothing on disk.
+/// nothing on disk but a terminal session's own state file (`start::forget_vault`).
 fn forget_button(key: &str, forget: &Rc<dyn Fn(&str)>) -> gtk::Button {
     let button = gtk::Button::builder()
         .icon_name("user-trash-symbolic")

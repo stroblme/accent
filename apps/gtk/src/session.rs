@@ -454,11 +454,10 @@ impl App {
     }
 
     /// Unnamed again, so the close that follows ends the shells and writes nothing; then the
-    /// session's file and its row go.
+    /// session's row goes, and its file with it (`start::forget_vault`).
     fn end_session(self: &Rc<Self>, key: &std::path::Path) {
         self.rekey(shell::WindowKey::Loose(shell::Loose::Terminal));
         start::forget_vault(&self.config, key);
-        let _ = std::fs::remove_file(accent_core::config::state_path(key));
         let _ = WidgetExt::activate_action(&self.window, "app.close-vault", None);
     }
 
