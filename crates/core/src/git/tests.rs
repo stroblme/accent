@@ -681,6 +681,22 @@ fn show_reads_head_index_and_reports_missing() {
         None,
         "untracked on disk"
     );
+    // git words a commit it does not have as it words a file the commit lacks, so a commit read
+    // in the wrong repository came back as two empty sides.
+    assert!(
+        show(&repo, &"1".repeat(40), "a.md").is_err(),
+        "a commit this repository does not have"
+    );
+
+    let fresh = tempfile::tempdir().unwrap();
+    init(fresh.path());
+    write_file(fresh.path(), "a.md", "one\n");
+    ok(fresh.path(), &["add", "a.md"]);
+    assert_eq!(
+        show(&open(fresh.path()), "HEAD", "a.md").unwrap(),
+        None,
+        "HEAD before the first commit has no files"
+    );
 }
 
 #[test]
@@ -974,20 +990,30 @@ fn changed_files_reads_a_commit_a_root_a_merge_and_a_rename() {
 
     let repo = open(dir);
     let files = |oid: &str| changed_files(&repo, oid).unwrap();
+    let row = |letter, path: &str, orig: Option<&str>| ChangedFile {
+        letter,
+        path: path.to_string(),
+        orig: orig.map(str::to_string),
+    };
     assert_eq!(
         files(&root),
-        [('A', "a.md".to_string()), ('A', "b.md".to_string())],
+        [row('A', "a.md", None), row('A', "b.md", None)],
         "a root commit adds everything in it"
     );
-    assert_eq!(files(&second), [('M', "a.md".to_string())]);
+    assert_eq!(files(&second), [row('M', "a.md", None)]);
     assert_eq!(
         files(&rename),
-        [('R', "renamed.md".to_string())],
-        "a rename is one row, under the name it now has"
+        [row('R', "renamed.md", Some("a.md"))],
+        "a rename is one row, under the name it now has, and knows the one it had"
+    );
+    assert_eq!(
+        show(&repo, &second, "a.md").unwrap(),
+        Some(Blob::Text("two\n".into())),
+        "the parent has it under the old name"
     );
     assert_eq!(
         files(&merge),
-        [('A', "c.md".to_string())],
+        [row('A', "c.md", None)],
         "a merge shows its first-parent diff"
     );
 }
