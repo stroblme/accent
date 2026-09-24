@@ -206,7 +206,9 @@ impl Panel {
 fn sides_for(section: Section, entry: &Entry) -> Option<Sides> {
     match section {
         Section::Conflicts => None,
-        Section::Staged => Some(Sides::Staged),
+        Section::Staged => Some(Sides::Staged {
+            orig: entry.orig.clone(),
+        }),
         Section::Changes if entry.y == 'D' => Some(Sides::Deleted),
         Section::Changes => Some(Sides::Worktree),
     }
@@ -949,9 +951,19 @@ mod tests {
         ));
         assert!(matches!(
             sides(Section::Staged, 'D', '.'),
-            Some(Sides::Staged)
+            Some(Sides::Staged { orig: None })
         ));
         assert!(sides(Section::Conflicts, 'U', 'U').is_none());
+    }
+
+    #[test]
+    fn a_staged_rename_reads_head_at_the_path_it_came_from() {
+        let mut renamed = entry("new.md", 'R', 'M');
+        renamed.orig = Some("old.md".to_string());
+        assert!(matches!(
+            sides_for(Section::Staged, &renamed),
+            Some(Sides::Staged { orig: Some(orig) }) if orig == "old.md"
+        ));
     }
 
     #[test]
