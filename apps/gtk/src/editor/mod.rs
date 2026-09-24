@@ -25,6 +25,7 @@ use std::time::Duration;
 
 mod banner;
 mod compare;
+mod drag;
 mod follow;
 mod keys;
 mod lines;
@@ -36,6 +37,7 @@ mod text;
 pub use banner::Alert;
 use compare::Comparing;
 pub use compare::{companion, overlay_view, restyle_companion, style_companion};
+pub(crate) use drag::content as drag_content;
 use follow::Follow;
 pub(crate) use keys::press;
 use lines::primary_paste;
@@ -478,6 +480,7 @@ pub fn open(
     // first.
     line_clipboard(&view);
     primary_paste(&view);
+    drag::install(&view);
     let paste_link = paste::link_paste(&view, flavour);
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width

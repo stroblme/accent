@@ -52,7 +52,8 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
         // Across a folded section, whose tag hides text rather than styling it.
         ("primary_fold", FOLDED, "One\nhidden body\n", "primary"),
         // A drag inside the note, dropped the way the view's drop target takes it. Across a fold
-        // the drag carries the visible text only, which a move then replaces the whole range with.
+        // the drag is ours and carries the hidden text too, which a move then takes away with the
+        // rest of the range.
         ("drop", BOLD, "Some **b", "drop"),
         ("drop_fold", FOLDED, "One\nhidden body\n", "drop"),
     ] {
@@ -75,13 +76,15 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
         match how {
             // What a middle click runs: the selection stays, the text goes in where the click was.
             "primary" => crate::editor::paste_primary(&tab.view, &tab.buffer.iter_at_offset(into)),
-            // What the drag carries is the selection's content provider; the view's drop target
-            // reads it as a string and inserts that where its `gtk_drag_target` mark is.
+            // What the drag carries is ours across a fold (`editor::drag_content`) and the
+            // selection's own content provider otherwise; the view's drop target reads it as a
+            // string and inserts that where its `gtk_drag_target` mark is.
             "drop" => {
                 let stream = gio::MemoryOutputStream::new_resizable();
-                let content = tab.buffer.selection_content();
+                let content = crate::editor::drag_content(tab.buffer.upcast_ref())
+                    .unwrap_or_else(|| tab.buffer.selection_content());
                 let source = content
-                    .value(gtk::TextBuffer::static_type())
+                    .value(content.formats().types()[0])
                     .expect("bench drag content");
                 let mime = "text/plain;charset=utf-8";
                 gdk::content_serialize_future(&stream, mime, &source, glib::Priority::DEFAULT)
@@ -129,6 +132,60 @@ async fn bench_style_paste(tab: &Rc<Tab>) {
             over("fold")
         );
     }
+}
+
+/// The pointer's half of `drop_fold`, held for XTEST: a section folded under its heading and
+/// selected whole, where to press on it and where to let it go at the end of the note, and after
+/// eight seconds what the note holds. A move has to carry the hidden body and take all of it away
+/// from where it was, so `hidden body` is in the note once, after `plain line`. Drive it in steps
+/// with pauses between them — `move X0 Y0; down`, a move past the drag threshold, then
+/// `sleep 0.3; move X1 Y1; sleep 0.5; up` — because XDND's position and status messages have to go
+/// round before the release, and `xtest.py`'s one-shot `drag` lets go too soon.
+pub(super) fn bench_drag_fold(app: &Rc<App>, rel: &str) {
+    const FOLDED: &str = "# One\nhidden body\n# Two\nplain line\n";
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        tab.set_text(FOLDED);
+        let fold = accent_api::Fold {
+            start_line: 0,
+            end_line: 1,
+        };
+        crate::fold::fold(tab.buffer.upcast_ref(), fold);
+        let at = |needle: &str| {
+            let offset = FOLDED.find(needle).expect("bench needle") as i32;
+            tab.buffer.iter_at_offset(offset)
+        };
+        tab.buffer.select_range(&at("# One"), &at("# Two"));
+        glib::timeout_future(Duration::from_millis(300)).await;
+        // Screen coordinates: under Xvfb with no window manager the window sits at 0,0.
+        let screen = |iter: &gtk::TextIter| {
+            let r = tab.view.iter_location(iter);
+            let (x, y) = tab.view.buffer_to_window_coords(
+                gtk::TextWindowType::Widget,
+                r.x() + 2,
+                r.y() + r.height() / 2,
+            );
+            let point = gtk::graphene::Point::new(x as f32, y as f32);
+            let p = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+            let (sx, sy) = app.window.surface_transform();
+            ((p.x() as f64 + sx) as i32, (p.y() as f64 + sy) as i32)
+        };
+        let mut end = tab.buffer.end_iter();
+        end.backward_char();
+        println!(
+            "bench drag_fold press={:?} release={:?}",
+            screen(&at("One")),
+            screen(&end)
+        );
+        glib::timeout_future(Duration::from_secs(8)).await;
+        println!("bench drag_fold text={:?}", tab.text());
+        bench_quit(&app);
+    });
 }
 
 /// Fill `tab` with `chars` of body, then type `# Heading` on a line of its own, one character at a

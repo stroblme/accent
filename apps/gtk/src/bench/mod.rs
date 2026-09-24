@@ -47,7 +47,10 @@ use panes::{
 use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_strip};
 use replace::bench_replace;
 use search::bench_search;
-use style::{bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme, bench_wrap};
+use style::{
+    bench_drag_fold, bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme,
+    bench_wrap,
+};
 use tags::bench_tags;
 
 /// `ACCENT_BENCH_EXPAND=<rel_path>` and `ACCENT_BENCH_SWITCHER=<query>` time the two interactions
@@ -87,7 +90,8 @@ use tags::bench_tags;
 /// was styled on the keystroke or on the debounce, then whether a copy and paste, a middle click
 /// or a drop out of a styled or folded line brings its tags along. `=wrap:<rel>,<rel>…` opens each
 /// file in a narrow window and prints where every line's wrapped rows hang, then times the wrap
-/// indent on 10k lines of code in the last one.
+/// indent on 10k lines of code in the last one. `=dragfold:<rel>` selects a folded section and
+/// prints where to press and let go for XTEST, then what a real drag of it left in the note.
 /// `ACCENT_BENCH_PANES=<relA>,<relB>` moves a tab between panes and prints where it landed, then
 /// steps the split it leaves with Move Divider from a dragged 47 % and prints the share each time.
 /// `ACCENT_BENCH_COMPARE=<rel_path>` compares a note with its disk copy inside its tab and prints
@@ -482,6 +486,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             };
         }
         if let Some(rel) = style {
+            if let Some(rel) = rel.strip_prefix("dragfold:") {
+                return bench_drag_fold(&app, rel);
+            }
             return match rel.strip_prefix("wrap:") {
                 Some(rels) => bench_wrap(&app, rels),
                 None => bench_style(&app, &rel),
