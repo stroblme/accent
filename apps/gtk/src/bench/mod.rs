@@ -161,7 +161,8 @@ use tags::bench_tags;
 /// bar ends, and `d` and then `c` moved right with Move Tab. It quits the way Ctrl+Q does, which
 /// writes the session; `=pins` on the same scratch state prints what the restore brought back.
 /// `=pinwin:<a>,<b>,<c>` pins `a` among three notes, then hands `b` and then `a` to the window
-/// kept for loose files the way a drop there does, and prints both windows' tabs after each.
+/// kept for loose files the way a drop there does, and prints both windows' tabs after each. On a
+/// remote vault it waits for the host, and neither tab may leave: the file is on the host.
 /// `ACCENT_BENCH_FOLLOW=<rel_note>` puts the pointer on a wikilink, on a plain word and on a bare
 /// URL with Ctrl held, and prints what the Ctrl+hover underline covers and the URL under the caret;
 /// then it follows a link nothing answers to from the caret, as F12 does, and prints the dialog
