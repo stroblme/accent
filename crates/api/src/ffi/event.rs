@@ -12,13 +12,17 @@ pub enum Event {
     Progress {
         progress: Progress,
     },
-    /// The index is level with the files again.
+    /// The index is level with the files again, or as level as a walk that was `stopped` left it:
+    /// a partial index, and a vault that walks again on [`Vault::resume_indexing`] alone.
+    ///
+    /// [`Vault::resume_indexing`]: crate::ffi::Vault::resume_indexing
     Reconciled {
         scanned: u64,
         added: u64,
         updated: u64,
         removed: u64,
         scan_ms: u64,
+        stopped: bool,
     },
     /// The direct children of these vault-relative directories changed; `""` is the root.
     DirsChanged {
@@ -55,6 +59,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
             updated: s.updated as u64,
             removed: s.removed as u64,
             scan_ms: s.scan_ms,
+            stopped: s.stopped,
         },
         crate::Event::DirsChanged(dirs) => Event::DirsChanged { dirs },
         crate::Event::FileChanged(rel) => Event::FileChanged { rel },
