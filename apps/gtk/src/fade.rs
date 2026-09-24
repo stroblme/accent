@@ -3,7 +3,7 @@
 //!
 //! A veil rather than text tags. `GtkTextTag` has no opacity, a `foreground-rgba` would flatten a
 //! note's link colours and a code tab's syntax colours into one grey, and re-tagging the buffer
-//! each time the fade comes and goes is the tag churn ROADMAP measures at 10–21 ms on a long note.
+//! each time the fade comes and goes is the tag churn measured at 10–21 ms on a long note.
 //! So the view paints a band of its own background over each visible line, above the text, and
 //! the buffer is never touched: the cost is one rectangle per line on screen, whatever the note's
 //! length.

@@ -25,8 +25,8 @@ import java.io.File
  * Which folder the vault is.
  *
  * A vault is a Syncthing folder full of symlinks and tens of thousands of files, and the Storage
- * Access Framework can neither see one nor walk it at any speed (ROADMAP §7.A), so the app asks
- * for all-files access and then works in real paths. The folder picker is only used to *name* the
+ * Access Framework can neither see one nor walk it at any speed (MOBILE_DESIGN.md, Architecture),
+ * so the app asks for all-files access and then works in real paths. The folder picker is only used to *name* the
  * folder; everything after that is `open(2)`.
  */
 @Composable
