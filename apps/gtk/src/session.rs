@@ -275,6 +275,14 @@ impl App {
                 .iter()
                 .filter_map(|t| Some((t.key(), ShellPlace { at: t.at()? })))
                 .collect(),
+            pinned: self
+                .pinned
+                .borrow()
+                .iter()
+                .filter_map(|page| self.doc_for_page(page))
+                .filter(Doc::persists)
+                .map(|d| d.key())
+                .collect(),
         };
         let session = match self.restored.get() {
             true => session,
@@ -297,6 +305,12 @@ impl App {
         if self.active().is_some() || self.active_diagram().is_some() {
             return self.save_active();
         }
+        self.save_shells();
+    }
+
+    /// Save Session: a window of shells written down under its name, asked for the first time.
+    /// Any other window has no session of shells, and a vault's writes its own as it changes.
+    pub(crate) fn save_shells(self: &Rc<Self>) {
         let named = match &*self.key.borrow() {
             shell::WindowKey::Terminal(key) => terminal::session_name(key).map(str::to_string),
             key if key.is_terminal() => None,
@@ -624,6 +638,7 @@ impl App {
         let restore = Rc::new(Restore {
             placed,
             active,
+            pinned: session.pinned.clone(),
             taken: RefCell::default(),
             selecting: Cell::new(false),
         });
@@ -702,7 +717,8 @@ impl App {
     }
 
     /// Put back what the session had in front, as far as it has landed: each pane's tabs in the
-    /// order its bar had them, whatever order the reads came back in, with its own tab selected;
+    /// order its bar had them, whatever order the reads came back in, the pinned ones pinned
+    /// again, with its own tab selected;
     /// then the active tab, whose pane is the one notes open into. A pane still empty with nothing
     /// on its way has lost every note it held since, and closes, the other side of its split
     /// taking the room.
@@ -729,6 +745,13 @@ impl App {
                 .collect();
             for (at, page) in (0..).zip(&pages) {
                 pane.tabs.reorder_page(page, at);
+            }
+            // In bar order, so each joins the end of the pinned tabs it was saved behind.
+            for page in &pages {
+                let key = self.doc_for_page(page).map(|doc| doc.key());
+                if key.is_some_and(|key| restore.pinned.contains(&key)) {
+                    self.set_pinned(page, true);
+                }
             }
             let taken = restore.taken.borrow().iter().any(|p| p.ptr_eq(&leaf.pane));
             if !taken
@@ -821,6 +844,8 @@ struct Placed {
 pub struct Restore {
     placed: Vec<Placed>,
     active: Option<String>,
+    /// The keys the session had pinned, each pinned again as it lands.
+    pinned: Vec<String>,
     /// The panes the reader has picked a tab in or moved the keyboard to since, the latest last.
     taken: RefCell<Vec<std::rc::Weak<Pane>>>,
     /// Set while `put_back` selects, so the notify that fires is not taken for the reader's.
@@ -856,7 +881,7 @@ impl Drop for Asked {
 struct Unsized;
 
 /// How long a split is along the way it splits.
-fn extent_of(paned: &gtk::Paned) -> i32 {
+pub(crate) fn extent_of(paned: &gtk::Paned) -> i32 {
     match paned.orientation() {
         gtk::Orientation::Vertical => paned.height(),
         _ => paned.width(),
@@ -926,6 +951,11 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
             stored.open.push(key);
         }
     }
+    for key in now.pinned {
+        if !stored.pinned.contains(&key) {
+            stored.pinned.push(key);
+        }
+    }
     stored.active = stored.active.or(now.active);
     for rel in now.recent_notes.iter().rev() {
         accent_core::config::touch(&mut stored.recent_notes, rel, RECENT_NOTES);
@@ -964,6 +994,7 @@ mod tests {
             zoom: 1.5,
             recent_commands: vec!["win.find".into()],
             terminals: [("terminal:1".into(), place("/srv"))].into(),
+            pinned: vec!["a.md".into()],
             ..Session::default()
         };
         let merged = unrestored(stored.clone(), Session::default());
@@ -975,6 +1006,7 @@ mod tests {
         assert_eq!(merged.recent_commands, stored.recent_commands);
         // Where a stored shell was is kept for the restore that has not happened yet.
         assert_eq!(merged.terminals, stored.terminals);
+        assert_eq!(merged.pinned, stored.pinned);
 
         let now = Session {
             open: vec!["b.md".into(), "c.md".into()],

@@ -532,6 +532,7 @@ impl App {
             pane.nav.borrow_mut().forget(&doc.key());
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
+        self.pinned.borrow_mut().retain(|p| p != page);
         self.sync_active();
         self.save_session_soon();
     }

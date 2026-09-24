@@ -36,11 +36,16 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
     const STEPS: &[&str] = &["win.split-right", "win.move-tab-left", "win.move-tab-right"];
     let Some(action) = STEPS.get(step) else {
         if let Some(gtk_app) = app.window.application() {
-            for accel in ["<Shift><Alt>Left", "<Shift><Alt>Right"] {
+            for accel in [
+                "<Shift><Alt>Left",
+                "<Shift><Alt>Right",
+                "<Control><Alt>Left",
+                "<Control><Alt>Up",
+            ] {
                 println!("bench accel {accel} {:?}", gtk_app.actions_for_accel(accel));
             }
         }
-        return bench_quit(app);
+        return bench_dividers(app);
     };
     println!("bench step {action}");
     let _ = WidgetExt::activate_action(&app.window, action, None);
@@ -49,6 +54,34 @@ fn bench_pane_step(app: &Rc<App>, page: &adw::TabPage, step: usize) {
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, step + 1);
     });
+}
+
+/// Move Divider over the split the steps above leave, from where a drag left it at 47 %: a step
+/// each way, which lands on the grid anchored at the centre; a step along the axis no split runs,
+/// which moves nothing; and a run of steps into the end of the range, which stops at what the
+/// pane's minimum width allows.
+fn bench_dividers(app: &Rc<App>) {
+    let Some(paned) = app.pane().widget().parent().and_downcast::<gtk::Paned>() else {
+        println!("bench divider none");
+        return bench_quit(app);
+    };
+    let extent = paned.width();
+    paned.set_position(extent * 47 / 100);
+    let say = |what: &str| {
+        let share = f64::from(paned.position()) / f64::from(extent);
+        println!("bench divider {what} {share:.3}");
+    };
+    say("dragged");
+    for side in ["right", "left", "left", "up"] {
+        let _ = WidgetExt::activate_action(&app.window, &format!("win.divider-{side}"), None);
+        say(side);
+    }
+    for _ in 0..30 {
+        let _ = WidgetExt::activate_action(&app.window, "win.divider-left", None);
+    }
+    say("left_x30");
+    println!("bench divider min {}", paned.min_position());
+    bench_quit(app);
 }
 
 /// How many panes there are, and where in the window three things sit: the pane holding `page`,
@@ -399,6 +432,158 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
                     bench_quit(&app);
                 });
             });
+        });
+    });
+}
+
+/// One step of [`bench_pin`], named for its printout.
+type PinStep = (&'static str, Box<dyn Fn(&Rc<App>, &[adw::TabPage])>);
+
+/// See `ACCENT_BENCH_TABS=pin:` above.
+pub(super) fn bench_pin(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    if rels.len() != 4 {
+        return bench_quit(app);
+    }
+    for rel in &rels {
+        app.open_path(rel);
+    }
+    let steps: Vec<PinStep> = vec![
+        ("open", Box::new(|_, _| {})),
+        (
+            "pin_c_menu",
+            Box::new(|app, p| bench_pin_menu(app, &p[2], "win.pin-tab")),
+        ),
+        (
+            "pin_b_palette",
+            Box::new(|app, p| {
+                app.reveal_page(&p[1]);
+                let _ = WidgetExt::activate_action(&app.window, "win.pin-tab", None);
+            }),
+        ),
+        (
+            "unpin_c_menu",
+            Box::new(|app, p| bench_pin_menu(app, &p[2], "win.unpin-tab")),
+        ),
+        (
+            "pin_c_palette",
+            Box::new(|app, p| {
+                app.reveal_page(&p[2]);
+                let _ = WidgetExt::activate_action(&app.window, "win.pin-tab", None);
+            }),
+        ),
+        // Where a drag along the bar ends: the tab view told to put the page there.
+        (
+            "drag_a_first",
+            Box::new(|app, p| {
+                app.tabs().reorder_page(&p[0], 0);
+            }),
+        ),
+        (
+            "drag_b_last",
+            Box::new(|app, p| {
+                app.tabs().reorder_page(&p[1], 3);
+            }),
+        ),
+        (
+            "move_d_right",
+            Box::new(|app, p| {
+                app.reveal_page(&p[3]);
+                let _ = WidgetExt::activate_action(&app.window, "win.move-tab-right", None);
+            }),
+        ),
+        (
+            "move_c_right",
+            Box::new(|app, p| {
+                app.reveal_page(&p[2]);
+                let _ = WidgetExt::activate_action(&app.window, "win.move-tab-right", None);
+            }),
+        ),
+    ];
+    let landed = {
+        let (app, rels) = (app.clone(), rels.clone());
+        move || rels.iter().all(|rel| app.doc_for(rel).is_some())
+    };
+    let app = app.clone();
+    bench_layout_when(landed, move || {
+        let pages: Vec<adw::TabPage> = rels
+            .iter()
+            .filter_map(|rel| app.doc_for(rel).map(|doc| doc.page().clone()))
+            .collect();
+        bench_pin_step(&app, Rc::new(steps), Rc::new(pages), 0);
+    });
+}
+
+/// Run step `i` and print the panes once the holds it queued have run, then the next one.
+fn bench_pin_step(app: &Rc<App>, steps: Rc<Vec<PinStep>>, pages: Rc<Vec<adw::TabPage>>, i: usize) {
+    let Some((what, step)) = steps.get(i) else {
+        println!("bench pinned_tab {}", bench_tab_line(&pages[2]));
+        if let Some(gtk_app) = app.window.application() {
+            gtk_app.activate_action("quit", None);
+        }
+        return;
+    };
+    let what = *what;
+    step(app, &pages);
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(300), move || {
+        println!("bench pins {what} {}", bench_pins_line(&app));
+        bench_pin_step(&app, steps, pages, i + 1);
+    });
+}
+
+/// Open `page`'s tab menu, print the pin item it offers, and take it.
+fn bench_pin_menu(app: &Rc<App>, page: &adw::TabPage, action: &str) {
+    let Some(tabs) = app.pane_of(page).map(|pane| pane.tabs.clone()) else {
+        return;
+    };
+    tabs.emit_by_name::<()>("setup-menu", &[&Some(page)]);
+    let offered = tabs
+        .menu_model()
+        .and_then(|menu| menu.item_link(1, "section"))
+        .and_then(|moves| moves.item_attribute_value(moves.n_items() - 1, "action", None))
+        .and_then(|action| action.get::<String>());
+    println!("bench pin_menu offers {offered:?}");
+    let _ = WidgetExt::activate_action(&app.window, action, None);
+    tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+}
+
+/// Every pane's tabs in bar order, pinned ones marked `^`, panes in the order they were made.
+fn bench_pins_line(app: &Rc<App>) -> String {
+    let panes: Vec<String> = app
+        .panes
+        .borrow()
+        .iter()
+        .map(|pane| {
+            let tabs: Vec<String> = pane
+                .pages()
+                .iter()
+                .map(|page| {
+                    let key = app.doc_for_page(page).map(|d| d.key()).unwrap_or_default();
+                    match app.is_pinned(page) {
+                        true => format!("^{key}"),
+                        false => key,
+                    }
+                })
+                .collect();
+            format!("[{}]", tabs.join(" "))
+        })
+        .collect();
+    panes.join(" ")
+}
+
+/// See `ACCENT_BENCH_TABS=pins` above: the panes once every restored tab has landed.
+pub(super) fn bench_pins_restored(app: &Rc<App>) {
+    let (app, landing) = (app.clone(), app.clone());
+    let landed = move || landing.restored.get() && landing.awaiting.borrow().is_empty();
+    bench_layout_when(landed, move || {
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            println!("bench pins restored {}", bench_pins_line(&app));
+            let pinned = app.pinned.borrow().clone();
+            for page in &pinned {
+                println!("bench pinned_tab {}", bench_tab_line(page));
+            }
+            bench_quit(&app);
         });
     });
 }
