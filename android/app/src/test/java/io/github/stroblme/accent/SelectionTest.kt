@@ -1,10 +1,15 @@
 package io.github.stroblme.accent
 
 import io.github.stroblme.accent.ffi.Glyph
+import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ui.Caret
 import io.github.stroblme.accent.ui.Selection
+import io.github.stroblme.accent.ui.grownTo
+import io.github.stroblme.accent.ui.nearest
 import io.github.stroblme.accent.ui.pieces
+import io.github.stroblme.accent.ui.text
+import io.github.stroblme.accent.ui.wordAt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -48,6 +53,39 @@ class SelectionTest {
     @Test
     fun `a page not read yet is no answer yet`() {
         assertNull(Selection(Caret(0, 0), Caret(1, 0)).pieces(mapOf(0 to line("ab"))))
+    }
+
+    /** Inside a glyph's box it is that glyph; in the margin, the nearest one level with it. */
+    @Test
+    fun `a finger takes the glyph under it, or the nearest one`() {
+        val glyphs = line("ab cd")
+        assertEquals(1, nearest(glyphs, Point(1.5f, 5f)))
+        assertEquals(4, nearest(glyphs, Point(30f, 5f)))
+        assertEquals(0, nearest(glyphs, Point(-3f, 12f)))
+        assertNull(nearest(emptyList(), Point(0f, 0f)))
+    }
+
+    @Test
+    fun `a long press takes the word, and a glyph that is none alone`() {
+        val glyphs = line("an ex-ample")
+        assertEquals(0..1, wordAt(glyphs, 1))
+        assertEquals(6..10, wordAt(glyphs, 8))
+        assertEquals(5..5, wordAt(glyphs, 5))
+    }
+
+    /** Dragged either way, the word the press made stays selected. */
+    @Test
+    fun `a word grows towards the finger and keeps itself`() {
+        val word = Selection(Caret(0, 3), Caret(0, 5))
+        assertEquals(Selection(Caret(0, 3), Caret(1, 2)), word.grownTo(Caret(1, 2)))
+        assertEquals(Selection(Caret(0, 1), Caret(0, 5)), word.grownTo(Caret(0, 1)))
+        assertEquals(word, word.grownTo(Caret(0, 4)))
+    }
+
+    @Test
+    fun `a selection over a page break copies as two lines`() {
+        val glyphs = mapOf(0 to line("ab cd"), 1 to line("ef"))
+        assertEquals("cd\nef", Selection(Caret(0, 3), Caret(1, 1)).pieces(glyphs)!!.text())
     }
 
     @Test

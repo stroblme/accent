@@ -108,6 +108,23 @@ class NavigationTest {
         }
     }
 
+    /**
+     * What is drawn over the pages — a selection's handles, the menu — is placed by the way back
+     * from a point on the paper to the screen, so it has to be the tap's own mapping reversed.
+     */
+    @Test
+    fun `a point on the paper goes to the screen and back`() {
+        for (zoom in listOf(1f, 8f)) {
+            val above = pages.top(2, width, zoom) + 37f
+            val panX = -(width * (zoom - 1f)) / 3
+            val at = pages.screen(2, 120f, 300f, above, panX, width, zoom)
+            val land = pages.on(at.x - panX, at.y + above, width, zoom)!!
+            assertEquals(2, land.page)
+            assertEquals(120f, land.point.x, 0.05f)
+            assertEquals(300f, land.point.y, 0.05f)
+        }
+    }
+
     private fun link(left: Float, top: Float, right: Float, bottom: Float, to: LinkTarget) =
         PdfLinkBox(Rect(left, top, right, bottom), to)
 
