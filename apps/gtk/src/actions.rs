@@ -821,11 +821,10 @@ pub fn label_of(action: &str) -> &str {
 /// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
 /// files in this window, which vault it is on, what it shows, and the application. What needs a
 /// vault — making a file or a folder in it, closing it — is left off a window without one rather
-/// than offered and refused. In a window of shells Save is the session's, so it needs no item of
-/// its own, and a named session has Close Session as its way out. A shell on this machine is its
-/// own item only where New Terminal opens one on a host. Every item is the window's whichever tab
-/// is in front: what acts on the document, Find and Toggle Preview among them, is left to its chord
-/// and the palette.
+/// than offered and refused. A named session has Close Session as its way out. A shell on this
+/// machine is its own item only where New Terminal opens one on a host. Every item is the window's
+/// whichever tab is in front: what acts on the document, Save, Find and Toggle Preview among
+/// them, is left to its chord and the palette.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -837,7 +836,7 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
         true => vec!["win.new-file", "win.new-folder"],
         false => Vec::new(),
     };
-    files.extend(["win.open-file", "win.save"]);
+    files.push("win.open-file");
     // What changes which vault this window is on: the three ways in, then the way out.
     let mut vaults = vec!["app.open-vault", "app.open-remote", "win.open-recent"];
     if vault {
@@ -1044,14 +1043,10 @@ mod tests {
     fn the_primary_menu_offers_only_what_the_window_can_do() {
         use crate::shell::{Loose, WindowKey};
         let vault = primary_actions(&WindowKey::Vault("/home/me/Notes".into()));
+        // Save acts on the tab in front, so it is not here.
         assert_eq!(
             vault[0],
-            [
-                "win.new-file",
-                "win.new-folder",
-                "win.open-file",
-                "win.save"
-            ]
+            ["win.new-file", "win.new-folder", "win.open-file"]
         );
         assert_eq!(
             vault[1],
@@ -1062,12 +1057,12 @@ mod tests {
                 "app.close-vault"
             ]
         );
-        // Without a vault there is nothing to make a file in and no vault to close; in a window of
-        // shells Save is the session's, and a named session is closed as one.
+        // Without a vault there is nothing to make a file in and no vault to close, and a named
+        // session is closed as one.
         let named = primary_actions(&WindowKey::Terminal("terminal://dev".into()));
         let unnamed = primary_actions(&WindowKey::Loose(Loose::Terminal));
         for menu in [&named, &unnamed] {
-            assert_eq!(menu[0], ["win.open-file", "win.save"]);
+            assert_eq!(menu[0], ["win.open-file"]);
             assert_eq!(menu[2..], vault[2..]);
         }
         assert_eq!(
@@ -1084,7 +1079,7 @@ mod tests {
             ["app.open-vault", "app.open-remote", "win.open-recent"]
         );
         let documents = primary_actions(&WindowKey::Loose(Loose::Documents));
-        assert_eq!(documents[0], ["win.open-file", "win.save"]);
+        assert_eq!(documents[0], ["win.open-file"]);
         assert_eq!(documents[1], unnamed[1]);
         // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
         // this machine is an item of its own.
