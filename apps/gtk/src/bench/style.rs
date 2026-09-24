@@ -516,6 +516,82 @@ pub(super) fn bench_theme(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// See `ACCENT_BENCH_NUMBERS` in `install_bench_hooks`.
+pub(super) fn bench_numbers(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let [first, code, later] = rels.as_slice() else {
+        return bench_quit(app);
+    };
+    let (app, first, code, later) = (app.clone(), first.clone(), code.clone(), later.clone());
+    app.open_path(&first);
+    app.open_path(&code);
+    glib::spawn_future_local(async move {
+        let step = |what: &str| {
+            let tabs: Vec<String> = app
+                .open_tabs()
+                .iter()
+                .map(|tab| {
+                    let (shown, width) = tab.line_numbers();
+                    let front = match tab.view.is_mapped() {
+                        true => "front",
+                        false => "behind",
+                    };
+                    format!("{}:{shown}/{width}px/{front}", tab.rel())
+                })
+                .collect();
+            println!("bench numbers {what} {}", tabs.join(" "));
+        };
+        // The switch itself, in the dialog the menu opens, which is then closed again.
+        let flip = || {
+            let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+            let row = find_widget(app.window.upcast_ref(), &|w| {
+                w.downcast_ref::<adw::SwitchRow>()
+                    .is_some_and(|row| row.title() == "Line Numbers")
+            })
+            .and_downcast::<adw::SwitchRow>();
+            let Some(row) = row else {
+                return println!("bench numbers no_switch");
+            };
+            row.set_active(!row.is_active());
+            if let Some(dialog) = row.ancestor(adw::Dialog::static_type()) {
+                dialog
+                    .downcast::<adw::Dialog>()
+                    .map(|d| d.force_close())
+                    .ok();
+            }
+        };
+        glib::timeout_future(Duration::from_millis(800)).await;
+        // The note in front, the code behind it.
+        app.open_path(&first);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("opened");
+        flip();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("flipped");
+        app.open_path(&later);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        step("opened_after");
+        app.open_path(&code);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("code_in_front");
+        flip();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("flipped_back");
+        app.open_path(&first);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("note_in_front");
+        // On again with both notes behind the code, then one of them brought forward.
+        app.open_path(&code);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        flip();
+        glib::timeout_future(Duration::from_millis(300)).await;
+        app.open_path(&later);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        step("on_behind_then_front");
+        bench_quit(&app);
+    });
+}
+
 /// What the theme-derived tags of `tab` hold right now, each with what it reads at against the
 /// page under it, next to what they are derived from: the view's resolved foreground, the scheme
 /// the buffer is on and that scheme's own `text` ink.

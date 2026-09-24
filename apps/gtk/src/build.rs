@@ -869,7 +869,9 @@ thread_local! {
 /// divider left at full strength frames the panes that recede. The undershoot is a CSS node of the
 /// scrolled window's own rather than a widget, so it takes its line and gradient away where
 /// everything else takes opacity. `.accent-flat` puts the two columns on the note's own background
-/// so nothing bands against it, on a class of ours rather than on `headerbar` globally.
+/// so nothing bands against it, on a class of ours rather than on `headerbar` globally; on the find
+/// bar it reaches the box Adwaita paints (`searchbar > revealer > box`), since the bar's own node
+/// is covered by it.
 /// `.accent-lone-header` drops the bottom padding of the sidebar header, the one header in the
 /// window that does not sit above a second bar: libadwaita pads a stacked header 3 px top and
 /// bottom and its bar area another 3, so with 6 above and none below both headers hold their
@@ -970,7 +972,9 @@ fn install_chrome_css() {
                background-color: var(--border-color); }} \
              paned > separator:hover {{ box-shadow: none; \
                background-color: var(--accent-bg-color); }} \
-             .accent-flat, .accent-flat:backdrop {{ background-color: var(--view-bg-color); }} \
+             .accent-flat, .accent-flat:backdrop, \
+               .accent-flat > revealer > box, .accent-flat > revealer > box:backdrop {{ \
+               background-color: var(--view-bg-color); }} \
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \

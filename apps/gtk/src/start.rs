@@ -329,12 +329,20 @@ fn recent_row(
     row
 }
 
-/// Drop `path` from the recent vaults and write the config back. Nothing on disk is touched: the
-/// list is the only thing that remembers a vault. Shared with the Open Recent picker, which offers
-/// the same removal from its own rows.
+/// Drop `path` from the recent vaults and write the config back. Shared with the Open Recent
+/// picker, which offers the same removal from its own rows, and with Close Session.
+///
+/// A vault's own files are not touched, nor its state file: the list is the only thing that
+/// remembers a vault, and its tabs are still there when it is opened again. A terminal session is
+/// nothing but its state file, so that goes with the row, and the next start's sweep then finds
+/// its held shells named by no session and ends them (`terminal::sweep`); shells on a host are
+/// never swept.
 pub(crate) fn forget_vault(config: &Rc<RefCell<Config>>, path: &Path) {
     config.borrow_mut().recent_vaults.retain(|p| p != path);
     crate::settings::save(&config.borrow());
+    if crate::terminal::session_name(path).is_some() {
+        let _ = std::fs::remove_file(accent_core::config::state_path(path));
+    }
 }
 
 /// What a recent row says about a vault: it is named by its folder and placed by its path, on

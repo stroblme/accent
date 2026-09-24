@@ -170,6 +170,9 @@ impl Bar {
         // bar came up in go-to-line mode. Focus is taken explicitly in `open` instead.
         let bar = gtk::SearchBar::builder().show_close_button(true).build();
         bar.set_child(Some(&rows));
+        // On the note's own background, as the header above it is: Adwaita paints a search bar in
+        // the header bar colour, which is the note's in light but a lighter band in dark.
+        bar.add_css_class("accent-flat");
 
         let this = Rc::new(Bar {
             bar,

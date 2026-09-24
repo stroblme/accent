@@ -48,8 +48,8 @@ use pdf::{bench_drawing, bench_pdf, bench_pdf_pages, bench_pdf_stale, bench_pdf_
 use replace::bench_replace;
 use search::bench_search;
 use style::{
-    bench_drag_fold, bench_follow, bench_occurrences, bench_reveal, bench_style, bench_theme,
-    bench_wrap,
+    bench_drag_fold, bench_follow, bench_numbers, bench_occurrences, bench_reveal, bench_style,
+    bench_theme, bench_wrap,
 };
 use tags::bench_tags;
 
@@ -178,6 +178,11 @@ use tags::bench_tags;
 /// highlight made of each selection, plus the two match colours and the priorities of the tags
 /// they are painted with.
 ///
+/// `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>` opens the first two and flips the Line
+/// Numbers switch in the preferences three times, printing after each step whether every open tab
+/// shows its numbers, how wide the column is and whether the tab is in front: the third file
+/// opens after the first flip, and the last flip is made with both notes behind the code.
+///
 /// `ACCENT_BENCH_THEME=<rel_note>` walks the window through Light, Dark and Solarized the way a
 /// system switch and the preferences do, and prints what the note's theme-derived tags hold on
 /// each side of every switch: as it lands, and again once the restyle it defers has run. A second
@@ -271,6 +276,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
     let occur = std::env::var("ACCENT_BENCH_OCCUR").ok();
     let theme = std::env::var("ACCENT_BENCH_THEME").ok();
+    let numbers = std::env::var("ACCENT_BENCH_NUMBERS").ok();
     let reveal = std::env::var("ACCENT_BENCH_REVEAL").ok();
     let follow = std::env::var("ACCENT_BENCH_FOLLOW").ok();
     let outline = std::env::var("ACCENT_BENCH_OUTLINE").ok();
@@ -309,6 +315,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && tabs.is_none()
         && occur.is_none()
         && theme.is_none()
+        && numbers.is_none()
         && reveal.is_none()
         && follow.is_none()
         && outline.is_none()
@@ -426,6 +433,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = theme {
             return bench_theme(&app, &rel);
+        }
+        if let Some(rels) = numbers {
+            return bench_numbers(&app, &rels);
         }
         if let Some(rel) = reveal {
             return bench_reveal(&app, &rel);

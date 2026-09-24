@@ -426,6 +426,12 @@ impl Tab {
         self.numbers.set_visible(on || !self.flavour.is_note());
     }
 
+    /// Whether the line numbers are on, and the width the gutter gave them. Only
+    /// `ACCENT_BENCH_NUMBERS` reads it.
+    pub fn line_numbers(&self) -> (bool, i32) {
+        (self.numbers.is_visible(), self.numbers.width())
+    }
+
     /// Which line the gutter drew the caret's highlight on when it last painted, 0-based. Beside
     /// the caret's own line this says whether the column is following it; `ACCENT_BENCH_DIAG`
     /// prints the pair.
