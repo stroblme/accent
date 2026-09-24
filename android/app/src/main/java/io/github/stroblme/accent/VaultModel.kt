@@ -10,6 +10,7 @@ import io.github.stroblme.accent.ffi.AccentException
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.SearchHit
@@ -126,16 +127,40 @@ data class VaultState(
 
 /**
  * What the switcher ranks: every file, then every note a link names that is not there yet, by the
- * path creating it would give it.
+ * path creating it would give it, then every front matter alias, by the alias.
  *
- * One list, so the two rank together, and the files first: the ranking is stable, so a file that
- * is there leads a note only linked to at the same score.
+ * One list, so they rank together, in that order: the ranking is stable, so at the same score a
+ * file that is there leads a note only linked to, and a path leads an alias. A row is a place in
+ * [names] rather than the string there, because one alias can name two notes.
  */
-class Corpus(files: List<String>, missing: List<String>) {
-    val paths = files + missing
+class Corpus(
+    files: List<String> = emptyList(),
+    missing: List<String> = emptyList(),
+    aliases: List<NoteAlias> = emptyList(),
+) {
+    /** What the ranking reads. */
+    val names = files + missing + aliases.map { it.name }
 
-    /** The notes in [paths] that are not there yet: a pick writes one rather than opens it. */
-    val unwritten = missing.toHashSet()
+    private val written = files.size
+    private val paths = written + missing.size
+    private val notes = aliases.map { it.relPath }
+
+    /** The row the [i]th of [names] stands for. */
+    fun row(i: Int): Row = when {
+        i < written -> Row(names[i].substringAfterLast('/'), names[i])
+        i < paths -> Row(names[i].substringAfterLast('/'), names[i], unwritten = true)
+        else -> Row(names[i], notes[i - paths])
+    }
+
+    /** Where [rel] is among the paths, if it is: how a recent note finds its row. */
+    fun find(rel: String): Int? = names.subList(0, paths).indexOf(rel).takeIf { it >= 0 }
+
+    /**
+     * What a row reads and what picking it does: [name] over [rel], and a pick opens [rel], or
+     * writes it first when it is [unwritten]. A path's name is its file's; an alias is its own,
+     * with the whole path of its note under it, since the alias says nothing of where that is.
+     */
+    data class Row(val name: String, val rel: String, val unwritten: Boolean = false)
 }
 
 /**
@@ -293,14 +318,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** The switcher's corpus, fetched the first time it is asked for. */
     suspend fun corpus(): Corpus {
-        corpus?.takeIf { it.paths.isNotEmpty() }?.let { return it }
-        val v = vault ?: return Corpus(emptyList(), emptyList())
+        corpus?.takeIf { it.names.isNotEmpty() }?.let { return it }
+        val v = vault ?: return Corpus()
         // Tens of thousands of strings in one call: worth doing when the switcher opens, which is
         // the only thing that wants them, rather than after every reconcile.
         val read = withContext(Dispatchers.IO) {
             Corpus(
                 runCatching { v.filePaths(false) }.getOrDefault(emptyList()),
                 runCatching { v.missingNotes() }.getOrDefault(emptyList()),
+                runCatching { v.noteAliases() }.getOrDefault(emptyList()),
             )
         }
         corpus = read

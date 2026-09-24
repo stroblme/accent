@@ -171,6 +171,13 @@ pub struct TagCount {
     pub count: i64,
 }
 
+/// A name a note's front matter gives it (`aliases:`), and the note.
+#[derive(uniffi::Record)]
+pub struct NoteAlias {
+    pub name: String,
+    pub rel_path: String,
+}
+
 #[derive(uniffi::Record)]
 pub struct SearchHit {
     pub rel_path: String,

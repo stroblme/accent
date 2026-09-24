@@ -14,6 +14,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.stroblme.accent.Corpus
 import io.github.stroblme.accent.Recents
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.ffi.FileKind
@@ -67,11 +68,12 @@ fun BrowseScreen(
     // follow the surface across, rather than waiting for it to land.
     val mode = Mode.entries[pager.currentPage]
     var query by remember { mutableStateOf("") }
-    // The ranking and the page it was ranked for. Two pages are composed at once while one is being
-    // dragged in, and a file path drawn as a command label is a row that says the wrong thing.
-    var ranked by remember { mutableStateOf(Mode.Search to emptyList<String>()) }
-    // Which of the files' rows are notes a link names that nobody has written yet.
-    var unwritten by remember { mutableStateOf(emptySet<String>()) }
+    // The ranking and the page it was ranked for, as places in [Commands] or in [files]. Two pages
+    // are composed at once while one is being dragged in, and a file row drawn from a command's
+    // place is a row that says the wrong thing.
+    var ranked by remember { mutableStateOf(Mode.Search to emptyList<Int>()) }
+    // What the Files page's places are places in.
+    var files by remember { mutableStateOf(Corpus()) }
     val focus = remember { FocusRequester() }
 
     LaunchedEffect(query, mode) {
@@ -80,18 +82,18 @@ fun BrowseScreen(
         val kind = if (commands) Recents.Kind.Commands else Recents.Kind.Notes
         // The note corpus is fetched on demand rather than kept in step with the index, so the
         // first query in a session waits for it once.
-        val files = if (commands) null else model.corpus()
-        val corpus = files?.paths ?: Commands.map { it.label }
+        val read = if (commands) null else model.corpus()
+        val corpus = read?.names ?: Commands.map { it.label }
         ranked = mode to withContext(Dispatchers.Default) {
-            if (query.isBlank() && !commands) {
-                model.recents.list(Recents.Kind.Notes).filter { it in corpus }.take(50)
+            if (read != null && query.isBlank()) {
+                model.recents.list(Recents.Kind.Notes).mapNotNull { read.find(it) }.take(50)
             } else {
                 val ranks = model.recents.ranks(kind, corpus)
-                fuzzyRank(query, corpus, ranks).map { corpus[it.toInt()] }
+                fuzzyRank(query, corpus, ranks).map { it.toInt() }
             }
         }
-        // With the rows it marks, in the same frame.
-        files?.let { unwritten = it.unwritten }
+        // With the places it holds, in the same frame.
+        if (read != null) files = read
     }
 
     // Reaching for a chip is reaching for the keyboard. Opening the screen is not: Search lands on
@@ -108,22 +110,32 @@ fun BrowseScreen(
             val rows = if (ranked.first == tab) ranked.second else emptyList()
             LazyColumn(Modifier.fillMaxSize(), reverseLayout = tab != Mode.Search) {
                 when {
-                    tab != Mode.Search -> items(rows, key = { it }) { row ->
-                        val missing = row in unwritten
+                    tab == Mode.Command -> items(rows, key = { it }) { i ->
+                        val command = Commands[i]
                         ListItem(
                             headlineContent = {
-                                Text(
-                                    if (tab == Mode.Command) row else File(row).name,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                                Text(command.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             },
-                            supportingContent = if (tab == Mode.Command) null else ({
-                                Text(row, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
-                            }),
+                            colors = flatRow(),
+                            modifier = Modifier.row {
+                                model.recents.touch(Recents.Kind.Commands, command.label)
+                                command.run(model)
+                                onClose()
+                            },
+                        )
+                    }
+                    tab == Mode.Files -> items(rows, key = { it }) { i ->
+                        val row = files.row(i)
+                        ListItem(
+                            headlineContent = {
+                                Text(row.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            },
+                            supportingContent = {
+                                Text(row.rel, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
+                            },
                             // At the row's end, what the note is not: the name alone reads as a
                             // file that is there.
-                            trailingContent = if (!missing) null else ({
+                            trailingContent = if (!row.unwritten) null else ({
                                 Text(
                                     "Not created",
                                     style = MaterialTheme.typography.labelMedium,
@@ -132,17 +144,11 @@ fun BrowseScreen(
                             }),
                             colors = flatRow(),
                             modifier = Modifier.row {
-                                when {
-                                    tab == Mode.Command -> {
-                                        model.recents.touch(Recents.Kind.Commands, row)
-                                        Commands.first { it.label == row }.run(model)
-                                        onClose()
-                                    }
-                                    missing -> {
-                                        model.create(row)
-                                        onClose()
-                                    }
-                                    else -> onOpen(row, null)
+                                if (row.unwritten) {
+                                    model.create(row.rel)
+                                    onClose()
+                                } else {
+                                    onOpen(row.rel, null)
                                 }
                             },
                         )

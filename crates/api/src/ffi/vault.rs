@@ -13,7 +13,7 @@ use accent_core::config::VaultConfig;
 use accent_core::fs::Etag;
 use accent_core::index::{Backlink, FileRow};
 
-use crate::ffi::convert::{self, NewNote, Note, PdfLink, SearchHit, TagCount, Utf16};
+use crate::ffi::convert::{self, NewNote, Note, NoteAlias, PdfLink, SearchHit, TagCount, Utf16};
 use crate::ffi::error::Answer;
 use crate::ffi::event::{self, Event};
 
@@ -191,6 +191,17 @@ impl Vault {
     /// what the switcher lists after the files.
     pub fn missing_notes(&self) -> Answer<Vec<String>> {
         Ok(self.inner.missing_notes()?)
+    }
+
+    /// Every front matter alias with the note that carries it, by alias: the names the switcher
+    /// also finds a note by. A link still resolves by the file's name alone.
+    pub fn note_aliases(&self) -> Answer<Vec<NoteAlias>> {
+        Ok(self
+            .inner
+            .note_aliases()?
+            .into_iter()
+            .map(|(name, rel_path)| NoteAlias { name, rel_path })
+            .collect())
     }
 
     /// What a link target resolves to, or `None` when nothing in the vault answers to it.
