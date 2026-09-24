@@ -53,8 +53,8 @@ pub(super) fn bench_replace(app: &Rc<App>) {
 }
 
 fn bench_replace_print(sidebar: &crate::sidebar::Sidebar, step: &str) {
-    let (page, rows) = sidebar.search_state();
-    println!("bench replace step={step} page={page} rows={rows}");
+    let (page, rows, count) = sidebar.search_state();
+    println!("bench replace step={step} page={page} rows={rows} count={count:?}");
 }
 
 /// Take the drill's own note away again, whatever it managed to do with it.
