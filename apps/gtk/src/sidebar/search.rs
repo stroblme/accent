@@ -16,6 +16,7 @@ use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, Ref};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -176,6 +177,21 @@ fn more_row(rel_path: &str, more: usize, first: Option<Range<usize>>) -> Row {
     }
 }
 
+/// What an answer holds, where the progress bar is drawn between queries: "12 results in 3
+/// files". A number the list's cap may have cut short is a floor, and says so with a `+`.
+fn count_label(found: usize, files: usize, more_found: bool, more_files: bool) -> String {
+    let counted = |n: usize, more: bool, noun: &str| match (n, more) {
+        (1, false) => format!("1 {noun}"),
+        (n, false) => format!("{n} {noun}s"),
+        (n, true) => format!("{n}+ {noun}s"),
+    };
+    format!(
+        "{} in {}",
+        counted(found, more_found, "result"),
+        counted(files, more_files, "file")
+    )
+}
+
 /// The system accent as pango markup understands it. `Widget::color()` and the style manager are
 /// the only colour sources in the app, and pango's parser takes `#rrggbb` and colour names only,
 /// so the resolved accent is spelled out here rather than handed over as a CSS function.
@@ -232,6 +248,9 @@ struct Search {
     progress: gtk::ProgressBar,
     /// The timer stepping [`Search::progress`] while a query is on a worker thread.
     pulse: Pulse,
+    /// What the rows on screen add up to ([`count_label`]), in the bar's place while it is not
+    /// drawn.
+    count: gtk::Label,
     body: gtk::Stack,
     results: gio::ListStore,
     /// Which question the rows on screen are meant to answer. Every query takes the next number
@@ -319,6 +338,7 @@ impl Search {
             self.body.set_visible_child_name("prompt");
             self.set_busy(self.busy());
             self.set_total(0);
+            self.count.set_text("");
             return;
         }
         let query = match compile(&key) {
@@ -331,6 +351,7 @@ impl Search {
                 self.body.set_visible_child_name("invalid");
                 self.set_busy(self.busy());
                 self.set_total(0);
+                self.count.set_text("");
                 return;
             }
         };
@@ -368,10 +389,16 @@ impl Search {
     }
 
     fn show(&self, key: &Key, answer: Answer) {
-        let rows = match answer {
+        // A row is one match, and a file's last row counts the ones the per-file cap left off it.
+        // A list as long as the cap may have been cut short, and cannot count what it left out.
+        let (rows, count) = match answer {
             Answer::Fts(hits) => {
                 self.set_total(0);
-                fts_rows(hits)
+                let found = hits.iter().map(|h| 1 + h.more).sum();
+                let files = hits.iter().map(|h| h.rel_path.as_str());
+                let files = files.collect::<HashSet<_>>().len();
+                let cut = hits.len() >= crate::SEARCH_LIMIT;
+                (fts_rows(hits), count_label(found, files, cut, cut))
             }
             Answer::Grep {
                 hits,
@@ -382,6 +409,13 @@ impl Search {
                 let Ok(re) = compile_regex(key) else {
                     return;
                 };
+                // `total` is every match the index holds, however many were listed; the walk
+                // past it counts what it listed alone, so only All's number can be a floor.
+                let found = total + walked.iter().map(|m| 1 + m.more).sum::<usize>();
+                let files = hits.iter().chain(&walked).map(|m| m.rel_path.as_str());
+                let files = files.collect::<HashSet<_>>().len();
+                let cut = hits.len() + walked.len() >= crate::SEARCH_LIMIT;
+                let count = count_label(found, files, cut && key.all, cut);
                 let replacement = self.replacement();
                 let accent = accent_markup_colour();
                 let literal = !key.options.regex;
@@ -389,9 +423,12 @@ impl Search {
                 // No preview on a walked row: the rewrite never opens its file, so striking the
                 // match through would promise an edit that does not happen.
                 rows.extend(grep_rows(walked, &re, None, literal, &accent));
-                rows
+                (rows, count)
             }
         };
+        // No Results says it already.
+        self.count
+            .set_text(if rows.is_empty() { "" } else { &count });
         self.body
             .set_visible_child_name(if rows.is_empty() { "empty" } else { "results" });
         let objects: Vec<glib::BoxedAnyObject> =
@@ -576,11 +613,11 @@ pub(super) struct Pane {
     /// cleared by the query the next show runs. It starts false, unlike the Tags pane's: a box
     /// with nothing in it has nothing to catch up on.
     pub(super) dirty: Rc<Cell<bool>>,
-    /// The Replace All button, and which page the body is showing with how many rows on it.
-    /// What `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say whether the rows
-    /// left standing after a rewrite are the new text's.
+    /// The Replace All button, and which page the body is showing with how many rows on it and
+    /// what the count says. What `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say
+    /// whether the rows left standing after a rewrite are the new text's.
     pub(super) apply: gtk::Button,
-    pub(super) state: Rc<dyn Fn() -> (String, u32)>,
+    pub(super) state: Rc<dyn Fn() -> (String, u32, String)>,
 }
 
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
@@ -717,7 +754,33 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     // A bar spanning the width right above the results, not a spinner beside the entry: the wait
     // belongs to the list that is about to change, and the entry needs the whole sidebar width.
     // It is faded rather than hidden, so the results never shift when a query starts.
-    let progress = gtk::ProgressBar::builder().opacity(0.0).build();
+    let progress = gtk::ProgressBar::builder()
+        .opacity(0.0)
+        .valign(gtk::Align::Center)
+        .build();
+    // Between queries its place says what the answer holds, in the status bar's caption. One slot
+    // of one height for both, and the bar takes it for exactly as long as it is drawn, which is
+    // [`Pulse`]'s to decide: a query over inside the grace period leaves the count where it was.
+    let count = gtk::Label::builder()
+        .xalign(0.0)
+        .margin_start(12)
+        .margin_end(12)
+        .ellipsize(pango::EllipsizeMode::End)
+        .build();
+    for class in ["caption", "dim-label", "numeric"] {
+        count.add_css_class(class);
+    }
+    let slot = gtk::Stack::new();
+    slot.add_named(&count, Some("count"));
+    slot.add_named(&progress, Some("bar"));
+    progress.connect_opacity_notify(glib::clone!(
+        #[weak]
+        slot,
+        move |bar| slot.set_visible_child_name(match bar.opacity() > 0.0 {
+            true => "bar",
+            false => "count",
+        })
+    ));
 
     // `edit-find-replace-symbolic`, not a chevron: it names what the button reveals rather than
     // which way a panel opens, and the chevron was invisible for the user who reported this. An
@@ -805,6 +868,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         apply: apply.clone(),
         progress: progress.clone(),
         pulse: Pulse::new(&progress),
+        count,
         body: body.clone(),
         results,
         generation: Cell::new(0),
@@ -889,7 +953,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&controls);
-    column.append(&progress);
+    column.append(&slot);
     column.append(&body);
     Pane {
         widget: column.upcast(),
@@ -913,6 +977,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                         .map(|name| name.to_string())
                         .unwrap_or_default(),
                     search.results.n_items(),
+                    search.count.text().to_string(),
                 )
             }
         }),
@@ -1026,5 +1091,20 @@ mod tests {
         assert!(replaced.contains("<s>&lt;b&gt;</s>"), "{replaced}");
         assert!(replaced.contains(">&amp;x</span>"), "{replaced}");
         assert!(pango::parse_markup(&replaced, '\u{0}').is_ok());
+    }
+
+    #[test]
+    fn the_count_says_one_in_the_singular_and_a_cut_number_as_a_floor() {
+        assert_eq!(count_label(1, 1, false, false), "1 result in 1 file");
+        assert_eq!(count_label(12, 3, false, false), "12 results in 3 files");
+        // An exact scan counts every match the index holds past the cap, but not the files.
+        assert_eq!(
+            count_label(340, 20, false, true),
+            "340 results in 20+ files"
+        );
+        assert_eq!(
+            count_label(100, 20, true, true),
+            "100+ results in 20+ files"
+        );
     }
 }

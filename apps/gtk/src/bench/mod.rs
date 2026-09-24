@@ -109,6 +109,9 @@ use tags::bench_tags;
 /// `ACCENT_BENCH_TERM=1` prints what a shell window calls itself — the window title, the header's
 /// two lines and the tab's — until VTE has reported a title of its own. Against `--terminal` that
 /// is the vault-less window; against a vault it opens a shell in a tab and covers that instead.
+/// The vault-less window then answers Save Session with a name and prints whether its primary
+/// menu offers Close Session either side; give it a scratch `TMPDIR`, or its shell joins the
+/// holder of whatever session of accent is running.
 /// `ACCENT_BENCH_SHELL_KEYS=1` focuses a shell in a window that does not have the keyboard and
 /// prints what `Ctrl+S` activates.
 /// `ACCENT_BENCH_HOLD=open` then `=back`, on one scratch state, is a shell outliving its window:
