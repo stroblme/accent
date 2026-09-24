@@ -81,6 +81,37 @@ pub(super) fn bench_git_init(app: &Rc<App>) {
     });
 }
 
+/// A commit row of the history clicked the moment another repository is picked, before the
+/// refresh that reads the new one's has landed. Point it at a vault holding two repositories with
+/// a commit each. The row used to be the old repository's, asked of the new one, which toasted
+/// `Cannot list the commit's files: fatal: bad object …`; now the history is empty until then.
+pub(super) fn bench_git_switch(app: &Rc<App>) {
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        wait_for(
+            || app.git.get().is_some_and(|git| git.log_rows() > 0),
+            30000,
+        )
+        .await;
+        let Some(git) = app.git.get().cloned() else {
+            return bench_quit(&app);
+        };
+        println!("bench git_switch before rows={}", git.log_rows());
+        let said = app.toasted.get();
+        git.select_repo(1);
+        let rows = git.log_rows();
+        git.activate_log_row(0);
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!(
+            "bench git_switch clicked rows={rows} toasts={} said={:?} after={}",
+            app.toasted.get() - said,
+            bench_said(&app),
+            git.log_rows()
+        );
+        bench_quit(&app);
+    });
+}
+
 /// Whether the sidebar is showing a Git pane at all, which is the whole readout above: the pane
 /// appearing is a switcher icon, and the headless image has no pointer to find it with.
 fn has_git_pane(app: &Rc<App>) -> bool {

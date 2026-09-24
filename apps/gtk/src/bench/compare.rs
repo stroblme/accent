@@ -215,6 +215,14 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
             println!("bench compare_row no_repo");
             return bench_quit(&app);
         };
+        // A toast already up, the first index's, would hold the row's own back in the queue,
+        // where nothing can read it.
+        for _ in 0..80 {
+            if bench_toast(&app).is_none() {
+                break;
+            }
+            wait(100).await;
+        }
         // A Staged row needs one refresh to exist before it can be made stale.
         if mode == "staged" {
             git_cmd(&["add", "--", &rel]);
@@ -274,13 +282,23 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
             }
             // The refusal is a toast, and it asks git again, so the row it refused goes too.
             (None, _) => println!(
-                "bench compare_row opened tabs={:?} comparing=false toasts={}",
+                "bench compare_row opened tabs={:?} comparing=false toasts={} said={:?}",
                 tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
-                app.toasted.get() - said
+                app.toasted.get() - said,
+                bench_toast(&app)
             ),
         }
         bench_quit(&app);
     });
+}
+
+/// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.
+fn bench_toast(app: &Rc<App>) -> Option<String> {
+    let toast = find_widget(app.window.upcast_ref(), &|w| {
+        w.type_().name() == "AdwToastWidget"
+    })?;
+    let label = find_widget(&toast, &|w| w.is::<gtk::Label>())?;
+    Some(label.downcast::<gtk::Label>().ok()?.label().to_string())
 }
 
 /// The end-of-line diagnostics of a comparison's collapsed runs: they used to be drawn all the

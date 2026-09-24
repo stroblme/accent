@@ -110,11 +110,21 @@ impl Panel {
     /// The file rows of one commit are contiguous and only one commit is ever expanded, so where
     /// they are is remembered rather than looked for: a scan would read every row in the store,
     /// and a `LogItem` is several `String`s.
-    pub(super) fn collapse(&self) {
+    fn collapse(&self) {
         self.expanded.replace(None);
         if let Some((start, n)) = self.expanded_at.take() {
             self.log.splice(start, n, &[] as &[glib::BoxedAnyObject]);
         }
+    }
+
+    /// Take the whole history away until the next refresh reads one: what picking another
+    /// repository does. Every row on screen names a commit of the one it replaces, and a click
+    /// on one would be asked of the new one, which answers `fatal: bad object`.
+    pub(super) fn clear_log(&self) {
+        self.collapse();
+        self.has_more.set(false);
+        self.state.borrow_mut().commits.clear();
+        self.log.remove_all();
     }
 
     /// Show, or hide again, the files one commit changed.
@@ -192,13 +202,21 @@ impl Panel {
         if !self.has_more.replace(false) {
             return;
         }
-        let panel = self.clone();
+        let (panel, asked) = (self.clone(), repo.clone());
         glib::spawn_future_local(async move {
             let vault = panel.hooks.vault.clone();
             let page = crate::work::attempt("load more history", move || {
                 vault.git_log(&repo, skip, PAGE)
             })
             .await;
+            // Another repository was picked while git answered, and its history is not this.
+            let moved = {
+                let state = panel.state.borrow();
+                state.repos.get(state.selected) != Some(&asked)
+            };
+            if moved {
+                return;
+            }
             let page = match page {
                 Ok(page) => page,
                 // Whatever went wrong, the history behind the row is still there, so the Load

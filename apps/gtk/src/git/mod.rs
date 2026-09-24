@@ -406,8 +406,18 @@ impl Panel {
 
     pub fn activate_last_log_row(&self) {
         if let Some(last) = self.log.n_items().checked_sub(1) {
-            self.log_view.emit_by_name::<()>("activate", &[&last]);
+            self.activate_log_row(last);
         }
+    }
+
+    /// Activate the history's row `at`, and pick the repository `at` in the chooser, as a click
+    /// does. `ACCENT_BENCH_GIT=switch` and nothing else.
+    pub fn activate_log_row(&self, at: u32) {
+        self.log_view.emit_by_name::<()>("activate", &[&at]);
+    }
+
+    pub fn select_repo(&self, at: u32) {
+        self.chooser.set_selected(at);
     }
 
     /// How many rows the changes list holds. `ACCENT_BENCH_GIT` prints it either side of a
@@ -481,9 +491,9 @@ impl Panel {
                 return;
             }
             panel.state.borrow_mut().selected = chooser.selected() as usize;
-            // The history stays up until the refresh lands, and it is the other repository's: a
-            // file under it would be read in this one.
-            panel.collapse();
+            // The history on screen is the other repository's until the refresh lands, and a
+            // commit or a file under it clicked meanwhile would be read in this one.
+            panel.clear_log();
             panel.refresh(Depth::Everything);
             // And ask its remote what it has, rather than leaving the first look at a second
             // repository up to five minutes stale. One round trip per pick, which is what makes
