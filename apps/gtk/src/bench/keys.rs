@@ -841,10 +841,11 @@ fn bench_term_save(app: &Rc<App>) {
 /// `ACCENT_BENCH_HOLD=open|back`: a shell outliving its window. Run twice on one scratch state,
 /// `open` first. `open` sends a `cd` and a marker into the window's shell and quits the way
 /// Ctrl+Q does, which writes the session and leaves the shell held; `back` prints what the
-/// restore brought back — the key, where the shell is, and whether the marker came back on its
-/// screen — then closes the tab and prints how many shells the holder still has. Expected: the
-/// same key twice, `at=/tmp`, `replayed=true`, `held=0`. Under `SHELL=/bin/bash`, whose `vte.sh`
-/// reports the directory.
+/// restore brought back — the key, where the shell is, whether the marker came back on its
+/// screen, how many of its rows the replay filled and whether it has the keyboard — then closes
+/// the tab and prints how many shells the holder still has. Expected: the same key twice,
+/// `at=/tmp`, `replayed=true`, as many `lines` as `rows`, `focused=true`, `held=0`. Under
+/// `SHELL=/bin/bash`, whose `vte.sh` reports the directory.
 ///
 /// `=early` closes new shells before their `attach` can have had them started: in the same tick,
 /// and a few milliseconds in, while the attach waits for the holder it started. Expected
@@ -866,7 +867,9 @@ pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
     // mode may flush what is waiting there.
     glib::timeout_add_local_once(Duration::from_millis(1000), move || {
         if open {
-            term.view.feed_child(b"cd /tmp && echo held-marker\n");
+            // Enough lines to fill the screen, so a replay drawn at another size shows.
+            term.view
+                .feed_child(b"cd /tmp && seq 1 100 && echo held-marker\n");
         }
         glib::timeout_add_local_once(Duration::from_millis(1500), move || {
             bench_hold_step(&app, &term, open)
@@ -891,7 +894,18 @@ fn bench_hold_step(app: &Rc<App>, term: &Rc<crate::terminal::Term>, open: bool) 
         .view
         .text_format(vte4::Format::Text)
         .is_some_and(|text| text.contains("held-marker"));
-    println!("bench hold back key={key} at={at} replayed={replayed} toasts={toasts}");
+    let text = term
+        .view
+        .text_format(vte4::Format::Text)
+        .unwrap_or_default();
+    let lines = text.lines().filter(|line| !line.trim().is_empty()).count();
+    let focused = gtk::prelude::GtkWindowExt::focus(&app.window)
+        .is_some_and(|widget| widget == *term.view.upcast_ref::<gtk::Widget>());
+    println!(
+        "bench hold back key={key} at={at} replayed={replayed} rows={} lines={lines} \
+         focused={focused} toasts={toasts}",
+        term.view.row_count()
+    );
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
     let app = app.clone();
     glib::timeout_add_local_once(Duration::from_millis(500), move || {

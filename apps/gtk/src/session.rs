@@ -713,6 +713,13 @@ impl App {
             .borrow_mut()
             .retain(|key, _| self.awaiting.borrow().contains_key(key));
         self.put_back(&restore);
+        // A shell is back at once, where a note lands later: the one in front of the pane the
+        // reader was in takes the keyboard, as a new one does.
+        if let Some(Doc::Terminal(term)) = self.active_doc()
+            && restore.active.as_deref() == Some(term.key().as_str())
+        {
+            self.focus_document(&self.pane());
+        }
     }
 
     /// Split `pane` the way `layout` is split, and note which pane each tab belongs in. The pane
