@@ -39,7 +39,7 @@ pub struct Shell {
 #[derive(Clone, PartialEq)]
 pub enum WindowKey {
     Vault(PathBuf),
-    /// Shells saved under a name (Save Session…): no vault, but a session and a place in the
+    /// Shells saved under a name (Save): no vault, but a session and a place in the
     /// recent list like one.
     Terminal(PathBuf),
     Loose(Loose),
