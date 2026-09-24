@@ -69,6 +69,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("app.open-remote", "Open Remote…", &[]),
     ("win.open-recent", "Open Recent…", &["<Control>r"]),
     ("app.close-vault", "Close Vault", &[]),
+    // Save's session half, for the primary menu of a window of shells: a focused shell keeps
+    // `Ctrl+S`, and Save over a note in front saves the note.
+    ("win.save-session", "Save Session", &[]),
     ("win.close-session", "Close Session", &[]),
     ("app.quit", "Quit", &["<Control>q"]),
     ("win.palette-files", "Go to File…", &["<Control>e"]),
@@ -249,6 +252,7 @@ impl App {
         match name {
             "save" => self.save(),
             "save-as" => self.save_as(),
+            "save-session" => self.save_shells(),
             "close-session" => self.close_session(),
             "open-file" => self.open_file_dialog(),
             "new-file" => {
@@ -823,10 +827,10 @@ pub fn label_of(action: &str) -> &str {
 /// The primary menu's four sections (DESIGN.md, Primary menu), for a window opened on `key`: the
 /// files in this window, which vault it is on, what it shows, and the application. What needs a
 /// vault — making a file or a folder in it, closing it — is left off a window without one rather
-/// than offered and refused. A named session has Close Session as its way out. A shell on this
-/// machine is its own item only where New Terminal opens one on a host. Every item is the window's
-/// whichever tab is in front: what acts on the document, Save, Find and Toggle Preview among
-/// them, is left to its chord and the palette.
+/// than offered and refused. A window of shells has Save Session, and a named one Close Session
+/// as its way out. A shell on this machine is its own item only where New Terminal opens one on a
+/// host. Every item is the window's whichever tab is in front: what acts on the document, Save,
+/// Find and Toggle Preview among them, is left to its chord and the palette.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -843,6 +847,9 @@ fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let mut vaults = vec!["app.open-vault", "app.open-remote", "win.open-recent"];
     if vault {
         vaults.push("app.close-vault");
+    }
+    if key.is_terminal() {
+        vaults.push("win.save-session");
     }
     if matches!(key, crate::shell::WindowKey::Terminal(_)) {
         vaults.push("win.close-session");
@@ -1059,8 +1066,8 @@ mod tests {
                 "app.close-vault"
             ]
         );
-        // Without a vault there is nothing to make a file in and no vault to close, and a named
-        // session is closed as one.
+        // Without a vault there is nothing to make a file in and no vault to close. A window of
+        // shells saves its session, named or not, and a named session is closed as one.
         let named = primary_actions(&WindowKey::Terminal("terminal://dev".into()));
         let unnamed = primary_actions(&WindowKey::Loose(Loose::Terminal));
         for menu in [&named, &unnamed] {
@@ -1073,16 +1080,25 @@ mod tests {
                 "app.open-vault",
                 "app.open-remote",
                 "win.open-recent",
+                "win.save-session",
                 "win.close-session"
             ]
         );
         assert_eq!(
             unnamed[1],
-            ["app.open-vault", "app.open-remote", "win.open-recent"]
+            [
+                "app.open-vault",
+                "app.open-remote",
+                "win.open-recent",
+                "win.save-session"
+            ]
         );
         let documents = primary_actions(&WindowKey::Loose(Loose::Documents));
         assert_eq!(documents[0], ["win.open-file"]);
-        assert_eq!(documents[1], unnamed[1]);
+        assert_eq!(
+            documents[1],
+            ["app.open-vault", "app.open-remote", "win.open-recent"]
+        );
         // New Terminal in a remote vault's window opens a shell on the host, so there a shell on
         // this machine is an item of its own.
         let remote = primary_actions(&WindowKey::Vault("ssh://box/srv/vault".into()));
@@ -1101,7 +1117,7 @@ mod tests {
             ]
         );
         // Every item is a command the window has, which is where its label comes from.
-        for menu in [vault, documents, remote, named] {
+        for menu in [vault, documents, remote, named, unnamed] {
             for action in menu.iter().flatten() {
                 assert!(
                     ACTIONS.iter().any(|(name, _, _)| name == action),

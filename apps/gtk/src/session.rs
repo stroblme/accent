@@ -297,6 +297,12 @@ impl App {
         if self.active().is_some() || self.active_diagram().is_some() {
             return self.save_active();
         }
+        self.save_shells();
+    }
+
+    /// Save Session: a window of shells written down under its name, asked for the first time.
+    /// Any other window has no session of shells, and a vault's writes its own as it changes.
+    pub(crate) fn save_shells(self: &Rc<Self>) {
         let named = match &*self.key.borrow() {
             shell::WindowKey::Terminal(key) => terminal::session_name(key).map(str::to_string),
             key if key.is_terminal() => None,
