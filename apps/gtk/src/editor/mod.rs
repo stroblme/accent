@@ -330,6 +330,8 @@ pub struct Tab {
     /// First-wins ([`crate::widgets::Debounce::call_once`]): a caret held on an arrow key must
     /// still tell the outline where it is, rather than be pushed off for as long as it moves.
     cursor: crate::widgets::Debounce,
+    /// The end-of-line messages laid again for a new column width, once a drag has settled.
+    refit: crate::widgets::Debounce,
     on_autosave: Hook,
     on_edited: Hook,
     on_banner: Hook,
@@ -637,6 +639,7 @@ pub fn open(
         debounce: crate::widgets::Debounce::new(DEBOUNCE),
         autosave: crate::widgets::Debounce::new(AUTOSAVE),
         cursor: crate::widgets::Debounce::new(CURSOR),
+        refit: crate::widgets::Debounce::new(DEBOUNCE),
         on_autosave: RefCell::new(None),
         on_edited: RefCell::new(None),
         on_banner: RefCell::new(None),
@@ -689,6 +692,26 @@ pub fn open(
             tab.update_sticky();
         }
     ));
+
+    // An end-of-line message is cut to the column it was laid in (`diagnostics::fit`), so a new
+    // column width lays them again. The adjustment's page size is that width, the view being the
+    // scrollable child.
+    scroller
+        .hadjustment()
+        .connect_page_size_notify(glib::clone!(
+            #[weak(rename_to = tab)]
+            tab,
+            move |_| {
+                if tab.annotated.get() > 0 {
+                    let weak = Rc::downgrade(&tab);
+                    tab.refit.call(move || {
+                        if let Some(tab) = weak.upgrade() {
+                            tab.paint_diagnostics();
+                        }
+                    });
+                }
+            }
+        ));
 
     // What the top of the view is inside changes on every scroll, and the widget the title has
     // to line up with moves with the clamp, so the bar is recomputed rather than positioned once.
@@ -1106,6 +1129,7 @@ impl Tab {
             false => &items,
         };
         self.annotated.set(diagnostics::render(
+            &self.view,
             &self.buffer,
             &self.annotations,
             painted,
