@@ -370,6 +370,12 @@ fn reattach_on_key(term: &Rc<Term>) {
 /// it there still running, and relays it into this pty: so the shell outlives the tab's pty and a
 /// closed window, and comes back when its tab does. Without `accent-cli` it is the shell itself,
 /// ending with its tab, as it always used to.
+///
+/// Not before the view is laid out ([`when_laid_out`]): the holder redraws a shell it kept at the
+/// size the attach finds its pty at, and until then that is VTE's default of 24 rows, or for a
+/// restored tab behind another no size at all. A screen replayed at the wrong size stays that way
+/// until the program in it redraws. So a restored tab behind another attaches when it is first
+/// shown, and is called "Terminal" until then; a new shell starts two frames later than it could.
 fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
     let (cwd, argv) = match (shell, cli()) {
         (Shell::Local(cwd), Some(cli)) => (
@@ -386,23 +392,60 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
         (Shell::Remote { argv, .. }, _) => (None, argv.clone()),
     };
-    let named = argv.join(" ");
-    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
-    view.spawn_async(
-        vte4::PtyFlags::DEFAULT,
-        cwd.as_deref().and_then(Path::to_str),
-        &args,
-        &[],
-        glib::SpawnFlags::DEFAULT,
-        || {},
-        -1,
-        gio::Cancellable::NONE,
-        move |result| {
-            if let Err(e) = result {
-                tracing::warn!("cannot start {named}: {e}");
+    when_laid_out(view, move |view| {
+        let named = argv.join(" ");
+        let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        view.spawn_async(
+            vte4::PtyFlags::DEFAULT,
+            cwd.as_deref().and_then(Path::to_str),
+            &args,
+            &[],
+            glib::SpawnFlags::DEFAULT,
+            || {},
+            -1,
+            gio::Cancellable::NONE,
+            move |result| {
+                if let Err(e) = result {
+                    tracing::warn!("cannot start {named}: {e}");
+                }
+            },
+        );
+    });
+}
+
+/// Run `then` once `view` is on screen at the size it will keep: at once if it is laid out
+/// already, else once it is shown and two frames in a row have given it the same size. The
+/// second frame is for a restored split, whose handles move for a few frames before they settle
+/// (`session::hold_ratios`): a shell attached at the first of those sizes can be a dozen columns
+/// wide. GTK 4 has no signal for an allocation, so a tick callback looks each frame, but only
+/// while the view is mapped: a tab that stays behind another costs nothing while it waits. The
+/// view comes in as an argument, as nothing hung on it may hold it.
+fn when_laid_out(view: &vte4::Terminal, then: impl FnOnce(&vte4::Terminal) + 'static) {
+    if view.is_mapped() && view.height() > 0 {
+        return then(view);
+    }
+    let then = Rc::new(Cell::new(Some(then)));
+    let wait = move |view: &vte4::Terminal| {
+        let (then, last) = (then.clone(), Cell::new((0, 0)));
+        view.add_tick_callback(move |view, _| {
+            // Hidden again first: the next map waits afresh.
+            if !view.is_mapped() {
+                return glib::ControlFlow::Break;
             }
-        },
-    );
+            let size = (view.width(), view.height());
+            if size.1 == 0 || last.replace(size) != size {
+                return glib::ControlFlow::Continue;
+            }
+            if let Some(then) = then.take() {
+                then(view);
+            }
+            glib::ControlFlow::Break
+        });
+    };
+    if view.is_mapped() {
+        wait(view);
+    }
+    view.connect_map(wait);
 }
 
 /// Run `changed` whenever VTE reports a title of its own: once a moment after the shell has
