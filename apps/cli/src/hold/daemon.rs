@@ -27,7 +27,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long a terminal may leave output unread before it is dropped.
 const STALL: Duration = Duration::from_secs(5);
@@ -38,6 +38,11 @@ const IDLE_MS: i32 = 1000;
 const GRACE: Duration = Duration::from_secs(1);
 /// The largest read from a pty, and the largest piece of a replay.
 const CHUNK: usize = 64 * 1024;
+/// How long a holder that holds no shell waits for a terminal before it leaves. The `attach` that
+/// starts a holder connects within two seconds or gives up (`client::connect`), and says HELLO at
+/// once, so five times that with nobody connecting means it died first. Short enough that a
+/// holder left that way is gone before anyone lists what is held.
+const WAIT: Duration = Duration::from_secs(10);
 
 /// Tells attached terminals apart, so that one leaving does not detach the one that took over.
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -45,6 +50,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Daemon {
     shells: Mutex<HashMap<String, Arc<Shell>>>,
     socket: PathBuf,
+    /// When a terminal last connected, for [`Daemon::watch`].
+    seen: Mutex<Instant>,
 }
 
 struct Shell {
@@ -77,8 +84,13 @@ pub fn run() -> io::Result<()> {
     let daemon = Arc::new(Daemon {
         shells: Mutex::default(),
         socket,
+        seen: Mutex::new(Instant::now()),
     });
+    let watched = daemon.clone();
+    thread::spawn(move || watched.watch());
     for conn in listener.incoming().flatten() {
+        // `super::lock`: `lock` here is the lock file.
+        *super::lock(&daemon.seen) = Instant::now();
         let daemon = daemon.clone();
         thread::spawn(move || daemon.serve(conn));
     }
@@ -205,6 +217,19 @@ impl Daemon {
         lock(&self.shells).remove(id);
         shell.ended(code);
         self.leave_if_idle();
+    }
+
+    /// Leave once no terminal has connected for [`WAIT`] and no shell is held: a holder whose
+    /// `attach` died before its HELLO would otherwise wait forever. Only the first shell needs
+    /// waiting for; once one has come, the holder leaves as the last one ends ([`Daemon::gone`]).
+    fn watch(&self) {
+        loop {
+            let left = wait_left(*lock(&self.seen), Instant::now());
+            if left.is_zero() {
+                return self.leave_if_idle();
+            }
+            thread::sleep(left);
+        }
     }
 
     /// Exit, taking the socket along, when no shell is held. The check and the exit happen under
@@ -455,9 +480,34 @@ fn var<'a>(hello: &'a Hello, name: &str) -> Option<&'a OsStr> {
         .filter(|value| !value.is_empty())
 }
 
+/// How much of [`WAIT`] is left for a holder a terminal last connected to at `seen`.
+fn wait_left(seen: Instant, now: Instant) -> Duration {
+    WAIT.saturating_sub(now.saturating_duration_since(seen))
+}
+
 /// A status as a shell reports it: the exit code, or 128 plus the signal that ended the process.
 fn status(status: ExitStatus) -> i32 {
     status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counted from the last terminal that connected; one that connected after the clock was read
+    /// leaves the whole wait to go.
+    #[test]
+    fn a_holder_with_nothing_to_hold_waits_from_the_last_terminal() {
+        let seen = Instant::now();
+        assert_eq!(wait_left(seen, seen), WAIT);
+        assert_eq!(
+            wait_left(seen, seen + Duration::from_secs(3)),
+            WAIT - Duration::from_secs(3)
+        );
+        assert_eq!(wait_left(seen, seen + WAIT), Duration::ZERO);
+        assert_eq!(wait_left(seen, seen + WAIT * 2), Duration::ZERO);
+        assert_eq!(wait_left(seen + Duration::from_secs(1), seen), WAIT);
+    }
 }

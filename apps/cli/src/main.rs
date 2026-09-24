@@ -123,8 +123,9 @@ enum Cmd {
     },
     /// Hold the terminals' shells: the daemon `attach` starts when none is running.
     ///
-    /// One per user and machine. It leaves on its own when its last shell has ended, and returns
-    /// at once when another holder is already up.
+    /// One per user and machine. It leaves on its own when its last shell has ended, or ten
+    /// seconds after it was last asked anything when it never held one, and returns at once when
+    /// another holder is already up.
     Hold,
     /// Attach this terminal to held shell ID, starting the holder and the shell if need be.
     ///
