@@ -72,6 +72,9 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Git shows only where there is a repository, Ports only on a remote vault, Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, floor 200.
+- Below 760 sp an `AdwBreakpoint` hides the sidebar: that is the default 280 px sidebar beside the 480 px column floor. Above it the sidebar comes back as it was, at its dragged width.
+- `F9` still shows the sidebar in a narrow window, beside the note rather than over it.
+- Neither the narrow-window collapse nor presentation mode is session state: the session saves the sidebar as it was before either.
 
 **Files**
 
@@ -454,6 +457,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - A diagram's page is painted in the colours the draw.io file gives it, in light and dark alike, the theme reaching only the surround and the accent only the selection: a diagram's colours are its content. The Properties pane may put any colour into the document; none is a literal in code.
 - **`theme.rs` is the only file allowed to write a hex literal**, and one anywhere else is a bug the pre-flight grep catches. It holds libadwaita's `--view-bg-color` pair (`#ffffff` / `#1d1d20`) and their foregrounds, the Solarized palette (Ethan Schoonover's, MIT), and the terminal's ANSI palettes: Ayu and Ayu Light (MIT, from `mbadolato/iTerm2-Color-Schemes`) under the Adwaita themes, Solarized's own under Solarized. Only the dark one has a contrast floor in the tests (3.0:1 on `#1d1d20`): Ayu Light and Solarized are low-contrast by design and ship as their authors made them.
 - One flat background: the sidebar, both header bars, the tab bar and the document all paint `var(--view-bg-color)` (`accent-flat`), so the window reads as one surface rather than banded panels.
+- The find bar paints the note's own background (`--view-bg-color`) in every theme through `accent-flat`, which has to reach `searchbar > revealer > box`: Adwaita paints that box in the header-bar colour, a band that shows once the chrome around it fades.
 - The 1 px paned separator is the only division. Under the pointer it takes the accent at the same width, dragged it thickens to 3 px, and a double-click puts it back at its default position.
 - Four themes, chosen in Preferences: System, Light and Dark are `AdwStyleManager` colour schemes and paint nothing of ours; Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` on `:root`, so every widget follows untouched and it still follows the system between its halves. It leaves the accent, shade and border variables alone, so the one-accent rule holds in all four.
 - Light and dark are the same design by construction: outside `theme.rs` nothing is picked per theme, so there is no second palette to keep in step, and the same holds for the accent, which the user can change at any moment.
