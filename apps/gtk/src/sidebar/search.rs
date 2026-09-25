@@ -10,7 +10,7 @@ use super::{OnOpen, Target};
 use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
-use accent_core::index::{Match, SearchHit};
+use accent_core::index::{MIN_INFIX, Match, SearchHit};
 use accent_core::path::{basename, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
@@ -41,11 +41,13 @@ const CONFIRM_ABOVE: usize = 1;
 /// query there that does outlive it is the reader's own first exact scan on an index the page
 /// cache has not got yet, which reads every body off the disk (459 ms) and is worth reporting.
 const SHOW_AFTER: u32 = 2;
-/// How long a ranked query with All on waits before walking the trees the index never entered,
-/// counted from when it was asked — which is [`DEBOUNCE`] after the last keystroke, so the walk
-/// starts some 400 ms after the typing stops. The walk took 132 ms on the generated 40k-file vault,
-/// too slow to run per keystroke, and a query typed past in the meantime is never walked at all.
-const WALK_AFTER: Duration = Duration::from_millis(350);
+/// How long a ranked answer stands before its two slower halves are asked for — the files that
+/// hold it mid-word, and with All on the walk past the index — counted from when it was asked.
+/// That is the entry's own 150 ms `search-delay` and [`DEBOUNCE`] after the last keystroke, so
+/// the two start some 400 ms after the typing stops. The walk took 132 ms on the generated
+/// 40k-file vault and a mid-word query up to 140 ms, too slow for every keystroke, and a query
+/// typed past in the meantime asks for neither.
+const WIDEN_AFTER: Duration = Duration::from_millis(200);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
 /// One query, already compiled. Built on the main thread from what the search box says, so an
@@ -64,6 +66,14 @@ pub enum Query {
         text: String,
         options: Options,
         all: bool,
+    },
+    /// The files the index holds the ranked query in mid-word, leaving out the `skip` files the
+    /// ranked rows already list, at most `limit` rows. `all` means what it does above.
+    MidWord {
+        text: String,
+        limit: usize,
+        all: bool,
+        skip: Vec<String>,
     },
     /// The ranked query's text as a case-insensitive literal over the trees the index never
     /// entered, at most `limit` rows. `stop` turns true once a newer question has been asked, and
@@ -86,6 +96,7 @@ pub enum Answer {
         /// The matches All's walk found past the index. Listed, never rewritten.
         walked: Vec<Match>,
     },
+    MidWord(Vec<SearchHit>),
     Walked(Vec<Match>),
 }
 
@@ -399,10 +410,22 @@ impl Search {
                 ms = t0.elapsed().as_secs_f64() * 1e3,
                 "sidebar query"
             );
-            // With All on, a ranked answer leaves the room it did not fill to the walk.
-            let room = match &answer {
-                Answer::Fts(hits) if key.all => {
-                    Some(crate::SEARCH_LIMIT.saturating_sub(hits.len()))
+            // What the ranked rows list, which the mid-word rows below them must not repeat. A
+            // query shorter than a trigram has none, and one that filled the list has no room.
+            let listed = match &answer {
+                Answer::Fts(hits) => Some(hits.len()),
+                _ => None,
+            };
+            let skip = match &answer {
+                Answer::Fts(hits)
+                    if !hits.is_empty()
+                        && hits.len() < crate::SEARCH_LIMIT
+                        && key.text.trim().chars().count() >= MIN_INFIX =>
+                {
+                    // A file's rows arrive together, so its repeats are neighbours.
+                    let mut files: Vec<String> = hits.iter().map(|h| h.rel_path.clone()).collect();
+                    files.dedup();
+                    Some(files)
                 }
                 _ => None,
             };
@@ -410,54 +433,111 @@ impl Search {
             // with the answer that belongs on screen. Old results stay up until it lands.
             if search.generation.load(Ordering::Relaxed) == mine {
                 search.show(&key, answer);
-                if let Some(room) = room.filter(|room| *room > 0) {
-                    search.walk_soon(key.text.trim().to_string(), mine, room, t0);
+                if let Some(listed) = listed
+                    && (skip.is_some() || key.all)
+                {
+                    search.widen_soon(key, mine, t0, listed, skip);
                 }
             }
             search.set_busy(search.busy());
         });
     }
 
-    /// Walk the trees the index never entered for a ranked query, once it has stood for
-    /// [`WALK_AFTER`], and append what the walk finds under [`NOT_INDEXED`].
+    /// Add the slower halves of a ranked answer once it has stood for [`WIDEN_AFTER`]: the files
+    /// that hold the query mid-word, in the order the trigram index gives them, then, with All
+    /// on, what the walk finds past the index under [`NOT_INDEXED`]. Each goes below what is
+    /// already listed, in that order, into whatever room the rows above left.
     ///
-    /// Nothing here can rank a file with no FTS row, so the rows come in path order below the
-    /// ranked ones. A newer question cancels both halves: the wait ends without a walk, and a
-    /// walk already running reads the generation before each file and stops. Its answer is
-    /// dropped either way, so it never lands on the rows of a query asked after it.
-    fn walk_soon(self: &Rc<Self>, text: String, mine: u64, room: usize, asked: Instant) {
+    /// Neither can be ranked against the prefix rows — a trigram match has no term statistics
+    /// and a walked file has no FTS row — so both come after them. A newer question cancels all
+    /// of it: the wait ends without asking, a walk already running reads the generation before
+    /// each file and stops, and an answer that lands anyway is dropped, so it never shows under
+    /// a query asked after it.
+    fn widen_soon(
+        self: &Rc<Self>,
+        key: Key,
+        mine: u64,
+        asked: Instant,
+        mut listed: usize,
+        skip: Option<Vec<String>>,
+    ) {
         let search = self.clone();
+        let text = key.text.trim().to_string();
         glib::spawn_future_local(async move {
-            glib::timeout_future(WALK_AFTER.saturating_sub(asked.elapsed())).await;
+            glib::timeout_future(WIDEN_AFTER.saturating_sub(asked.elapsed())).await;
             let current = search.generation.clone();
             let stale = move || current.load(Ordering::Relaxed) != mine;
-            if stale() {
+            if let Some(skip) = skip
+                && !stale()
+            {
+                let room = crate::SEARCH_LIMIT - listed;
+                let query = Query::MidWord {
+                    text: text.clone(),
+                    limit: room,
+                    all: key.all,
+                    skip,
+                };
+                if let Some(Answer::MidWord(hits)) = search.ask("mid_word", &text, query).await
+                    && !stale()
+                {
+                    listed += hits.len();
+                    search.show_mid_word(hits, room);
+                }
+            }
+            let room = crate::SEARCH_LIMIT.saturating_sub(listed);
+            if !key.all || room == 0 || stale() {
                 return;
             }
-            search.running.set(search.running.get() + 1);
-            search.set_busy(true);
-            let run = search.data.search.clone();
             let query = Query::Walk {
                 text: text.clone(),
                 limit: room,
                 stop: Box::new(stale.clone()),
             };
-            let t0 = Instant::now();
-            let answer = crate::work::off_thread("walk", move || run(query)).await;
-            search.running.set(search.running.get() - 1);
-            tracing::debug!(
-                query = text,
-                stale = stale(),
-                ms = t0.elapsed().as_secs_f64() * 1e3,
-                "sidebar walk"
-            );
-            if let Some(Answer::Walked(walked)) = answer
+            if let Some(Answer::Walked(walked)) = search.ask("walk", &text, query).await
                 && !stale()
             {
                 search.show_walked(&text, walked, room);
             }
-            search.set_busy(search.busy());
         });
+    }
+
+    /// Run one of [`widen_soon`](Self::widen_soon)'s questions on a worker thread, the bar
+    /// pulsing meanwhile.
+    async fn ask(self: &Rc<Self>, pass: &'static str, text: &str, query: Query) -> Option<Answer> {
+        self.running.set(self.running.get() + 1);
+        self.set_busy(true);
+        let run = self.data.search.clone();
+        let t0 = Instant::now();
+        let answer = crate::work::off_thread(pass, move || run(query)).await;
+        self.running.set(self.running.get() - 1);
+        self.set_busy(self.busy());
+        tracing::debug!(
+            query = text,
+            pass,
+            ms = t0.elapsed().as_secs_f64() * 1e3,
+            "sidebar pass"
+        );
+        answer
+    }
+
+    /// Append the mid-word rows below the ranked ones, and count them in. Rows that filled the
+    /// `room` they were given may have left matches out, so the count becomes a floor.
+    fn show_mid_word(&self, hits: Vec<SearchHit>, room: usize) {
+        if hits.is_empty() {
+            return;
+        }
+        let (found, files, cut) = self.counted.get();
+        let found = found + hits.iter().map(|h| 1 + h.more).sum::<usize>();
+        let new_files = hits.iter().map(|h| h.rel_path.as_str());
+        let files = files + new_files.collect::<HashSet<_>>().len();
+        let cut = cut || hits.len() >= room;
+        self.counted.set((found, files, cut));
+        self.count.set_text(&count_label(found, files, cut, cut));
+        let objects: Vec<glib::BoxedAnyObject> = fts_rows(hits)
+            .into_iter()
+            .map(glib::BoxedAnyObject::new)
+            .collect();
+        self.results.splice(self.results.n_items(), 0, &objects);
     }
 
     /// Append the walk's rows below the ranked ones, and count them in. A walk that filled the
@@ -520,8 +600,8 @@ impl Search {
                 rows.extend(walked_rows(walked, &re, &accent));
                 (rows, count)
             }
-            // Appended by `show_walked`, never shown on its own.
-            Answer::Walked(_) => return,
+            // Appended by `show_mid_word` and `show_walked`, never shown on their own.
+            Answer::MidWord(_) | Answer::Walked(_) => return,
         };
         // No Results says it already.
         self.count
@@ -1236,8 +1316,10 @@ mod tests {
     }
 
     #[test]
-    fn a_walk_waits_for_the_typing_to_stop() {
-        assert_eq!((DEBOUNCE + WALK_AFTER).as_millis(), 400);
+    fn the_slower_halves_wait_for_the_typing_to_stop() {
+        // `GtkSearchEntry`'s default `search-delay`, which the box keeps.
+        let entry_delay = Duration::from_millis(150);
+        assert_eq!((entry_delay + DEBOUNCE + WIDEN_AFTER).as_millis(), 400);
     }
 
     #[test]

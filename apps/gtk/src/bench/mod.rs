@@ -245,8 +245,10 @@ use tags::bench_tags;
 /// holding it behind the pane's back, printing the rows before, after and once they are gone
 /// again — once ranked, then once more with the replace row open, which is the exact scan, and
 /// last with another pane in front, which is the catch-up the Search pane owes on its way back.
-/// `=walk:<query>` types a ranked query with All on and prints the rows before and after the walk
-/// past the index has appended its own under Not Indexed.
+/// `=type:<query>` types a ranked query and prints each change of the rows with the milliseconds
+/// since the last keystroke: the prefix rows, then the mid-word rows appended below them;
+/// `=walk:<query>` does the same with All on, the walk past the index appending its rows last,
+/// under Not Indexed.
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.

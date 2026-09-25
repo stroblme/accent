@@ -504,6 +504,16 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                         walked,
                     }
                 }
+                sidebar::Query::MidWord {
+                    text,
+                    limit,
+                    all,
+                    skip,
+                } => sidebar::Answer::MidWord(
+                    vault
+                        .search_mid_word(&text, limit, all, &skip)
+                        .unwrap_or_default(),
+                ),
                 // The ranked query's text, matched the way a plain query with no toggle is
                 // everywhere else: a case-insensitive literal.
                 sidebar::Query::Walk { text, limit, stop } => sidebar::Answer::Walked(
