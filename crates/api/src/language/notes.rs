@@ -167,8 +167,10 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
 /// Paths matching what has been typed, and whether there were more than fit.
 ///
 /// The query is matched *anywhere* in the path and need not be contiguous, because it is
-/// [`fuzzy`]'s match — the same one the palette and the file switcher use: `[[work]]` offers
-/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. What starts with the query still
+/// [`fuzzy`]'s match — the matcher the palette and the file switcher use: `[[work]]` offers
+/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. It is taken as typed, though
+/// ([`fuzzy::Query::as_typed`]): its words in order and `é` not folded to `e`, which is how
+/// GtkSourceView narrows the same rows afterwards. What starts with the query still
 /// comes first — that is the file the reader most likely means — then the better match, then the
 /// shortest path, so a note at the root beats one buried under three directories.
 ///
@@ -182,7 +184,7 @@ pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bo
 
 /// [`path_candidates`] by index into `paths`, for a caller whose list holds more than paths.
 fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
-    let mut matcher = fuzzy::Query::new(query, fuzzy::Corpus::Paths);
+    let mut matcher = fuzzy::Query::as_typed(query, fuzzy::Corpus::Paths);
     let query = query.to_lowercase();
     let mut hits: Vec<(bool, Reverse<u32>, usize, usize)> = paths
         .iter()
@@ -208,7 +210,7 @@ fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
 /// Matched the same way a path is, so `#bc` offers `a/bc`: a tag is one word but a nested one is
 /// several, and the part that is remembered is rarely the first.
 pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> (Vec<String>, bool) {
-    let mut matcher = fuzzy::Query::new(prefix, fuzzy::Corpus::Words);
+    let mut matcher = fuzzy::Query::as_typed(prefix, fuzzy::Corpus::Words);
     let hits: Vec<String> = tags
         .iter()
         .filter(|(name, _)| matcher.score(name).is_some())
