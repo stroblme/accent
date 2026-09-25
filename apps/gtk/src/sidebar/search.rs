@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Same value as the palette and the switcher (DESIGN.md, Motion): long enough to swallow a burst
-/// of keystrokes, short enough to feel immediate.
+/// of keystrokes, short enough to feel immediate. The only wait between a keystroke and its
+/// query: the entry's own `search-delay`, 150 ms by default, is set to nothing.
 const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
@@ -43,11 +44,10 @@ const CONFIRM_ABOVE: usize = 1;
 const SHOW_AFTER: u32 = 2;
 /// How long a ranked answer stands before its two slower halves are asked for — the files that
 /// hold it mid-word, and with All on the walk past the index — counted from when it was asked.
-/// That is the entry's own 150 ms `search-delay` and [`DEBOUNCE`] after the last keystroke, so
-/// the two start some 400 ms after the typing stops. The walk took 132 ms on the generated
-/// 40k-file vault and a mid-word query up to 140 ms, too slow for every keystroke, and a query
-/// typed past in the meantime asks for neither.
-const WIDEN_AFTER: Duration = Duration::from_millis(200);
+/// That is [`DEBOUNCE`] after the last keystroke, so the two start some 400 ms after the typing
+/// stops. The walk took 132 ms on the generated 40k-file vault and a mid-word query up to 140 ms,
+/// too slow for every keystroke, and a query typed past in the meantime asks for neither.
+const WIDEN_AFTER: Duration = Duration::from_millis(350);
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
 /// One query, already compiled. Built on the main thread from what the search box says, so an
@@ -953,9 +953,12 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     body.add_named(&scroller(&view), Some("results"));
     body.set_visible_child_name("prompt");
 
+    // No `search-delay`: [`DEBOUNCE`] is the pane's one wait, and the entry's 150 ms default in
+    // front of it made every query start some 200 ms after the keystroke that asked for it.
     let entry = gtk::SearchEntry::builder()
         .placeholder_text("Search…")
         .hexpand(true)
+        .search_delay(0)
         .build();
     // A bar spanning the width right above the results, not a spinner beside the entry: the wait
     // belongs to the list that is about to change, and the entry needs the whole sidebar width.
@@ -1317,9 +1320,7 @@ mod tests {
 
     #[test]
     fn the_slower_halves_wait_for_the_typing_to_stop() {
-        // `GtkSearchEntry`'s default `search-delay`, which the box keeps.
-        let entry_delay = Duration::from_millis(150);
-        assert_eq!((entry_delay + DEBOUNCE + WIDEN_AFTER).as_millis(), 400);
+        assert_eq!((DEBOUNCE + WIDEN_AFTER).as_millis(), 400);
     }
 
     #[test]
