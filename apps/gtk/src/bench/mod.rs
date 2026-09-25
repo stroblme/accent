@@ -38,7 +38,9 @@ use git::{
     bench_git_switch, bench_git_sync_over_fetch,
 };
 use image::bench_image;
-use keys::{bench_hold, bench_keys, bench_list, bench_shell_keys, bench_term};
+use keys::{
+    bench_hold, bench_keys, bench_list, bench_occurrence_keys, bench_shell_keys, bench_term,
+};
 use outline::bench_outline;
 use panes::{
     bench_collapse, bench_layout, bench_layout_pick, bench_panes, bench_pin, bench_pin_window,
@@ -75,6 +77,8 @@ use tags::bench_tags;
 /// positions; `=<rel_note>` instead presses Return and Tab at the end of every list line of that
 /// note and prints the ones whose marker or indent did not come out as `typing` says it should,
 /// plus the width one indent is worth there, then Tab on lines that already have text on them.
+/// `=occur:<rel>` asks for XTEST presses of `Alt+J` and `Ctrl+Shift+L` with typing after them, and
+/// prints every selection and the buffer after each (see `keys::bench_occurrence_keys`).
 /// It opens with the completion popup: whether "a popup is up" reads true against a real one,
 /// that Return at the end of a list item under it continues the list while no row is selected and
 /// is the popup's once one is, that "up" reads false against both a view taken off screen under
@@ -488,6 +492,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_chrome(&app, &notes);
         }
         if let Some(arg) = keys {
+            if let Some(rel) = arg.strip_prefix("occur:") {
+                return bench_occurrence_keys(&app, rel);
+            }
             return match arg.as_str() {
                 "1" => bench_keys(&app),
                 rel => bench_list(&app, rel),
