@@ -116,6 +116,12 @@ data class PdfPlace(
 
 data class VaultState(
     val root: String? = null,
+    /**
+     * [root] is the folder just picked, and the core has not handed the vault over yet: the index
+     * is being opened, and on the app's first vault the library loaded. Set on the pick itself,
+     * so the picker is gone by the next frame rather than sitting there as if the tap were lost.
+     */
+    val opening: Boolean = false,
     val indexing: Boolean = false,
     /**
      * The reader stopped the walk ([VaultModel.stopIndexing]): the index holds what it had read,
@@ -154,7 +160,13 @@ data class VaultState(
      */
     val back: OpenPdf? = null,
     val message: String? = null,
-)
+) {
+    /**
+     * Whether the vault opened for [picked] is still wanted: the reader may have closed it, or
+     * picked another, while the core was opening it.
+     */
+    fun waitsFor(picked: String): Boolean = opening && root == picked
+}
 
 /**
  * What the switcher ranks: every file, then every note a link names that is not there yet, by the
@@ -245,9 +257,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Open the vault at [root], leaving the picker on the next frame.
+     *
+     * The core's open is quick on a warm index, but the first one of a run loads the library and
+     * a new vault creates its index; the reader waits for neither on a picker that has not moved.
+     * What the core hands back is let go if the reader has closed the vault, or picked another,
+     * in the meantime.
+     */
     fun open(root: String) {
+        _state.value = VaultState(root = root, opening = true)
         viewModelScope.launch {
             val opened = withContext(Dispatchers.IO) { runCatching { Vault.open(root) } }
+            if (!_state.value.waitsFor(root)) {
+                opened.onSuccess { release(it) }
+                return@launch
+            }
             opened
                 .onSuccess { v ->
                     release(vault)
@@ -257,7 +282,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     listen()
                     refresh()
                 }
-                .onFailure { fail("Cannot open this folder", it) }
+                .onFailure {
+                    // Back to the picker, which says why.
+                    _state.value = VaultState()
+                    fail("Cannot open this folder", it)
+                }
         }
     }
 
