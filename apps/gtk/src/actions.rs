@@ -128,6 +128,13 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
     ("win.caret-above", "Add Caret Above", &["<Shift><Alt>Up"]),
     ("win.caret-below", "Add Caret Below", &["<Shift><Alt>Down"]),
+    // JetBrains' chord: `Ctrl+D`, VS Code's, is Duplicate Line here.
+    (
+        "win.next-occurrence",
+        "Add Caret at Next Occurrence",
+        &["<Alt>j"],
+    ),
+    ("win.all-occurrences", "Select All Occurrences", &[]),
     (
         "win.zoom-in",
         "Zoom In",
@@ -385,6 +392,8 @@ impl App {
             "scroll-down" => self.with_active(|tab| tab.scroll_lines(1)),
             "caret-above" => self.with_active(|tab| tab.add_caret(false)),
             "caret-below" => self.with_active(|tab| tab.add_caret(true)),
+            "next-occurrence" => self.with_active(Tab::add_next_occurrence),
+            "all-occurrences" => self.with_active(Tab::select_all_occurrences),
             "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
             "back" => self.navigate(false),
             "forward" => self.navigate(true),
@@ -1260,6 +1269,7 @@ mod tests {
         for (action, accel) in [
             ("win.save", "<Control>s"),
             ("win.duplicate-line", "<Control>d"),
+            ("win.next-occurrence", "<Alt>j"),
             ("win.toggle-comment", "<Control>k"),
             ("win.delete-line", "<Control>l"),
             ("win.palette-files", "<Control>e"),
