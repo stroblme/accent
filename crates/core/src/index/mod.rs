@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
 use schema::{DROP_ALL, SCHEMA, SCHEMA_VERSION};
+pub use search::MIN_INFIX;
 use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;

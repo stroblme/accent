@@ -10,10 +10,10 @@ const SETTLE: Duration = Duration::from_millis(2500);
 /// How long to wait for a cold vault's first walk before giving up on it. `testvault` is 40k
 /// files and takes about half a minute.
 const INDEXED: Duration = Duration::from_secs(120);
-/// One keystroke of the `walk:` drill: faster than the walk's wait, as typing is.
+/// One keystroke of the `type:` and `walk:` drills: faster than the pane's wait, as typing is.
 const TYPING: Duration = Duration::from_millis(100);
-/// From the last keystroke to a ranked answer on screen and the walk not yet started.
-const RANKED: Duration = Duration::from_millis(250);
+/// How often those drills look at the rows, to time each change from the last keystroke.
+const LOOK: Duration = Duration::from_millis(2);
 
 /// `ACCENT_BENCH_SEARCH=<query>[:<n>]` puts `<query>` in the Search pane, then writes `n` files
 /// holding it twice — one note unless the tail says otherwise, every second file a `.txt` rather
@@ -40,24 +40,32 @@ const RANKED: Duration = Duration::from_millis(250);
 /// the `grep=true` lines after the `grep` step are what a requery nobody asked for costs in exact
 /// mode, and `<n>` is how many files the settled batch behind one of them touched.
 ///
-/// `ACCENT_BENCH_SEARCH=walk:<query>` is a different drill: it turns All on and types `<query>` a
-/// character at a time, faster than the walk past the index waits for, then prints the rows once
-/// the ranked answer is up (`ranked`), once the walk has landed (`walked`) and with All off again
-/// (`all_off`). On a vault that is a git repository gitignoring a folder that holds the query,
-/// `walked` lists that folder's rows under `Not Indexed`, below the ranked ones, and neither of the
-/// other two steps does. `RUST_LOG=accent=debug` prints one `sidebar walk` line for the whole
-/// query, not one per character.
+/// `ACCENT_BENCH_SEARCH=type:<query>` is a different drill: it types `<query>` a character at a
+/// time, faster than the pane waits for, and prints the rows each time they change, with the
+/// milliseconds since the last keystroke: first the prefix rows, then the mid-word rows appended
+/// below them once the typing has stopped. `=walk:<query>` does the same with All on, where the
+/// walk past the index appends its rows last, under `Not Indexed`, and prints them once more with
+/// All off again (`all_off`). `RUST_LOG=accent=debug` prints one `sidebar pass` line per pass for
+/// the whole query, not one per character.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
-    if let Some(query) = arg.strip_prefix("walk:") {
+    let typed = arg
+        .strip_prefix("type:")
+        .map(|query| (query, false))
+        .or_else(|| arg.strip_prefix("walk:").map(|query| (query, true)));
+    if let Some((query, all)) = typed {
         let typed: Vec<String> = (1..=query.chars().count())
             .map(|n| query.chars().take(n).collect())
             .collect();
         return bench_search_indexed(app.clone(), Instant::now(), move |app| {
             if let Some(sidebar) = app.sidebar.get() {
                 sidebar.show_pane("search");
-                sidebar.toggle_search_all();
+                if all {
+                    sidebar.toggle_search_all();
+                }
             }
-            bench_walk_type(app, typed, 0)
+            // Typed once the window's first git refreshes are in: each one that lands asks the
+            // question again, which would put a second answer into what is being timed.
+            glib::timeout_add_local_once(SETTLE, move || bench_type(app, typed, 0, all));
         });
     }
     // A `:<n>` tail stages a batch of several files, which is what a sync pull looks like; a
@@ -207,36 +215,53 @@ fn bench_search_remove(paths: &[PathBuf]) {
 }
 
 /// One keystroke of the `walk:` drill, and once the query is typed out, its three steps.
-fn bench_walk_type(app: Rc<App>, typed: Vec<String>, i: usize) {
+fn bench_type(app: Rc<App>, typed: Vec<String>, i: usize, all: bool) {
     let (Some(sidebar), Some(text)) = (app.sidebar.get(), typed.get(i)) else {
         return bench_quit(&app);
     };
     sidebar.set_search_text(text);
     if i + 1 < typed.len() {
-        glib::timeout_add_local_once(TYPING, move || bench_walk_type(app, typed, i + 1));
+        glib::timeout_add_local_once(TYPING, move || bench_type(app, typed, i + 1, all));
         return;
     }
-    glib::timeout_add_local_once(RANKED, move || {
-        bench_walk_print(&app, "ranked");
+    let typed_at = Instant::now();
+    let seen = RefCell::new(sidebar.search_state());
+    glib::timeout_add_local(LOOK, move || {
+        let state = app.sidebar.get().map(|s| s.search_state());
+        if let Some(state) = state.filter(|state| *state != *seen.borrow()) {
+            bench_type_print(typed_at.elapsed().as_millis(), &state);
+            seen.replace(state);
+        }
+        if typed_at.elapsed() < SETTLE {
+            return glib::ControlFlow::Continue;
+        }
+        let Some(sidebar) = app.sidebar.get().filter(|_| all) else {
+            bench_quit(&app);
+            return glib::ControlFlow::Break;
+        };
+        sidebar.toggle_search_all();
+        let app = app.clone();
         glib::timeout_add_local_once(SETTLE, move || {
-            bench_walk_print(&app, "walked");
             if let Some(sidebar) = app.sidebar.get() {
-                sidebar.toggle_search_all();
+                let (page, rows, count) = sidebar.search_state();
+                println!("bench search step=all_off page={page} count={count:?} rows={rows:?}");
             }
-            glib::timeout_add_local_once(SETTLE, move || {
-                bench_walk_print(&app, "all_off");
-                bench_quit(&app);
-            });
+            bench_quit(&app);
         });
+        glib::ControlFlow::Break
     });
 }
 
-fn bench_walk_print(app: &Rc<App>, step: &str) {
-    let Some(sidebar) = app.sidebar.get() else {
-        return println!("bench search walk step={step} pane=none");
+/// One change of the rows: every name while they fit on a line, the first and last few past that.
+fn bench_type_print(ms: u128, (page, rows, count): &(String, Vec<String>, String)) {
+    let names = match rows.len() {
+        0..=12 => format!("{rows:?}"),
+        n => format!("{:?} … {:?}", &rows[..6], &rows[n - 4..]),
     };
-    let (page, rows, count) = sidebar.search_state();
-    println!("bench search walk step={step} page={page} count={count:?} rows={rows:?}");
+    println!(
+        "bench search ms={ms} page={page} count={count:?} rows={} {names}",
+        rows.len()
+    );
 }
 
 fn bench_search_print(app: &Rc<App>, step: &str) {
