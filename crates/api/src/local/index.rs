@@ -68,6 +68,19 @@ impl Local {
         self.searcher().search(query, limit, include_ignored)
     }
 
+    /// The mid-word matches below a ranked search: [`Index::search_mid_word`], on the same
+    /// connection as [`search`](Self::search).
+    pub fn search_mid_word(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+        skip: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        self.searcher()
+            .search_mid_word(query, limit, include_ignored, skip)
+    }
+
     /// Exact search: one row per match of `re`, capped at `limit`, plus how many there are in
     /// all, which is what a [`replace_all`](Self::replace_all) under the same `include_ignored`
     /// would rewrite. `include_ignored` means what it does in [`search`](Self::search).

@@ -389,6 +389,14 @@ methods! {
     // ------------------------------------------------------------ index reads
     any list_dir(rel: ref str) -> Vec<FileRow>;
     any search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    /// A host whose `accent-cli serve` predates it answers "no such method", which the Search
+    /// pane takes as no mid-word matches.
+    any search_mid_word(
+        query: ref str,
+        limit: val usize,
+        include_ignored: val bool,
+        skip: ref [String],
+    ) -> Vec<SearchHit>;
     any tags() -> Vec<(String, i64)>;
     any files_with_tag(tag: ref str) -> Vec<FileRow>;
     any backlinks(rel: ref str) -> Vec<Backlink>;
@@ -873,7 +881,7 @@ mod tests {
             assert_eq!(items[0].insert, "[[Beta]]");
             assert_eq!(
                 items[0].filter.as_deref(),
-                Some("[[sub/Beta"),
+                Some("[[sub/Beta.md"),
                 "the popup narrows by what was typed, `[[` and all"
             );
             assert_eq!(

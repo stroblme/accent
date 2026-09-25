@@ -17,6 +17,7 @@ use anyhow::{Context, Result};
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
 use schema::{DROP_ALL, SCHEMA, SCHEMA_VERSION};
+pub use search::MIN_INFIX;
 use search::{folded_find, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
@@ -253,6 +254,15 @@ impl Index {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(Index { conn })
+    }
+
+    /// SQLite's `data_version`: a number that moves whenever another connection has committed to
+    /// the index since this one last asked. What lets a reader keep something it read out of the
+    /// index for as long as the index says nothing has changed.
+    pub fn data_version(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA data_version", [], |r| r.get(0))?)
     }
 
     /// Every write transaction in this file, and `BEGIN IMMEDIATE` rather than rusqlite's default

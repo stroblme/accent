@@ -12,6 +12,7 @@
 //! and an overflow asks for another reconcile — measured as a permanent loop on a 16 536-directory
 //! vault. Whatever the walk skips must be skipped here too, or neither limit improves.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -54,14 +55,22 @@ fn inotify_budget() -> Option<u64> {
 
 /// Owns the debouncer; dropping it stops watching.
 pub struct Watcher {
-    _backend: Backend,
+    backend: Backend,
+    /// What is watched besides the root, so a new set is a diff against it. See
+    /// [`set_dirs`](Self::set_dirs).
+    dirs: HashSet<PathBuf>,
 }
 
-/// Held only so the watcher keeps running; stopping happens in `Debouncer::drop`.
-#[allow(dead_code)]
+/// Stopping happens in `Debouncer::drop`.
 enum Backend {
     Native(Debouncer<notify::RecommendedWatcher, RecommendedCache>),
     Poll(Debouncer<notify::PollWatcher, RecommendedCache>),
+}
+
+/// Whether watching `dir_count` directories would take more than 80% of the inotify budget, which
+/// is where polling takes over.
+fn over_budget(dir_count: usize) -> bool {
+    inotify_budget().is_some_and(|b| dir_count as f64 > 0.8 * b as f64)
 }
 
 impl Watcher {
@@ -77,8 +86,8 @@ impl Watcher {
     /// If that count is close to the kernel's inotify budget the watcher falls back to polling
     /// instead of silently missing changes (inotify fails per-directory once the budget is gone).
     ///
-    /// A directory created after this call is not watched until the next walk rebuilds the
-    /// watcher; the caller is responsible for triggering one.
+    /// A directory created after this call is not watched until [`set_dirs`](Self::set_dirs) is
+    /// given it; the caller is responsible for that.
     ///
     /// `on_event` runs on the debouncer's own thread, so it must not block: hand the event to a
     /// channel or the UI's main context and return.
@@ -105,9 +114,7 @@ impl Watcher {
         };
 
         let debounce = Duration::from_millis(300);
-        let over_budget = inotify_budget().is_some_and(|b| dir_count as f64 > 0.8 * b as f64);
-
-        let backend = if over_budget {
+        let backend = if over_budget(dir_count) {
             tracing::warn!(
                 dir_count,
                 budget = inotify_budget(),
@@ -131,7 +138,55 @@ impl Watcher {
             Backend::Native(d)
         };
 
-        Ok(Watcher { _backend: backend })
+        Ok(Watcher {
+            backend,
+            dirs: dirs.iter().cloned().collect(),
+        })
+    }
+
+    /// Watch `dirs` besides the root from now on: a watch for each directory that is new, an
+    /// unwatch for each that went, on the same debouncer.
+    ///
+    /// A new [`Watcher`] would cost more than the watches. The debouncer holds each event for
+    /// 300 ms before reporting it, and dropping one drops what it holds, so a file written just
+    /// before a rebuild was never reported: the window's first git refresh changes the set about
+    /// a second after a git vault opens. `false`, and nothing changed, when the set has crossed
+    /// the inotify budget either way since this watcher was made: switching between inotify and
+    /// polling takes a new one.
+    pub fn set_dirs(&mut self, dirs: &[PathBuf]) -> bool {
+        if over_budget(dirs.len() + 1) != matches!(self.backend, Backend::Poll(_)) {
+            return false;
+        }
+        let next: HashSet<PathBuf> = dirs.iter().cloned().collect();
+        for dir in self.dirs.difference(&next) {
+            // A deleted directory took its watch with it, and the kernel said so already.
+            if let Err(e) = self.backend.unwatch(dir) {
+                tracing::debug!(dir = %dir.display(), error = %e, "not unwatching");
+            }
+        }
+        for dir in next.difference(&self.dirs) {
+            if let Err(e) = self.backend.watch(dir) {
+                tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+            }
+        }
+        self.dirs = next;
+        true
+    }
+}
+
+impl Backend {
+    fn watch(&mut self, dir: &Path) -> notify::Result<()> {
+        match self {
+            Backend::Native(d) => d.watch(dir, RecursiveMode::NonRecursive),
+            Backend::Poll(d) => d.watch(dir, RecursiveMode::NonRecursive),
+        }
+    }
+
+    fn unwatch(&mut self, dir: &Path) -> notify::Result<()> {
+        match self {
+            Backend::Native(d) => d.unwatch(dir),
+            Backend::Poll(d) => d.unwatch(dir),
+        }
     }
 }
 

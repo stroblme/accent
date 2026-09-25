@@ -17,7 +17,7 @@ const CLIP_AFTER: usize = 200;
 /// Shortest mid-word query [`Index::infix`] asks the trigram index for. Below three characters
 /// there is no trigram to look up, and FTS5 answers a `LIKE` by reading every body instead — the
 /// one thing the second index exists to avoid.
-const MIN_INFIX: usize = 3;
+pub const MIN_INFIX: usize = 3;
 
 /// Rows one file may contribute to a grep, however many matches it holds. The list's own cap is
 /// shared by every file the query reaches — and by the three passes the sidebar makes over them —
@@ -65,10 +65,53 @@ impl Index {
     /// same window over the body the index already stores costs a tenth of that.
     ///
     /// A query that starts mid-word — `oggle split` — is not a term the index holds, so this
-    /// ranked path comes back empty and [`infix`](Self::infix) answers it instead.
+    /// ranked path comes back empty and [`infix`](Self::infix) answers it instead. Where it does
+    /// find something, the mid-word matches below it are
+    /// [`search_mid_word`](Self::search_mid_word)'s, asked for separately so the prefix rows
+    /// never wait for them.
     pub fn search(
         &self,
         query: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        let phrase = fold(&terms(query).join(" "));
+        let hits = self.ranked(query, &phrase, limit, include_ignored)?;
+        let hits = match hits.is_empty() {
+            true => self.infix(query, limit, include_ignored)?,
+            false => hits,
+        };
+        self.per_match(hits, &phrase, limit)
+    }
+
+    /// What the trigram index adds below a [`search`](Self::search) that found something: the
+    /// files holding the query mid-word, in [`infix`](Self::infix)'s order, leaving out the
+    /// `skip` files already listed, at most `limit` rows. `toggle` finds `retoggle.md` here.
+    ///
+    /// Nothing where the prefix index found nothing, because `search` has already answered that
+    /// query from the trigram index and this would list the same files again.
+    pub fn search_mid_word(
+        &self,
+        query: &str,
+        limit: usize,
+        include_ignored: bool,
+        skip: &[String],
+    ) -> Result<Vec<SearchHit>> {
+        let phrase = fold(&terms(query).join(" "));
+        if self.ranked(query, &phrase, 1, include_ignored)?.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hits = self.infix(query, limit + skip.len(), include_ignored)?;
+        let hits = hits.into_iter().filter(|h| !skip.contains(&h.rel_path));
+        self.per_match(hits.take(limit).collect(), &phrase, limit)
+    }
+
+    /// The files the prefix index ranks for `query`, best first, at most `limit` of them: one hit
+    /// each, before [`per_match`](Self::per_match) makes rows of them.
+    fn ranked(
+        &self,
+        query: &str,
+        phrase: &str,
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
@@ -90,24 +133,18 @@ impl Index {
         // What the query matched is one phrase, so that is what the window is cut around and what
         // the snippet marks. It goes in folded, and with its whitespace squeezed, because that is
         // how `snippet_window` reads the body it looks through.
-        let phrase = fold(&terms(query).join(" "));
         let rows = st.query_map(
             params![
                 q,
                 query.trim(),
                 limit as i64,
-                &phrase,
+                phrase,
                 include_ignored,
                 FileKind::Markdown.as_i64(),
             ],
-            |r| hit(r, &phrase),
+            |r| hit(r, phrase),
         )?;
-        let hits: Vec<SearchHit> = rows.collect::<rusqlite::Result<_>>()?;
-        let hits = match hits.is_empty() {
-            true => self.infix(query, limit, include_ignored)?,
-            false => hits,
-        };
-        self.per_match(hits, &phrase, limit)
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The ranked files as one row per occurrence rather than one per file.
@@ -151,9 +188,12 @@ impl Index {
     /// cut. `notes_tri` indexes every three-character window of the same bodies, which is what
     /// lets a substring be an index lookup rather than a pass over every note.
     ///
-    /// It runs only where [`search`](Self::search) came back empty, which is what keeps the path
-    /// the sidebar takes on every keystroke exactly as fast as it was: a query that matches a
-    /// word never reaches this at all, and one that matches nothing pays a single index probe.
+    /// [`search`](Self::search) runs it only where the prefix index came back empty, which is
+    /// what keeps the path the sidebar takes on every keystroke exactly as fast as it was: a query
+    /// that matches a word never reaches this there, and one that matches nothing pays a single
+    /// index probe. Below a query that did match, it is
+    /// [`search_mid_word`](Self::search_mid_word)'s, which the sidebar asks once the typing
+    /// stops.
     ///
     /// The match is a literal, case-insensitive substring of the body or the title. Two
     /// consequences of that, both from FTS5 answering the `LIKE` by verifying it against the
@@ -965,6 +1005,34 @@ mod tests {
         // trigram is asked of the index at all.
         assert!(ix.search("zqxjv split", 10, false).unwrap().is_empty());
         assert!(ix.search("gg", 10, false).unwrap().is_empty());
+    }
+
+    /// `toggle` is a prefix hit in `target.md` and a mid-word one in `retoggle.md`: the prefix hit
+    /// comes first, the mid-word one is listed below it, and neither twice.
+    #[test]
+    fn mid_word_hits_come_below_the_prefix_ones_and_never_repeat_them() {
+        let (vault, db) = ranking_vault();
+        fs::write(vault.path().join("retoggle.md"), "Retoggle the pane.\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let prefix = ix.search("toggle", 10, false).unwrap();
+        assert_eq!(files(&prefix), ["target.md"]);
+        let skip: Vec<String> = files(&prefix).iter().map(|f| f.to_string()).collect();
+        let mid = ix.search_mid_word("toggle", 10, false, &skip).unwrap();
+        assert_eq!(files(&mid), ["retoggle.md"], "{mid:?}");
+        assert_eq!(&mid[0].snippet, "Re«toggle» the pane.");
+
+        // A query only the trigram index answers was answered by `search` already.
+        assert_eq!(
+            files(&ix.search("oggle split", 10, false).unwrap()),
+            ["target.md"]
+        );
+        assert!(
+            ix.search_mid_word("oggle split", 10, false, &[])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The delete half of the FTS triggers, which is the half that fails silently: a stale title

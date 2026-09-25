@@ -10,8 +10,8 @@
 use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
@@ -167,8 +167,10 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
 /// Paths matching what has been typed, and whether there were more than fit.
 ///
 /// The query is matched *anywhere* in the path and need not be contiguous, because it is
-/// [`fuzzy`]'s match — the same one the palette and the file switcher use: `[[work]]` offers
-/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. What starts with the query still
+/// [`fuzzy`]'s match — the matcher the palette and the file switcher use: `[[work]]` offers
+/// `Projects/Rework.md` and `[[dpwk]]` offers `deep-work.md`. It is taken as typed, though
+/// ([`fuzzy::Query::as_typed`]): its words in order and `é` not folded to `e`, which is how
+/// GtkSourceView narrows the same rows afterwards. What starts with the query still
 /// comes first — that is the file the reader most likely means — then the better match, then the
 /// shortest path, so a note at the root beats one buried under three directories.
 ///
@@ -182,7 +184,7 @@ pub(crate) fn path_candidates(paths: &[String], query: &str) -> (Vec<String>, bo
 
 /// [`path_candidates`] by index into `paths`, for a caller whose list holds more than paths.
 fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
-    let mut matcher = fuzzy::Query::new(query, fuzzy::Corpus::Paths);
+    let mut matcher = fuzzy::Query::as_typed(query, fuzzy::Corpus::Paths);
     let query = query.to_lowercase();
     let mut hits: Vec<(bool, Reverse<u32>, usize, usize)> = paths
         .iter()
@@ -208,7 +210,7 @@ fn ranked_paths(paths: &[String], query: &str) -> (Vec<usize>, bool) {
 /// Matched the same way a path is, so `#bc` offers `a/bc`: a tag is one word but a nested one is
 /// several, and the part that is remembered is rarely the first.
 pub(crate) fn tag_candidates(tags: &[(String, i64)], prefix: &str) -> (Vec<String>, bool) {
-    let mut matcher = fuzzy::Query::new(prefix, fuzzy::Corpus::Words);
+    let mut matcher = fuzzy::Query::as_typed(prefix, fuzzy::Corpus::Words);
     let hits: Vec<String> = tags
         .iter()
         .filter(|(name, _)| matcher.score(name).is_some())
@@ -328,6 +330,27 @@ pub(crate) struct Notes {
     /// The text as the editor has it, which is ahead of what is on disk and in the index.
     docs: Mutex<HashMap<String, String>>,
     events: Sender<Event>,
+    /// What a link completion ranks, kept between keystrokes. See [`Notes::corpus`].
+    corpora: Mutex<Corpora>,
+}
+
+/// What one kind of link completion ranks: `paths`, whose first `named` are files and notes only
+/// linked to so far (`missing`), and after those one name per entry of `aliases`.
+struct Corpus {
+    paths: Vec<String>,
+    named: usize,
+    missing: Vec<String>,
+    aliases: Vec<(String, String)>,
+}
+
+/// The two corpora a link completion ranks, as the index held them at `version`.
+#[derive(Default)]
+struct Corpora {
+    version: i64,
+    /// `[[`: the notes and PDFs, the notes only linked to and the aliases.
+    wiki: Option<Arc<Corpus>>,
+    /// `![[` and `](`: every file.
+    files: Option<Arc<Corpus>>,
 }
 
 impl Notes {
@@ -337,7 +360,55 @@ impl Notes {
             index: Mutex::new(Index::open(db)?),
             docs: Mutex::new(HashMap::new()),
             events,
+            corpora: Mutex::default(),
         })
+    }
+
+    /// The paths a `[[` completion ranks (`wiki`), or the ones a `![[` or a `](` does, read out
+    /// of the index once and then kept while [`Index::data_version`] says nothing has been
+    /// written: a reconcile, a save or a move reads them again at the next keystroke.
+    ///
+    /// The popup asks on every keystroke while its answer is cut at the cap, and reading 39 012
+    /// paths out of SQLite was most of what each one cost on the generated 40k-file vault: 59 ms
+    /// a keystroke for `](` and `![[`, 30 ms for `[[`, where ranking them is a few.
+    fn corpus(&self, index: &Index, wiki: bool) -> Result<Arc<Corpus>> {
+        let version = index.data_version()?;
+        let mut corpora = locked(&self.corpora);
+        if corpora.version != version {
+            *corpora = Corpora {
+                version,
+                ..Corpora::default()
+            };
+        }
+        let slot = match wiki {
+            true => &mut corpora.wiki,
+            false => &mut corpora.files,
+        };
+        if let Some(corpus) = slot {
+            return Ok(corpus.clone());
+        }
+        let (mut paths, missing, aliases) = match wiki {
+            true => (
+                index.note_and_pdf_paths()?,
+                index.missing_notes()?,
+                index.note_aliases()?,
+            ),
+            false => (index.file_paths(false)?, Vec::new(), Vec::new()),
+        };
+        // Behind the files, so one that is there leads a note only linked to at the same rank:
+        // the ranking is stable.
+        paths.extend(missing.iter().cloned());
+        // The aliases last, ranked by their own names, and told apart by where they sit.
+        let named = paths.len();
+        paths.extend(aliases.iter().map(|(alias, _)| alias.clone()));
+        let corpus = Arc::new(Corpus {
+            paths,
+            named,
+            missing,
+            aliases,
+        });
+        *slot = Some(corpus.clone());
+        Ok(corpus)
     }
 
     /// The note as the editor has it if it is open, else as it is on disk: a link's target is
@@ -433,26 +504,19 @@ impl Notes {
                 }
 
                 let index = locked(&self.index);
-                let (mut paths, missing, aliases) = match trigger {
-                    Trigger::Wiki => (
-                        index.note_and_pdf_paths()?,
-                        index.missing_notes()?,
-                        index.note_aliases()?,
-                    ),
-                    _ => (index.file_paths(false)?, Vec::new(), Vec::new()),
-                };
-                // Behind the files, so one that is there leads a note only linked to at the same
-                // rank: the ranking is stable.
-                paths.extend(missing.iter().cloned());
-                // The aliases last, ranked by their own names, and told apart by where they sit.
-                let named = paths.len();
-                paths.extend(aliases.iter().map(|(alias, _)| alias.clone()));
-                let (ranked, more) = ranked_paths(&paths, prefix);
+                let corpus = self.corpus(&index, trigger == Trigger::Wiki)?;
+                let Corpus {
+                    paths,
+                    named,
+                    missing,
+                    aliases,
+                } = &*corpus;
+                let (ranked, more) = ranked_paths(paths, prefix);
                 let mut items = Vec::with_capacity(ranked.len());
                 for i in ranked {
                     // The link names the file, as any other row writes it, and reads as the
                     // alias: an alias is a name to find a note by, never a link target.
-                    if let Some((alias, rel)) = i.checked_sub(named).map(|j| &aliases[j]) {
+                    if let Some((alias, rel)) = i.checked_sub(*named).map(|j| &aliases[j]) {
                         let (name, path) = link_names(rel);
                         let target = match index.resolve_target(&name)?.as_ref() == Some(rel) {
                             true => name,
@@ -477,7 +541,7 @@ impl Notes {
                         items.push(Completion {
                             insert: format!("[[{path}]]"),
                             detail: Some(format!("{hit}, not created")),
-                            filter: Some(format!("[[{path}")),
+                            filter: Some(format!("[[{hit}")),
                             label: stem(&hit),
                             kind: Kind::File,
                             replace,
@@ -496,8 +560,10 @@ impl Notes {
                         },
                         detail: (!bare).then(|| hit.clone()),
                         // The popup narrows by what was typed since the `[[`, which a bare
-                        // name never matches; the path lets a folder narrow it too.
-                        filter: Some(format!("[[{path}")),
+                        // name never matches; the path lets a folder narrow it too. The path
+                        // as the index holds it, extension and all, because that is what the
+                        // row was ranked against: `[[Note.md` has to keep `Note.md` on screen.
+                        filter: Some(format!("[[{hit}")),
                         label: name,
                         kind: Kind::File,
                         replace,
@@ -549,11 +615,12 @@ impl Notes {
                 })
             }
             Trigger::Path => {
-                let paths = locked(&self.index).file_paths(false)?;
+                let files = self.corpus(&locked(&self.index), false)?;
                 // Matched against vault paths, so what was typed loses its encoding, and the `./`
                 // and `../` a relative link opens with, which say where from rather than what.
                 let query = markdown::percent_decode(prefix);
-                let (hits, more) = path_candidates(&paths, query.trim_start_matches(['.', '/']));
+                let (hits, more) =
+                    path_candidates(&files.paths, query.trim_start_matches(['.', '/']));
                 let dir = parent_dir(rel);
                 let items = hits
                     .into_iter()
@@ -1031,6 +1098,79 @@ mod tests {
                 ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
             ]
         );
+    }
+
+    /// The paths a completion ranks are kept between keystrokes, and read again once the index
+    /// has been written: a note that arrives while the popup is up is offered at the next one.
+    #[test]
+    fn a_completion_reads_the_paths_again_once_the_index_changes() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Other.md"), "# Other\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Oth\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        let mut writer = Index::open(&db).unwrap();
+        writer.reconcile(vault.path(), |_| {}).unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let caret = Pos {
+            line: 0,
+            character: 5,
+        };
+        let labels = || -> Vec<String> {
+            let items = notes.completion("a.md", caret).unwrap().items;
+            items.into_iter().map(|i| i.label).collect()
+        };
+        assert_eq!(labels(), ["Other"]);
+        assert_eq!(labels(), ["Other"], "kept, and the same");
+
+        std::fs::write(vault.path().join("Otherwise.md"), "# Otherwise\n").unwrap();
+        writer.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(labels(), ["Other", "Otherwise"]);
+    }
+
+    /// GtkSourceView narrows the popup a second time, keeping a row only while what was typed
+    /// since the `[[` is a case-insensitive subsequence of its `filter`. The provider ranks a note
+    /// by its path with the extension on, so the filter has to carry the extension as well, or
+    /// `[[Other.md` ranked the note and the popup then dropped it.
+    #[test]
+    fn a_typed_extension_keeps_the_note_row() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Other.md"), "# Other\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Nowhere/Other]]\n[[Other.md\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let caret = Pos {
+            line: 1,
+            character: 10,
+        };
+        let items = notes.completion("a.md", caret).unwrap().items;
+
+        let inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
+        assert_eq!(inserts, ["[[Other]]", "[[Nowhere/Other]]"]);
+        // GtkSourceView's `fuzzy_match`, which the popup runs over every row it is handed.
+        let kept = |filter: &str| {
+            let mut rest = filter.chars().flat_map(char::to_lowercase);
+            "[[other.md".chars().all(|c| rest.any(|f| f == c))
+        };
+        for item in &items {
+            let filter = item.filter.as_deref().unwrap_or(&item.label);
+            assert!(kept(filter), "the popup would drop {filter:?}");
+        }
     }
 
     /// A front matter alias is offered by its own name and writes a link to the file, spelled as

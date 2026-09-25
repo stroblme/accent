@@ -2,14 +2,15 @@
 //!
 //! Three callers ask it. The desktop palette and the Android file switcher rank a whole corpus
 //! with [`rank`], which is why they offer the same note first for the same query. The note
-//! completion popup scores one candidate at a time with [`Query`], because it orders its rows by
-//! rules of its own — what starts with the query, then the shortest path.
+//! completion popup scores one candidate at a time with [`Query::as_typed`], because it orders its
+//! rows by rules of its own — what starts with the query, then the shortest path — and because
+//! GtkSourceView filters the same rows again by rules the query has to agree with.
 //!
 //! `nucleo-matcher` is fzf's algorithm as a library: a subsequence match with bonuses for word
 //! and path-segment starts, so `dpwk` finds `deep-work.md` and a contiguous match outscores a
 //! scattered one.
 
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::path::basename;
@@ -43,10 +44,31 @@ pub struct Query {
 }
 
 impl Query {
+    /// The query as a list asks it: each word matched on its own, in any order, with fzf's `^`,
+    /// `$`, `!` and `'`, and `cafe` finding `café`.
     pub fn new(query: &str, corpus: Corpus) -> Query {
         Query {
             matcher: Matcher::new(corpus.config()),
             pattern: Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart),
+            buf: Vec::new(),
+        }
+    }
+
+    /// The whole query as one needle, in the order typed, spaces and punctuation included, and
+    /// with no diacritic folded: what GtkSourceView's own completion filter keeps. The popup runs
+    /// that filter over every row the provider hands it, so a query wider than it computes rows
+    /// only for them to be dropped, and one narrower loses rows.
+    pub fn as_typed(query: &str, corpus: Corpus) -> Query {
+        // No atom at all for an empty query, which then matches everything as `new`'s does.
+        let mut pattern = Pattern::default();
+        if !query.is_empty() {
+            let (case, normalize) = (CaseMatching::Ignore, Normalization::Never);
+            let atom = Atom::new(query, case, normalize, AtomKind::Fuzzy, false);
+            pattern.atoms.push(atom);
+        }
+        Query {
+            matcher: Matcher::new(corpus.config()),
+            pattern,
             buf: Vec::new(),
         }
     }
@@ -162,6 +184,36 @@ mod tests {
         assert_eq!(
             rank(&both, &[None, Some(0)], "test", Corpus::Paths),
             vec![1, 0]
+        );
+    }
+
+    #[test]
+    fn a_query_as_typed_keeps_its_order_and_its_accents() {
+        // A list takes the words in any order and folds `é`.
+        assert!(
+            Query::new("work deep", Corpus::Paths)
+                .score("deep-work.md")
+                .is_some()
+        );
+        assert!(Query::new("cafe", Corpus::Paths).score("café.md").is_some());
+        // The completion popup's filter does neither, so its query does not either.
+        let mut typed = Query::as_typed("work deep", Corpus::Paths);
+        assert!(typed.score("deep-work.md").is_none());
+        assert!(typed.score("Work on the deep end.md").is_some());
+        assert!(
+            Query::as_typed("cafe", Corpus::Paths)
+                .score("café.md")
+                .is_none()
+        );
+        assert!(
+            Query::as_typed("CAF", Corpus::Paths)
+                .score("café.md")
+                .is_some()
+        );
+        assert!(
+            Query::as_typed("", Corpus::Paths)
+                .score("anything")
+                .is_some()
         );
     }
 
