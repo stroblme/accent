@@ -477,7 +477,7 @@ impl Notes {
                         items.push(Completion {
                             insert: format!("[[{path}]]"),
                             detail: Some(format!("{hit}, not created")),
-                            filter: Some(format!("[[{path}")),
+                            filter: Some(format!("[[{hit}")),
                             label: stem(&hit),
                             kind: Kind::File,
                             replace,
@@ -496,8 +496,10 @@ impl Notes {
                         },
                         detail: (!bare).then(|| hit.clone()),
                         // The popup narrows by what was typed since the `[[`, which a bare
-                        // name never matches; the path lets a folder narrow it too.
-                        filter: Some(format!("[[{path}")),
+                        // name never matches; the path lets a folder narrow it too. The path
+                        // as the index holds it, extension and all, because that is what the
+                        // row was ranked against: `[[Note.md` has to keep `Note.md` on screen.
+                        filter: Some(format!("[[{hit}")),
                         label: name,
                         kind: Kind::File,
                         replace,
@@ -1031,6 +1033,46 @@ mod tests {
                 ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
             ]
         );
+    }
+
+    /// GtkSourceView narrows the popup a second time, keeping a row only while what was typed
+    /// since the `[[` is a case-insensitive subsequence of its `filter`. The provider ranks a note
+    /// by its path with the extension on, so the filter has to carry the extension as well, or
+    /// `[[Other.md` ranked the note and the popup then dropped it.
+    #[test]
+    fn a_typed_extension_keeps_the_note_row() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Other.md"), "# Other\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Nowhere/Other]]\n[[Other.md\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+        )
+        .unwrap();
+        let caret = Pos {
+            line: 1,
+            character: 10,
+        };
+        let items = notes.completion("a.md", caret).unwrap().items;
+
+        let inserts: Vec<&str> = items.iter().map(|i| i.insert.as_str()).collect();
+        assert_eq!(inserts, ["[[Other]]", "[[Nowhere/Other]]"]);
+        // GtkSourceView's `fuzzy_match`, which the popup runs over every row it is handed.
+        let kept = |filter: &str| {
+            let mut rest = filter.chars().flat_map(char::to_lowercase);
+            "[[other.md".chars().all(|c| rest.any(|f| f == c))
+        };
+        for item in &items {
+            let filter = item.filter.as_deref().unwrap_or(&item.label);
+            assert!(kept(filter), "the popup would drop {filter:?}");
+        }
     }
 
     /// A front matter alias is offered by its own name and writes a link to the file, spelled as
