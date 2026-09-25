@@ -66,7 +66,7 @@ pub struct Status {
     pub ignored: Vec<String>,
     /// A merge stopped part way and is waiting for a commit or an abort.
     pub merging: bool,
-    /// A rebase stopped part way — a `pull.rebase=true` pull on a conflict, most often — and is
+    /// A rebase stopped part way — one started in a terminal, since a Sync merges — and is
     /// waiting for a continue or an abort. Defaulted, so a server that does not send it reads.
     #[serde(default)]
     pub rebasing: bool,
@@ -1439,8 +1439,13 @@ pub fn push(repo: &Repo) -> Result<String, Error> {
 }
 
 /// A pull cannot: its merge rewrites the working tree.
+///
+/// It merges, which was git's own default until it began refusing a diverged branch that
+/// `pull.rebase` and `pull.ff` say nothing about. A merge never rewrites a commit, and a conflict
+/// stops where the pane already shows one. `--no-rebase` outranks either setting where the user
+/// has one, `pull.ff = only` included: a Sync always merges.
 pub fn pull(repo: &Repo) -> Result<String, Error> {
-    transcript(repo, &["pull"], false)
+    transcript(repo, &["pull", "--no-rebase"], false)
 }
 
 /// Where the current branch's upstream is, if it has one. `None` covers a detached HEAD and a

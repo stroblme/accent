@@ -1232,6 +1232,47 @@ fn sync_moves_a_commit_each_way_through_the_bare_origin() {
 }
 
 #[test]
+fn a_pull_onto_a_diverged_branch_merges_where_nothing_says_how() {
+    if !have_git() {
+        return;
+    }
+    // git will not reconcile a diverged branch until `pull.rebase` or `pull.ff` says how, and
+    // neither is set here: the repository's pin from `configure` goes, and so does the
+    // developer's global config, for the git under test too, which inherits this process's
+    // environment. Every test here is meant to pass without that config anyway.
+    unsafe {
+        std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+        std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    init(&source);
+    write_file(&source, "a.md", "one\n");
+    commit_all(&source, "first");
+    ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+    for clone in ["work", "other"] {
+        ok(tmp.path(), &["clone", "-q", "origin", clone]);
+        configure(&tmp.path().join(clone));
+    }
+    let (work, other) = (tmp.path().join("work"), tmp.path().join("other"));
+    ok(&work, &["config", "--unset", "pull.rebase"]);
+    write_file(&other, "theirs.md", "theirs\n");
+    commit_all(&other, "theirs");
+    ok(&other, &["push", "-q"]);
+    write_file(&work, "mine.md", "mine\n");
+    commit_all(&work, "mine");
+
+    pull(&open(&work)).unwrap();
+    assert!(work.join("theirs.md").exists(), "the pull brought theirs");
+    let parents = sh(&work, &["rev-list", "--parents", "-n", "1", "HEAD"]).stdout;
+    assert_eq!(
+        String::from_utf8_lossy(&parents).split_whitespace().count(),
+        3,
+        "a merge commit, and nothing of ours rewritten"
+    );
+}
+
+#[test]
 fn a_sync_without_an_upstream_publishes_the_branch() {
     if !have_git() {
         return;
