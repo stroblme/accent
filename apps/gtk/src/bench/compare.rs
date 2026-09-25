@@ -190,6 +190,15 @@ pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
 /// Pointed at a file HEAD did change, `commit:` prints whether the tab opened with its first change
 /// on screen, and the shared scrollbar's value, upper and page size: a long file whose one change
 /// is deep inside used to open scrolled away from it, with everything around it folded.
+///
+/// Every comparison that opens is then scrolled half a page down and read back once it has had
+/// time to lay itself again (`scrolled want=… got=…`, the two equal): a file with one side empty
+/// — untracked, newly staged, deleted, or added by the commit — went back to `got=0`, the empty
+/// column's view pulling the scroll they share into its own few pixels. `stale:` opens the file
+/// first and prints whether its editor has its own scrollbar back once the comparison has been
+/// left (`own_scroll=true`), then scrolls it: the editor used to keep the companion's adjustment,
+/// and with it the freed companion's handler, and that scroll crashed the window — every time
+/// under `MALLOC_PERTURB_=165`.
 pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
     app.show_pane("git");
     let (mode, rel) = match rel.split_once(':') {
@@ -208,8 +217,14 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
                 .unwrap_or_default()
         };
-        // The debounced refresh and its `git status`.
+        // The debounced refresh and its `git status`, and on a remote vault the host's answer.
         wait(2500).await;
+        for _ in 0..120 {
+            if app.git.get().is_some_and(|git| git.changes_rows() > 0) {
+                break;
+            }
+            wait(250).await;
+        }
         let Some(git) = app.git.get().filter(|git| git.has_repos()).cloned() else {
             println!("bench compare_row no_repo");
             return bench_quit(&app);
@@ -227,6 +242,23 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
             git_cmd(&["add", "--", &rel]);
             wait(2500).await;
         }
+        // The file's own scrollbar, from before the comparison its outgrown row begins and leaves.
+        let own = match mode.as_str() {
+            "stale" => {
+                app.open_path(&rel);
+                let mut own = None;
+                for _ in 0..40 {
+                    wait(250).await;
+                    let tab = app.open_tabs().into_iter().find(|tab| tab.rel() == rel);
+                    own = tab.and_then(|tab| tab.view.vadjustment());
+                    if own.is_some() {
+                        break;
+                    }
+                }
+                own
+            }
+            _ => None,
+        };
         match mode.as_str() {
             "stale" => println!(
                 "bench compare_row staged={:?}",
@@ -258,6 +290,17 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 format!("diff:index:{rel}")
             }
         };
+        // Both sides are read on a worker, over the wire on a remote vault; then the comparison
+        // settles.
+        for _ in 0..60 {
+            wait(250).await;
+            if app.toasted.get() > said
+                || matches!(app.doc_for(&key), Some(Doc::Diff(_)))
+                || app.open_tabs().iter().any(|tab| tab.comparison().is_some())
+            {
+                break;
+            }
+        }
         wait(1500).await;
         let tabs = app.open_tabs();
         let comparing = tabs.iter().find_map(|tab| Some((tab, tab.comparison()?)));
@@ -269,30 +312,64 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                     bench_compare_line(&compare)
                 );
                 println!("bench compare_row tops {}", bench_tops(&compare));
+                println!(
+                    "bench compare_row scrolled {}",
+                    bench_scroll(&compare).await
+                );
             }
             // A Staged row and a commit's file open a tab of two read-only panes instead, which
             // has to open scrolled to the first change.
             (None, Some(Doc::Diff(diff))) => {
                 let compare = diff.comparison();
-                let (value, upper, page) = compare.vscroll();
+                let adj = compare.vadjustment();
                 println!(
                     "bench compare_row opened key={key:?} {} first_hunk_on_screen={} \
-                     scroll={value}/{upper}/{page}",
+                     scroll={}/{}/{}",
                     bench_compare_line(compare),
-                    compare.first_hunk_on_screen()
+                    compare.first_hunk_on_screen(),
+                    adj.value(),
+                    adj.upper(),
+                    adj.page_size()
                 );
                 println!("bench compare_row tops {}", bench_tops(compare));
+                println!("bench compare_row scrolled {}", bench_scroll(compare).await);
             }
             // The refusal is a toast, and it asks git again, so the row it refused goes too.
-            (None, _) => println!(
-                "bench compare_row opened tabs={:?} comparing=false toasts={} said={:?}",
-                tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
-                app.toasted.get() - said,
-                bench_toast(&app)
-            ),
+            (None, _) => {
+                println!(
+                    "bench compare_row opened tabs={:?} comparing=false toasts={} said={:?}",
+                    tabs.iter().map(|tab| tab.rel()).collect::<Vec<_>>(),
+                    app.toasted.get() - said,
+                    bench_toast(&app)
+                );
+                if let Some(own) = own
+                    && let Some(adj) = tabs
+                        .iter()
+                        .find(|tab| tab.rel() == rel)
+                        .and_then(|tab| tab.view.vadjustment())
+                {
+                    let own_scroll = adj == own;
+                    adj.set_value(adj.value() + adj.page_size() / 2.0);
+                    wait(300).await;
+                    println!(
+                        "bench compare_row refused own_scroll={own_scroll} scrolled={}",
+                        adj.value()
+                    );
+                }
+            }
         }
         bench_quit(&app);
     });
+}
+
+/// Half a page further down the comparison, as a wheel turn goes, and where the shared scrollbar
+/// is once the comparison has had time to lay itself again.
+async fn bench_scroll(compare: &diff::Compare) -> String {
+    let adj = compare.vadjustment();
+    let want = (adj.value() + adj.page_size() / 2.0).min(adj.upper() - adj.page_size());
+    adj.set_value(want);
+    glib::timeout_future(Duration::from_millis(500)).await;
+    format!("want={want} got={}", adj.value())
 }
 
 /// What the toast over the window reads, whatever it says: [`bench_said`] looks for a failure.

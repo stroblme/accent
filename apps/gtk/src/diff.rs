@@ -377,6 +377,9 @@ struct Grid {
 struct Pads {
     above: Vec<i32>,
     below: Vec<i32>,
+    /// What no line of this column can carry because it has none at all — a file a commit added,
+    /// seen from before it — which is the whole of the other column's height.
+    rest: i32,
 }
 
 /// From the natural height of every row on each side — `None` where a side has no visible line
@@ -388,8 +391,8 @@ struct Pads {
 /// the same row; a row with no line on a side leaves all of it. The space goes below the side's
 /// line before it where that line is a change (`changed`, per row), so a change and the blank
 /// that levels it are one tinted block, and above the side's next line otherwise; what is left
-/// after the last line goes below it. This is the whole correctness surface of the alignment, so
-/// it is a plain function over plain numbers.
+/// after the last line goes below it, or to `rest` on a side with no line. This is the whole
+/// correctness surface of the alignment, so it is a plain function over plain numbers.
 fn padding(
     old: &[Option<i32>],
     new: &[Option<i32>],
@@ -400,6 +403,7 @@ fn padding(
     let mut pads = [(); 2].map(|_| Pads {
         above: vec![0; n],
         below: vec![0; n],
+        rest: 0,
     });
     let mut tops = Vec::with_capacity(n);
     let (mut y, mut carry, mut last) = (0, [0, 0], [None::<usize>; 2]);
@@ -420,8 +424,9 @@ fn padding(
         }
     }
     for s in 0..2 {
-        if let Some(l) = last[s] {
-            pads[s].below[l] += carry[s];
+        match last[s] {
+            Some(l) => pads[s].below[l] += carry[s],
+            None => pads[s].rest = carry[s],
         }
     }
     (pads, tops)
@@ -723,6 +728,12 @@ pub struct Compare {
     /// by every refresh; a bound, because a line GTK never validates would otherwise be asked
     /// about forever.
     settling: Cell<u8>,
+    /// The right column's own vertical adjustment, given up for the left one's while the
+    /// comparison lasts and handed back by [`Compare::leave`].
+    own_vadjustment: gtk::Adjustment,
+    /// The bottom margin each view was last given here, and how much of it is the blank under a
+    /// side with no line: see [`Compare::page_bottom`].
+    bottoms: [Cell<(i32, i32)>; 2],
     /// Whether the next relayout should put the first hunk on screen. Set once, when the
     /// comparison is built: a diff opens on what changed rather than on the top of a file whose
     /// first difference is four hundred lines down. Cleared by the relayout that does it, because
@@ -747,6 +758,7 @@ impl Compare {
         }
         // Vertical is shared, so two views of the same rows cannot drift apart. Horizontal
         // stays per pane: everything wraps, so there is nothing to scroll sideways anyway.
+        let own_vadjustment = new.scroller.vadjustment();
         new.scroller
             .set_vadjustment(Some(&old.scroller.vadjustment()));
         // One height for both title rows: the editor's carries Stop Comparing and would stand
@@ -789,6 +801,8 @@ impl Compare {
             grid: RefCell::new(Grid::default()),
             pending: RefCell::new(None),
             settling: Cell::new(0),
+            own_vadjustment,
+            bottoms: Default::default(),
             first_view: Cell::new(true),
             handlers: RefCell::new(Vec::new()),
             offered: RefCell::new(Vec::new()),
@@ -1173,6 +1187,17 @@ impl Compare {
         for (object, id) in self.handlers.borrow_mut().drain(..) {
             object.disconnect(id);
         }
+        // Each column scrolls on its own again before the companion can go. A GtkTextView that is
+        // freed stays connected to its adjustment, so one left on the adjustment the editor keeps
+        // was called into after it was gone: a comparison left the moment it opened — a Changes
+        // row git had outgrown — crashed the window on the editor's next scroll.
+        self.panes[1]
+            .scroller
+            .set_vadjustment(Some(&self.own_vadjustment));
+        // And the editor its page's bottom margin, should it have been the side with no line.
+        if let Some(mine) = self.editable {
+            self.set_bottom(mine, self.page_bottom(mine), 0);
+        }
         for (side, (menu, previous)) in [Side::Old, Side::New].into_iter().zip(self.offered.take())
         {
             let view = &self.pane(side).view;
@@ -1192,6 +1217,22 @@ impl Compare {
             }
             restyle_tags(&pane.buffer, &pane.view);
         }
+    }
+
+    /// The bottom margin the page gives `side`, without the blank a relayout left under a side
+    /// with no line: the editor's own, which a companion beside it takes as well. A margin
+    /// someone else has set since — the zoom — is the page's whole.
+    fn page_bottom(&self, side: Side) -> i32 {
+        let side = self.editable.unwrap_or(side);
+        let (set, blank) = self.bottoms[side.idx()].get();
+        let now = self.pane(side).view.bottom_margin();
+        if now == set { now - blank } else { now }
+    }
+
+    /// `side`'s bottom margin: the page's, and `blank` pixels more under a side with no line.
+    fn set_bottom(&self, side: Side, page: i32, blank: i32) {
+        self.pane(side).view.set_bottom_margin(page + blank);
+        self.bottoms[side.idx()].set((page + blank, blank));
     }
 
     fn schedule_relayout(&self) {
@@ -1229,7 +1270,6 @@ impl Compare {
         if let Some(mine) = self.editable {
             let (from, to) = (&self.pane(mine).view, &self.pane(mine.other()).view);
             to.set_top_margin(from.top_margin());
-            to.set_bottom_margin(from.bottom_margin());
             to.set_left_margin(from.left_margin());
             to.set_right_margin(from.right_margin());
             to.set_pixels_above_lines(from.pixels_above_lines());
@@ -1275,6 +1315,19 @@ impl Compare {
             })
             .collect();
         let (pads, tops) = padding(&heights[0], &heights[1], &extra, &changed);
+        // A side with no line at all has no paragraph to pad, so the blank that keeps it as tall
+        // as the other goes under its text, less the one empty line it shows. Left shorter, its
+        // view pulled the scroll the two share back into its own range whenever it was laid out,
+        // and a file a commit added could not be scrolled at all.
+        let pages = [Side::Old, Side::New].map(|side| self.page_bottom(side));
+        for side in [Side::Old, Side::New] {
+            let pane = self.pane(side);
+            let blank = match pads[side.idx()].rest {
+                0 => 0,
+                rest => rest - pane.view.line_yrange(&pane.buffer.start_iter()).1,
+            };
+            self.set_bottom(side, pages[side.idx()], blank.max(0));
+        }
         for side in [Side::Old, Side::New] {
             if let Some(view) = self
                 .pane(side)
@@ -1423,10 +1476,9 @@ impl Compare {
             .collect()
     }
 
-    /// The shared vertical scrollbar: value, upper and page size.
-    pub fn vscroll(&self) -> (f64, f64, f64) {
-        let adj = self.panes[0].scroller.vadjustment();
-        (adj.value(), adj.upper(), adj.page_size())
+    /// The shared vertical scrollbar, for the bench to read and to move as a reader would.
+    pub fn vadjustment(&self) -> gtk::Adjustment {
+        self.panes[0].scroller.vadjustment()
     }
 
     /// Whether row `r` is in a hidden run right now.
@@ -1835,5 +1887,13 @@ mod tests {
         assert_eq!(tops, vec![0, 10, 15]);
         assert_eq!(pads[0].above, vec![0, 0, 5]);
         assert_eq!(pads[1].above, vec![0, 0, 5]);
+    }
+
+    #[test]
+    fn a_side_with_no_line_at_all_leaves_the_whole_column_under_its_text() {
+        // A file a commit added: nothing on the old side to pad.
+        let (pads, _) = padding(&[None, None], &[Some(20), Some(30)], &[0, 0], &[true, true]);
+        assert_eq!((pads[0].rest, pads[1].rest), (50, 0));
+        assert_eq!(pads[0].below, vec![0, 0]);
     }
 }
