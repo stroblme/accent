@@ -86,7 +86,7 @@ impl Encoding {
         }
     }
 
-    fn char_pos(self, text: &str, p: types::Position) -> Pos {
+    pub(crate) fn char_pos(self, text: &str, p: types::Position) -> Pos {
         Pos {
             line: p.line,
             character: self.to_char(line_of(text, p.line), p.character),
@@ -479,6 +479,8 @@ pub(crate) struct External {
     renames: Vec<RenameFilter>,
     /// The vault root, for turning URIs into relative paths and back.
     root: PathBuf,
+    /// The server is texlab, whose outline wants putting right ([`super::latex`]).
+    texlab: bool,
 }
 
 /// Start a language server for `root` and hand back what answers with it.
@@ -524,6 +526,9 @@ pub(crate) async fn start(
         encoding,
         docs,
         root: vault_root,
+        texlab: Path::new(&name)
+            .file_stem()
+            .is_some_and(|stem| stem == "texlab"),
     }))
 }
 
@@ -905,7 +910,12 @@ impl Language for External {
             }
             let text = self.text_of(&rel)?;
             let params = json!({"textDocument": self.doc_id(&rel)?});
-            let answer = self.ask("textDocument/documentSymbol", params).await?;
+            let answer = match self.ask("textDocument/documentSymbol", params).await? {
+                Some(DocumentSymbolResponse::Nested(rows)) if self.texlab => Some(
+                    DocumentSymbolResponse::Nested(super::latex::tidy(rows, &text, self.encoding)),
+                ),
+                answer => answer,
+            };
             Ok(symbols_of(answer, &text, self.encoding))
         })
     }
