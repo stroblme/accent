@@ -396,6 +396,72 @@ pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A warning and a fold chevron on both kinds of padded line, for a screenshot of the gutter:
+/// line 3, shorter than its partner, carries its blank below it, and line 8, under a paragraph
+/// the buffer lacks, carries its blank above it. Prints each line's cell and first row as the
+/// view lays them out; the icons belong beside the first row, as the line numbers are. Point it
+/// at a scratch text file no language server answers for, as `diag:`. It holds the window up for
+/// two seconds before it quits, for the screenshot.
+pub(super) fn bench_compare_gutter(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let long = ["a long paragraph that wraps"; 8].join(" ");
+        let text = |three: &str, gone: Option<&str>| -> String {
+            (1..=12)
+                .flat_map(|i| {
+                    let line = match i {
+                        3 => three.to_string(),
+                        _ => format!("line {i}"),
+                    };
+                    std::iter::once(line).chain(gone.filter(|_| i == 7).map(str::to_string))
+                })
+                .map(|line| line + "\n")
+                .collect()
+        };
+        tab.set_text(&text(&long, Some(&long)));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_gutter write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&text("line three", None));
+        app.compare_with_disk(&tab);
+        wait(800).await;
+        tab.set_diagnostics(
+            [2, 7]
+                .map(|line| diagnostic(Severity::Warning, line, 0, 4))
+                .to_vec(),
+        );
+        tab.set_folds(
+            [2, 7]
+                .map(|line| Fold {
+                    start_line: line,
+                    end_line: line + 1,
+                })
+                .to_vec(),
+        );
+        wait(800).await;
+        for n in [2, 7] {
+            let Some(at) = tab.buffer.iter_at_line(n) else {
+                continue;
+            };
+            let ((top, height), row) = (tab.view.line_yrange(&at), tab.view.iter_location(&at));
+            println!(
+                "bench compare_gutter line={n} cell={top}+{height} first_row={}+{}",
+                row.y(),
+                row.height()
+            );
+        }
+        wait(2000).await;
+        bench_quit(&app);
+    });
+}
+
 /// Type one character into the comparing editor's side — `line`, or the first change where it is
 /// `None` — `at` of the way along that line, and print what moved while the comparison caught up:
 /// how often the shared scroll range changed, whether the scroll position did, how many rows were

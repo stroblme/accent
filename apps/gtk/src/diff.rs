@@ -67,6 +67,9 @@ const CHANGE_ALPHA: f32 = 0.16;
 /// The words that actually differ, in the same hue over the row's own background. Emphasis is
 /// colour only: bold would change advance widths and pull the two panes out of alignment.
 const EMPH_ALPHA: f32 = 0.35;
+/// The blank a hunk that only adds or only deletes leaves on the other side, in the hue of the
+/// lines it faces: half a row's tint, so it reads as the same block without passing for lines.
+const BAND_ALPHA: f32 = 0.08;
 
 /// Which of the two texts a pane shows: `Old` is the left column.
 pub use accent_core::diff::Side;
@@ -424,6 +427,43 @@ fn padding(
     (pads, tops)
 }
 
+/// Where `side` has no line in a hunk at all — the other side only adds, or only deletes — the
+/// blank that levels it, as `(y, height, hue)` rows for `multicaret::View::set_bands`, in the hue
+/// of the lines it faces. A run of rows it has no line in that touches a changed line of its own
+/// is part of a change already, and that line's tint covers it (see [`padding`]).
+fn bands(
+    heights: &[Vec<Option<i32>>; 2],
+    extra: &[i32],
+    changed: &[bool],
+    tops: &[i32],
+    side: Side,
+) -> Vec<Band> {
+    let (n, own) = (changed.len(), &heights[side.idx()]);
+    let hue = match side {
+        Side::Old => ADDED_HUE,
+        Side::New => REMOVED_HUE,
+    };
+    let bottom =
+        |r: usize| tops[r] + heights[0][r].unwrap_or(0).max(heights[1][r].unwrap_or(0)) + extra[r];
+    let lacks = |r: usize| changed[r] && own[r].is_none();
+    let mut out = Vec::new();
+    let mut r = 0;
+    while r < n {
+        if !lacks(r) {
+            r += 1;
+            continue;
+        }
+        let start = r;
+        while r < n && lacks(r) {
+            r += 1;
+        }
+        if (start == 0 || !changed[start - 1]) && (r == n || !changed[r]) {
+            out.push((tops[start], bottom(r - 1) - tops[start], hue));
+        }
+    }
+    out
+}
+
 /// The natural height of one line of `buffer` as `view` lays it out, wrapping and all, with
 /// `padded` — the pixels this module has put above and below it — taken back off. The flag
 /// says the figure is an estimate.
@@ -621,6 +661,16 @@ pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA
         mix(hue.2, fg.blue()),
         alpha,
     )
+}
+
+/// A run of blank rows a comparison fills under the text: `y` and height in buffer coordinates,
+/// and the hue of the lines it faces. See [`bands`].
+pub(crate) type Band = (i32, i32, (f32, f32, f32));
+
+/// The colour of a band of blank facing lines of `hue`, over a view whose text is `fg`: what
+/// `multicaret::View` fills [`Compare`]'s bands with.
+pub(crate) fn band(hue: (f32, f32, f32), fg: gdk::RGBA) -> gdk::RGBA {
+    tint(hue, fg, BAND_ALPHA)
 }
 
 /// Re-derive the row backgrounds from the resolved theme foreground. Once the view is mapped
@@ -1112,6 +1162,9 @@ impl Compare {
             }
             pane.pool.unclaim();
             pane.pool.hide_unclaimed();
+            if let Some(view) = pane.view.downcast_ref::<crate::multicaret::View>() {
+                view.set_bands(Vec::new());
+            }
         }
         self.overlays.borrow_mut().clear();
         if let Some(id) = self.pending.borrow_mut().take() {
@@ -1222,6 +1275,15 @@ impl Compare {
             })
             .collect();
         let (pads, tops) = padding(&heights[0], &heights[1], &extra, &changed);
+        for side in [Side::Old, Side::New] {
+            if let Some(view) = self
+                .pane(side)
+                .view
+                .downcast_ref::<crate::multicaret::View>()
+            {
+                view.set_bands(bands(&heights, &extra, &changed, &tops, side));
+            }
+        }
 
         let mut repadded = false;
         for side in [Side::Old, Side::New] {
@@ -1730,6 +1792,29 @@ mod tests {
             (pads[1].above.clone(), pads[1].below.clone()),
             (vec![0, 0, 10], vec![0; 3])
         );
+    }
+
+    #[test]
+    fn a_hunk_with_no_line_on_one_side_leaves_a_band_there_in_the_other_sides_hue() {
+        // Rows 1 and 2 only delete; the new side has nothing there.
+        let heights = [
+            vec![Some(10), Some(20), Some(10), Some(10)],
+            vec![Some(10), None, None, Some(10)],
+        ];
+        let (extra, changed) = ([0; 4], [false, true, true, false]);
+        let tops = [0, 10, 30, 40];
+        assert_eq!(
+            bands(&heights, &extra, &changed, &tops, Side::New),
+            vec![(10, 30, REMOVED_HUE)]
+        );
+        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::Old), vec![]);
+
+        // A deletion under a changed pair is that change's blank, which its own tint covers.
+        let heights = [
+            vec![Some(10), Some(20), Some(10), Some(10)],
+            vec![Some(10), Some(10), None, Some(10)],
+        ];
+        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::New), vec![]);
     }
 
     #[test]
