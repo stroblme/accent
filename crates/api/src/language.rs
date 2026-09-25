@@ -30,6 +30,7 @@ use crate::vault::{Backend, remote_err};
 use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
 
 pub(crate) mod external;
+mod latex;
 pub(crate) mod notes;
 pub(crate) mod words;
 

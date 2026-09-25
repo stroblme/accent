@@ -51,6 +51,21 @@ fn changed_run<T: PartialEq>(old: &[T], new: &[T]) -> (usize, usize, usize) {
     (head, old.len() - head - tail, new.len() - head - tail)
 }
 
+/// Where `row` is once the `removed` rows at `at` are replaced by `added` new ones: moved along
+/// when the change is above it, kept when its own text changed, and gone when it was removed.
+fn spliced(row: u32, at: usize, removed: usize, added: usize) -> u32 {
+    let r = row as usize;
+    if row == gtk::INVALID_LIST_POSITION || r < at {
+        row
+    } else if r >= at + removed {
+        (r + added - removed) as u32
+    } else if r < at + added {
+        row
+    } else {
+        gtk::INVALID_LIST_POSITION
+    }
+}
+
 /// What activating a row does, by the row's position. Shared with the list's `activate` handler,
 /// which clones it out before it runs: a jump moves the focus, and what that sets off may refill
 /// the list.
@@ -188,6 +203,11 @@ impl List {
             .map(|(_, text)| text.as_str())
             .collect();
         self.model.splice(at as u32, removed as u32, &texts);
+        // An edit leaves the selection on the row it was on, which the splice would drop when
+        // that row's own text changed; only a caret move re-follows.
+        self.followed
+            .set(spliced(self.followed.get(), at, removed, added));
+        select(&self.selection, self.followed.get());
 
         let targets: Vec<T> = rows.iter().map(|(_, _, target)| *target).collect();
         *self.jump.borrow_mut() = Rc::new(move |row| {
@@ -214,7 +234,7 @@ fn reveal(view: &gtk::ListView, row: u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::changed_run;
+    use super::{changed_run, spliced};
 
     #[test]
     fn a_refill_touches_only_the_rows_that_changed() {
@@ -224,5 +244,16 @@ mod tests {
         assert_eq!(changed_run(&[1, 2, 3], &[1, 3]), (1, 1, 0), "one removed");
         assert_eq!(changed_run(&[1, 1], &[1, 1, 1]), (2, 0, 1), "repeats");
         assert_eq!(changed_run(&[], &[1, 2]), (0, 0, 2), "first fill");
+    }
+
+    #[test]
+    fn a_refill_keeps_the_selected_row() {
+        let none = gtk::INVALID_LIST_POSITION;
+        assert_eq!(spliced(1, 3, 1, 2), 1, "a change below");
+        assert_eq!(spliced(4, 1, 0, 2), 6, "two headings typed above");
+        assert_eq!(spliced(4, 1, 1, 0), 3, "one deleted above");
+        assert_eq!(spliced(2, 2, 1, 1), 2, "its own heading retyped");
+        assert_eq!(spliced(2, 2, 1, 0), none, "its heading deleted");
+        assert_eq!(spliced(none, 0, 1, 1), none, "nothing selected");
     }
 }

@@ -9,7 +9,13 @@ use anyhow::{Context, Result};
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Instant;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
+
+/// How often a scan still finding the files says how many it has found: often enough to read as
+/// moving, and past the whole scan of a desktop vault, which then reports nothing extra.
+const SCAN_TICK: Duration = Duration::from_millis(250);
 
 /// What the diff decided to do with one scanned entry.
 struct Job {
@@ -46,7 +52,34 @@ impl Index {
         mut on_progress: impl FnMut(&mut Index, Progress),
     ) -> Result<ReconcileStats> {
         let t_scan = Instant::now();
-        let scan = walk::scan_until(root, opts, stop);
+        // The scan writes nothing and has no total until it ends, which on a large vault over
+        // slow storage (Android's shared storage) is seconds. So it walks on a thread of its own,
+        // and this one says how many files it has found every [`SCAN_TICK`] until it answers.
+        let found = AtomicUsize::new(0);
+        let scan = std::thread::scope(|s| {
+            let (tx, rx) = mpsc::channel();
+            let found = &found;
+            let walk = s.spawn(move || {
+                let _ = tx.send(walk::scan_until(root, opts, stop, found));
+            });
+            loop {
+                match rx.recv_timeout(SCAN_TICK) {
+                    Ok(scan) => break scan,
+                    Err(RecvTimeoutError::Timeout) => on_progress(
+                        self,
+                        Progress {
+                            phase: Phase::Scan,
+                            done: found.load(Ordering::Relaxed),
+                            total: 0,
+                        },
+                    ),
+                    // Only a walk that panicked hangs up without answering.
+                    Err(RecvTimeoutError::Disconnected) => {
+                        std::panic::resume_unwind(walk.join().unwrap_err())
+                    }
+                }
+            }
+        });
         let mut stats = ReconcileStats {
             scanned: scan.files.len(),
             aliases: scan.aliases.len(),
@@ -599,8 +632,8 @@ mod tests {
         assert!(before > 0);
 
         let stats = ix
-            .reconcile_with(vault.path(), &ScanOptions::default(), &|| true, |_, _| {
-                panic!("a stopped scan reports no progress")
+            .reconcile_with(vault.path(), &ScanOptions::default(), &|| true, |_, p| {
+                assert_eq!(p.total, 0, "a stopped scan reports no more than its count")
             })
             .unwrap();
         assert!(stats.stopped);
@@ -609,6 +642,54 @@ mod tests {
             "nothing the walk never reached is deleted"
         );
         assert_eq!(ix.file_paths(false).unwrap().len(), before);
+    }
+
+    /// A large vault over slow storage takes seconds to scan, and the scan writes nothing, so the
+    /// count is all there is to show meanwhile. The walk is held on its first entry until a count
+    /// has been reported, which makes it as slow as it needs to be without guessing at a timing.
+    #[test]
+    fn a_scan_still_running_says_how_many_files_it_has_found() {
+        use std::sync::atomic::AtomicBool;
+
+        let (vault, db) = fixture();
+        let mut ix = open(&db);
+        let counted = AtomicBool::new(false);
+        let mut scans = Vec::new();
+        ix.reconcile_with(
+            vault.path(),
+            &ScanOptions::default(),
+            &|| {
+                // Bounded, so a scan that never reports fails the test rather than hanging it.
+                let until = Instant::now() + Duration::from_secs(5);
+                while !counted.load(Ordering::Relaxed) && Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                false
+            },
+            |_, p| {
+                if p.phase == Phase::Scan {
+                    counted.store(true, Ordering::Relaxed);
+                    scans.push(p);
+                }
+            },
+        )
+        .unwrap();
+
+        assert!(
+            scans.len() >= 2,
+            "a count while scanning, then the total: {scans:?}"
+        );
+        assert_eq!(
+            scans[0].total, 0,
+            "no total while the walk is still running"
+        );
+        let last = scans.last().unwrap();
+        assert_eq!(
+            (last.done, last.total),
+            (5, 5),
+            "4 files + 1 dir, once it has ended"
+        );
+        assert!(scans[0].done <= last.done);
     }
 
     #[test]

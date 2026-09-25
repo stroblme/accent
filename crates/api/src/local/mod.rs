@@ -7,7 +7,7 @@
 
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -37,10 +37,10 @@ pub(crate) struct Local {
     /// The language providers answering for the open documents.
     pub(crate) lang: std::sync::Arc<language::Languages>,
     tx: Sender<Msg>,
-    /// Raised to stop the walk the worker is in the middle of. A flag rather than a message
-    /// because the worker only reads its inbox between write batches, and the scan half of a
-    /// walk has no batches at all.
-    stop: Arc<AtomicBool>,
+    /// Raised to stop the walk the worker is in the middle of, saying why: [`worker::PAUSE`] or
+    /// [`worker::CLOSE`]. A flag rather than a message because the worker only reads its inbox
+    /// between write batches, and the scan half of a walk has no batches at all.
+    stop: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
     /// What the last Replace All rewrote, as it was before: [`Local::undo_replace`]'s to write
     /// back. `None` when there is nothing to undo, or when it was too much to keep.
@@ -91,7 +91,7 @@ impl Local {
         let (events, event_rx) = channel::<Event>();
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicU8::new(worker::RUN));
         let handle = worker::spawn(
             root.clone(),
             writer,
@@ -150,13 +150,13 @@ impl Local {
     ///
     /// [`ReconcileStats::stopped`]: accent_core::index::ReconcileStats::stopped
     pub fn stop_indexing(&self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(worker::PAUSE, Ordering::Relaxed);
     }
 
     /// Walk again after [`stop_indexing`](Self::stop_indexing). The only thing that does: a
     /// paused vault ignores every other reason to rescan.
     pub fn resume_indexing(&self) {
-        self.stop.store(false, Ordering::Relaxed);
+        self.stop.store(worker::RUN, Ordering::Relaxed);
         self.post(Msg::Resume);
     }
 
@@ -229,9 +229,15 @@ impl Local {
 impl Drop for Local {
     /// Stop the worker before the vault goes away, so no thread outlives the window that opened it.
     ///
-    /// ponytail: the join waits for whatever the worker is doing, and a cold reconcile of a large
-    /// vault takes seconds. Give `reconcile` a cancellation flag if closing a window ever stalls.
+    /// A walk in progress stops as [`stop_indexing`](Self::stop_indexing) stops it, keeping what
+    /// it wrote, so closing never waits for a cold index; the next open carries on from there.
+    ///
+    /// ponytail: the stopped walk still resolves the links of what it indexed (~0.3 s at 19 000
+    /// files of `make vault`). Skipping it would need the index to remember that its links are
+    /// stale, since the next walk reads those files as unchanged and resolves only what it adds.
     fn drop(&mut self) {
+        // First, so the walk winds down while the language servers stop.
+        self.stop.store(worker::CLOSE, Ordering::Relaxed);
         // Before the worker, because a provider is still sending diagnostics down its channel.
         self.lang.shutdown();
         let _ = self.tx.send(Msg::Shutdown);

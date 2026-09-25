@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread::JoinHandle;
 
@@ -27,8 +27,8 @@ use crate::paths::{conflict_original_rel, conflict_pairs};
 /// asks for a [`Msg::Rescan`] when it comes back to the foreground instead.
 ///
 /// `stop` is the one thing that reaches this thread while it is walking: the inbox is only read
-/// between batches, and a walk of 40 000 files is not one message-loop turn. See
-/// [`Worker::reconcile`].
+/// between batches, and a walk of 40 000 files is not one message-loop turn. It holds [`RUN`],
+/// [`PAUSE`] or [`CLOSE`]. See [`Worker::reconcile`].
 pub(crate) fn spawn(
     root: PathBuf,
     index: Index,
@@ -36,7 +36,7 @@ pub(crate) fn spawn(
     tx: Sender<Msg>,
     events: Sender<Event>,
     watch: bool,
-    stop: Arc<AtomicBool>,
+    stop: Arc<AtomicU8>,
 ) -> Result<JoinHandle<()>> {
     let worker = Worker {
         root,
@@ -58,6 +58,13 @@ pub(crate) fn spawn(
         .spawn(move || worker.run())
         .context("spawning the vault worker")
 }
+
+/// What `stop` says: walk on.
+pub(crate) const RUN: u8 = 0;
+/// The user stopped the walk: see [`Worker::paused`].
+pub(crate) const PAUSE: u8 = 1;
+/// The vault is closing, for good: a walk stops as for a pause, and nothing is set up after it.
+pub(crate) const CLOSE: u8 = 2;
 
 /// The worker's inbox. The watcher pushes `Fs`, the public API pushes the rest.
 pub(crate) enum Msg {
@@ -106,9 +113,9 @@ struct Worker {
     /// What the inbox held that a walk read between its batches and could not answer there. See
     /// [`Worker::reconcile`].
     held: Vec<Msg>,
-    /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) from another thread
-    /// and read inside the walk: the inbox cannot be reached from there.
-    stop: Arc<AtomicBool>,
+    /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
+    /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
+    stop: Arc<AtomicU8>,
     /// A walk stopped, and nothing but [`Msg::Resume`] may start another. Not persisted, and it
     /// must not be: the index is a diff, so *opening the vault again* is the resume. What a
     /// pause has to survive is this session, where the vault stays open and half-indexed.
@@ -296,7 +303,7 @@ impl Worker {
         let stats = index.reconcile_with(
             root,
             &ScanOptions::default(),
-            &|| stop.load(Ordering::Relaxed),
+            &|| stop.load(Ordering::Relaxed) != RUN,
             |index, p| {
                 let _ = events.send(Event::Progress(p));
                 let mut git = false;
@@ -324,9 +331,11 @@ impl Worker {
                 }
             },
         );
-        // The flag has done its work either way, and a stop that arrived as the walk ended must
-        // not be waiting for the next one.
-        self.stop.store(false, Ordering::Relaxed);
+        // A pause has done its work either way, and one that arrived as the walk ended must not
+        // be waiting for the next one. A close stays: nothing walks again.
+        let _ = self
+            .stop
+            .compare_exchange(PAUSE, RUN, Ordering::Relaxed, Ordering::Relaxed);
         self.paused = matches!(&stats, Ok(s) if s.stopped);
         // A set written mid-walk marked the rows that were there, and what the walk added after
         // it inherited its parent's flag — but a directory the set itself names, added after it,
@@ -335,6 +344,11 @@ impl Worker {
             && let Err(e) = self.index.set_excluded(&entries)
         {
             self.fail("recording the exclusion set", e);
+        }
+        // A closing vault needs no watcher, and a walk it stopped is no pause to report: the next
+        // open carries on by itself.
+        if self.stop.load(Ordering::Relaxed) == CLOSE {
+            return;
         }
         self.rebuild_watcher();
         match stats {
@@ -572,13 +586,13 @@ fn touches_gitignore(msg: &Msg) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Msg, spawn};
+    use super::{Msg, RUN, spawn};
     use crate::tests::*;
     use crate::{Etag, Event, VaultConfig, fs};
     use accent_core::index::Index;
     use accent_core::watch::VaultEvent;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU8;
     use std::sync::mpsc::{RecvTimeoutError, channel};
     use std::time::{Duration, Instant};
 
@@ -626,6 +640,32 @@ mod tests {
         let done = wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET);
         let Some(Event::Reconciled(stats)) = done else {
             panic!("no reconcile after resume: {done:?}");
+        };
+        assert!(!stats.stopped);
+        assert_eq!(vault.file_paths(false).unwrap().len(), notes);
+    }
+
+    /// Closing a vault mid-walk stops the walk rather than waiting for it, and the next open
+    /// carries on by itself: a close is no pause.
+    #[test]
+    fn closing_a_vault_mid_walk_stops_the_walk_and_the_next_open_finishes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let notes = 1000;
+        for i in 0..notes {
+            std::fs::write(root.path().join(format!("n{i}.md")), "body").unwrap();
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+        let open = || crate::Vault::open_at(root.path(), &db, VaultConfig::default()).unwrap();
+
+        drop(open());
+        let partial = Index::open(&db).unwrap().file_paths(false).unwrap().len();
+        assert!(partial < notes, "the close waited for the walk");
+
+        let (vault, events) = open();
+        let done = wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET);
+        let Some(Event::Reconciled(stats)) = done else {
+            panic!("no reconcile after the reopen: {done:?}");
         };
         assert!(!stats.stopped);
         assert_eq!(vault.file_paths(false).unwrap().len(), notes);
@@ -988,7 +1028,7 @@ mod tests {
             tx.clone(),
             events,
             true,
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU8::new(RUN)),
         )
         .unwrap();
         assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1037,7 +1077,7 @@ mod tests {
             tx.clone(),
             events,
             true,
-            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicU8::new(RUN)),
         )
         .unwrap();
 

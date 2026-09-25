@@ -79,7 +79,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk clean distclean install uninstall test test-pdf check fmt fmt-check \
-        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help \
+        clippy doc run smoke vault validate icons flatpak cargo-sources pdfium server help requirements \
         android android-check android-test android-tools apk apk-release pdfium-android bindings
 
 ## all: build everything, core plus the desktop app
@@ -92,6 +92,37 @@ core:
 ## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
 	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent
+
+## requirements: check what building and running the desktop app needs (installs nothing)
+#
+# One line per missing item; README.md's Requirements names the packages per distro. The library
+# floors are what the binding features in apps/gtk/Cargo.toml ask pkg-config for (`v4_18` is
+# gtk4 >= 4.18), and Rust's is the highest `rust-version` among the dependencies, gtk-rs's.
+# An optional item only warns: the app runs without it and lacks the feature it names.
+RUST_MIN := 1.92
+GTK_LIBS := gtk4:4.18 libadwaita-1:1.7 gtksourceview-5:5.18 webkitgtk-6.0:2.40 \
+            vte-2.91-gtk4:0.76 libspelling-1:0.1
+requirements:
+	@missing=0; \
+	for tool in cargo cc pkg-config glib-compile-resources; do \
+		command -v $$tool >/dev/null || { echo "missing: $$tool"; missing=1; }; \
+	done; \
+	rust=$$(rustc --version 2>/dev/null | cut -d' ' -f2); \
+	printf '%s\n' $(RUST_MIN) "$$rust" | sort -VC || \
+		{ echo "missing: Rust >= $(RUST_MIN), found $${rust:-none}"; missing=1; }; \
+	for lib in $(GTK_LIBS); do \
+		name=$${lib%:*} min=$${lib#*:}; \
+		pkg-config --atleast-version=$$min $$name 2>/dev/null || { missing=1; \
+			echo "missing: $$name >= $$min, found $$(pkg-config --modversion $$name 2>/dev/null || echo none)"; }; \
+	done; \
+	test -f $(PDFIUM_LIB) || echo "optional: libpdfium, for the PDF tab: run make pdfium"; \
+	command -v git >/dev/null || echo "optional: git, for the Git pane"; \
+	command -v ssh >/dev/null || echo "optional: ssh, for remote vaults"; \
+	{ command -v cargo-zigbuild && command -v zig || command -v musl-gcc; } >/dev/null || \
+		echo "optional: cargo-zigbuild and zig (or musl-gcc), for make server, which remote vaults need"; \
+	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
+	if test $$missing = 0; then echo "All requirements met."; \
+	else echo "README.md, Requirements, lists the packages per distro."; exit 1; fi
 
 ## test: run the whole workspace test suite, desktop app included
 test:
