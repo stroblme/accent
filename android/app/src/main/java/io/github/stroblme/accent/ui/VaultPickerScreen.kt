@@ -39,7 +39,17 @@ fun VaultPickerScreen(model: VaultModel) {
         uri?.let { model.open(pathOf(it)) }
     }
 
-    Scaffold { padding ->
+    // A folder that could not be opened comes back here, and this is where it says why.
+    val snackbar = remember { SnackbarHostState() }
+    val message = model.state.collectAsState().value.message
+    message?.let {
+        LaunchedEffect(it) {
+            snackbar.showSnackbar(it)
+            model.said(null)
+        }
+    }
+
+    Scaffold(snackbarHost = { SnackbarHost(snackbar) }) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 24.dp),
             verticalArrangement = Arrangement.Center,

@@ -79,6 +79,7 @@ fun HomeScreen(model: VaultModel) {
                     chrome = chrome,
                 )
                 else -> Empty(
+                    opening = state.opening,
                     indexing = state.indexing,
                     paused = state.paused,
                     scanned = state.scanned,
@@ -168,6 +169,8 @@ private val ProgressHeight: Dp = 4.dp
  * A first index is watched from here, so it says in words how far the walk has got and draws the
  * platform's own indeterminate bar under them. Indeterminate because the walk has no total until
  * it ends, and a percentage nobody can honour is worse than a bar that only says "still going".
+ * Both are up from the frame after the pick, while the vault is still [opening] and no walk has
+ * started: to the reader, that is already the vault being read.
  *
  * Stop sits under the bar while the walk runs, and Resume in its place once it has stopped: the
  * desktop's control beside its indexing line, with the same meaning. Stopping is a pause, not a
@@ -179,6 +182,7 @@ private val ProgressHeight: Dp = 4.dp
  */
 @Composable
 private fun Empty(
+    opening: Boolean,
     indexing: Boolean,
     paused: Boolean,
     scanned: Long,
@@ -194,7 +198,7 @@ private fun Empty(
     ) {
         Text(
             when {
-                indexing -> "Reading your vault…"
+                opening || indexing -> "Reading your vault…"
                 paused -> "Reading paused"
                 else -> "Nothing open"
             },
@@ -225,10 +229,11 @@ private fun Empty(
         // The space is kept whether or not there is a bar in it, so the lines above stay where
         // they are when the walk ends rather than settling half its height downwards.
         Box(Modifier.height(ProgressHeight), contentAlignment = Alignment.Center) {
-            if (indexing) LinearProgressIndicator(Modifier.width(ProgressWidth))
+            if (opening || indexing) LinearProgressIndicator(Modifier.width(ProgressWidth))
         }
         Spacer(Modifier.height(24.dp))
-        // One row, so the lines above stay put when either control comes or goes.
+        // One row, so the lines above stay put when either control comes or goes. No Stop while
+        // the vault is opening: there is no walk yet for it to stop.
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (indexing) TextButton(onClick = onStop) { Text("Stop") }
             if (paused) TextButton(onClick = onResume) { Text("Resume") }

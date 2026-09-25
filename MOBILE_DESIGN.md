@@ -27,6 +27,10 @@ Compose widget stands in for which desktop one.
 
 - A centred column: the name, one line of explanation, the permission if it is missing, one button,
   then the recent vaults as plain rows.
+- A pick leaves it on the next frame, for the vault's own screen reading "Reading your vault…" over
+  the indeterminate bar while the core is still opening the index; a folder that cannot be opened
+  comes back here and says why in a `Snackbar`. A picker that stays put after a tap reads as a tap
+  that was lost.
 
 ### Browse
 
