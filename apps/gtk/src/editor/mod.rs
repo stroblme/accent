@@ -333,6 +333,11 @@ pub struct Tab {
     /// First-wins ([`crate::widgets::Debounce::call_once`]): a caret held on an arrow key must
     /// still tell the outline where it is, rather than be pushed off for as long as it moves.
     cursor: crate::widgets::Debounce,
+    /// Whether this turn of the main loop has changed the text, and whether it has moved the
+    /// caret; settled into `moved` once the turn is over (see [`Tab::note_turn`]).
+    turn: Cell<(bool, bool)>,
+    /// The caret was last moved rather than carried by an edit: see [`Tab::caret_moved`].
+    moved: Cell<bool>,
     /// The end-of-line messages laid again for a new column width, once a drag has settled.
     refit: crate::widgets::Debounce,
     on_autosave: Hook,
@@ -643,6 +648,8 @@ pub fn open(
         debounce: crate::widgets::Debounce::new(DEBOUNCE),
         autosave: crate::widgets::Debounce::new(AUTOSAVE),
         cursor: crate::widgets::Debounce::new(CURSOR),
+        turn: Cell::new((false, false)),
+        moved: Cell::new(false),
         refit: crate::widgets::Debounce::new(DEBOUNCE),
         on_autosave: RefCell::new(None),
         on_edited: RefCell::new(None),
@@ -1479,6 +1486,7 @@ impl Tab {
     // --- edits ---------------------------------------------------------------------------
 
     fn on_changed(self: &Rc<Self>) {
+        self.note_turn(true, false);
         if self.loading.get() {
             return;
         }
@@ -1599,11 +1607,49 @@ impl Tab {
     }
 
     fn on_cursor_moved(self: &Rc<Self>) {
+        self.note_turn(false, true);
         self.cursor.call_once(glib::clone!(
             #[weak(rename_to = tab)]
             self,
             move || tab.emit(&tab.on_cursor)
         ));
+    }
+
+    /// Note that this turn of the main loop changed the text or moved the caret. A caret that
+    /// moves in the same turn as an edit is carried by it — a keystroke, a paste, an undo, which
+    /// puts the caret back after its edit — and only one that moves without an edit is a move.
+    /// An edit says so at once; a move is settled once the turn is over, since the order of the
+    /// two is the editing code's: a list continuation may place the caret before it inserts.
+    fn note_turn(self: &Rc<Self>, edited: bool, caret: bool) {
+        if edited {
+            self.moved.set(false);
+        }
+        let (was_edited, was_caret) = self.turn.get();
+        if !was_edited && !was_caret {
+            // Above the event sources' priority, so it runs before the next key is handled.
+            glib::idle_add_local_full(
+                glib::Priority::HIGH,
+                glib::clone!(
+                    #[weak(rename_to = tab)]
+                    self,
+                    #[upgrade_or]
+                    glib::ControlFlow::Break,
+                    move || {
+                        if tab.turn.take() == (false, true) {
+                            tab.moved.set(true);
+                        }
+                        glib::ControlFlow::Break
+                    }
+                ),
+            );
+        }
+        self.turn.set((was_edited || edited, was_caret || caret));
+    }
+
+    /// Whether the caret was last moved — a click, an arrow key, a jump — rather than carried
+    /// along by an edit. What the Outline pane follows.
+    pub fn caret_moved(&self) -> bool {
+        self.moved.get()
     }
 }
 
