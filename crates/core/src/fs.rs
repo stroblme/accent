@@ -5,7 +5,7 @@
 //! a change that Syncthing (or another device) pulled in behind our back.
 
 use std::io::{self, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -148,7 +148,8 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
     write_bytes(path, text.as_bytes(), expected)
 }
 
-/// The same atomic save for bytes: a PDF an annotation was written into, and nothing else so far.
+/// The same atomic save for bytes: a PDF an annotation was written into, a new drawing, an image
+/// pasted into a note.
 ///
 /// Split out of [`write_note`] rather than duplicated, so a PDF gets the etag gate, the symlink
 /// resolution and the preserved ownership a note has always had.
@@ -177,10 +178,12 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
         }
     }
 
-    // ponytail: new files inherit tempfile's 0600 instead of 0666 & !umask. Fine for a private
-    // vault; if notes ever need to be group-readable, set the mode explicitly here.
+    // Opened with 0666 as `File::create` would be, so the umask decides and a new file gets the
+    // mode a new note gets (0644 under the usual 022) rather than tempfile's own 0600: an image
+    // nobody else on a shared vault could open. An existing file's own mode is put back below.
     let mut tmp = tempfile::Builder::new()
         .prefix(".accent-")
+        .permissions(std::fs::Permissions::from_mode(0o666))
         .tempfile_in(parent)
         .map_err(SaveError::Io)?;
     tmp.write_all(bytes)?;
@@ -385,6 +388,17 @@ mod tests {
 
         let mode = std::fs::metadata(&note).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "saved file kept the original mode");
+    }
+
+    #[test]
+    fn a_new_file_gets_the_mode_a_new_note_gets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (note, image) = (dir.path().join("New.md"), dir.path().join("New.png"));
+        create_note(&note, "hello").unwrap();
+        write_bytes(&image, b"png", None).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&image), mode(&note));
     }
 
     #[test]
