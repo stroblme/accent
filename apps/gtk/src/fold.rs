@@ -301,8 +301,10 @@ mod imp {
             let Some((open, shut)) = icons.as_ref() else {
                 return;
             };
+            // Beside the line's first row, as its number and a diagnostic's mark are: the cell
+            // also holds the blank a comparison pads a line with, above or below it.
             let (y, height) =
-                lines.line_yrange(line, sourceview5::GutterRendererAlignmentMode::Cell);
+                lines.line_yrange(line, sourceview5::GutterRendererAlignmentMode::First);
             // A line inside a fold has no height. Drawing on it would stack every hidden chevron
             // on the header's own row.
             if height <= 0 {
