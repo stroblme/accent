@@ -18,9 +18,8 @@ use accent_api::{Fold, Severity};
 /// before the first change folded and the caret on that change, and then a character typed into
 /// it, see [`bench_compare_type`]. That half wants a scratch repository whose committed note
 /// differs from the fifty lines in a few places, one of them a long line where the drill writes a
-/// short one, so the view has room to scroll. The short line leaves the difference under it, so
-/// the line typed into carries no padding: typing at the start of a padded line is
-/// [`bench_compare_pads`]'s.
+/// short one, which carries the difference as padding under it, so the change is padded and the
+/// view has room to scroll.
 pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -500,13 +499,14 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
     });
 }
 
-/// Whether the paragraph at `at` carries alignment padding above it, which is what GTK lays the
-/// line out with and what a character typed at the line's start must not take away.
+/// Whether the paragraph at `at` carries alignment padding above or below it, which is what GTK
+/// lays the line out with and what a character typed at the line's start must not take away.
 fn is_padded(tab: &Rc<Tab>, at: &gtk::TextIter) -> bool {
-    let base = tab.view.pixels_above_lines();
-    at.tags()
-        .iter()
-        .any(|t| t.is_pixels_above_lines_set() && t.pixels_above_lines() > base)
+    let (above, below) = (tab.view.pixels_above_lines(), tab.view.pixels_below_lines());
+    at.tags().iter().any(|t| {
+        (t.is_pixels_above_lines_set() && t.pixels_above_lines() > above)
+            || (t.is_pixels_below_lines_set() && t.pixels_below_lines() > below)
+    })
 }
 
 /// The left and top margins of the first text view under `widget`: the page a zoomed comparison
@@ -724,14 +724,12 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
 /// begins at it and the line is laid out bare for a frame, and the one place such a tag does not
 /// begin at the newline before its line: a padded paragraph right under a padded blank line.
 ///
-/// A line shorter than its partner leaves the difference under it, as padding on the next line,
-/// so a padded line that stays padded while it is typed into is a change under a shorter change.
-/// The note is written as five long paragraphs with unchanged lines around them and staged, then
-/// the buffer makes the first three a short line, an empty one and another short one, which pads
-/// the empty line and the one under it by two different amounts, and the last two paragraphs two
-/// short lines, the second of them the control, padded under a line that is not blank. A character
-/// is then typed at the start of the empty line, of the line under it and of the control;
-/// `padded_after` is the claim in all three.
+/// A changed line shorter than its partner carries the difference as padding under it. The note
+/// is written as five long paragraphs with unchanged lines around them and staged, then the buffer
+/// makes the first three a short line, an empty one and another short one, each padded by its own
+/// amount, and the last two paragraphs two short lines, the second of them the control, under a
+/// padded line that is not blank. A character is then typed at the start of the empty line, of
+/// the line under it and of the control; `padded_after` is the claim in all three.
 ///
 /// It makes a repository in the vault root and stages the note, so point it at a throwaway vault.
 /// The lines, counting from 0: three unchanged lines before the empty one, and the fourteen
