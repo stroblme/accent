@@ -42,6 +42,9 @@ pub(crate) struct Local {
     /// walk has no batches at all.
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    /// What the last Replace All rewrote, as it was before: [`Local::undo_replace`]'s to write
+    /// back. `None` when there is nothing to undo, or when it was too much to keep.
+    undo: Mutex<Option<Vec<files::Before>>>,
 }
 
 // ---------------------------------------------------------------------- open
@@ -109,6 +112,7 @@ impl Local {
                 tx,
                 stop,
                 worker: Some(handle),
+                undo: Mutex::new(None),
             },
             event_rx,
         ))

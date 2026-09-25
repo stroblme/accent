@@ -1017,10 +1017,11 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Whatever else answers to `Alt+J` and `Ctrl+Shift+L`: the actions the application binds them
-/// to, and any shortcut on the view itself.
+/// Whatever else answers to `Alt+J` and `Ctrl+Shift+L`, and to `Ctrl+Shift+W`, which Outline Pane
+/// took from `Ctrl+Shift+L`: the actions the application binds them to, and any shortcut on the
+/// view itself.
 fn bench_occurrence_claims(app: &Rc<App>, tab: &Rc<Tab>) {
-    let chords = ["<Alt>j", "<Control><Shift>l"];
+    let chords = ["<Alt>j", "<Control><Shift>l", "<Control><Shift>w"];
     if let Some(gtk_app) = app.window.application() {
         for chord in chords {
             println!(

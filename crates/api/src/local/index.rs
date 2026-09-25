@@ -84,12 +84,12 @@ impl Local {
     /// dependency tree, a `node_modules`, a `target/` or a gitignored directory the walk
     /// deliberately never entered.
     ///
-    /// This is the second half of the Search pane's All toggle, and only the exact-match path
-    /// runs it. The first half drops the git-ignored exclusion, which is a column in the index and
-    /// which ranked search reads as well; this one reaches what was never indexed, and it can only
-    /// be a walk, so a ranked query has no way to fold it in. Everything already in the index is
-    /// skipped by path, so no file is greped twice, and the walk stops as soon as `limit` matches
-    /// are in hand.
+    /// This is the second half of the Search pane's All toggle. The first half drops the
+    /// git-ignored exclusion, which is a column in the index and which ranked search reads as
+    /// well; this one reaches what was never indexed, and it can only be a walk, so a ranked query
+    /// cannot rank what it finds: the pane lists it last, in path order, and only once the box
+    /// has been still for a moment. Everything already in the index is skipped by path, so no
+    /// file is greped twice, and the walk stops as soon as `limit` matches are in hand.
     ///
     /// The matching runs **inside** the walk ([`walk::visit`]), on its threads, rather than over
     /// a [`walk::ScanResult`] it built first: reading 10 000 dependency files one at a time was
@@ -109,8 +109,16 @@ impl Local {
     /// Rows only, no count beside them: nothing here can be rewritten by Replace All, which
     /// visits the indexed files, so a number of matches past `limit` would have no reader.
     ///
+    /// `stop` is read before each file as the budget is, so a question the reader has already
+    /// moved on from ends its walk rather than finishing it.
+    ///
     /// ponytail: the walk runs per query, with no cache, for as long as All is on.
-    pub fn grep_unindexed(&self, re: &Regex, limit: usize) -> Result<Vec<Match>> {
+    pub fn grep_unindexed(
+        &self,
+        re: &Regex,
+        limit: usize,
+        stop: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Vec<Match>> {
         // Collected before the walk: the guard must not be held across file I/O.
         let known: HashSet<String> = self.searcher().file_paths(true)?.into_iter().collect();
         let opts = walk::ScanOptions {
@@ -128,7 +136,7 @@ impl Local {
         // which is nearly all of them — never touches it at all.
         let found = AtomicUsize::new(0);
         walk::visit(&self.root, &opts, &|f| {
-            if found.load(Ordering::Relaxed) >= limit {
+            if found.load(Ordering::Relaxed) >= limit || stop() {
                 return false;
             }
             if f.kind == FileKind::Dir || known.contains(&f.rel_path) {
@@ -383,7 +391,10 @@ mod tests {
         // The index cannot see inside it; the All toggle's walk can.
         let plain = Options::default();
         assert_eq!(f.vault.grep("zorblat", plain, 10, true).unwrap().1, 1);
-        let hits = f.vault.grep_unindexed("zorblat", plain, 10).unwrap();
+        let hits = f
+            .vault
+            .grep_unindexed("zorblat", plain, 10, &|| false)
+            .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "ml/mlruns/0/run/meta.yaml");
     }
@@ -419,13 +430,20 @@ mod tests {
         // The index never walked node_modules, so its own grep cannot see the dependency.
         assert_eq!(f.vault.grep("zorblat", plain, 10, true).unwrap().1, 1);
 
-        let hits = f.vault.grep_unindexed("zorblat", plain, 10).unwrap();
+        let hits = f
+            .vault
+            .grep_unindexed("zorblat", plain, 10, &|| false)
+            .unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "node_modules/dep.js");
         assert!(
             !hits.iter().any(|h| h.rel_path == "a.md"),
             "an indexed note must not be greped a second time: {hits:?}"
         );
+
+        // A walk whose question is already out of date opens nothing more.
+        let stopped = f.vault.grep_unindexed("zorblat", plain, 10, &|| true);
+        assert!(stopped.unwrap().is_empty());
     }
 
     /// The row budget is shared by the walking threads, so a cap is a cap however many of them
@@ -440,7 +458,10 @@ mod tests {
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 
         let plain = Options::default();
-        let hits = f.vault.grep_unindexed("zorblat", plain, 7).unwrap();
+        let hits = f
+            .vault
+            .grep_unindexed("zorblat", plain, 7, &|| false)
+            .unwrap();
         assert_eq!(hits.len(), 7, "{hits:?}");
         let paths: Vec<&str> = hits.iter().map(|h| h.rel_path.as_str()).collect();
         let mut sorted = paths.clone();
@@ -464,7 +485,7 @@ mod tests {
 
         let hits = f
             .vault
-            .grep_unindexed("zorblat", Options::default(), 7)
+            .grep_unindexed("zorblat", Options::default(), 7, &|| false)
             .unwrap();
         assert_eq!(hits.len(), 7, "{hits:?}");
         // Five of a.js's six matches are listed; the sixth is the per-file cap's own tail.

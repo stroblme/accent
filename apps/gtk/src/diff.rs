@@ -67,6 +67,9 @@ const CHANGE_ALPHA: f32 = 0.16;
 /// The words that actually differ, in the same hue over the row's own background. Emphasis is
 /// colour only: bold would change advance widths and pull the two panes out of alignment.
 const EMPH_ALPHA: f32 = 0.35;
+/// The blank a hunk that only adds or only deletes leaves on the other side, in the hue of the
+/// lines it faces: half a row's tint, so it reads as the same block without passing for lines.
+const BAND_ALPHA: f32 = 0.08;
 
 /// Which of the two texts a pane shows: `Old` is the left column.
 pub use accent_core::diff::Side;
@@ -368,12 +371,12 @@ struct Grid {
     tops: Vec<i32>,
 }
 
-/// Blank space above each row of one column, and below its last, that keeps it in step with the
+/// Blank space above and below each row's line in one column, that keeps it in step with the
 /// other column. See [`padding`].
 #[derive(Debug, PartialEq, Eq)]
 struct Pads {
     above: Vec<i32>,
-    below_last: i32,
+    below: Vec<i32>,
 }
 
 /// From the natural height of every row on each side — `None` where a side has no visible line
@@ -382,40 +385,83 @@ struct Pads {
 /// which is where a hidden run's button goes.
 ///
 /// A line shorter than its partner leaves the difference under it, so two paired lines start on
-/// the same row; a row with no line on a side leaves all of it. Either way the space goes above
-/// the side's next line, and what is left after the last goes below that. This is the whole
-/// correctness surface of the alignment, so it is a plain function over plain numbers.
-fn padding(old: &[Option<i32>], new: &[Option<i32>], extra: &[i32]) -> ([Pads; 2], Vec<i32>) {
+/// the same row; a row with no line on a side leaves all of it. The space goes below the side's
+/// line before it where that line is a change (`changed`, per row), so a change and the blank
+/// that levels it are one tinted block, and above the side's next line otherwise; what is left
+/// after the last line goes below it. This is the whole correctness surface of the alignment, so
+/// it is a plain function over plain numbers.
+fn padding(
+    old: &[Option<i32>],
+    new: &[Option<i32>],
+    extra: &[i32],
+    changed: &[bool],
+) -> ([Pads; 2], Vec<i32>) {
     let n = old.len();
-    let mut pads = [
-        Pads {
-            above: vec![0; n],
-            below_last: 0,
-        },
-        Pads {
-            above: vec![0; n],
-            below_last: 0,
-        },
-    ];
+    let mut pads = [(); 2].map(|_| Pads {
+        above: vec![0; n],
+        below: vec![0; n],
+    });
     let mut tops = Vec::with_capacity(n);
-    let (mut y, mut carry) = (0, [0, 0]);
+    let (mut y, mut carry, mut last) = (0, [0, 0], [None::<usize>; 2]);
     for r in 0..n {
         tops.push(y);
         let h = old[r].unwrap_or(0).max(new[r].unwrap_or(0)) + extra[r];
         y += h;
         for (s, side) in [old, new].into_iter().enumerate() {
-            match side[r] {
-                Some(own) => {
-                    pads[s].above[r] = carry[s];
-                    carry[s] = h - own;
-                }
-                None => carry[s] += h,
+            let Some(own) = side[r] else {
+                carry[s] += h;
+                continue;
+            };
+            match last[s] {
+                Some(l) if changed[l] => pads[s].below[l] += carry[s],
+                _ => pads[s].above[r] = carry[s],
             }
+            (carry[s], last[s]) = (h - own, Some(r));
         }
     }
-    pads[0].below_last = carry[0];
-    pads[1].below_last = carry[1];
+    for s in 0..2 {
+        if let Some(l) = last[s] {
+            pads[s].below[l] += carry[s];
+        }
+    }
     (pads, tops)
+}
+
+/// Where `side` has no line in a hunk at all — the other side only adds, or only deletes — the
+/// blank that levels it, as `(y, height, hue)` rows for `multicaret::View::set_bands`, in the hue
+/// of the lines it faces. A run of rows it has no line in that touches a changed line of its own
+/// is part of a change already, and that line's tint covers it (see [`padding`]).
+fn bands(
+    heights: &[Vec<Option<i32>>; 2],
+    extra: &[i32],
+    changed: &[bool],
+    tops: &[i32],
+    side: Side,
+) -> Vec<Band> {
+    let (n, own) = (changed.len(), &heights[side.idx()]);
+    let hue = match side {
+        Side::Old => ADDED_HUE,
+        Side::New => REMOVED_HUE,
+    };
+    let bottom =
+        |r: usize| tops[r] + heights[0][r].unwrap_or(0).max(heights[1][r].unwrap_or(0)) + extra[r];
+    let lacks = |r: usize| changed[r] && own[r].is_none();
+    let mut out = Vec::new();
+    let mut r = 0;
+    while r < n {
+        if !lacks(r) {
+            r += 1;
+            continue;
+        }
+        let start = r;
+        while r < n && lacks(r) {
+            r += 1;
+        }
+        if (start == 0 || !changed[start - 1]) && (r == n || !changed[r]) {
+            out.push((tops[start], bottom(r - 1) - tops[start], hue));
+        }
+    }
+    out
 }
 
 /// The natural height of one line of `buffer` as `view` lays it out, wrapping and all, with
@@ -615,6 +661,16 @@ pub(crate) fn tint(hue: (f32, f32, f32), fg: gdk::RGBA, alpha: f32) -> gdk::RGBA
         mix(hue.2, fg.blue()),
         alpha,
     )
+}
+
+/// A run of blank rows a comparison fills under the text: `y` and height in buffer coordinates,
+/// and the hue of the lines it faces. See [`bands`].
+pub(crate) type Band = (i32, i32, (f32, f32, f32));
+
+/// The colour of a band of blank facing lines of `hue`, over a view whose text is `fg`: what
+/// `multicaret::View` fills [`Compare`]'s bands with.
+pub(crate) fn band(hue: (f32, f32, f32), fg: gdk::RGBA) -> gdk::RGBA {
+    tint(hue, fg, BAND_ALPHA)
 }
 
 /// Re-derive the row backgrounds from the resolved theme foreground. Once the view is mapped
@@ -1106,6 +1162,9 @@ impl Compare {
             }
             pane.pool.unclaim();
             pane.pool.hide_unclaimed();
+            if let Some(view) = pane.view.downcast_ref::<crate::multicaret::View>() {
+                view.set_bands(Vec::new());
+            }
         }
         self.overlays.borrow_mut().clear();
         if let Some(id) = self.pending.borrow_mut().take() {
@@ -1205,31 +1264,45 @@ impl Compare {
         for (gap, _) in hidden.iter() {
             extra[gap.start] += GAP_PX;
         }
-        let (pads, tops) = padding(&heights[0], &heights[1], &extra);
+        // A row is a change where either side's line is: a changed pair, or a line the other
+        // side has none for.
+        let changed: Vec<bool> = rows
+            .iter()
+            .map(|row| {
+                [Side::Old, Side::New]
+                    .iter()
+                    .any(|side| side.of(row).is_some_and(|i| lines[i].op != Op::Equal))
+            })
+            .collect();
+        let (pads, tops) = padding(&heights[0], &heights[1], &extra, &changed);
+        for side in [Side::Old, Side::New] {
+            if let Some(view) = self
+                .pane(side)
+                .view
+                .downcast_ref::<crate::multicaret::View>()
+            {
+                view.set_bands(bands(&heights, &extra, &changed, &tops, side));
+            }
+        }
 
         let mut repadded = false;
         for side in [Side::Old, Side::New] {
             let pane = self.pane(side);
             let st = &starts[side.idx()];
             let now = &pads[side.idx()];
-            // Below the last visible line, which is where trailing rows of the other side fall.
-            let last = (0..rows.len())
-                .rev()
-                .find(|&r| heights[side.idx()][r].is_some());
             // Every line on this side, hidden ones included, so a row that is hidden now or was
             // the last one before an edit does not keep what it carried then.
             for (r, row) in rows.iter().enumerate() {
                 let Some(n) = side.of(row).and_then(|i| side.number(&lines[i])) else {
                     continue;
                 };
-                let below = if last == Some(r) { now.below_last } else { 0 };
                 repadded |= pad(
                     &pane.view,
                     &pane.buffer,
                     st[n - 1],
                     st[n],
                     now.above[r],
-                    below,
+                    now.below[r],
                 );
             }
         }
@@ -1688,30 +1761,68 @@ mod tests {
     #[test]
     fn padding_keeps_every_row_level_and_hands_a_fillers_share_on() {
         // Row 1 is a two-line paragraph on the old side facing one line; row 2 is a filler on
-        // the old side; row 3 exists on both.
+        // the old side; row 3 exists on both. Rows 1 and 2 are one change.
         let old = [Some(10), Some(20), None, Some(10)];
         let new = [Some(10), Some(10), Some(10), Some(10)];
-        let (pads, tops) = padding(&old, &new, &[0; 4]);
+        let changed = [false, true, true, false];
+        let (pads, tops) = padding(&old, &new, &[0; 4], &changed);
         assert_eq!(tops, vec![0, 10, 30, 40]);
+        assert_eq!(pads[0].above, vec![0; 4]);
         assert_eq!(
-            pads[0].above,
-            vec![0, 0, 0, 10],
-            "the filler's row lands on row 3"
+            pads[0].below,
+            vec![0, 10, 0, 0],
+            "the filler's row goes under the change it belongs to, and takes its tint"
+        );
+        assert_eq!(pads[1].above, vec![0; 4]);
+        assert_eq!(
+            pads[1].below,
+            vec![0, 10, 0, 0],
+            "the shorter line of row 1 starts with its partner, and the blank under it is its own"
+        );
+
+        // A deletion with no line of its own on the new side: the blank has no changed line to
+        // go under, so it waits above the next one.
+        let (pads, _) = padding(
+            &[Some(10), Some(10), Some(10)],
+            &[Some(10), None, Some(10)],
+            &[0; 3],
+            &[false, true, false],
         );
         assert_eq!(
-            pads[1].above,
-            vec![0, 0, 10, 0],
-            "the shorter line of row 1 starts with its partner, and the blank goes under it"
+            (pads[1].above.clone(), pads[1].below.clone()),
+            (vec![0, 0, 10], vec![0; 3])
         );
-        assert_eq!((pads[0].below_last, pads[1].below_last), (0, 0));
+    }
+
+    #[test]
+    fn a_hunk_with_no_line_on_one_side_leaves_a_band_there_in_the_other_sides_hue() {
+        // Rows 1 and 2 only delete; the new side has nothing there.
+        let heights = [
+            vec![Some(10), Some(20), Some(10), Some(10)],
+            vec![Some(10), None, None, Some(10)],
+        ];
+        let (extra, changed) = ([0; 4], [false, true, true, false]);
+        let tops = [0, 10, 30, 40];
+        assert_eq!(
+            bands(&heights, &extra, &changed, &tops, Side::New),
+            vec![(10, 30, REMOVED_HUE)]
+        );
+        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::Old), vec![]);
+
+        // A deletion under a changed pair is that change's blank, which its own tint covers.
+        let heights = [
+            vec![Some(10), Some(20), Some(10), Some(10)],
+            vec![Some(10), Some(10), None, Some(10)],
+        ];
+        assert_eq!(bands(&heights, &extra, &changed, &tops, Side::New), vec![]);
     }
 
     #[test]
     fn trailing_fillers_and_gap_space_go_below_the_last_line() {
         let old = [Some(10), None, None];
         let new = [Some(10), Some(10), Some(10)];
-        let (pads, _) = padding(&old, &new, &[0, 0, 0]);
-        assert_eq!(pads[0].below_last, 20);
+        let (pads, _) = padding(&old, &new, &[0, 0, 0], &[false, true, true]);
+        assert_eq!(pads[0].below, vec![20, 0, 0]);
         assert_eq!(pads[1].above, vec![0, 0, 0]);
 
         // A hidden run leaves the same blank on both sides, so the alignment is unmoved.
@@ -1719,6 +1830,7 @@ mod tests {
             &[Some(10), None, Some(10)],
             &[Some(10), None, Some(10)],
             &[0, 5, 0],
+            &[false; 3],
         );
         assert_eq!(tops, vec![0, 10, 15]);
         assert_eq!(pads[0].above, vec![0, 0, 5]);

@@ -42,7 +42,8 @@ use follow::Follow;
 pub(crate) use keys::press;
 use lines::primary_paste;
 pub(crate) use lines::{
-    delete_line, duplicate_line, line_clipboard, newline_below, paste_primary, toggle_comment,
+    delete_line, duplicate_line, line_clipboard, newline_below, paste_primary, pressed_at,
+    toggle_comment,
 };
 pub use page::default_font;
 use page::{GUTTER, line_numbers};

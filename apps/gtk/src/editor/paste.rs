@@ -52,7 +52,14 @@ pub(super) fn link_paste(view: &sourceview5::View, flavour: Flavour) -> glib::Si
         let Some((start, end)) = buffer.selection_bounds() else {
             return;
         };
-        if column || !view.is_editable() || !could_link(&buffer.text(&start, &end, true), flavour) {
+        // A clipboard with no text on it holds no address, and an image on its own is pasted as
+        // an attachment (`App::wire_attachments`), whose handler runs after this one.
+        let text = view.clipboard().formats().contains_type(glib::Type::STRING);
+        if column
+            || !text
+            || !view.is_editable()
+            || !could_link(&buffer.text(&start, &end, true), flavour)
+        {
             return;
         }
         view.stop_signal_emission_by_name("paste-clipboard");

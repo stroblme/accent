@@ -110,7 +110,7 @@ struct VaultPanes {
     search_dirty: Rc<Cell<bool>>,
     /// The Replace All button and what the body is showing, for `ACCENT_BENCH_REPLACE`.
     apply_replace: gtk::Button,
-    search_state: Rc<dyn Fn() -> (String, u32, String)>,
+    search_state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
     references: gtk::StringList,
     references_stack: gtk::Stack,
     /// The empty page of the References pane. Its words change with what the tab holds — a note
@@ -528,12 +528,12 @@ impl Sidebar {
     }
 
     /// Which page the Search pane's body is showing — "prompt", "results", "empty" or
-    /// "invalid" — how many rows are on it, and its result count. What `ACCENT_BENCH_REPLACE`
-    /// reads.
-    pub fn search_state(&self) -> (String, u32, String) {
+    /// "invalid" — the rows on it by name, and its result count. What `ACCENT_BENCH_REPLACE`
+    /// and `ACCENT_BENCH_SEARCH` read.
+    pub fn search_state(&self) -> (String, Vec<String>, String) {
         match self.panes.as_ref() {
             Some(panes) => (panes.search_state)(),
-            None => (String::new(), 0, String::new()),
+            None => (String::new(), Vec::new(), String::new()),
         }
     }
 

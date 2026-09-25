@@ -18,9 +18,8 @@ use accent_api::{Fold, Severity};
 /// before the first change folded and the caret on that change, and then a character typed into
 /// it, see [`bench_compare_type`]. That half wants a scratch repository whose committed note
 /// differs from the fifty lines in a few places, one of them a long line where the drill writes a
-/// short one, so the view has room to scroll. The short line leaves the difference under it, so
-/// the line typed into carries no padding: typing at the start of a padded line is
-/// [`bench_compare_pads`]'s.
+/// short one, which carries the difference as padding under it, so the change is padded and the
+/// view has room to scroll.
 pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -397,6 +396,72 @@ pub(super) fn bench_compare_diag(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// A warning and a fold chevron on both kinds of padded line, for a screenshot of the gutter:
+/// line 3, shorter than its partner, carries its blank below it, and line 8, under a paragraph
+/// the buffer lacks, carries its blank above it. Prints each line's cell and first row as the
+/// view lays them out; the icons belong beside the first row, as the line numbers are. Point it
+/// at a scratch text file no language server answers for, as `diag:`. It holds the window up for
+/// two seconds before it quits, for the screenshot.
+pub(super) fn bench_compare_gutter(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        wait(400).await;
+        let Some(tab) = app.open_tabs().into_iter().next() else {
+            return bench_quit(&app);
+        };
+        let long = ["a long paragraph that wraps"; 8].join(" ");
+        let text = |three: &str, gone: Option<&str>| -> String {
+            (1..=12)
+                .flat_map(|i| {
+                    let line = match i {
+                        3 => three.to_string(),
+                        _ => format!("line {i}"),
+                    };
+                    std::iter::once(line).chain(gone.filter(|_| i == 7).map(str::to_string))
+                })
+                .map(|line| line + "\n")
+                .collect()
+        };
+        tab.set_text(&text(&long, Some(&long)));
+        if let Err(e) = app.write_tab(&tab, None) {
+            println!("bench compare_gutter write_failed {e}");
+            return bench_quit(&app);
+        }
+        tab.set_text(&text("line three", None));
+        app.compare_with_disk(&tab);
+        wait(800).await;
+        tab.set_diagnostics(
+            [2, 7]
+                .map(|line| diagnostic(Severity::Warning, line, 0, 4))
+                .to_vec(),
+        );
+        tab.set_folds(
+            [2, 7]
+                .map(|line| Fold {
+                    start_line: line,
+                    end_line: line + 1,
+                })
+                .to_vec(),
+        );
+        wait(800).await;
+        for n in [2, 7] {
+            let Some(at) = tab.buffer.iter_at_line(n) else {
+                continue;
+            };
+            let ((top, height), row) = (tab.view.line_yrange(&at), tab.view.iter_location(&at));
+            println!(
+                "bench compare_gutter line={n} cell={top}+{height} first_row={}+{}",
+                row.y(),
+                row.height()
+            );
+        }
+        wait(2000).await;
+        bench_quit(&app);
+    });
+}
+
 /// Type one character into the comparing editor's side — `line`, or the first change where it is
 /// `None` — `at` of the way along that line, and print what moved while the comparison caught up:
 /// how often the shared scroll range changed, whether the scroll position did, how many rows were
@@ -500,13 +565,14 @@ fn bench_compare_binary(app: &Rc<App>, then: impl FnOnce() + 'static) {
     });
 }
 
-/// Whether the paragraph at `at` carries alignment padding above it, which is what GTK lays the
-/// line out with and what a character typed at the line's start must not take away.
+/// Whether the paragraph at `at` carries alignment padding above or below it, which is what GTK
+/// lays the line out with and what a character typed at the line's start must not take away.
 fn is_padded(tab: &Rc<Tab>, at: &gtk::TextIter) -> bool {
-    let base = tab.view.pixels_above_lines();
-    at.tags()
-        .iter()
-        .any(|t| t.is_pixels_above_lines_set() && t.pixels_above_lines() > base)
+    let (above, below) = (tab.view.pixels_above_lines(), tab.view.pixels_below_lines());
+    at.tags().iter().any(|t| {
+        (t.is_pixels_above_lines_set() && t.pixels_above_lines() > above)
+            || (t.is_pixels_below_lines_set() && t.pixels_below_lines() > below)
+    })
 }
 
 /// The left and top margins of the first text view under `widget`: the page a zoomed comparison
@@ -724,14 +790,12 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
 /// begins at it and the line is laid out bare for a frame, and the one place such a tag does not
 /// begin at the newline before its line: a padded paragraph right under a padded blank line.
 ///
-/// A line shorter than its partner leaves the difference under it, as padding on the next line,
-/// so a padded line that stays padded while it is typed into is a change under a shorter change.
-/// The note is written as five long paragraphs with unchanged lines around them and staged, then
-/// the buffer makes the first three a short line, an empty one and another short one, which pads
-/// the empty line and the one under it by two different amounts, and the last two paragraphs two
-/// short lines, the second of them the control, padded under a line that is not blank. A character
-/// is then typed at the start of the empty line, of the line under it and of the control;
-/// `padded_after` is the claim in all three.
+/// A changed line shorter than its partner carries the difference as padding under it. The note
+/// is written as five long paragraphs with unchanged lines around them and staged, then the buffer
+/// makes the first three a short line, an empty one and another short one, each padded by its own
+/// amount, and the last two paragraphs two short lines, the second of them the control, under a
+/// padded line that is not blank. A character is then typed at the start of the empty line, of
+/// the line under it and of the control; `padded_after` is the claim in all three.
 ///
 /// It makes a repository in the vault root and stages the note, so point it at a throwaway vault.
 /// The lines, counting from 0: three unchanged lines before the empty one, and the fourteen

@@ -710,7 +710,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value, RpcError> {
         }
         "grep_unindexed" => {
             let re = compile(p, 0, 1)?;
-            any(vault.grep_unindexed(&re, arg(p, 2)?))
+            any(vault.grep_unindexed(&re, arg(p, 2)?, &|| false))
         }
         "rescan" => {
             vault.rescan();

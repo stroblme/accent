@@ -337,7 +337,7 @@ pub fn build_window(
             build_sidebar(&app, &rows, vault);
         }
         // Outline only, and collapsed: a window opened on one file is that file, and the
-        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+L.
+        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+W.
         None => {
             build_outline_sidebar(&app);
             app.sidebar_column.set_visible(false);
@@ -489,7 +489,12 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                     // All on, the trees it was never asked to hold get whatever room is left.
                     let walked = match all {
                         true => vault
-                            .grep_unindexed(&text, options, SEARCH_LIMIT.saturating_sub(hits.len()))
+                            .grep_unindexed(
+                                &text,
+                                options,
+                                SEARCH_LIMIT.saturating_sub(hits.len()),
+                                &|| false,
+                            )
                             .unwrap_or_default(),
                         false => Vec::new(),
                     };
@@ -499,6 +504,13 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
                         walked,
                     }
                 }
+                // The ranked query's text, matched the way a plain query with no toggle is
+                // everywhere else: a case-insensitive literal.
+                sidebar::Query::Walk { text, limit, stop } => sidebar::Answer::Walked(
+                    vault
+                        .grep_unindexed(&text, accent_api::Options::default(), limit, &*stop)
+                        .unwrap_or_default(),
+                ),
             }
         }),
         replace_all: Box::new(glib::clone!(

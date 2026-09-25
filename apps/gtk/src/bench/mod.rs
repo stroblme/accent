@@ -4,6 +4,7 @@
 
 use super::*;
 
+mod attach;
 mod chrome;
 mod compare;
 mod diagnostics;
@@ -21,10 +22,11 @@ mod search;
 mod style;
 mod tags;
 
+use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_keys};
 use compare::{
-    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_lines,
-    bench_compare_pads, bench_compare_row,
+    bench_compare, bench_compare_conflict, bench_compare_diag, bench_compare_gutter,
+    bench_compare_lines, bench_compare_pads, bench_compare_row,
 };
 use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
@@ -114,6 +116,8 @@ use tags::bench_tags;
 /// each state drew: the messages of a hidden run go, the icons stay. It then folds a block over
 /// the same file, which hides lines the same way, and reads the two numbers again without
 /// publishing anything: a fold's header keeps its own message, the lines under it do not.
+/// `=gutter:<rel_text_file>` puts a warning and a fold chevron on a line padded below and on one
+/// padded above, prints each one's cell and first row, and holds the window up for a screenshot.
 /// `=conflict:<rel_text_file>` writes a sync conflict copy beside that file while its tab is open
 /// and prints what the banner stands for: live, after the tab is opened again, and once the copy
 /// is gone.
@@ -207,6 +211,8 @@ use tags::bench_tags;
 /// cuts two notes that link each other and a third, pastes them into the file's folder and
 /// answers the Update Links? question, printing every dialog that came — one is right — and
 /// the three notes' texts afterwards.
+/// `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>` pastes and drops images into a
+/// note and prints the text and the files they left (`attach::bench_attach`).
 /// `ACCENT_BENCH_SAVE_AS=<rel_file>` saves the file as another in a folder not there yet, and a
 /// note also onto a folder, onto a file open in another tab and as `.txt` (`bench_save_as`).
 /// `ACCENT_BENCH_MENU=<rel_file>` opens a tree row's context menu and takes the pointer off the
@@ -239,6 +245,8 @@ use tags::bench_tags;
 /// holding it behind the pane's back, printing the rows before, after and once they are gone
 /// again — once ranked, then once more with the replace row open, which is the exact scan, and
 /// last with another pane in front, which is the catch-up the Search pane owes on its way back.
+/// `=walk:<query>` types a ranked query with All on and prints the rows before and after the walk
+/// past the index has appended its own under Not Indexed.
 ///
 /// `ACCENT_BENCH_HIDDEN=1` prints the Files pane's rows and which of them are dimmed, then toggles
 /// Show Hidden Files off and on again, printing them after each.
@@ -305,7 +313,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
+    let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     if expand.is_none()
+        && attach.is_none()
         && save_as.is_none()
         && find.is_none()
         && diag.is_none()
@@ -372,6 +382,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rel) = rel.strip_prefix("diag:") {
                 return bench_compare_diag(&app, rel);
             }
+            if let Some(rel) = rel.strip_prefix("gutter:") {
+                return bench_compare_gutter(&app, rel);
+            }
             if let Some(rel) = rel.strip_prefix("conflict:") {
                 return bench_compare_conflict(&app, rel);
             }
@@ -400,6 +413,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = save_as {
             return bench_save_as(&app, &rel);
+        }
+        if let Some(arg) = attach {
+            return bench_attach(&app, &arg);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

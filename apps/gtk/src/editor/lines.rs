@@ -480,7 +480,7 @@ pub(super) fn primary_paste(view: &sourceview5::View) {
 /// The place a press at buffer `x`, `y` means, as GTK's own gesture takes it: the character under
 /// it, or the end or start of the row it is beside. `iter_at_location` answers only over text, so
 /// beside a row that row is found by walking the paragraph's display rows down to `y`.
-pub(super) fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextIter {
+pub(crate) fn pressed_at(view: &sourceview5::View, x: i32, y: i32) -> gtk::TextIter {
     if let Some(at) = view.iter_at_location(x, y) {
         return at;
     }

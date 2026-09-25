@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Same value as the palette and the switcher (DESIGN.md, Motion): long enough to swallow a burst
@@ -28,10 +29,10 @@ const DEBOUNCE: Duration = Duration::from_millis(50);
 /// One step of the search progress bar. GTK4 has no indeterminate mode, so the bar is stepped by
 /// a timer of ours; at the default pulse step this crosses the trough in about two seconds.
 const PULSE: Duration = Duration::from_millis(80);
-/// How many matches Replace All rewrites without asking first. A rewrite cannot be undone and
-/// reaches files nobody has open, which is the choice DESIGN.md's States section keeps an
-/// `AdwAlertDialog` for; the one match the pane is already showing struck through is the case
-/// where the preview *is* the confirmation.
+/// How many matches Replace All rewrites without asking first. A rewrite reaches files nobody has
+/// open, and past 64 MB of them cannot be undone, which is the choice DESIGN.md's States section
+/// keeps an `AdwAlertDialog` for; the one match the pane is already showing struck through is the
+/// case where the preview *is* the confirmation.
 const CONFIRM_ABOVE: usize = 1;
 /// How many pulses a query has to outlive before its bar is drawn at all (DESIGN.md, Loading).
 /// Nothing else in the window starts a search, so a query the user did not ask for — the requery
@@ -40,6 +41,13 @@ const CONFIRM_ABOVE: usize = 1;
 /// query there that does outlive it is the reader's own first exact scan on an index the page
 /// cache has not got yet, which reads every body off the disk (459 ms) and is worth reporting.
 const SHOW_AFTER: u32 = 2;
+/// How long a ranked query with All on waits before walking the trees the index never entered,
+/// counted from when it was asked — which is [`DEBOUNCE`] after the last keystroke, so the walk
+/// starts some 400 ms after the typing stops. The walk took 132 ms on the generated 40k-file vault,
+/// too slow to run per keystroke, and a query typed past in the meantime is never walked at all.
+const WALK_AFTER: Duration = Duration::from_millis(350);
+/// The heading over the rows All's walk found past the index.
+const NOT_INDEXED: &str = "Not Indexed";
 /// One query, already compiled. Built on the main thread from what the search box says, so an
 /// invalid pattern is reported without a worker thread being spent on it.
 pub enum Query {
@@ -57,6 +65,14 @@ pub enum Query {
         options: Options,
         all: bool,
     },
+    /// The ranked query's text as a case-insensitive literal over the trees the index never
+    /// entered, at most `limit` rows. `stop` turns true once a newer question has been asked, and
+    /// the walk ends there.
+    Walk {
+        text: String,
+        limit: usize,
+        stop: Box<dyn Fn() -> bool + Send + Sync>,
+    },
 }
 
 /// What a [`Query`] answered.
@@ -70,6 +86,7 @@ pub enum Answer {
         /// The matches All's walk found past the index. Listed, never rewritten.
         walked: Vec<Match>,
     },
+    Walked(Vec<Match>),
 }
 
 /// What the Search pane asks of the index.
@@ -209,6 +226,7 @@ fn accent_markup_colour() -> String {
 /// A finished result row. Both query kinds meet here, already marked up, so binding a row costs
 /// nothing and the factory does not have to know which kind produced it.
 struct Row {
+    /// Empty on a heading, which names the rows under it and opens nothing.
     rel_path: String,
     /// The match's byte range in the note; `None` opens the note at the top, which is all a hit
     /// on a note's title alone can name.
@@ -256,8 +274,8 @@ struct Search {
     /// Which question the rows on screen are meant to answer. Every query takes the next number
     /// before it starts, so an answer arriving under a newer one is dropped instead of painted:
     /// a slow first query — a remote vault, or an All walk — used to hold every keystroke typed
-    /// after it until it landed.
-    generation: Cell<u64>,
+    /// after it until it landed. Atomic, because a walk reads it from its own threads to stop.
+    generation: Arc<AtomicU64>,
     /// How many queries are on worker threads. A query cannot be called back, so the count comes
     /// down as each one lands, whether its answer was wanted or not.
     running: Cell<usize>,
@@ -266,6 +284,9 @@ struct Search {
     replacing: Cell<bool>,
     /// What the button last promised to rewrite, which is what the confirmation says out loud.
     total: Cell<usize>,
+    /// What the ranked rows on screen counted — results, files, and whether the cap cut them —
+    /// which the rows a walk appends later are added to.
+    counted: Cell<(usize, usize, bool)>,
 }
 
 impl Search {
@@ -328,8 +349,7 @@ impl Search {
         let key = self.key();
         // Taken before anything else, so the branches that paint without asking the vault also
         // put the answer of a query still in flight out of date.
-        let mine = self.generation.get() + 1;
-        self.generation.set(mine);
+        let mine = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         // The bar tracks what is running in every branch: a query still on a worker thread keeps
         // it pulsing, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
@@ -379,13 +399,87 @@ impl Search {
                 ms = t0.elapsed().as_secs_f64() * 1e3,
                 "sidebar query"
             );
+            // With All on, a ranked answer leaves the room it did not fill to the walk.
+            let room = match &answer {
+                Answer::Fts(hits) if key.all => {
+                    Some(crate::SEARCH_LIMIT.saturating_sub(hits.len()))
+                }
+                _ => None,
+            };
             // The box has moved on since this was asked, so a newer query is already on its way
             // with the answer that belongs on screen. Old results stay up until it lands.
-            if search.generation.get() == mine {
+            if search.generation.load(Ordering::Relaxed) == mine {
                 search.show(&key, answer);
+                if let Some(room) = room.filter(|room| *room > 0) {
+                    search.walk_soon(key.text.trim().to_string(), mine, room, t0);
+                }
             }
             search.set_busy(search.busy());
         });
+    }
+
+    /// Walk the trees the index never entered for a ranked query, once it has stood for
+    /// [`WALK_AFTER`], and append what the walk finds under [`NOT_INDEXED`].
+    ///
+    /// Nothing here can rank a file with no FTS row, so the rows come in path order below the
+    /// ranked ones. A newer question cancels both halves: the wait ends without a walk, and a
+    /// walk already running reads the generation before each file and stops. Its answer is
+    /// dropped either way, so it never lands on the rows of a query asked after it.
+    fn walk_soon(self: &Rc<Self>, text: String, mine: u64, room: usize, asked: Instant) {
+        let search = self.clone();
+        glib::spawn_future_local(async move {
+            glib::timeout_future(WALK_AFTER.saturating_sub(asked.elapsed())).await;
+            let current = search.generation.clone();
+            let stale = move || current.load(Ordering::Relaxed) != mine;
+            if stale() {
+                return;
+            }
+            search.running.set(search.running.get() + 1);
+            search.set_busy(true);
+            let run = search.data.search.clone();
+            let query = Query::Walk {
+                text: text.clone(),
+                limit: room,
+                stop: Box::new(stale.clone()),
+            };
+            let t0 = Instant::now();
+            let answer = crate::work::off_thread("walk", move || run(query)).await;
+            search.running.set(search.running.get() - 1);
+            tracing::debug!(
+                query = text,
+                stale = stale(),
+                ms = t0.elapsed().as_secs_f64() * 1e3,
+                "sidebar walk"
+            );
+            if let Some(Answer::Walked(walked)) = answer
+                && !stale()
+            {
+                search.show_walked(&text, walked, room);
+            }
+            search.set_busy(search.busy());
+        });
+    }
+
+    /// Append the walk's rows below the ranked ones, and count them in. A walk that filled the
+    /// `room` it was given may have left matches out, so its count is a floor.
+    fn show_walked(&self, text: &str, walked: Vec<Match>, room: usize) {
+        let Ok(re) = search::pattern(text, Options::default()) else {
+            return;
+        };
+        if walked.is_empty() {
+            return;
+        }
+        let (found, files, cut) = self.counted.get();
+        let found = found + walked.iter().map(|m| 1 + m.more).sum::<usize>();
+        let walked_files = walked.iter().map(|m| m.rel_path.as_str());
+        let files = files + walked_files.collect::<HashSet<_>>().len();
+        let cut = cut || walked.len() >= room;
+        self.count.set_text(&count_label(found, files, cut, cut));
+        let rows = walked_rows(walked, &re, &accent_markup_colour());
+        self.body.set_visible_child_name("results");
+        let objects: Vec<glib::BoxedAnyObject> =
+            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
+        self.results.splice(self.results.n_items(), 0, &objects);
     }
 
     fn show(&self, key: &Key, answer: Answer) {
@@ -398,6 +492,7 @@ impl Search {
                 let files = hits.iter().map(|h| h.rel_path.as_str());
                 let files = files.collect::<HashSet<_>>().len();
                 let cut = hits.len() >= crate::SEARCH_LIMIT;
+                self.counted.set((found, files, cut));
                 (fts_rows(hits), count_label(found, files, cut, cut))
             }
             Answer::Grep {
@@ -422,9 +517,11 @@ impl Search {
                 let mut rows = grep_rows(hits, &re, replacement.as_deref(), literal, &accent);
                 // No preview on a walked row: the rewrite never opens its file, so striking the
                 // match through would promise an edit that does not happen.
-                rows.extend(grep_rows(walked, &re, None, literal, &accent));
+                rows.extend(walked_rows(walked, &re, &accent));
                 (rows, count)
             }
+            // Appended by `show_walked`, never shown on its own.
+            Answer::Walked(_) => return,
         };
         // No Results says it already.
         self.count
@@ -466,7 +563,8 @@ impl Search {
             return confirm(
                 &self.apply,
                 &format!("Replace {total} Matches?"),
-                "Every match is rewritten in the file it is in. This cannot be undone.",
+                "Every match is rewritten in the file it is in. A rewrite of more than 64 MB \
+                 cannot be undone.",
                 "Replace All",
                 true,
                 move || search.run_replace_all(),
@@ -599,6 +697,24 @@ fn grep_rows(
     rows
 }
 
+/// The rows All's walk found past the index, under a heading that says so: the matched line
+/// marked as a grep row's is, and no replacement preview, because Replace All never opens them.
+fn walked_rows(walked: Vec<Match>, re: &Regex, accent: &str) -> Vec<Row> {
+    if walked.is_empty() {
+        return Vec::new();
+    }
+    let heading = Row {
+        rel_path: String::new(),
+        at: None,
+        name: NOT_INDEXED.to_string(),
+        dir: String::new(),
+        snippet: String::new(),
+    };
+    let mut rows = vec![heading];
+    rows.extend(grep_rows(walked, re, None, true, accent));
+    rows
+}
+
 pub(super) struct Pane {
     pub(super) widget: gtk::Widget,
     pub(super) entry: gtk::SearchEntry,
@@ -613,11 +729,12 @@ pub(super) struct Pane {
     /// cleared by the query the next show runs. It starts false, unlike the Tags pane's: a box
     /// with nothing in it has nothing to catch up on.
     pub(super) dirty: Rc<Cell<bool>>,
-    /// The Replace All button, and which page the body is showing with how many rows on it and
-    /// what the count says. What `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say
-    /// whether the rows left standing after a rewrite are the new text's.
+    /// The Replace All button, and which page the body is showing with the rows on it — each by
+    /// its name, or a tail row by its dim line — and what the count says. What
+    /// `ACCENT_BENCH_REPLACE` presses and reads: nothing else can say whether the rows left
+    /// standing after a rewrite are the new text's.
     pub(super) apply: gtk::Button,
-    pub(super) state: Rc<dyn Fn() -> (String, u32, String)>,
+    pub(super) state: Rc<dyn Fn() -> (String, Vec<String>, String)>,
 }
 
 pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
@@ -684,9 +801,18 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 return;
             };
             let hit: Ref<Row> = boxed.borrow();
+            // A heading is small and dim, like the branch popover's Remote, and nothing to open.
+            // A recycled row may have been one, which is why every other row sets it back.
+            let heading = hit.rel_path.is_empty();
+            item.set_activatable(!heading);
+            item.set_selectable(!heading);
+            name.set_css_classes(match heading {
+                true => &["caption-heading", "dim-label"],
+                false => &["heading"],
+            });
             // A tail row has no name, and no icon either: it continues the file above it.
             icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
-            icon.set_visible(!hit.name.is_empty());
+            icon.set_visible(!hit.name.is_empty() && !heading);
             name.set_text(&hit.name);
             dir.set_text(&hit.dir);
             // A tail row is the dim line alone, so the empty second line is taken away rather than
@@ -799,14 +925,15 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     //
     // All's tooltip says which half of "everywhere" it reaches, because the two halves are not
     // the same mechanism: dropping the git-ignored exclusion is a column the ranked search reads
-    // too, while the skipped trees are a walk that only the exact-match path makes.
+    // too, while the skipped trees are a walk, whose rows nothing can rank and which are listed
+    // last under their own heading.
     let toggles = [
         ("Aa", "Match Case"),
         ("Word", "Match Whole Word"),
         (".*", "Use Regular Expression"),
         (
             "All",
-            "Search Ignored Files, and Skipped Ones in an Exact Search",
+            "Search Ignored Files, and List Skipped Folders Under Not Indexed",
         ),
     ]
     .map(|(label, tooltip)| {
@@ -871,10 +998,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         count,
         body: body.clone(),
         results,
-        generation: Cell::new(0),
+        generation: Arc::new(AtomicU64::new(0)),
         running: Cell::new(0),
         replacing: Cell::new(false),
         total: Cell::new(0),
+        counted: Cell::new((0, 0, false)),
     });
 
     // Every handler below holds `search` weakly. Each is connected to a widget `Search` holds, so
@@ -976,7 +1104,21 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                         .visible_child_name()
                         .map(|name| name.to_string())
                         .unwrap_or_default(),
-                    search.results.n_items(),
+                    (0..search.results.n_items())
+                        .filter_map(|i| {
+                            search
+                                .results
+                                .item(i)
+                                .and_downcast::<glib::BoxedAnyObject>()
+                        })
+                        .map(|boxed| {
+                            let row = boxed.borrow::<Row>();
+                            match row.name.is_empty() {
+                                true => row.dir.clone(),
+                                false => row.name.clone(),
+                            }
+                        })
+                        .collect(),
                     search.count.text().to_string(),
                 )
             }
@@ -1091,6 +1233,33 @@ mod tests {
         assert!(replaced.contains("<s>&lt;b&gt;</s>"), "{replaced}");
         assert!(replaced.contains(">&amp;x</span>"), "{replaced}");
         assert!(pango::parse_markup(&replaced, '\u{0}').is_ok());
+    }
+
+    #[test]
+    fn a_walk_waits_for_the_typing_to_stop() {
+        assert_eq!((DEBOUNCE + WALK_AFTER).as_millis(), 400);
+    }
+
+    #[test]
+    fn walked_rows_come_under_a_heading_that_opens_nothing() {
+        let re = search::pattern("zorblat", Options::default()).unwrap();
+        assert!(walked_rows(Vec::new(), &re, "teal").is_empty());
+        let walked = vec![Match {
+            rel_path: "node_modules/dep.js".into(),
+            title: None,
+            line: 1,
+            line_text: "// zorblat".into(),
+            range: 3..10,
+            offset: 3,
+            more: 0,
+        }];
+        let rows = walked_rows(walked, &re, "teal");
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.name.as_str()))
+            .collect();
+        assert_eq!(seen, [("", NOT_INDEXED), ("node_modules/dep.js", "dep.js")]);
+        assert_eq!(rows[1].snippet, "// <b>zorblat</b>");
     }
 
     #[test]

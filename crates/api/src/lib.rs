@@ -149,6 +149,20 @@ pub struct ReplaceReport {
     pub rewritten: Vec<String>,
     pub matches: usize,
     pub failed: Vec<(String, String)>,
+    /// Whether [`Vault::undo_replace`] can put the rewritten files back: false when nothing was
+    /// rewritten, or when what they held was more than an undo keeps. Defaulted, so a host that
+    /// predates the undo still reports its rewrite, as one that cannot be undone.
+    #[serde(default)]
+    pub undoable: bool,
+}
+
+/// What undoing a Replace All did: the files it put back, the ones changed since the rewrite and
+/// so left alone, and the ones it could not write.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UndoReport {
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failed: Vec<(String, String)>,
 }
 
 /// What it actually did.

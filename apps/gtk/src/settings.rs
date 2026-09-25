@@ -450,6 +450,16 @@ fn vault_group(
         save,
         |cfg, text| cfg.new_file_dir = folder(text),
     ));
+    // Kept as typed but for spaces at the ends: `/` is the vault root and `./` the note's folder.
+    group.add(&entry_row(
+        "Attachments Folder",
+        Some("Where pasted and dropped images go. Empty means beside the note, ./name a folder beside it"),
+        &vault.attachment_folder,
+        config,
+        root,
+        save,
+        |cfg, text| cfg.attachment_folder = text.trim().to_string(),
+    ));
 
     group
 }
