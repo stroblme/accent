@@ -462,6 +462,9 @@ mod imp {
         pub redo: RefCell<Vec<Option<Step>>>,
         /// The suggestion painted after the caret, if one is showing.
         pub ghost: RefCell<Option<String>>,
+        /// Blank rows a comparison fills under the text ([`super::View::set_bands`]): `y` and
+        /// height in buffer coordinates, and the hue of the lines they face.
+        pub bands: RefCell<Vec<crate::diff::Band>>,
         /// Set while this widget edits the buffer or moves a caret itself, so the `mark-set` and
         /// `changed` hooks do not read that as someone else's and drop every caret mid-edit.
         pub busy: Cell<bool>,
@@ -556,8 +559,10 @@ mod imp {
         fn snapshot_layer(&self, layer: gtk::TextViewLayer, snapshot: gtk::Snapshot) {
             self.parent_snapshot_layer(layer, snapshot.clone());
             let obj = self.obj();
-            // The other carets' selections go under the text, where GTK paints the primary's.
+            // The other carets' selections go under the text, where GTK paints the primary's, and
+            // a comparison's bands under those.
             if layer == gtk::TextViewLayer::BelowText {
+                obj.paint_bands(&snapshot);
                 obj.paint_selections(&snapshot);
                 return;
             }
@@ -712,6 +717,18 @@ impl View {
     /// What is painted after the caret, if anything.
     pub fn ghost(&self) -> Option<String> {
         self.imp().ghost.borrow().clone()
+    }
+
+    /// Fill these rows under the text, or none: the blank a comparison leaves where a hunk has
+    /// no line on this side, in the colour of the lines it faces. Rows are `(y, height, hue)` in
+    /// buffer coordinates, as `iter_location` reports them, so they scroll with the text; the
+    /// colour is worked out at paint time, so it follows the theme.
+    pub fn set_bands(&self, bands: Vec<crate::diff::Band>) {
+        if *self.imp().bands.borrow() == bands {
+            return;
+        }
+        self.imp().bands.replace(bands);
+        self.queue_draw();
     }
 
     /// Bring focus mode's line fade in or take it away, over the chrome's own transition. It
@@ -1497,6 +1514,24 @@ impl View {
     /// the text, a band per screen row, carried on to the edge of the text where the selection
     /// goes on past a row's end. Rows below the screen are not walked, so selecting a long file
     /// costs what is visible.
+    /// [`View::set_bands`]'s rows, across the text column a row's own tint covers.
+    fn paint_bands(&self, snapshot: &gtk::Snapshot) {
+        let bands = self.imp().bands.borrow();
+        if bands.is_empty() {
+            return;
+        }
+        let visible = self.visible_rect();
+        let left = self.left_margin();
+        let right = visible.x() + visible.width() - self.right_margin();
+        let fg = self.color();
+        for &(y, height, hue) in bands.iter() {
+            snapshot.append_color(
+                &crate::diff::band(hue, fg),
+                &graphene::Rect::new(left as f32, y as f32, (right - left) as f32, height as f32),
+            );
+        }
+    }
+
     fn paint_selections(&self, snapshot: &gtk::Snapshot) {
         let buffer = self.buffer();
         let spans: Vec<Span> = self.spans()[1..]
