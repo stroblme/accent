@@ -307,10 +307,9 @@ impl Worker {
                             if dirs != *git_dirs {
                                 *git_dirs = dirs;
                                 // A failure is left to the rebuild after the walk, which reports it.
-                                *watcher = None;
-                                *watcher = watch(index, root, git_dirs, tx)
-                                    .inspect_err(|e| tracing::warn!("watching the vault: {e:#}"))
-                                    .ok();
+                                if let Err(e) = watch(watcher, index, root, git_dirs, tx) {
+                                    tracing::warn!("watching the vault: {e:#}");
+                                }
                             }
                         }
                         Msg::SetExcluded(entries, reply) => {
@@ -368,11 +367,14 @@ impl Worker {
         if !self.watch {
             return;
         }
-        // Drop the old watch set first: two registrations on one tree would double every event.
-        self.watcher = None;
-        match watch(&self.index, &self.root, &self.git_dirs, &self.tx) {
-            Ok(w) => self.watcher = Some(w),
-            Err(e) => self.fail("watching the vault", e),
+        if let Err(e) = watch(
+            &mut self.watcher,
+            &self.index,
+            &self.root,
+            &self.git_dirs,
+            &self.tx,
+        ) {
+            self.fail("watching the vault", e);
         }
     }
 
@@ -508,8 +510,15 @@ impl Worker {
     }
 }
 
-/// A watcher over the directories the index holds, plus the git directories.
-fn watch(index: &Index, root: &Path, git_dirs: &[PathBuf], tx: &Sender<Msg>) -> Result<Watcher> {
+/// Watch the directories the index holds, plus the git directories: the watcher there is, given
+/// the new set ([`Watcher::set_dirs`], which keeps what it has not reported yet), or a new one.
+fn watch(
+    watcher: &mut Option<Watcher>,
+    index: &Index,
+    root: &Path,
+    git_dirs: &[PathBuf],
+    tx: &Sender<Msg>,
+) -> Result<()> {
     // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
     // must not come back in through a recursive watch on the root.
     let mut dirs = index.dirs(root).unwrap_or_else(|e| {
@@ -523,10 +532,18 @@ fn watch(index: &Index, root: &Path, git_dirs: &[PathBuf], tx: &Sender<Msg>) -> 
         dirs.push(git_dir.clone());
         dirs.push(git_dir.join("refs/heads"));
     }
+    if let Some(w) = watcher
+        && w.set_dirs(&dirs)
+    {
+        return Ok(());
+    }
+    // Dropped first: two registrations on one tree would double every event.
+    *watcher = None;
     let tx = tx.clone();
-    Watcher::new(root, &dirs, move |e| {
+    *watcher = Some(Watcher::new(root, &dirs, move |e| {
         let _ = tx.send(Msg::Fs(e));
-    })
+    })?);
+    Ok(())
 }
 
 /// A directory with something in it, which is what a moved-in tree looks like.
@@ -949,6 +966,47 @@ mod tests {
             poll_until(indexed, BUDGET),
             "the tree stayed lazy after it stopped being ignored"
         );
+    }
+
+    /// A new watch set must not lose what the old one had seen and not yet reported. The window's
+    /// first `repos()` lands about a second after a git vault opens and changes the set, and a
+    /// note written just before it was never indexed: the debouncer holding its event for 300 ms
+    /// was dropped with the old watcher.
+    #[test]
+    fn a_write_just_before_the_watch_set_changes_is_still_indexed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root_path.join(".git/refs/heads")).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("index.db");
+        let (tx, rx) = channel();
+        let (events, event_rx) = channel();
+        let worker = spawn(
+            root_path.clone(),
+            Index::open(&db).unwrap(),
+            rx,
+            tx.clone(),
+            events,
+            true,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+
+        std::fs::write(root_path.join("late.md"), "late\n").unwrap();
+        tx.send(Msg::WatchGit(vec![root_path.join(".git")]))
+            .unwrap();
+
+        let indexed = || {
+            Index::open(&db)
+                .unwrap()
+                .file_paths(false)
+                .unwrap()
+                .contains(&"late.md".to_string())
+        };
+        assert!(poll_until(indexed, BUDGET), "the write was lost");
+        tx.send(Msg::Shutdown).unwrap();
+        worker.join().unwrap();
     }
 
     /// A first index of a large vault takes seconds, and some of what reaches the inbox meanwhile
