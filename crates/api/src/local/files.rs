@@ -36,6 +36,17 @@ impl Local {
         Ok(etag)
     }
 
+    /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and tell the worker
+    /// as [`save`](Self::save) does: an embed of it resolves at once, not a watcher debounce later.
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        fs::write_bytes(&self.resolve(rel)?, bytes, None).map_err(io::Error::other)?;
+        self.post(Msg::Update {
+            rel: rel.to_string(),
+            own: true,
+        });
+        Ok(())
+    }
+
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
     /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
     pub fn read_text(&self, rel: &str) -> io::Result<fs::Read> {

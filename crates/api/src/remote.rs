@@ -494,10 +494,15 @@ impl Remote {
 
     /// Copy a local file into the vault. The remote watcher indexes it as it lands.
     pub fn upload(&self, local: &Path, rel: &str) -> std::io::Result<()> {
-        let bytes = std::fs::read(local)?;
+        self.write_file(rel, &std::fs::read(local)?)
+    }
+
+    /// Write `bytes` to `rel` over the master, the way an upload goes: the host's shell creates a
+    /// new file with the mode its umask gives a new note there.
+    pub fn write_file(&self, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
         self.ssh_input(
             &format!("cat > {}", ssh::quote(&self.remote_path(rel))),
-            &bytes,
+            bytes,
         )
     }
 
