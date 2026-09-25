@@ -337,7 +337,7 @@ pub fn build_window(
             build_sidebar(&app, &rows, vault);
         }
         // Outline only, and collapsed: a window opened on one file is that file, and the
-        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+L.
+        // sidebar is there for when it is asked for with F9 or Ctrl+Shift+W.
         None => {
             build_outline_sidebar(&app);
             app.sidebar_column.set_visible(false);

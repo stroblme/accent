@@ -134,7 +134,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Add Caret at Next Occurrence",
         &["<Alt>j"],
     ),
-    ("win.all-occurrences", "Select All Occurrences", &[]),
+    // VS Code's chord, which moved Outline Pane to `Ctrl+Shift+W`.
+    (
+        "win.all-occurrences",
+        "Select All Occurrences",
+        &["<Control><Shift>l"],
+    ),
     (
         "win.zoom-in",
         "Zoom In",
@@ -162,7 +167,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.git-merge", "Merge Branch…", &[]),
     ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.git-delete-branch", "Delete Branch…", &[]),
-    ("win.pane-outline", "Outline Pane", &["<Control><Shift>l"]),
+    ("win.pane-outline", "Outline Pane", &["<Control><Shift>w"]),
     (
         "win.pane-properties",
         "Properties Pane",
