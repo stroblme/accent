@@ -148,6 +148,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 - Conflicts are the Merge Conflicts section's rows: a row opens the note with git's markers, Stage marks it resolved, and nothing opens on its own.
 - Sync and Commit share a row, the pane's two actions: a row of its own costs 40 px the changes and the history need. Sync carries the ahead and behind counts and `mail-send-receive-symbolic`.
 - Sync pulls then pushes, both halves every time: the counts come from a background fetch (on opening the vault, on picking a repository, every five minutes while the window has focus), so they are a readout, not a decision. A failed pull stops there and keeps its transcript.
+- Sync's pull is a merge (`git pull --no-rebase`): it never rewrites a commit, and a conflict stops in the Merge Conflicts row. It merges even where the user's `pull.rebase` or `pull.ff = only` says otherwise, by the user's decision.
 - A failed background fetch interrupts nobody and says so on the Sync tooltip. The fetch and a Sync never run together, both writing the remote-tracking refs: the fetch skips a tick that lands on a Sync, and a Sync asked for mid-fetch waits for it, 8 s at most.
 - With no upstream the button's tooltip says Publish: it pushes the branch to its remote (the only one, or `origin`) and tracks it, instead of answering with git's "There is no tracking information".
 - There is no Refresh button: a save, a watcher event and a `.git` write each schedule one — a write, never a read, or the pane's own reads would re-trigger it forever. A `git init` in a vault with no repository is such a write, so the pane shows itself unasked.
@@ -360,7 +361,8 @@ The decisions under the code, each with the reason it was taken. Android's own a
 
 - A side-by-side line diff, in a tab rather than a dialog: it is something to work beside, and git produces them by the dozen.
 - One involving a file — the working tree against the index, a note changed under its buffer, a sync conflict copy — happens in the file's own tab: the editor is the editable side, a read-only companion styled the same sits beside it, and the diff is highlighting over both.
-- Rows are kept level by blank space above lines, never filler text, and a line's number stays beside its text.
+- Rows are kept level by blank space, never filler text, and a line's number stays beside its text.
+- Paired lines start on the row they share. A changed line shorter than its partner carries the difference as blank space under it, in its own tint, so a change reads as one block of equal height on both sides; the blank of a hunk that only adds or only deletes stays untinted for now.
 - Unchanged runs beyond three lines of context hide behind a "⋯ N unchanged lines" button: all of them on opening, the caret going to the first change, then all but the run holding the caret. A hidden line's end-of-line diagnostic message is left off (the gutter icon still says it is there), or a collapsed run's messages would stack on one row.
 - Typing re-diffs on each keystroke and moves no row that did not change.
 - A differing hunk carries Take / Keep Both buttons on the Theirs pane, so a merge is a click or a keystroke into the note itself. A sync conflict and a changed-on-disk note keep the Keep Theirs / Keep Mine bar under the panes; Keep Mine on a changed-on-disk note writes against the version it showed. The banner that asked drops its button while its comparison is on screen.
@@ -511,9 +513,11 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Editing
 
-- Duplicate Line `Ctrl+D`, Delete Line `Ctrl+L`, Insert Line Below `Ctrl+Return`, Toggle Comment `Ctrl+K`, Toggle Word Wrap `Alt+Z`, Scroll Viewport `Ctrl+Up` / `Ctrl+Down`, Add Caret Above / Below `Shift+Alt+Up` / `Shift+Alt+Down`, Paste as Plain Text (unbound).
+- Duplicate Line `Ctrl+D`, Delete Line `Ctrl+L`, Insert Line Below `Ctrl+Return`, Toggle Comment `Ctrl+K`, Toggle Word Wrap `Alt+Z`, Scroll Viewport `Ctrl+Up` / `Ctrl+Down`, Add Caret Above / Below `Shift+Alt+Up` / `Shift+Alt+Down`, Add Caret at Next Occurrence `Alt+J`, Select All Occurrences `Ctrl+Shift+L`, Paste as Plain Text (unbound).
 - Duplicate Line is VS Code's Copy Line Down: every line the selection touches, the caret and selection moving onto the copy. Insert Line Below copies the current line's indent.
-- **A column of carets follows VS Code**: typing, the deletes and every caret motion (Page Up and Page Down included) act at every caret, and Shift with a motion extends each caret's own selection. Typing, Backspace, Delete and a paste take each selection; a plain Left or Right collapses it onto its start or end, and Up, Down, Home and End collapse it and move on.
+- Add Caret at Next Occurrence is JetBrains' `Alt+J`, `Ctrl+D` staying Duplicate Line. With nothing selected the first press selects the word under the caret; each press after adds a caret selecting the next occurrence after the caret added last, wrapping at the end of the buffer and passing over what a caret already holds; with none left it does nothing.
+- Select All Occurrences (VS Code's `Ctrl+Shift+L`) puts a caret on every occurrence of the selection, or of the word under the caret. Both match literally and by case.
+- **A column of carets follows VS Code**, whether made with `Shift+Alt+Up` / `Down` or at the occurrences of the selection: typing, the deletes and every caret motion (Page Up and Page Down included) act at every caret, and Shift with a motion extends each caret's own selection. Typing, Backspace, Delete and a paste take each selection; a plain Left or Right collapses it onto its start or end, and Up, Down, Home and End collapse it and move on.
 - A paste goes to each caret, a line each when the clipboard holds one line per caret. Duplicate Line, Delete Line and Insert Line Below take every line a caret or its selection covers, once, a run of lines as a block. Cut and copy take each caret's selection joined by newlines top to bottom, or every caret's whole line where none has one.
 - Overlapping selections, and a caret touching a selection, become one; two that only meet stay two. Undo and Redo put the carets and their selections back with the text. The other selections are painted in the primary's colour.
 - A modifier on its own, AltGr included, and any chord the column has no use for leave it up. Escape ends it and keeps the primary's selection (a second Escape is GTK's), and so do a dead key or Compose, whose next keys are the input method's, and anything that moves the caret or edits at it alone — a click, `Ctrl+A`, `Ctrl+Home`, a completion. No completion is offered unasked while a column is up, and no ghost text; `Ctrl+Space` still asks.
@@ -576,7 +580,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Panes
 
-- Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, References `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+L`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
+- Sidebar `F9`, Files / Search / Tags `Ctrl+Shift+E` / `Ctrl+Shift+F` / `Ctrl+Shift+T`, References `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
+- The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too.
 
 ### Git
 
