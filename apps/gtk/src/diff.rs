@@ -381,9 +381,10 @@ struct Pads {
 /// top of every row in that shared grid. `extra` is space both sides leave at a row on purpose,
 /// which is where a hidden run's button goes.
 ///
-/// A row with no line on a side has nothing to carry space, so its share is handed on to the next
-/// row that has one; what is left after the last goes below it. This is the whole correctness
-/// surface of the alignment, so it is a plain function over plain numbers.
+/// A line shorter than its partner leaves the difference under it, so two paired lines start on
+/// the same row; a row with no line on a side leaves all of it. Either way the space goes above
+/// the side's next line, and what is left after the last goes below that. This is the whole
+/// correctness surface of the alignment, so it is a plain function over plain numbers.
 fn padding(old: &[Option<i32>], new: &[Option<i32>], extra: &[i32]) -> ([Pads; 2], Vec<i32>) {
     let n = old.len();
     let mut pads = [
@@ -405,8 +406,8 @@ fn padding(old: &[Option<i32>], new: &[Option<i32>], extra: &[i32]) -> ([Pads; 2
         for (s, side) in [old, new].into_iter().enumerate() {
             match side[r] {
                 Some(own) => {
-                    pads[s].above[r] = carry[s] + h - own;
-                    carry[s] = 0;
+                    pads[s].above[r] = carry[s];
+                    carry[s] = h - own;
                 }
                 None => carry[s] += h,
             }
@@ -1332,6 +1333,23 @@ impl Compare {
         })
     }
 
+    /// Where the first hunk's lines and the ones after it start, as GTK lays them out: the row,
+    /// then the old and the new side's `y`, `None` where a side has no visible line in the row.
+    pub fn first_hunk_tops(&self) -> Vec<(usize, Option<i32>, Option<i32>)> {
+        let hunk = {
+            let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+            diff::hunks(&lines, &rows).first().cloned()
+        };
+        let Some(hunk) = hunk else {
+            return Vec::new();
+        };
+        let end = (hunk.end + 1).min(self.rows.borrow().len());
+        let top = |r, side| self.laid(r, side).map(|(_, actual, ..)| actual);
+        (hunk.start..end)
+            .map(|r| (r, top(r, Side::Old), top(r, Side::New)))
+            .collect()
+    }
+
     /// The shared vertical scrollbar: value, upper and page size.
     pub fn vscroll(&self) -> (f64, f64, f64) {
         let adj = self.panes[0].scroller.vadjustment();
@@ -1402,7 +1420,7 @@ impl Compare {
             .max(grid.heights[1][r].unwrap_or(0))
             + grid.extra[r];
         let pane = self.pane(side);
-        let expected = grid.tops[r] + pane.view.pixels_above_lines() + (tallest - own);
+        let expected = grid.tops[r] + pane.view.pixels_above_lines();
         let iter = pane.buffer.iter_at_offset(starts[side.idx()][n - 1]);
         Some((expected, pane.view.iter_location(&iter).y(), own, tallest))
     }
@@ -1680,7 +1698,11 @@ mod tests {
             vec![0, 0, 0, 10],
             "the filler's row lands on row 3"
         );
-        assert_eq!(pads[1].above, vec![0, 10, 0, 0]);
+        assert_eq!(
+            pads[1].above,
+            vec![0, 0, 10, 0],
+            "the shorter line of row 1 starts with its partner, and the blank goes under it"
+        );
         assert_eq!((pads[0].below_last, pads[1].below_last), (0, 0));
     }
 

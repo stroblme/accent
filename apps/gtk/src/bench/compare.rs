@@ -18,9 +18,9 @@ use accent_api::{Fold, Severity};
 /// before the first change folded and the caret on that change, and then a character typed into
 /// it, see [`bench_compare_type`]. That half wants a scratch repository whose committed note
 /// differs from the fifty lines in a few places, one of them a long line where the drill writes a
-/// short one, so the change is padded and the view has room to scroll. With that long line the
-/// first, typing at the start of the change is typing at the start of the buffer, which is the one
-/// place a padding tag has no newline before it.
+/// short one, so the view has room to scroll. The short line leaves the difference under it, so
+/// the line typed into carries no padding: typing at the start of a padded line is
+/// [`bench_compare_pads`]'s.
 pub(super) fn bench_compare(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -263,11 +263,14 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
         let tabs = app.open_tabs();
         let comparing = tabs.iter().find_map(|tab| Some((tab, tab.comparison()?)));
         match (comparing, app.doc_for(&key)) {
-            (Some((tab, compare)), _) => println!(
-                "bench compare_row opened rel={:?} {}",
-                tab.rel(),
-                bench_compare_line(&compare)
-            ),
+            (Some((tab, compare)), _) => {
+                println!(
+                    "bench compare_row opened rel={:?} {}",
+                    tab.rel(),
+                    bench_compare_line(&compare)
+                );
+                println!("bench compare_row tops {}", bench_tops(&compare));
+            }
             // A Staged row and a commit's file open a tab of two read-only panes instead, which
             // has to open scrolled to the first change.
             (None, Some(Doc::Diff(diff))) => {
@@ -279,6 +282,7 @@ pub(super) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                     bench_compare_line(compare),
                     compare.first_hunk_on_screen()
                 );
+                println!("bench compare_row tops {}", bench_tops(compare));
             }
             // The refusal is a toast, and it asks git again, so the row it refused goes too.
             (None, _) => println!(
@@ -431,10 +435,15 @@ fn bench_compare_type(tab: &Rc<Tab>, at: f64, line: Option<i32>, then: impl FnOn
                 let n = n.clone();
                 move || n.set(n.get() + 1)
             };
-            let tick = count(&moves);
+            // A change of the range, not a notify: GTK re-sets an unchanged one at the bottom.
+            let (tick, upper) = (count(&moves), Cell::new(adj.upper()));
             let mut ids = vec![(
                 adj.clone().upcast::<glib::Object>(),
-                adj.connect_upper_notify(move |_| tick()),
+                adj.connect_upper_notify(move |a| {
+                    if upper.replace(a.upper()) != a.upper() {
+                        tick();
+                    }
+                }),
             )];
             // The overlaid buttons sit one level down, on the view's text child.
             let mut stack = vec![tab.view.clone().upcast::<gtk::Widget>()];
@@ -691,6 +700,17 @@ fn select_line(buffer: &impl IsA<gtk::TextBuffer>, n: i32) {
     }
 }
 
+/// Where the first hunk's lines and the ones after it start on each side: `row:old/new`, which a
+/// pair of lines has level.
+fn bench_tops(compare: &diff::Compare) -> String {
+    let tops: Vec<String> = compare
+        .first_hunk_tops()
+        .into_iter()
+        .map(|(r, old, new)| format!("{r}:{old:?}/{new:?}"))
+        .collect();
+    tops.join(" ")
+}
+
 fn bench_compare_line(compare: &diff::Compare) -> String {
     let (rows, hunks, hidden, buttons) = compare.counts();
     format!(
@@ -700,20 +720,24 @@ fn bench_compare_line(compare: &diff::Compare) -> String {
     )
 }
 
-/// The two places a padding tag does not begin at the newline before its line, which is where a
-/// character typed at the line's start lands outside it and the line is laid out bare for a
-/// frame: an empty first line, and a padded paragraph right under a padded blank line.
+/// Typing at the start of a padded line, where the character lands outside a padding tag that
+/// begins at it and the line is laid out bare for a frame, and the one place such a tag does not
+/// begin at the newline before its line: a padded paragraph right under a padded blank line.
 ///
-/// The note is written as three long paragraphs with unchanged lines around them and staged, then
-/// the buffer is given an empty first line, an empty line 5 and a short line 6, so those three
-/// rows are padded by three different amounts. A character is then typed at the start of line 1
-/// and of line 6, and of the control line, a short line under an unchanged one whose padding tag
-/// does begin at the newline before it; `padded_after` is the claim in all three.
+/// A line shorter than its partner leaves the difference under it, as padding on the next line,
+/// so a padded line that stays padded while it is typed into is a change under a shorter change.
+/// The note is written as five long paragraphs with unchanged lines around them and staged, then
+/// the buffer makes the first three a short line, an empty one and another short one, which pads
+/// the empty line and the one under it by two different amounts, and the last two paragraphs two
+/// short lines, the second of them the control, padded under a line that is not blank. A character
+/// is then typed at the start of the empty line, of the line under it and of the control;
+/// `padded_after` is the claim in all three.
 ///
 /// It makes a repository in the vault root and stages the note, so point it at a throwaway vault.
-/// The line of the control change, counting from 0: the three lines of context, the two changes
-/// and the fourteen unchanged lines before it.
-const CONTROL: i32 = 20;
+/// The lines, counting from 0: three unchanged lines before the empty one, and the fourteen
+/// unchanged lines and the short line before the control.
+const BLANK: i32 = 4;
+const CONTROL: i32 = 21;
 
 pub(super) fn bench_compare_pads(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
@@ -756,16 +780,15 @@ pub(super) fn bench_compare_pads(app: &Rc<App>, rel: &str) {
                         .is_some_and(|at| is_padded(&tab, &at))
                 };
                 println!(
-                    "bench compare_pads {} first_padded={} blank_padded={} under_blank_padded={} control_padded={}",
+                    "bench compare_pads {} blank_padded={} under_blank_padded={} control_padded={}",
                     bench_compare_line(&compare),
-                    padded(0),
-                    padded(4),
-                    padded(5),
+                    padded(BLANK),
+                    padded(BLANK + 1),
                     padded(CONTROL)
                 );
                 let (then, last) = (tab.clone(), tab.clone());
-                bench_compare_type(&tab, 0.0, Some(0), move || {
-                    bench_compare_type(&then, 0.0, Some(5), move || {
+                bench_compare_type(&tab, 0.0, Some(BLANK), move || {
+                    bench_compare_type(&then, 0.0, Some(BLANK + 1), move || {
                         bench_compare_type(&last, 0.0, Some(CONTROL), move || {
                             let quit = app.clone();
                             bench_compare_binary(&app, move || bench_quit(&quit));
@@ -777,20 +800,22 @@ pub(super) fn bench_compare_pads(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// The staged side and the buffer side of [`bench_compare_pads`]: four paragraphs that wrap to
-/// four different heights, against an empty first line, an empty line, a short line under it, and
-/// one last short line under an unchanged one — the control, whose padding tag does begin at the
-/// newline before it.
+/// The staged side and the buffer side of [`bench_compare_pads`]: five paragraphs that wrap to
+/// five different heights, against a short line, an empty line and a short line under it, and two
+/// last short lines, the second the control, whose padding tag does begin at the newline before it.
 fn pads_texts() -> (String, String) {
     let long = |n: usize, word: &str| vec![word; n].join(" ");
     let keep: String = (1..=14).map(|i| format!("keep {i}\n")).collect();
     let index = format!(
-        "{}\nkeep one\nkeep two\nkeep three\n{}\n{}\n{keep}{}\nkeep last\n",
+        "keep one\nkeep two\nkeep three\n{}\n{}\n{}\n{keep}{}\n{}\nkeep last\n",
         long(60, "alpha"),
         long(36, "bravo"),
         long(18, "charlie"),
-        long(24, "delta")
+        long(24, "delta"),
+        long(30, "echo")
     );
-    let work = format!("\nkeep one\nkeep two\nkeep three\n\nshort\n{keep}short too\nkeep last\n");
+    let work = format!(
+        "keep one\nkeep two\nkeep three\nshort\n\nshort two\n{keep}short too\nshort three\nkeep last\n"
+    );
     (index, work)
 }

@@ -1,4 +1,5 @@
-//! A `sourceview5::View` that can hold extra carets, VS Code's Add Cursor Above / Below.
+//! A `sourceview5::View` that can hold extra carets: VS Code's Add Cursor Above / Below and
+//! Select All Occurrences, and JetBrains' Add Caret at Next Occurrence.
 //!
 //! GtkTextView has exactly one insert mark and no notion of a second one, so each secondary caret
 //! is a pair of plain right-gravity `TextMark`s, the caret and the anchor its selection was
@@ -266,6 +267,40 @@ fn tab_insert(column: usize, width: usize, spaces: bool) -> String {
         true => " ".repeat(width - column % width),
         false => "\t".to_string(),
     }
+}
+
+/// Every occurrence of `needle` in `text`, left to right, none overlapping the one before, as
+/// character ranges, which is what a buffer counts in. Literal and case-sensitive: VS Code's Add
+/// Selection to Next Find Match by default.
+fn occurrences<'a>(text: &'a str, needle: &'a str) -> impl Iterator<Item = (i32, i32)> + 'a {
+    let len = needle.chars().count() as i32;
+    let (mut byte, mut chars) = (0, 0);
+    text.match_indices(needle)
+        .filter(move |_| !needle.is_empty())
+        .map(move |(at, _)| {
+            chars += text[byte..at].chars().count() as i32;
+            byte = at;
+            (chars, chars + len)
+        })
+}
+
+/// The next occurrence of `needle` in `text` that starts at or after `from`, or failing that the
+/// first from the top, as the search wraps at the end of the buffer. One that overlaps a range in
+/// `taken`, a selection some caret already holds, is passed over, so `None` means every
+/// occurrence is taken.
+fn next_occurrence(
+    text: &str,
+    needle: &str,
+    from: i32,
+    taken: &[(i32, i32)],
+) -> Option<(i32, i32)> {
+    let free: Vec<(i32, i32)> = occurrences(text, needle)
+        .filter(|&(start, end)| !taken.iter().any(|&(s, e)| start < e && s < end))
+        .collect();
+    free.iter()
+        .find(|(start, _)| *start >= from)
+        .or(free.first())
+        .copied()
 }
 
 /// The run of spaces and tabs the caret is sitting in front of, or `None` where it is not on one
@@ -759,6 +794,62 @@ impl View {
         {
             return;
         }
+        self.push_caret(&target, &target, Some(goal));
+        // One landing inside a selection is part of it.
+        self.collapse();
+        self.show_column();
+    }
+
+    /// Add a caret selecting the next occurrence of the primary selection after the caret added
+    /// last, JetBrains' `Alt+J`: the search wraps at the end of the buffer and passes over what a
+    /// caret already holds. Where there is none left, nothing moves.
+    pub fn add_next_occurrence(&self) {
+        let buffer = self.buffer();
+        let Some((start, end)) = buffer.selection_bounds() else {
+            return;
+        };
+        let needle = buffer.text(&start, &end, true);
+        let (all_start, all_end) = buffer.bounds();
+        let text = buffer.text(&all_start, &all_end, true);
+        let spans = self.spans();
+        // The primary is `spans[0]` and a new caret is pushed last, so the last is the newest.
+        let from = spans.last().map_or(0, |span| span.end());
+        let taken: Vec<(i32, i32)> = spans.iter().map(|s| (s.start(), s.end())).collect();
+        let Some((from, to)) = next_occurrence(&text, &needle, from, &taken) else {
+            return;
+        };
+        let at = |offset| buffer.iter_at_offset(offset);
+        self.push_caret(&at(from), &at(to), None);
+        self.show_column();
+        if let Some(caret) = self.imp().carets.borrow().last() {
+            self.scroll_mark_onscreen(&caret.mark);
+        }
+    }
+
+    /// Add a caret selecting every occurrence of the primary selection that no caret holds yet,
+    /// VS Code's `Ctrl+Shift+L`. One pass over the text, where repeating
+    /// [`Self::add_next_occurrence`] would read the whole buffer again for each.
+    pub fn select_all_occurrences(&self) {
+        let buffer = self.buffer();
+        let Some((start, end)) = buffer.selection_bounds() else {
+            return;
+        };
+        let needle = buffer.text(&start, &end, true);
+        let (all_start, all_end) = buffer.bounds();
+        let text = buffer.text(&all_start, &all_end, true);
+        let taken: Vec<(i32, i32)> = self.spans().iter().map(|s| (s.start(), s.end())).collect();
+        let at = |offset| buffer.iter_at_offset(offset);
+        for (from, to) in occurrences(&text, &needle) {
+            if !taken.iter().any(|&(s, e)| from < e && s < to) {
+                self.push_caret(&at(from), &at(to), None);
+            }
+        }
+        self.show_column();
+    }
+
+    /// Add a secondary caret at `at` whose selection runs from `from`, aiming for column `goal`
+    /// on its way up and down.
+    fn push_caret(&self, from: &gtk::TextIter, at: &gtk::TextIter, goal: Option<i32>) {
         // A new column: the steps an earlier one recorded are not its to put back, and a popup
         // still up at the primary caret would take the keys meant for all of them.
         if !self.has_carets() {
@@ -766,11 +857,14 @@ impl View {
             self.imp().redo.take();
             self.completion().hide();
         }
-        let mut caret = imp::Caret::new(&buffer, &target, &target);
-        caret.goal = Some(goal);
+        let mut caret = imp::Caret::new(&self.buffer(), from, at);
+        caret.goal = goal;
         self.imp().carets.borrow_mut().push(caret);
-        // One landing inside a selection is part of it.
-        self.collapse();
+    }
+
+    /// Paint the column after carets were added: GTK's caret hands the blink over while there is
+    /// one.
+    fn show_column(&self) {
         if self.has_carets() {
             self.blink_on();
         }
@@ -1494,8 +1588,9 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Edit, Motion, Span, blink_alpha, departure, edit_for, ends_column, merge, spaces_ahead,
-        spaces_behind, spread, tab_insert, undo_or_redo, vertical_step, visual_column,
+        Edit, Motion, Span, blink_alpha, departure, edit_for, ends_column, merge, next_occurrence,
+        spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo, vertical_step,
+        visual_column,
     };
     use gtk::gdk::{Key, ModifierType as Mod};
 
@@ -1661,5 +1756,31 @@ mod tests {
         assert!((0.01..0.99).contains(&blink_alpha(900, 1200)));
         assert_eq!(blink_alpha(1200, 1200), blink_alpha(0, 1200));
         assert_eq!(blink_alpha(2400, 1200), 1.0);
+    }
+
+    /// The next occurrence is the next one after the last caret, wrapping round at the end,
+    /// passing over what a caret already holds, and matched literally and by case.
+    #[test]
+    fn the_next_occurrence_wraps_and_skips_what_is_taken() {
+        let text = "foo bar Foo foo baz foo";
+        assert_eq!(
+            next_occurrence(text, "foo", 3, &[(0, 3)]),
+            Some((12, 15)),
+            "not Foo"
+        );
+        assert_eq!(
+            next_occurrence(text, "foo", 15, &[(0, 3), (12, 15)]),
+            Some((20, 23))
+        );
+        let all = [(0, 3), (12, 15), (20, 23)];
+        assert_eq!(next_occurrence(text, "foo", 23, &all), None, "all taken");
+        assert_eq!(
+            next_occurrence(text, "foo", 23, &[(12, 15), (20, 23)]),
+            Some((0, 3)),
+            "wraps to the top"
+        );
+        assert_eq!(next_occurrence(text, "o.", 0, &[]), None, "not a pattern");
+        // Offsets are characters, as the buffer counts them.
+        assert_eq!(next_occurrence("äö foo", "foo", 0, &[]), Some((3, 6)));
     }
 }

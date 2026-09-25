@@ -1303,6 +1303,45 @@ impl Tab {
         }
     }
 
+    /// JetBrains' Add Caret at Next Occurrence: with nothing selected the first press selects the
+    /// word under the caret, and each press after it adds a caret selecting the next occurrence.
+    pub fn add_next_occurrence(&self) {
+        let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
+            return;
+        };
+        if self.buffer.has_selection() {
+            view.add_next_occurrence();
+        } else {
+            self.select_word();
+        }
+    }
+
+    /// VS Code's Select All Occurrences: a caret on every occurrence of the selection, or of the
+    /// word under the caret where nothing is selected.
+    pub fn select_all_occurrences(&self) {
+        let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
+            return;
+        };
+        if self.buffer.has_selection() || self.select_word() {
+            view.select_all_occurrences();
+        }
+    }
+
+    /// Select the word under the caret, or the one it has just finished, caret at its end: a word
+    /// being what Ctrl+hover underlines (`follow::word_at`), underscores and all. Selecting moves
+    /// the primary caret, which ends a column. Says whether there was a word.
+    fn select_word(&self) -> bool {
+        let at = caret(&self.buffer);
+        let mut before = at;
+        before.backward_char();
+        let Some(word) = follow::word_at(&at).or_else(|| follow::word_at(&before)) else {
+            return false;
+        };
+        let iter = |offset| self.buffer.iter_at_offset(offset);
+        self.buffer.select_range(&iter(word.end), &iter(word.start));
+        true
+    }
+
     /// Focus mode's line fade, which the view subclass paints (`fade.rs`).
     pub fn set_fade(&self, on: bool) {
         if let Some(view) = self.view.downcast_ref::<multicaret::View>() {

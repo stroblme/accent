@@ -943,3 +943,118 @@ fn bench_held() -> String {
         Err(e) => format!("failed:{e}"),
     }
 }
+
+/// Add Caret at Next Occurrence and Select All Occurrences through the real key path. The note at
+/// `rel` is given a text of its own for each part, and the drill prints `bench occur_ready <chord>`
+/// for an XTEST press of each chord in turn (`build-aux/xtest.py :N "key <chord>"`), then every
+/// caret's selection and the buffer. It first prints `bench occur focus_window` and waits for the
+/// window to have the X input focus, which under Xvfb is `xtest.py :N "move 700 400; focus"`.
+///
+/// Before any key it prints what claims the two chords: the application's accelerators, and the
+/// view's own shortcuts, GtkTextView's and GtkSourceView's class bindings among them. `Tab::set_text`
+/// leaves the tab clean and the note's own text goes back at the end, so nothing is written.
+pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        println!("bench occur focus_window");
+        for _ in 0..100 {
+            if app.window.is_active() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let Some(tab) = app.active() else {
+            return bench_quit(&app);
+        };
+        bench_occurrence_claims(&app, &tab);
+        let own = tab.text();
+        tab.view.clipboard().set_text("Q");
+        let parts: [(&str, i32, &[&str]); 4] = [
+            // Three presses: the word under the caret, then the two after it; then typing,
+            // Backspace and Escape at every one of them.
+            (
+                "let foo = 1;\nfoo += foo;\nbar(fo);\n",
+                5,
+                &["alt+j", "alt+j", "alt+j", "x", "BackSpace", "y", "Escape"],
+            ),
+            // From the last occurrence, round to the top and on, and a fourth press with none left.
+            (
+                "foo 1\nfoo 2\nfoo 3\n",
+                13,
+                &["alt+j", "alt+j", "alt+j", "alt+j"],
+            ),
+            // Every occurrence at once, literally: the `foo` inside `foo_bar` too.
+            (
+                "a.foo b.foo\nfoo_bar foo\n",
+                3,
+                &["ctrl+shift+l", "z", "Escape"],
+            ),
+            // A paste lands at every one of them too.
+            ("foo foo\nfoo\n", 1, &["alt+j", "alt+j", "ctrl+v", "Escape"]),
+        ];
+        for (text, at, chords) in parts {
+            tab.set_text(text);
+            tab.buffer.place_cursor(&tab.buffer.iter_at_offset(at));
+            tab.view.grab_focus();
+            for chord in chords {
+                glib::timeout_future(Duration::from_millis(200)).await;
+                println!("bench occur_ready {chord}");
+                glib::timeout_future(Duration::from_millis(800)).await;
+                let selected: Vec<(i32, i32)> = tab
+                    .ghost_view()
+                    .map(|view| view.selections())
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|(start, end)| (start.offset(), end.offset()))
+                    .collect();
+                println!("bench occur {chord} {selected:?} {:?}", tab.text());
+            }
+        }
+        tab.set_text(&own);
+        bench_quit(&app);
+    });
+}
+
+/// Whatever else answers to `Alt+J` and `Ctrl+Shift+L`: the actions the application binds them
+/// to, and any shortcut on the view itself.
+fn bench_occurrence_claims(app: &Rc<App>, tab: &Rc<Tab>) {
+    let chords = ["<Alt>j", "<Control><Shift>l"];
+    if let Some(gtk_app) = app.window.application() {
+        for chord in chords {
+            println!(
+                "bench occur_claims app {chord} {:?}",
+                gtk_app.actions_for_accel(chord)
+            );
+        }
+    }
+    // The class bindings are a shortcut controller of their own on every instance.
+    let controllers = tab.view.observe_controllers();
+    let triggers: Vec<String> = (0..controllers.n_items())
+        .filter_map(|i| {
+            controllers
+                .item(i)
+                .and_downcast::<gtk::ShortcutController>()
+        })
+        .flat_map(|controller| {
+            (0..controller.n_items())
+                .filter_map(|i| controller.item(i).and_downcast::<gtk::Shortcut>())
+                .filter_map(|shortcut| shortcut.trigger())
+                .map(|trigger| trigger.to_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let claimed: Vec<&String> = triggers
+        .iter()
+        .filter(|trigger| {
+            chords.iter().any(|chord| {
+                gtk::accelerator_parse(*chord) == gtk::accelerator_parse(trigger.as_str())
+            })
+        })
+        .collect();
+    println!(
+        "bench occur_claims view shortcuts={} claiming={claimed:?}",
+        triggers.len()
+    );
+}

@@ -51,6 +51,9 @@ fn configure(dir: &Path) {
     ok(dir, &["config", "user.email", "test@accent.invalid"]);
     ok(dir, &["config", "commit.gpgsign", "false"]);
     ok(dir, &["config", "core.hooksPath", ".git/hooks-disabled"]);
+    // git refuses to pull onto a diverged branch until told how to reconcile, so without this the
+    // sync test passes only where the developer's global config happens to say.
+    ok(dir, &["config", "pull.rebase", "false"]);
 }
 
 fn write_file(dir: &Path, rel: &str, text: &str) {

@@ -209,7 +209,7 @@ impl Tab {
 ///
 /// The line around the pointer is read out and scanned, so the boundary rule is one pure function
 /// with a test rather than a walk over iterators that needs a display to run.
-fn word_at(at: &gtk::TextIter) -> Option<Range<i32>> {
+pub(super) fn word_at(at: &gtk::TextIter) -> Option<Range<i32>> {
     let (base, line) = line_around(at);
     let word = word_bounds(&line, at.line_offset() as usize)?;
     Some(base + word.start as i32..base + word.end as i32)
