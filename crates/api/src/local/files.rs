@@ -13,8 +13,22 @@ use accent_core::{markdown, search, template};
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
 use crate::{
-    Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError, fs,
+    Etag, FileEdits, FileKind, Regex, RenamePlan, RenameReport, ReplaceReport, SaveError,
+    UndoReport, fs, locked,
 };
+
+/// Most text a Replace All keeps to undo itself with. The pre-images are held in memory, and the
+/// 3.3k-note replace measured on the generated vault came to about 57 MB of them; past this the
+/// rewrite still runs and no undo is offered.
+const UNDO_CAP: usize = 64 * 1024 * 1024;
+
+/// A file as it was before a Replace All rewrote it, and the etag the rewrite left on it: what
+/// [`Local::undo_replace`] writes back, and only while the file still carries that etag.
+pub(super) struct Before {
+    rel: String,
+    text: String,
+    etag: Etag,
+}
 
 impl Local {
     pub fn read(&self, rel: &str) -> io::Result<(String, Etag)> {
@@ -374,8 +388,13 @@ impl Local {
     /// by [`crate::vault::REPLACE_BOUND`], which is what a remote caller waits for: without it the
     /// caller gave up after ten seconds while the host went on rewriting.
     ///
+    /// What each file held before is kept for [`undo_replace`](Self::undo_replace), up to
+    /// [`UNDO_CAP`], and whatever the last Replace All kept is dropped here: there is one undo,
+    /// for the last rewrite. On a remote vault it stays on the host, in the `serve` behind the
+    /// window, so no note's text crosses the link twice.
+    ///
     /// ponytail: no progress callback. The one caller shows an indeterminate bar, and a fraction
-    /// nothing renders would be machinery for its own sake. Nor is it undoable — see NOTEPAD.
+    /// nothing renders would be machinery for its own sake.
     pub fn replace_all(
         &self,
         re: &Regex,
@@ -409,6 +428,10 @@ impl Local {
     ) -> Result<ReplaceReport> {
         let deadline = std::time::Instant::now() + budget;
         let mut report = ReplaceReport::default();
+        *locked(&self.undo) = None;
+        // `None` once the pre-images have passed the cap, and never kept again for this rewrite.
+        let mut undo = Some(Vec::new());
+        let mut kept = 0usize;
         // Bound to a name before the loop, not iterated straight out of the call: the guard
         // `searcher()` returns is a temporary of the `for` *statement*, so writing it that way
         // held the search connection for the whole rewrite — a query that reached the vault
@@ -422,10 +445,16 @@ impl Local {
                 continue;
             }
             match self.replace_one(&rel, re, replacement, literal) {
-                Ok(0) => {}
-                Ok(n) => {
+                Ok(None) => {}
+                Ok(Some((n, before))) => {
                     report.rewritten.push(rel);
                     report.matches += n;
+                    kept += before.text.len();
+                    if kept > UNDO_CAP {
+                        undo = None;
+                    } else if let Some(undo) = &mut undo {
+                        undo.push(before);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("replacing in {rel}: {e:#}");
@@ -437,34 +466,57 @@ impl Local {
         // Search pane, which asks its question again the moment this returns and asks it of the
         // index — so it returns once the index agrees rather than a moment before.
         self.settle_index();
+        report.undoable = undo.as_ref().is_some_and(|undo| !undo.is_empty());
+        *locked(&self.undo) = undo;
         Ok(report)
     }
 
-    /// How many matches this file lost. The count comes from the file rather than from the index,
-    /// which may be a watcher debounce behind what is on disk.
+    /// How many matches this file lost, and what it held before; `None` when it held none. The
+    /// count comes from the file rather than from the index, which may be a watcher debounce
+    /// behind what is on disk.
     fn replace_one(
         &self,
         rel: &str,
         re: &Regex,
         replacement: &str,
         literal: bool,
-    ) -> Result<usize> {
+    ) -> Result<Option<(usize, Before)>> {
         let path = self.resolve(rel)?;
         let (text, etag) = fs::read_note(&path)?;
         let matches = re.find_iter(&text).count();
         if matches == 0 {
-            return Ok(0);
+            return Ok(None);
         }
         let rewritten = match literal {
             true => re.replace_all(&text, search::NoExpand(replacement)),
             false => re.replace_all(&text, replacement),
         };
-        fs::write_note(&path, &rewritten, Some(etag))?;
+        let etag = fs::write_note(&path, &rewritten, Some(etag))?;
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
         });
-        Ok(matches)
+        let rel = rel.to_string();
+        Ok(Some((matches, Before { rel, text, etag })))
+    }
+
+    /// Put back what the last [`replace_all`](Self::replace_all) rewrote, through the same etag
+    /// gate a save goes through: a file changed since the rewrite, by the editor, a sync or
+    /// anything else, is left as it is and named in the report rather than clobbered. The undo
+    /// is spent here whatever happens, so a second call has nothing left to write.
+    pub fn undo_replace(&self) -> Result<UndoReport> {
+        let before = locked(&self.undo).take().unwrap_or_default();
+        let mut report = UndoReport::default();
+        for Before { rel, text, etag } in before {
+            match self.save(&rel, &text, Some(etag)) {
+                Ok(_) => report.restored.push(rel),
+                Err(SaveError::ChangedOnDisk { .. }) => report.skipped.push(rel),
+                Err(e) => report.failed.push((rel, e.to_string())),
+            }
+        }
+        // As after the rewrite: the pane asks its question again of the index once this returns.
+        self.settle_index();
+        Ok(report)
     }
 
     /// Keep theirs: the conflict copy's bytes replace the original.
@@ -588,7 +640,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::tests::*;
-    use crate::{Etag, Event, Options, VaultConfig, fs};
+    use crate::{Etag, Event, Options, UndoReport, VaultConfig, fs};
 
     /// `a.md` links to `B.md`; renaming it to `C.md` must move the link with it.
     fn linked_vault() -> Fixture {
@@ -669,6 +721,34 @@ mod tests {
             0,
             "the rewrites must be in the index by the time replace_all returns"
         );
+    }
+
+    /// The undo writes back through the etag gate, so a note edited since the rewrite keeps the
+    /// edit and is named instead, and the undo is spent once used.
+    #[test]
+    fn undoing_a_replace_skips_the_notes_changed_since() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("a.md", "colour\n");
+        f.write("b.md", "colour\n");
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let plain = Options::default();
+        let report = f
+            .vault
+            .replace_all("colour", plain, "color", true, false)
+            .unwrap();
+        assert!(report.undoable);
+        // Another size, so the etag moves whatever the clock's resolution.
+        f.write("b.md", "color, edited since\n");
+
+        let undo = f.vault.undo_replace().unwrap();
+        assert_eq!(undo.restored, ["a.md"]);
+        assert_eq!(undo.skipped, ["b.md"]);
+        assert!(undo.failed.is_empty());
+        assert_eq!(f.read("a.md"), "colour\n");
+        assert_eq!(f.read("b.md"), "color, edited since\n");
+        assert_eq!(f.vault.undo_replace().unwrap(), UndoReport::default());
     }
 
     /// The host's own bound, which is what a remote caller's wait is derived from: the rewrite
