@@ -1253,7 +1253,9 @@ impl App {
             self,
             move |tab| {
                 app.sync_scroll(tab);
-                if app.is_active(tab) {
+                // Typing carries the caret along without taking the Outline pane with it: the
+                // list stays where the reader left it until the caret is moved.
+                if app.is_active(tab) && tab.caret_moved() {
                     app.follow_outline();
                 }
                 // A code tab's references are about the symbol under the caret, so they follow

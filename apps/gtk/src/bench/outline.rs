@@ -72,7 +72,7 @@ fn bench_outline_hidden(app: Rc<App>, tab: Rc<Tab>, step: i32) {
     match step {
         0 => app.show_pane("files"),
         1 => app.sidebar_column.set_visible(false),
-        _ => return bench_quit(&app),
+        _ => return bench_outline_edit(app, tab, 0),
     }
     let line = tab.buffer.line_count() * (step + 1) / 3;
     tab.buffer
@@ -93,6 +93,70 @@ fn bench_outline_hidden(app: Rc<App>, tab: Rc<Tab>, step: i32) {
             );
             bench_outline_hidden(app, tab, step + 1);
         });
+    });
+}
+
+/// Edits leave the list where the reader has it. The caret is put at the end of a heading two
+/// thirds down and the list scrolled back to its top, as by hand; then a word is typed into that
+/// heading, a heading is added under it and both are undone, each printed with the scroll and the
+/// selected row, which should not change. Last a caret move, which takes the list along again.
+fn bench_outline_edit(app: Rc<App>, tab: Rc<Tab>, step: usize) {
+    let buffer = tab.buffer.clone();
+    let typed = |text: &str| {
+        buffer.begin_user_action();
+        buffer.insert_interactive_at_cursor(text, true);
+        buffer.end_user_action();
+    };
+    let (name, wait) = match step {
+        0 => {
+            let rows = tab.lang.outline();
+            let Some((_, _, at)) = rows.get(rows.len() * 2 / 3) else {
+                return bench_quit(&app);
+            };
+            let mut end = buffer.iter_at_line(at.line as i32).expect("bench line");
+            end.forward_to_line_end();
+            buffer.place_cursor(&end);
+            ("placed", 250)
+        }
+        1 => {
+            let list = app
+                .sidebar
+                .get()
+                .and_then(|s| s.outline_child())
+                .and_then(|c| find_widget(&c, &|w| w.is::<gtk::ListView>()))
+                .and_downcast::<gtk::ListView>()
+                .expect("bench list");
+            list.vadjustment().expect("bench adjustment").set_value(0.0);
+            ("scrolled", 100)
+        }
+        2 => {
+            typed(" typed");
+            ("typed", 1500)
+        }
+        3 => {
+            typed("\n## Added heading");
+            ("added", 1500)
+        }
+        4 => {
+            buffer.undo();
+            buffer.undo();
+            ("undone", 1500)
+        }
+        5 => {
+            let mut next = buffer.iter_at_mark(&buffer.get_insert());
+            next.forward_line();
+            buffer.place_cursor(&next);
+            ("moved", 250)
+        }
+        _ => return bench_quit(&app),
+    };
+    glib::timeout_add_local_once(Duration::from_millis(wait), move || {
+        let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+        println!(
+            "bench outline edit {name} {}",
+            outline_state(&app, &tab, line)
+        );
+        bench_outline_edit(app, tab, step + 1);
     });
 }
 

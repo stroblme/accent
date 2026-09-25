@@ -392,15 +392,17 @@ impl Sidebar {
 
     /// Show the outline of the text document `key` as rows that jump. The list on screen is
     /// refilled when it is already that document's, so an edit, a save or a language server's
-    /// answer leaves it scrolled where it was; another document gets a new list, from the top.
+    /// answer leaves it scrolled where it was; another document gets a new list, from the top,
+    /// and `true` back.
     pub fn set_outline_rows<T: Copy + 'static>(
         &self,
         key: &str,
         rows: &[(u8, String, T)],
         on_jump: impl Fn(T) + 'static,
-    ) {
+    ) -> bool {
         let mut kept = self.outline_list.borrow_mut();
-        if kept.as_ref().is_none_or(|list| list.key != key) {
+        let fresh = kept.as_ref().is_none_or(|list| list.key != key);
+        if fresh {
             let list = outline::List::new(key);
             self.outline_bin.set_child(Some(&list.scroller));
             *kept = Some(list);
@@ -408,6 +410,7 @@ impl Sidebar {
         if let Some(list) = kept.as_ref() {
             list.fill(rows, on_jump);
         }
+        fresh
     }
 
     /// Select `row` of the text document `key`'s outline, the one its caret is in, and scroll

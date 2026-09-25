@@ -119,7 +119,7 @@ The decisions under the code, each with the reason it was taken. Android's own a
 **Outline**
 
 - What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks and thumbnail strip (see PDF), or an empty state.
-- On a text tab it follows the caret, as VS Code's Follow Cursor does: the innermost heading or symbol holding the caret is selected and scrolled into view as little as it takes, never activated and never given the keyboard. Above the first heading the list returns to its top; in a gap between two functions it stays put, or it would jump to the top and back. An edit refills it in place, and a tab switched back to opens on its caret's section. The caret's row is put back when the pointer leaves. There is no toggle.
+- On a text tab it follows the caret, as VS Code's Follow Cursor does: the innermost heading or symbol holding the caret is selected and scrolled into view as little as it takes, never activated and never given the keyboard. Above the first heading the list returns to its top; in a gap between two functions it stays put, or it would jump to the top and back. It follows moves of the caret — a click, an arrow key, a jump — and not edits: typing, a paste or an undo refills the list in place and leaves its scroll and its selected row as they are, a caret moved in the same turn of the main loop as an edit being the edit's. A tab switched back to opens on its caret's section. The caret's row is put back when the pointer leaves. There is no toggle.
 
 **Properties**
 

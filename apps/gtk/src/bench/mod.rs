@@ -179,7 +179,8 @@ use tags::bench_tags;
 ///
 /// `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>` walks the caret down a note and prints which
 /// Outline row is selected, whether it is in view and who has the keyboard; then again after a
-/// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden.
+/// switch to `<rel_other>` and back, and after the caret moved while the pane was hidden; last
+/// the list's scroll and row through a few edits, which leave them alone, and one caret move.
 /// `=hold:<rel_note>` prints where to aim and then the pane's state as XTEST drives it, for 20 s.
 ///
 /// `ACCENT_BENCH_OCCUR=<rel_note>` selects things in a note and prints what the muted occurrence

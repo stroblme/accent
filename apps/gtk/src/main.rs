@@ -749,7 +749,7 @@ impl App {
             };
             return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
-        sidebar.set_outline_rows(
+        let fresh = sidebar.set_outline_rows(
             &doc.key(),
             &rows,
             glib::clone!(
@@ -758,7 +758,12 @@ impl App {
                 move |at| tab.goto_pos(at)
             ),
         );
-        self.follow_outline();
+        // A new list opens on the caret's section, and a refill catches up with a caret moved
+        // since the last edit, which was followed against the rows of the text before it. One
+        // refilled after an edit stays as it was.
+        if fresh || tab.caret_moved() {
+            self.follow_outline();
+        }
     }
 
     /// Whether the Outline pane is on screen with its "No Language Server" page up for `tab`.
